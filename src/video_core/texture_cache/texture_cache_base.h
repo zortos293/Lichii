@@ -262,6 +262,9 @@ public:
     /// @retval True if the Render Targets have been rescaled.
     bool RescaleRenderTargets();
 
+    /// Uploads the deferred new render targets the clear does not overwrite whole
+    void ResolveDeferredRtRefreshes();
+
     /// Update bound render targets and upload memory if necessary
     /// @param is_clear True when the render targets are being used for clears
     void UpdateRenderTargets(bool is_clear);
@@ -557,9 +560,10 @@ private:
     [[nodiscard]] std::optional<DAddr> ImageCpuAddress(GPUVAddr gpu_addr, size_t size) const;
 
     bool has_deleted_images = false;
-    /// True while a clear binds its render targets (UpdateRenderTargets(true)), so JoinImages can
-    /// skip the upload of a new target the clear overwrites whole.
-    bool clearing_render_targets = false;
+    /// While a clear binds its render targets (UpdateRenderTargets(true)): JoinImages leaves a new
+    /// target's upload to ResolveDeferredRtRefreshes, which skips it when the clear overwrites it.
+    bool defer_rt_refresh = false;
+    std::vector<ImageId> deferred_rt_refreshes;
     bool is_rescaling = false;
     u64 total_used_memory = 0;
     u64 minimum_memory;

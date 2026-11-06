@@ -785,15 +785,52 @@ bool TextureCache<P>::RescaleRenderTargets() {
 }
 
 template <class P>
+void TextureCache<P>::ResolveDeferredRtRefreshes() {
+    if (deferred_rt_refreshes.empty()) {
+        return;
+    }
+    const auto& regs = maxwell3d->regs;
+    const auto& clear = regs.clear_surface;
+    const auto is_deferred = [this](ImageId id) {
+        return std::ranges::find(deferred_rt_refreshes, id) != deferred_rt_refreshes.end();
+    };
+    // Only a target this clear really overwrites may skip its upload: IsFullClear looks at the
+    // area, not at which target and channels the clear selects. The others are uploaded now
+    // (their alias copies follow in PrepareImage's SynchronizeAliases).
+    for (size_t index = 0; index < NUM_RT; ++index) {
+        const ImageViewId view_id = render_targets.color_buffer_ids[index];
+        if (!view_id || slot_image_views[view_id].IsBuffer()) {
+            continue;
+        }
+        const ImageId image_id = slot_image_views[view_id].image_id;
+        if (!is_deferred(image_id)) {
+            continue;
+        }
+        const bool all_channels = clear.R && clear.G && clear.B && clear.A;
+        if (clear.RT != index || !all_channels || !IsFullClear(view_id)) {
+            RefreshContents(slot_images[image_id], image_id);
+        }
+    }
+    const ImageViewId depth_id = render_targets.depth_buffer_id;
+    if (depth_id && !slot_image_views[depth_id].IsBuffer()) {
+        const ImageId image_id = slot_image_views[depth_id].image_id;
+        if (is_deferred(image_id)) {
+            const auto type = VideoCore::Surface::GetFormatType(slot_images[image_id].info.format);
+            const bool all_aspects =
+                (clear.Z || type == VideoCore::Surface::SurfaceType::Stencil) &&
+                (clear.S || type == VideoCore::Surface::SurfaceType::Depth) &&
+                (!clear.S || regs.stencil_front_mask == 0xFF);
+            if (!all_aspects || !IsFullClear(depth_id)) {
+                RefreshContents(slot_images[image_id], image_id);
+            }
+        }
+    }
+    deferred_rt_refreshes.clear();
+}
+
+template <class P>
 void TextureCache<P>::UpdateRenderTargets(bool is_clear) {
     using namespace VideoCommon::Dirty;
-    struct ClearingScope {
-        bool& flag;
-        ~ClearingScope() {
-            flag = false;
-        }
-    } clearing_scope{clearing_render_targets};
-    clearing_render_targets = is_clear;
     auto& flags = maxwell3d->dirty.flags;
     if (!flags[Dirty::RenderTargets]) {
         for (size_t index = 0; index < NUM_RT; ++index) {
@@ -806,7 +843,11 @@ void TextureCache<P>::UpdateRenderTargets(bool is_clear) {
     }
 
     const VideoCommon::RenderTargets previous_render_targets = render_targets;
+    deferred_rt_refreshes.clear();
+    defer_rt_refresh = is_clear;
     const bool rescaled = RescaleRenderTargets();
+    defer_rt_refresh = false;
+    ResolveDeferredRtRefreshes();
     if (is_rescaling != rescaled) {
         flags[Dirty::RescaleViewports] = true;
         flags[Dirty::RescaleScissors] = true;
@@ -2713,62 +2754,19 @@ ImageId TextureCache<P>::JoinImages(const ImageInfo& info, GPUVAddr gpu_addr, DA
         DeleteImage(overlap_id);
     }
 
-    // A new render target that the clear binding it overwrites whole (every channel, the whole
-    // image) needs no upload from guest memory first: Ocarina of Time creates ~4 such targets a
-    // frame outdoors, and uploading them was ~15% of the GPU back thread.
-    const auto overwritten_by_clear = [&] {
-        if (!clearing_render_targets || !join_copies_to_do.empty() ||
-            new_info.type != ImageType::e2D || new_info.resources.levels != 1 ||
-            new_info.resources.layers != 1 || new_info.num_samples != 1) {
-            return false;
-        }
-        const auto& regs = maxwell3d->regs;
-        const auto& surface = regs.clear_surface;
-        if (surface.layer != 0) {
-            return false;
-        }
-        const u32 width = new_info.size.width;
-        const u32 height = new_info.size.height;
-        if (regs.clear_control.use_scissor != 0) {
-            const auto& scissor = regs.scissor_test[0];
-            if (scissor.min_x != 0 || scissor.min_y != 0 || scissor.max_x < width ||
-                scissor.max_y < height) {
-                return false;
-            }
-        }
-        // The clear covers the framebuffer's render area, the smallest bound target.
-        for (u32 index = 0; index < regs.rt_control.count && index < NUM_RT; ++index) {
-            const auto& rt = regs.rt[index];
-            if (rt.Address() != 0 && rt.format != Tegra::RenderTargetFormat::NONE &&
-                (rt.width < width || rt.height < height)) {
-                return false;
-            }
-        }
-        if (regs.zeta_enable && regs.zeta.Address() != 0 &&
-            (regs.zeta_size.width < width || regs.zeta_size.height < height)) {
-            return false;
-        }
-        const bool is_depth_target = regs.zeta_enable && regs.zeta.Address() == gpu_addr;
-        const bool full_stencil = surface.S && regs.stencil_front_mask == 0xFF;
-        switch (VideoCore::Surface::GetFormatType(new_info.format)) {
-        case VideoCore::Surface::SurfaceType::ColorTexture: {
-            const u32 index = surface.RT;
-            return surface.R && surface.G && surface.B && surface.A && index < NUM_RT &&
-                   index < regs.rt_control.count && regs.rt[index].Address() == gpu_addr;
-        }
-        case VideoCore::Surface::SurfaceType::Depth:
-            return is_depth_target && surface.Z;
-        case VideoCore::Surface::SurfaceType::Stencil:
-            return is_depth_target && full_stencil;
-        case VideoCore::Surface::SurfaceType::DepthStencil:
-            return is_depth_target && surface.Z && full_stencil;
-        default:
-            return false;
-        }
-    };
-    if (overwritten_by_clear()) {
-        // Stays CpuModified: UpdateRenderTargets' PrepareImage drops the upload only when
-        // IsFullClear agrees the clear covers the whole image, and uploads it otherwise.
+    // A render target created while a clear binds its targets usually never needs its guest
+    // contents: leave it CpuModified, UpdateRenderTargets uploads it unless the clear overwrites
+    // all of it (ResolveDeferredRtRefreshes). Ocarina of Time creates ~4-7 such targets a frame
+    // outdoors, uploading them was ~15% of the GPU back thread. Images that receive non-alias
+    // copies below must be uploaded first, or the upload would overwrite the copies. Alias copies
+    // can wait as well: when the clear does not overwrite the image, PrepareImage runs
+    // RefreshContents and SynchronizeAliases. Overlaps merged into it can't, they get deleted.
+    const bool deferred_refresh =
+        defer_rt_refresh && std::ranges::all_of(join_copies_to_do, [](const JoinCopy& copy) {
+            return copy.is_alias;
+        });
+    if (deferred_refresh) {
+        deferred_rt_refreshes.push_back(new_image_id);
         runtime.TransitionImageLayout(new_image);
     } else {
         // TODO: Only upload what we need
@@ -2823,6 +2821,9 @@ ImageId TextureCache<P>::JoinImages(const ImageInfo& info, GPUVAddr gpu_addr, DA
     for (const auto& copy_object : join_copies_to_do) {
         Image& overlap = slot_images[copy_object.id];
         if (copy_object.is_alias) {
+            if (deferred_refresh) {
+                continue;
+            }
             if (!overlap.IsSafeGpuCopy()) {
                 continue;
             }
