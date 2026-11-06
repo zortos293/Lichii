@@ -111,6 +111,9 @@ struct ShaderPools {
 struct ComputePipelineCacheEntry {
     std::unique_ptr<ComputePipeline> pipeline;
     std::string failure;
+    /// Constant buffer slots that were null pointers at translation (see NullStoragePointerSlots)
+    std::vector<std::pair<u32, u32>> null_pointer_slots;
+    u32 rebuilds{};
 
     [[nodiscard]] ComputePipeline* Get(bool native, GPUVAddr address,
                                        const ComputePipelineCacheKey& key) const;
@@ -149,6 +152,8 @@ private:
         std::span<Shader::Environment* const> envs, PipelineStatistics* statistics,
         bool build_in_parallel, std::shared_ptr<ShaderPools> emit_pools = nullptr,
         std::unique_ptr<EmissionBudget::Reservation> reservation = nullptr);
+
+    [[nodiscard]] bool StaleNullPointerSlot(const ComputePipelineCacheEntry& entry) const;
 
     ComputePipelineCacheEntry CreateComputePipeline(const ComputePipelineCacheKey& key,
                                                      const ShaderInfo* shader);
@@ -191,6 +196,8 @@ private:
     std::unordered_set<u64> used_and_evicted; ///< Key hashes of pipelines used this session, evicted since
 
     ::Common::unordered_map<ComputePipelineCacheKey, ComputePipelineCacheEntry> compute_cache;
+    /// Replaced compute pipelines; command buffers in flight may still use them.
+    std::vector<std::unique_ptr<ComputePipeline>> retired_compute_pipelines;
     ::Common::unordered_map<GraphicsPipelineCacheKey, std::unique_ptr<GraphicsPipeline>> graphics_cache;
 
     ShaderPools main_pools;
