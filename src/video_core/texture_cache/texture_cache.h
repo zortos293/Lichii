@@ -548,7 +548,9 @@ void TextureCache<P>::FillImageViews(std::span<ImageViewInOut> views, bool compu
         for (ImageViewInOut& view : views) {
             // An element repeating the one before (a handle table holding one shadow map in
             // many elements, say) is the same view: visiting it again only prepares it again.
-            view.id = previous != nullptr && previous->index == view.index
+            // Not once this pass has deleted image views (scaling an image down below does):
+            // that view may have gone with them.
+            view.id = previous != nullptr && previous->index == view.index && !has_deleted_images
                           ? previous->id
                           : VisitImageView(view.index, compute);
             previous = &view;
