@@ -795,8 +795,15 @@ void TextureCache<P>::ResolveDeferredRtRefreshes() {
         return std::ranges::find(deferred_rt_refreshes, id) != deferred_rt_refreshes.end();
     };
     // Only a target this clear really overwrites may skip its upload: IsFullClear looks at the
-    // area, not at which target and channels the clear selects. The others are uploaded now
-    // (their alias copies follow in PrepareImage's SynchronizeAliases).
+    // area, not at which target and channels the clear selects. The others are uploaded now, with
+    // their alias copies: PrepareImage skips those when IsFullClear makes it invalidate the image.
+    const auto restore = [this](ImageId image_id) {
+        Image& image = slot_images[image_id];
+        RefreshContents(image, image_id);
+        if (!image.aliased_images.empty()) {
+            SynchronizeAliases(image_id);
+        }
+    };
     for (size_t index = 0; index < NUM_RT; ++index) {
         const ImageViewId view_id = render_targets.color_buffer_ids[index];
         if (!view_id || slot_image_views[view_id].IsBuffer()) {
@@ -808,7 +815,7 @@ void TextureCache<P>::ResolveDeferredRtRefreshes() {
         }
         const bool all_channels = clear.R && clear.G && clear.B && clear.A;
         if (clear.RT != index || !all_channels || !IsFullClear(view_id)) {
-            RefreshContents(slot_images[image_id], image_id);
+            restore(image_id);
         }
     }
     const ImageViewId depth_id = render_targets.depth_buffer_id;
@@ -821,7 +828,7 @@ void TextureCache<P>::ResolveDeferredRtRefreshes() {
                 (clear.S || type == VideoCore::Surface::SurfaceType::Depth) &&
                 (!clear.S || regs.stencil_front_mask == 0xFF);
             if (!all_aspects || !IsFullClear(depth_id)) {
-                RefreshContents(slot_images[image_id], image_id);
+                restore(image_id);
             }
         }
     }
@@ -2751,8 +2758,8 @@ ImageId TextureCache<P>::JoinImages(const ImageInfo& info, GPUVAddr gpu_addr, DA
     // contents: leave it CpuModified, UpdateRenderTargets uploads it unless the clear overwrites
     // all of it (ResolveDeferredRtRefreshes). Images that receive non-alias copies below must be
     // uploaded first, or the upload would overwrite the copies. Alias copies can wait
-    // (PrepareImage runs RefreshContents and SynchronizeAliases); overlaps merged into the image
-    // can't, they get deleted.
+    // (ResolveDeferredRtRefreshes runs them with the upload); overlaps merged into the image can't,
+    // they get deleted.
     const bool deferred_refresh =
         defer_rt_refresh && std::ranges::all_of(join_copies_to_do, [](const JoinCopy& copy) {
             return copy.is_alias;
