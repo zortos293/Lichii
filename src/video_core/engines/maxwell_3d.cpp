@@ -1452,14 +1452,16 @@ bool Maxwell3D::FrontDmaReadQueued(VideoCommon::GpuSplit& split, FrontState& fs,
         return false;
     }
     const auto device = memory_manager.GpuToCpuAddress(source);
-    if (!device ||
-        memory_manager.GpuToCpuAddress(source + read_bytes - 1) != *device + read_bytes - 1 ||
-        !split.IsReportMemory(*device, read_bytes)) {
+    if (!device || !split.IsReportMemory(*device, read_bytes)) {
         return false;
     }
+    // Every page where a contiguous device range puts it: the queued-write checks look at
+    // [*device, *device + read_bytes).
     for (GPUVAddr page = source & ~GPUVAddr{0xfff}; page < source + read_bytes; page += 0x1000) {
-        const auto page_device = memory_manager.GpuToCpuAddress(page);
-        if (!page_device || Tegra::Nx2IsGpuWritten(*page_device)) {
+        const GPUVAddr at = (std::max)(page, source);
+        const auto page_device = memory_manager.GpuToCpuAddress(at);
+        if (!page_device || *page_device != *device + (at - source) ||
+            Tegra::Nx2IsGpuWritten(*page_device)) {
             return false;
         }
     }
