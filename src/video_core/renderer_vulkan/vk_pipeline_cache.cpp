@@ -22,6 +22,7 @@
 #include "common/scope_exit.h"
 #include "common/fs/fs.h"
 #include "common/fs/path_util.h"
+#include "common/memory_detect.h"
 #include "common/thread_worker.h"
 #include "core/core.h"
 #include "shader_recompiler/backend/spirv/emit_spirv.h"
@@ -38,6 +39,7 @@
 #include "video_core/renderer_vulkan/async_draw_policy.h"
 #include "video_core/renderer_vulkan/fixed_pipeline_state.h"
 #include "video_core/renderer_vulkan/maxwell_to_vk.h"
+#include "video_core/renderer_vulkan/pipeline_eviction_policy.h"
 #include "video_core/renderer_vulkan/pipeline_helper.h"
 #include "video_core/renderer_vulkan/pipeline_shader_emission.h"
 #include "video_core/renderer_vulkan/pipeline_statistics.h"
@@ -725,6 +727,14 @@ bool PreloadAllPipelines() {
     }();
     return all;
 }
+
+// Graphics pipelines a Switch 2 title keeps before any is evicted: an eighth of system RAM at
+// ~0.45 MB of driver memory each (16 GB: ~4,600), and never fewer than the boot limit above.
+size_t Switch2PipelineBudget() {
+    static const size_t budget = std::max<size_t>(
+        MaxPipelinesWithoutUsedList, Common::GetMemInfo().TotalPhysicalMemory / 8 / (450 * 1024));
+    return budget;
+}
 } // Anonymous namespace
 
 PipelineCache::~PipelineCache() {
@@ -986,7 +996,9 @@ void PipelineCache::LoadDiskResources(u64 title_id, std::stop_token stop_loading
                                                  state.statistics.get(), false)};
 
             std::scoped_lock lock{state.mutex};
-            if (pipeline) {
+            // A failed one is left out, as in the background prebuild, so the first draw that
+            // needs it builds it again instead of being skipped for the whole session.
+            if (pipeline && !pipeline->Failed()) {
                 graphics_cache.emplace(key, std::move(pipeline));
             }
             ++state.built;
@@ -1168,12 +1180,41 @@ void PipelineCache::EvictUnusedPipelines() {
         return;
     }
     const u64 cutoff = frame_count - EvictAfterFrames;
+    const auto evictable = [this, cutoff](const GraphicsPipeline* pipeline) {
+        return pipeline != nullptr && pipeline != current_pipeline && pipeline->IsBuilt() &&
+               pipeline->LastUse() < cutoff;
+    };
+    size_t max_evicted = graphics_cache.size();
+    std::optional<OldestPipelineSelection> oldest;
+    // A Switch 2 title translates a rebuilt pipeline's shaders on the GPU thread, so going back to
+    // an area rebuilt hundreds at once. Its pipelines are kept up to a memory budget. Past it, the
+    // least recently used are evicted, but still only ones unused for EvictAfterFrames: evicting
+    // pipelines used moments before lost the device on AMD.
+    const bool switch2 = Settings::CurrentProgramIsSwitch2();
+    if (switch2) {
+        const size_t budget = Switch2PipelineBudget();
+        if (graphics_cache.size() <= budget) {
+            return;
+        }
+        std::vector<u64> last_uses;
+        last_uses.reserve(graphics_cache.size());
+        for (const auto& [key, pipeline] : graphics_cache) {
+            if (evictable(pipeline.get())) {
+                last_uses.push_back(pipeline->LastUse());
+            }
+        }
+        max_evicted = std::min(graphics_cache.size() - budget, last_uses.size());
+        if (max_evicted == 0) {
+            return;
+        }
+        oldest.emplace(last_uses, max_evicted);
+    }
     const u64 tick = scheduler.CurrentTick();
     size_t evicted = 0;
-    for (auto it = graphics_cache.begin(); it != graphics_cache.end();) {
+    for (auto it = graphics_cache.begin(); it != graphics_cache.end() && evicted < max_evicted;) {
         GraphicsPipeline* const pipeline = it->second.get();
-        if (pipeline == nullptr || pipeline == current_pipeline || !pipeline->IsBuilt() ||
-            pipeline->LastUse() >= cutoff) {
+        // Take() must only see the candidates the selection was built from.
+        if (!evictable(pipeline) || (oldest && !oldest->Take(pipeline->LastUse()))) {
             ++it;
             continue;
         }
@@ -1192,8 +1233,14 @@ void PipelineCache::EvictUnusedPipelines() {
             pipeline->ClearTransitions();
         }
     }
-    LOG_INFO(Render_Vulkan, "Evicted {} graphics pipelines unused for {} frames, {} left", evicted,
-             EvictAfterFrames, graphics_cache.size());
+    if (switch2) {
+        LOG_INFO(Render_Vulkan, "Evicted {} least recently used graphics pipelines unused for {} "
+                 "frames, over the budget of {}, {} left", evicted, EvictAfterFrames,
+                 Switch2PipelineBudget(), graphics_cache.size());
+    } else {
+        LOG_INFO(Render_Vulkan, "Evicted {} graphics pipelines unused for {} frames, {} left",
+                 evicted, EvictAfterFrames, graphics_cache.size());
+    }
 }
 
 /// Returns `pipeline` when it is built or the current draw must wait for it, and nullptr when the
