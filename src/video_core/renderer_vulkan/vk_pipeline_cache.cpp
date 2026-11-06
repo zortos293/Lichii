@@ -1424,6 +1424,9 @@ std::unique_ptr<GraphicsPipeline> PipelineCache::CreateGraphicsPipeline(
             auto& program_va{programs[0]};
             auto program_vb{TranslateProgram(pools.inst, pools.block, env, cfg, host_info)};
             programs[index] = MergeDualVertexPrograms(program_va, program_vb, env);
+            // Each half fit its texture arrays to the stage limits on its own; joined, they are
+            // one stage.
+            Shader::Optimization::LimitSampledTextureArrays(programs[index], host_info);
         }
 
         if (device.GetDriverID() != VK_DRIVER_ID_NVIDIA_PROPRIETARY && Shader::Optimization::HasBrokenPattern(programs[index])) {
