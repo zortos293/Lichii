@@ -26,8 +26,9 @@ namespace SysmixTests {
 
 class Stream final : public AudioCore::Sink::SinkStream {
 public:
-    Stream(Core::System& system, AudioCore::Sink::StreamType type, u32 channels, bool ready_)
-        : SinkStream{system, type}, ready{ready_} {
+    Stream(Core::System& core_system, AudioCore::Sink::StreamType stream_type, u32 channels,
+           bool ready_)
+        : SinkStream{core_system, stream_type}, ready{ready_} {
         device_channels = channels;
     }
     bool IsReady() const override {
