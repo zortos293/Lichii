@@ -1441,9 +1441,13 @@ void Maxwell3D::FrontNoteMemoryWrite(VideoCommon::GpuSplit& split, FrontState& f
         if (((launch >> 4) & 3) == 2) {
             unknown("upload release");
         }
-        fs.upload_known = device && linear && lines == 1 && (*device & 3) == 0 &&
-                          memory_manager.GpuToCpuAddress(address + size - 1) ==
-                              *device + size - 1;
+        bool contiguous = device && linear && lines == 1 && (*device & 3) == 0 &&
+                          size <= (u64{64} << 20);
+        for (GPUVAddr page = (address & ~GPUVAddr{0xfff}) + 0x1000;
+             contiguous && page < address + size; page += 0x1000) {
+            contiguous = memory_manager.GpuToCpuAddress(page) == *device + (page - address);
+        }
+        fs.upload_known = contiguous;
         fs.upload_device = device.value_or(0);
         fs.upload_size = static_cast<u32>((std::min<u64>)(size, ~0U));
         fs.upload_offset = 0;
