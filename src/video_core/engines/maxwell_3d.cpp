@@ -1541,6 +1541,8 @@ bool Maxwell3D::FrontDmaReadQueued(VideoCommon::GpuSplit& split, FrontState& fs,
     if (!device || !split.IsReportMemory(*device, read_bytes)) {
         return false;
     }
+    // A queued dispatch or copy marks the pages it writes when the back runs it.
+    split.WaitForWriters();
     // Every page where a contiguous device range puts it: the queued-write checks look at
     // [*device, *device + read_bytes).
     for (GPUVAddr page = source & ~GPUVAddr{0xfff}; page < source + read_bytes; page += 0x1000) {
