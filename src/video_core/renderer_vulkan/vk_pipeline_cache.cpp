@@ -1404,13 +1404,13 @@ std::unique_ptr<GraphicsPipeline> PipelineCache::CreateGraphicsPipeline(
                                          hashes[stage + 1], stage, job->reference_spirv[stage]);
                 }
             }
-            auto pools = std::move(job->pools);
+            auto job_pools = std::move(job->pools);
             job.reset();
-            pools->ReleaseContents();
+            job_pools->ReleaseContents();
             {
                 std::scoped_lock lock{spare_pools_mutex};
                 if (spare_pools.size() < 4) {
-                    spare_pools.push_back(std::move(pools));
+                    spare_pools.push_back(std::move(job_pools));
                 }
             }
             AddRuntimeSpirvTime(1, begin);
