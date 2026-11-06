@@ -1122,15 +1122,8 @@ template <class P>
 bool TextureCache<P>::BlitImage(const Tegra::Engines::Fermi2D::Surface& dst,
                                 const Tegra::Engines::Fermi2D::Surface& src,
                                 const Tegra::Engines::Fermi2D::Config& copy) {
-    // A deferred clear parked before this copy has to land before it: realizing it afterwards
-    // starts its clear pass after the copy and wipes what the copy wrote. That is what made
-    // Ocarina of Time draw its terrain layer over the scene (#101): the game clears the
-    // occlusion depth, blits the scene depth over it, and reads it back during the layer draw.
-    // GetFramebufferId only flushes when it creates a framebuffer, so the bug starts on the
-    // second frame. Texture cache copies bypass render passes and keep stream order here.
-    // Only when the copy proceeds: a rejected blit writes nothing and must not realize the
-    // clear ahead of the next draw that consumes it as its load-op. GetBlitImages cannot
-    // invalidate the parked clear: framebuffer removal flushes first (RemoveFramebuffers).
+    // Land a parked deferred clear before the copy, or its clear pass would wipe what the copy
+    // wrote (#101). Only when the blit proceeds: a rejected blit writes nothing.
     const auto result = GetBlitImages(dst, src, copy);
     if (!result) {
         return false;
@@ -2756,11 +2749,10 @@ ImageId TextureCache<P>::JoinImages(const ImageInfo& info, GPUVAddr gpu_addr, DA
 
     // A render target created while a clear binds its targets usually never needs its guest
     // contents: leave it CpuModified, UpdateRenderTargets uploads it unless the clear overwrites
-    // all of it (ResolveDeferredRtRefreshes). Ocarina of Time creates ~4-7 such targets a frame
-    // outdoors, uploading them was ~15% of the GPU back thread. Images that receive non-alias
-    // copies below must be uploaded first, or the upload would overwrite the copies. Alias copies
-    // can wait as well: when the clear does not overwrite the image, PrepareImage runs
-    // RefreshContents and SynchronizeAliases. Overlaps merged into it can't, they get deleted.
+    // all of it (ResolveDeferredRtRefreshes). Images that receive non-alias copies below must be
+    // uploaded first, or the upload would overwrite the copies. Alias copies can wait
+    // (PrepareImage runs RefreshContents and SynchronizeAliases); overlaps merged into the image
+    // can't, they get deleted.
     const bool deferred_refresh =
         defer_rt_refresh && std::ranges::all_of(join_copies_to_do, [](const JoinCopy& copy) {
             return copy.is_alias;
