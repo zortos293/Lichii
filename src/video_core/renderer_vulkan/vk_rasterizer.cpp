@@ -1612,6 +1612,12 @@ bool RasterizerVulkan::HasPendingQueries(DAddr addr, u64 size) {
     return query_cache.IsRegionGpuModified(addr, size);
 }
 
+void RasterizerVulkan::SubmitQueryWork() {
+    // The guest writes of the pending reports run when the GPU passes this fence.
+    fence_manager.SignalReference();
+    scheduler.Flush();
+}
+
 VideoCore::RasterizerDownloadArea RasterizerVulkan::GetFlushArea(DAddr addr, u64 size) {
     {
         std::scoped_lock lock{texture_cache.mutex};

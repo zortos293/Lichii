@@ -7,6 +7,7 @@
 #include <algorithm>
 #include <array>
 #include <atomic>
+#include <chrono>
 #include <cstring>
 #include <limits>
 #include <optional>
@@ -29,6 +30,7 @@
 #include "video_core/nx2_profile.h"
 #include "video_core/query_cache/frame_trace.h"
 #include "video_core/query_dma.h"
+#include "video_core/report_filter.h"
 #include "video_core/rasterizer_interface.h"
 #include "video_core/textures/texture.h"
 #ifdef ARCHITECTURE_x86_64
@@ -792,6 +794,16 @@ void Maxwell3D::StampQueryResult(Core::System& system, u64 payload, bool long_qu
 }
 
 void Maxwell3D::ProcessQueryGet() {
+    // A report the split's front forwarded was counted by it: the query cache counts it as
+    // finished once its guest write is done.
+    struct FrontCounted {
+        FrontCounted(bool counted) {
+            VideoCore::ReportFilter::t_counted = counted;
+        }
+        ~FrontCounted() {
+            VideoCore::ReportFilter::t_counted = false;
+        }
+    } const front_counted{VideoCommon::GpuSplit::OnBackThread() && front != nullptr};
     VideoCommon::QueryPropertiesFlags flags{};
     if (regs.report_semaphore.query.short_query == 0) {
         flags |= VideoCommon::QueryPropertiesFlags::HasTimeout;
@@ -1190,14 +1202,33 @@ void Maxwell3D::FrontWrite(VideoCommon::GpuSplit& split, FrontState& fs, u32 met
             break;
         }
     }
+    const bool hot_report =
+        method == MAXWELL3D_REG_INDEX(report_semaphore.query) && FrontIssueReport(fs, value);
     if (from_macro) {
         split.MacroWrite(this, method, argument);
     } else {
         split.Method(this, method, argument, is_last_call, nullptr);
     }
+    if (hot_report) {
+        // A read of this block found its report pending before: submit what the back holds right
+        // after the report (no wait), so its value is there when the read comes.
+        split.Defer([rasterizer = rasterizer] { rasterizer->SubmitQueryWork(); });
+    }
     if (WritesGuestMemory(method)) {
         FrontNoteMemoryWrite(split, fs, method, &value, 1);
     }
+}
+
+bool Maxwell3D::FrontIssueReport(FrontState& fs, u32 query_word) {
+    Regs::ReportSemaphore query_regs{};
+    query_regs.query.raw = query_word;
+    // Acquire and trap do not reach the query cache.
+    if (query_regs.query.operation != Regs::ReportSemaphore::Operation::Release &&
+        query_regs.query.operation != Regs::ReportSemaphore::Operation::ReportOnly) {
+        return false;
+    }
+    constexpr u32 base = MAXWELL3D_REG_INDEX(report_semaphore);
+    return VideoCore::ReportFilter::Issue((GPUVAddr{fs.regs[base]} << 32) | fs.regs[base + 1]);
 }
 
 void Maxwell3D::FrontCallMethod(Core::System& system, VideoCommon::GpuSplit& split, u32 method,
@@ -1232,6 +1263,7 @@ void Maxwell3D::FrontCallMultiMethod(Core::System& system, VideoCommon::GpuSplit
     }
     // What CallMultiMethod does to the registers on the back, then one entry for all the words.
     constexpr u32 cb_data = MAXWELL3D_REG_INDEX(const_buffer.buffer);
+    bool hot_report = false;
     const auto tracked = [&fs] {
         return fs.control == Regs::ShadowRamControl::Track ||
                fs.control == Regs::ShadowRamControl::TrackWithFilter;
@@ -1294,6 +1326,9 @@ void Maxwell3D::FrontCallMultiMethod(Core::System& system, VideoCommon::GpuSplit
             case MAXWELL3D_REG_INDEX(falcon[4]):
                 fs.regs[MAXWELL3D_REG_INDEX(shadow_scratch)] = 1;
                 break;
+            case MAXWELL3D_REG_INDEX(report_semaphore.query):
+                hot_report |= FrontIssueReport(fs, value);
+                break;
             default:
                 if (!FrontHandledOutsideDrawManager(method)) {
                     fs.draw_pending = true;
@@ -1303,6 +1338,9 @@ void Maxwell3D::FrontCallMultiMethod(Core::System& system, VideoCommon::GpuSplit
         }
     }
     split.MultiMethod(this, method, base_start, amount, methods_pending, nullptr);
+    if (hot_report) {
+        split.Defer([rasterizer = rasterizer] { rasterizer->SubmitQueryWork(); });
+    }
     if (WritesGuestMemory(method) && amount != 0) {
         FrontNoteMemoryWrite(split, fs, method, base_start, amount);
     }
@@ -1439,6 +1477,50 @@ void Maxwell3D::FrontNoteMemoryWrite(VideoCommon::GpuSplit& split, FrontState& f
     fs.upload_offset += (std::min<u32>)(count * 4, remaining_bytes);
 }
 
+namespace {
+
+/// A macro DMA read overlaps a counter report the front forwarded whose guest write has not
+/// happened: the host query has not finished, so memory holds an older value (an occlusion result
+/// read this early changes the value in every case; draining the back does not help, the write
+/// only happens once the query was submitted and completed). The back submits the work it holds
+/// and the front waits for the reports on the block, which are all the read needs. Nothing waits
+/// longer than 200 ms: past that the filter is not trusted any more and reads go on without it.
+void FrontWaitReports(VideoCommon::GpuSplit& split, VideoCore::RasterizerInterface* rasterizer,
+                      GPUVAddr source, size_t size) {
+    namespace Filter = VideoCore::ReportFilter;
+    // The next report written on these blocks is followed by a submission of its own.
+    Filter::MarkHot(source, size);
+    split.Defer([rasterizer] { rasterizer->SubmitQueryWork(); });
+    split.Publish();
+    const auto finished = [&] { return !Filter::Pending(source, size) || !split.BackRunning(); };
+    const auto start = std::chrono::steady_clock::now();
+    bool done = false;
+    for (u32 spins = 0; spins < 1024 && !(done = finished()); ++spins) {
+        VideoCommon::GpuSplit::SpinPause();
+    }
+    if (!done) {
+        Filter::g_waiting.store(true, std::memory_order_seq_cst);
+        {
+            std::unique_lock lock{Filter::g_wait_mutex};
+            while (!(done = finished()) &&
+                   std::chrono::steady_clock::now() - start < std::chrono::milliseconds{200}) {
+                Filter::g_wait_cv.wait_for(lock, std::chrono::milliseconds{1});
+            }
+        }
+        Filter::g_waiting.store(false, std::memory_order_relaxed);
+    }
+    split.ResumeAfterWait();
+    if (!done) {
+        Filter::g_gave_up.store(true, std::memory_order_relaxed);
+        LOG_ERROR(HW_GPU,
+                  "Report at {:#x} (+{:#x}) not written 200 ms after its submission; reads stop "
+                  "waiting for reports",
+                  source, size);
+    }
+}
+
+} // Anonymous namespace
+
 bool Maxwell3D::FrontDmaReadQueued(VideoCommon::GpuSplit& split, FrontState& fs, u32 macro,
                                    u32 method, GPUVAddr source, u32 words) {
     // Without draining the back, for reads of report memory only (pages 3D reports and
@@ -1534,6 +1616,13 @@ void Maxwell3D::FrontDmaRead(VideoCommon::GpuSplit& split, FrontState& fs, u32 m
         memory_manager.ReadBlockUnsafe(source, diag_before.data(), read_bytes);
     }
     VideoCommon::Nx2Profile::CountDmaRead(macro);
+    // Reports still in flight come first. The early read below needs both this and
+    // Nx2AsyncReportsSettled: the counters of the latter start when the back reaches the report,
+    // which the front can be well ahead of.
+    if (!VideoCore::ReportFilter::g_gave_up.load(std::memory_order_relaxed) &&
+        VideoCore::ReportFilter::Pending(source, read_bytes)) {
+        FrontWaitReports(split, rasterizer, source, read_bytes);
+    }
     if (diag_before.empty() && FrontDmaReadQueued(split, fs, macro, method, source, words)) {
         return;
     }

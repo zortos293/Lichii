@@ -3402,6 +3402,9 @@ private:
     void FrontRunMacro(Core::System& system, VideoCommon::GpuSplit& split, FrontState& state);
     void FrontNoteMemoryWrite(VideoCommon::GpuSplit& split, FrontState& state, u32 method,
                               const u32* words, u32 count);
+    /// A report is about to be forwarded to the back: counts it in the pending-report filter.
+    /// Returns whether a macro DMA read has found a report pending on its block before.
+    bool FrontIssueReport(FrontState& state, u32 query_word);
     /// FrontDmaRead without draining the back, when the words can be known: false otherwise.
     bool FrontDmaReadQueued(VideoCommon::GpuSplit& split, FrontState& state, u32 macro, u32 method,
                             GPUVAddr source, u32 words);
