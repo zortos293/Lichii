@@ -7,6 +7,7 @@
 #pragma once
 
 #include <span>
+#include <vector>
 
 #include "shader_recompiler/environment.h"
 #include "shader_recompiler/frontend/ir/program.h"
@@ -46,7 +47,11 @@ bool HasBrokenPattern(const IR::Program& program);
 // Dual Vertex
 void VertexATransformPass(IR::Program& program);
 void VertexBTransformPass(IR::Program& program);
-void JoinTextureInfo(Info& base, Info& source);
-void JoinStorageInfo(Info& base, Info& source);
+/// Adds the descriptors of source to base, with the handle programs they use; those read the
+/// storage buffers of source at the bindings storage_bindings gives them in base (see
+/// JoinStorageInfo), or at their own bindings when it gives none
+void JoinTextureInfo(Info& base, Info& source, std::span<const u32> storage_bindings = {});
+/// Adds the storage buffers of source to base, returning the binding each has in base
+std::vector<u32> JoinStorageInfo(Info& base, Info& source);
 
 } // namespace Shader::Optimization

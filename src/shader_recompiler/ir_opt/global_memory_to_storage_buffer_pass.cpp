@@ -1682,10 +1682,11 @@ void GlobalMemoryToStorageBufferPass(Environment& env, IR::Program& program,
     }
 }
 
-void JoinStorageInfo(Info& base, Info& source) {
+std::vector<u32> JoinStorageInfo(Info& base, Info& source) {
     base.requires_coherent_global_memory |= source.requires_coherent_global_memory;
     base.native_global_bounds |= source.native_global_bounds;
     auto& descriptors = base.storage_buffers_descriptors;
+    std::vector<u32> bindings;
     for (auto& desc : source.storage_buffers_descriptors) {
         auto it{std::ranges::find_if(descriptors, [&desc](const auto& existing) {
             return desc.cbuf_index == existing.cbuf_index &&
@@ -1694,10 +1695,13 @@ void JoinStorageInfo(Info& base, Info& source) {
         })};
         if (it != descriptors.end()) {
             it->is_written |= desc.is_written;
+            bindings.push_back(static_cast<u32>(it - descriptors.begin()));
             continue;
         }
+        bindings.push_back(static_cast<u32>(descriptors.size()));
         descriptors.push_back(desc);
     }
+    return bindings;
 }
 
 } // namespace Shader::Optimization

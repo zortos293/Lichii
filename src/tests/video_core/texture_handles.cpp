@@ -1,13 +1,16 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 
+#include <algorithm>
 #include <array>
 #include <initializer_list>
 #include <map>
 #include <stdexcept>
+#include <utility>
 #include <vector>
 #include <catch2/catch_test_macros.hpp>
 
 #include "shader_recompiler/frontend/ir/ir_emitter.h"
+#include "shader_recompiler/frontend/maxwell/translate_program.h"
 #include "shader_recompiler/host_translate_info.h"
 #include "shader_recompiler/ir_opt/passes.h"
 #include "video_core/shader_handle_program.h"
@@ -522,4 +525,77 @@ TEST_CASE("Handle tracking skips the floating-point math a reused register leads
 
     CHECK(shader.Descriptor(sample).handle_program != ~0U);
     CHECK(shader.Evaluate(sample) == 0x1234);
+}
+
+TEST_CASE("Dual vertex programs join the handle programs of both halves",
+          "[video_core][texture_handles]") {
+    // Vertex A reads a handle at offset 4 of its storage buffer 0. Vertex B reads one at offset 0
+    // of its buffer 0 and, for an array texture, the one Vertex A reads, at offset 4 of its buffer
+    // 1, which is Vertex A's buffer 0: Vertex B's buffers swap bindings when they join.
+    HandleProgram vertex_a;
+    HandleProgram vertex_b;
+    vertex_a.program.stage = Shader::Stage::VertexA;
+    vertex_b.program.stage = Shader::Stage::VertexB;
+    vertex_a.Sample(vertex_a.Storage(4));
+    vertex_b.Sample(vertex_b.Storage(0));
+    auto& array_sample{
+        vertex_b.Sample(vertex_b.Emit(Opcode::LoadStorage32, {Value{1U}, Value{4U}}))};
+    auto flags{array_sample.Flags<IR::TextureInstInfo>()};
+    flags.type.Assign(Shader::TextureType::ColorArray2D);
+    array_sample.SetFlags(flags);
+    vertex_a.Run();
+    vertex_b.Run();
+    vertex_a.program.info.storage_buffers_descriptors.push_back(
+        {.cbuf_index = 0, .cbuf_offset = 0x10, .count = 1, .is_written = false});
+    vertex_b.program.info.storage_buffers_descriptors.push_back(
+        {.cbuf_index = 0, .cbuf_offset = 0x20, .count = 1, .is_written = false});
+    vertex_b.program.info.storage_buffers_descriptors.push_back(
+        {.cbuf_index = 0, .cbuf_offset = 0x10, .count = 1, .is_written = false});
+    REQUIRE(vertex_a.program.info.handle_programs.size() == 1);
+    REQUIRE(vertex_b.program.info.handle_programs.size() == 2);
+    const auto program_a{vertex_a.program.info.handle_programs.front()};
+    for (HandleProgram* const half : {&vertex_a, &vertex_b}) {
+        half->program.syntax_list = {
+            {{.block = &half->block}, IR::AbstractSyntaxNode::Type::Block},
+            {{}, IR::AbstractSyntaxNode::Type::Return},
+        };
+    }
+    const IR::Program merged{
+        Shader::Maxwell::MergeDualVertexPrograms(vertex_a.program, vertex_b.program, vertex_b.env)};
+
+    const auto& info{merged.info};
+    REQUIRE(info.storage_buffers_descriptors.size() == 2);
+    CHECK(info.storage_buffers_descriptors[0].cbuf_offset == 0x10);
+    CHECK(info.storage_buffers_descriptors[1].cbuf_offset == 0x20);
+    // Vertex A's program keeps its index, and Vertex B's reading the same word is that one.
+    REQUIRE(info.handle_programs.size() == 2);
+    CHECK(info.handle_programs.front() == program_a);
+    REQUIRE(info.texture_descriptors.size() == 3);
+    // The storage buffer whose address constant buffer 0 holds at 0x10 is at 0x2000, the one at
+    // 0x20 at 0x3000; a program reading the wrong one gets 0xd0 or 0xd4.
+    constexpr GPUVAddr cbuf = 0x1000;
+    HandleTestMemory memory;
+    memory.words[cbuf + 0x10] = 0x2000;
+    memory.words[cbuf + 0x20] = 0x3000;
+    memory.words[0x2004] = 0xa0;
+    memory.words[0x3000] = 0xb0;
+    memory.words[0x2000] = 0xd0;
+    memory.words[0x3004] = 0xd4;
+    const auto cbuf_address = [](u32 index) -> GPUVAddr { return index == 0 ? cbuf : 0; };
+    using Shader::TextureType;
+    std::vector<std::pair<TextureType, u32>> handles;
+    for (const auto& descriptor : info.texture_descriptors) {
+        REQUIRE(descriptor.handle_program < info.handle_programs.size());
+        handles.emplace_back(descriptor.type,
+                             VideoCommon::EvaluateTextureHandle(info, descriptor.handle_program,
+                                                                memory, cbuf_address));
+    }
+    std::vector<std::pair<TextureType, u32>> expected{
+        {TextureType::Color2D, 0xa0},
+        {TextureType::Color2D, 0xb0},
+        {TextureType::ColorArray2D, 0xa0},
+    };
+    std::ranges::sort(handles);
+    std::ranges::sort(expected);
+    CHECK(handles == expected);
 }

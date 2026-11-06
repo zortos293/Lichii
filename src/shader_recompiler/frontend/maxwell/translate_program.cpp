@@ -502,8 +502,9 @@ IR::Program MergeDualVertexPrograms(IR::Program& vertex_a, IR::Program& vertex_b
     result.info.loads.mask |= vertex_b.info.loads.mask;
     result.info.stores.mask |= vertex_b.info.stores.mask;
 
-    Optimization::JoinTextureInfo(result.info, vertex_b.info);
-    Optimization::JoinStorageInfo(result.info, vertex_b.info);
+    // Vertex B's handle programs read its storage buffers at the bindings they take here.
+    const auto storage_bindings{Optimization::JoinStorageInfo(result.info, vertex_b.info)};
+    Optimization::JoinTextureInfo(result.info, vertex_b.info, storage_bindings);
     Optimization::DeadCodeEliminationPass(result);
     if (Settings::values.renderer_debug) {
         Optimization::VerificationPass(result);

@@ -932,6 +932,22 @@ bool BuildHandleNode(const IR::Value& value, std::vector<u32>& code, int& budget
 // Programs built while making the texture instructions of the pass running on this thread.
 thread_local std::vector<std::vector<u32>>* g_handle_programs{};
 
+// The operands following op in a handle program.
+size_t HandleOperands(HandleOp op) {
+    switch (op) {
+    case HandleOp::Cbuf:
+        return 2;
+    case HandleOp::Immediate:
+    case HandleOp::CbufDynamic:
+    case HandleOp::Storage:
+    case HandleOp::Tee:
+    case HandleOp::Load:
+        return 1;
+    default:
+        return 0;
+    }
+}
+
 // Drops the Tee operations ending a program (they keep the result for nothing), so that two
 // instructions reading the same handle share the program and the descriptor.
 void TrimTrailingTees(std::vector<u32>& code) {
@@ -939,20 +955,7 @@ void TrimTrailingTees(std::vector<u32>& code) {
     size_t end{};
     for (size_t pc = 0; pc < code.size();) {
         const Op op{static_cast<Op>(code[pc++])};
-        switch (op) {
-        case Op::Cbuf:
-            pc += 2;
-            break;
-        case Op::Immediate:
-        case Op::CbufDynamic:
-        case Op::Storage:
-        case Op::Tee:
-        case Op::Load:
-            pc += 1;
-            break;
-        default:
-            break;
-        }
+        pc += HandleOperands(op);
         if (op != Op::Tee) {
             end = (std::min)(pc, code.size());
         }
@@ -1804,25 +1807,51 @@ void LimitPipelineSampledTextureArrays(std::span<IR::Program* const> programs,
     }
 }
 
-void JoinTextureInfo(Info& base, Info& source) {
+void JoinTextureInfo(Info& base, Info& source, std::span<const u32> storage_bindings) {
     base.requires_coherent_image_memory |= source.requires_coherent_image_memory;
+    // The handle programs of source join those of base (once each, as the pass keeps them),
+    // reading its storage buffers at their bindings in base.
+    std::vector<u32> program_index(source.handle_programs.size());
+    for (size_t program = 0; program < source.handle_programs.size(); ++program) {
+        auto code{source.handle_programs[program]};
+        for (size_t pc = 0; pc < code.size();) {
+            const HandleOp op{static_cast<HandleOp>(code[pc++])};
+            if (op == HandleOp::Storage && pc < code.size() &&
+                code[pc] < storage_bindings.size()) {
+                code[pc] = storage_bindings[code[pc]];
+            }
+            pc += HandleOperands(op);
+        }
+        auto it{std::ranges::find(base.handle_programs, code)};
+        if (it == base.handle_programs.end()) {
+            base.handle_programs.push_back(std::move(code));
+            it = base.handle_programs.end() - 1;
+        }
+        program_index[program] = static_cast<u32>(it - base.handle_programs.begin());
+    }
     Descriptors descriptors{
         base.texture_buffer_descriptors,
         base.image_buffer_descriptors,
         base.texture_descriptors,
         base.image_descriptors,
     };
-    for (auto& desc : source.texture_buffer_descriptors) {
+    const auto add = [&](auto desc) {
+        if (desc.handle_program != ~0U) {
+            desc.handle_program = program_index[desc.handle_program];
+        }
         descriptors.Add(desc);
+    };
+    for (auto& desc : source.texture_buffer_descriptors) {
+        add(desc);
     }
     for (auto& desc : source.image_buffer_descriptors) {
-        descriptors.Add(desc);
+        add(desc);
     }
     for (auto& desc : source.texture_descriptors) {
-        descriptors.Add(desc);
+        add(desc);
     }
     for (auto& desc : source.image_descriptors) {
-        descriptors.Add(desc);
+        add(desc);
     }
 }
 
