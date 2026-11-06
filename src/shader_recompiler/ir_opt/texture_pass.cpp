@@ -1145,7 +1145,8 @@ TextureInst MakeInst(Environment& env, IR::Block* block, IR::Inst& inst, const H
             // as written.
             const bool sampled{!IsStorageImageOpcode(IndexedInstruction(inst)) &&
                                inst.Flags<IR::TextureInstInfo>().type != TextureType::Buffer};
-            if (!built && g_handle_programs && sampled && HandleTableSize() > 0) {
+            if (!built && g_handle_programs && sampled && host_info.support_handle_table_arrays &&
+                HandleTableSize() > 0) {
                 // Read from a table at an index each invocation reads for itself: a descriptor
                 // array of the table's entries, which the shader indexes with that index.
                 code.clear();

@@ -60,6 +60,7 @@ struct HandleProgram {
     IR::Block* insertion_block{&block};
     IR::Program program;
     HandleEnvironment env;
+    bool handle_table_arrays{true};
 
     HandleProgram() {
         program.stage = Shader::Stage::Fragment;
@@ -106,6 +107,7 @@ struct HandleProgram {
 
     void Run() {
         Shader::HostTranslateInfo host;
+        host.support_handle_table_arrays = handle_table_arrays;
         host.ApplyDescriptorLimitPolicy();
         Shader::Optimization::TexturePass(env, program, host);
     }
@@ -435,6 +437,30 @@ TEST_CASE("A table index not defined where the texture is read takes the first e
     CHECK(descriptor.count == 1);
     CHECK(EvaluateTableElement(shader, descriptor, 0) == 0x1000 + 16);
     CHECK(sample.Arg(0).IsEmpty());
+}
+
+TEST_CASE("Hosts without handle table arrays keep the word the earlier search finds",
+          "[video_core][texture_handles]") {
+    for (const bool supported : {false, true}) {
+        CAPTURE(supported);
+        HandleProgram shader;
+        shader.handle_table_arrays = supported;
+        shader.env.cbuf_values = {{{0, 0x520}, 0xabc}};
+        // The table's address is a constant buffer word, the one the earlier search binds.
+        const Value list_offset{shader.Emit(Opcode::GetRegister, {Value{IR::Reg::R0}})};
+        const Value light{shader.Emit(Opcode::LoadStorage32, {Value{0U}, list_offset})};
+        const Value entry{shader.Emit(Opcode::IMul32, {light, Value{96U}})};
+        const Value table{shader.Emit(Opcode::GetCbufU32, {Value{0U}, Value{0x520U}})};
+        const Value handle{
+            shader.Emit(Opcode::LoadStorage32, {Value{1U}, shader.Add(entry, table)})};
+        auto& sample{shader.Sample(handle)};
+        shader.Run();
+
+        const auto& descriptor{shader.Descriptor(sample)};
+        CHECK(descriptor.count == (supported ? 64U : 1U));
+        CHECK((descriptor.handle_program != ~0U) == supported);
+        CHECK(descriptor.cbuf_offset == (supported ? 0U : 0x520U));
+    }
 }
 
 TEST_CASE("Handle tracking skips the floating-point math a reused register leads to",
