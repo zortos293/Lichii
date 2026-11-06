@@ -32,6 +32,7 @@
 #include "frontend_common/firmware_manager.h"
 #include "video_core/gpu.h"
 #include "video_core/nx2.h"
+#include "video_core/report_filter.h"
 
 namespace Service::Nvidia {
 
@@ -134,6 +135,8 @@ Module::Module(Core::System& system)
     Tegra::Nx2ClearSemaphoreRegions();
     Tegra::Nx2ClearSparseRegions();
     Tegra::Nx2ClearGpuWrittenPages();
+    Tegra::Nx2ClearAsyncReports();
+    VideoCore::ReportFilter::Reset();
     Devices::g_nx2_driver = false;
     Tegra::g_nx2_ampere = false;
     Core::g_nx2_present_count = 0;

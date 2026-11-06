@@ -94,6 +94,16 @@ inline std::array<std::atomic<u32>, Nx2AsyncReportSlots> g_nx2_async_reports_com
     return true;
 }
 
+/// A new emulation session starts: counter reports the previous one abandoned are not pending.
+inline void Nx2ClearAsyncReports() {
+    for (auto& count : g_nx2_async_reports_issued) {
+        count.store(0, std::memory_order_relaxed);
+    }
+    for (auto& count : g_nx2_async_reports_completed) {
+        count.store(0, std::memory_order_relaxed);
+    }
+}
+
 inline void Nx2ClearGpuWrittenPages() {
     for (auto& word : g_nx2_gpu_written_pages) {
         word.store(0, std::memory_order_relaxed);

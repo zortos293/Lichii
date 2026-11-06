@@ -85,4 +85,17 @@ TEST_CASE("Finishing a report wakes a waiting reader", "[video_core]") {
     writer.join();
     REQUIRE(finished);
 }
+
+TEST_CASE("A new session starts without pending reports or a lost filter", "[video_core]") {
+    constexpr u64 address = 0x70000000;
+    (void)Filter::Issue(address);
+    Filter::MarkHot(address, 4);
+    Filter::g_gave_up.store(true, std::memory_order_relaxed);
+    REQUIRE(Filter::Pending(address, 4));
+    Filter::Reset();
+    REQUIRE_FALSE(Filter::Pending(address, 4));
+    REQUIRE_FALSE(Filter::g_gave_up.load(std::memory_order_relaxed));
+    REQUIRE_FALSE(Filter::Issue(address));
+    Filter::Done(address);
+}
 } // namespace

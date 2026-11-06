@@ -113,4 +113,20 @@ inline void MarkHot(u64 source, u64 size) {
     }
 }
 
+/// A new emulation session starts: reports the previous one abandoned are not pending, and a
+/// wait that gave up there does not stop this one from waiting.
+inline void Reset() {
+    for (auto& count : g_issued) {
+        count.store(0, std::memory_order_relaxed);
+    }
+    for (auto& count : g_done) {
+        count.store(0, std::memory_order_relaxed);
+    }
+    for (auto& hot : g_hot) {
+        hot.store(false, std::memory_order_relaxed);
+    }
+    g_hot_count.store(0, std::memory_order_relaxed);
+    g_gave_up.store(false, std::memory_order_relaxed);
+}
+
 } // namespace VideoCore::ReportFilter
