@@ -4,11 +4,13 @@
 #include <initializer_list>
 #include <map>
 #include <stdexcept>
+#include <vector>
 #include <catch2/catch_test_macros.hpp>
 
 #include "shader_recompiler/frontend/ir/ir_emitter.h"
 #include "shader_recompiler/host_translate_info.h"
 #include "shader_recompiler/ir_opt/passes.h"
+#include "video_core/shader_handle_program.h"
 
 namespace {
 namespace IR = Shader::IR;
@@ -303,6 +305,136 @@ TEST_CASE("Failed Phi handle subtrees discard their cached values",
                   0x5678U + 7U + (nested ? 0x90U : 0U) + (retained_slot ? 2U * 0x90U : 0U));
         }
     }
+}
+
+namespace {
+struct HandleTestMemory {
+    std::map<GPUVAddr, u32> words;
+    template <typename T>
+    T Read(GPUVAddr address) const {
+        const auto word = [&](GPUVAddr at) -> u64 {
+            const auto it = words.find(at);
+            return it != words.end() ? it->second : 0U;
+        };
+        if constexpr (sizeof(T) == 8) {
+            return static_cast<T>(word(address) | (word(address + 4) << 32));
+        } else {
+            return static_cast<T>(word(address));
+        }
+    }
+};
+} // namespace
+
+TEST_CASE("Handle tables are read for every element at once", "[video_core][texture_handles]") {
+    constexpr GPUVAddr cbuf = 0x1000;
+    HandleTestMemory memory;
+    memory.words[cbuf + 0x10] = 0x2000; // the storage buffer address
+    memory.words[cbuf + 0x14] = 0;
+    memory.words[cbuf + 0x20] = 0x60; // the table entry size
+    for (u32 element = 0; element < 4; ++element) {
+        memory.words[0x2000 + 0x10 + element * 0x60] = 0x100 + element;
+    }
+    Shader::Info info;
+    info.storage_buffers_descriptors.push_back(
+        {.cbuf_index = 0, .cbuf_offset = 0x10, .count = 1, .is_written = false});
+    using Op = Shader::HandleOp;
+    // The word at Index * cbuf0[0x20] + 0x10 of the storage buffer.
+    info.handle_programs.push_back({static_cast<u32>(Op::Index), static_cast<u32>(Op::Cbuf), 0U,
+                                    0x20U, static_cast<u32>(Op::Mul),
+                                    static_cast<u32>(Op::Immediate), 0x10U,
+                                    static_cast<u32>(Op::Add), static_cast<u32>(Op::Storage), 0U});
+    u32 cbuf_reads{};
+    const auto cbuf_address = [&cbuf_reads](u32 index) -> GPUVAddr {
+        ++cbuf_reads;
+        return index == 0 ? cbuf : 0;
+    };
+    std::vector<u32> handles;
+    VideoCommon::EvaluateTextureHandles(info, 0, memory, cbuf_address, 4,
+                                        [&handles](u32 element, u32 handle) {
+                                            CHECK(element == handles.size());
+                                            handles.push_back(handle);
+                                        });
+    CHECK(handles == std::vector<u32>{0x100, 0x101, 0x102, 0x103});
+    // The entry size and the storage buffer address, once each for all the elements.
+    CHECK(cbuf_reads == 2);
+    for (u32 element = 0; element < 4; ++element) {
+        CHECK(VideoCommon::EvaluateTextureHandle(info, 0, memory, cbuf_address, element) ==
+              0x100 + element);
+    }
+}
+
+namespace {
+// A light loop's shadow map handle: each invocation reads a light index from its own list, at an
+// address only it knows, then the handle of that light from a table of 96-byte entries.
+struct LightTable {
+    Value light;
+    Value handle;
+
+    explicit LightTable(HandleProgram& shader) {
+        const Value list_offset{shader.Emit(Opcode::GetRegister, {Value{IR::Reg::R0}})};
+        light = shader.Emit(Opcode::LoadStorage32, {Value{0U}, list_offset});
+        const Value entry{shader.Emit(Opcode::IMul32, {light, Value{96U}})};
+        const Value handle_offset{shader.Add(entry, Value{16U})};
+        handle = shader.Emit(Opcode::LoadStorage32, {Value{1U}, handle_offset});
+    }
+};
+
+u32 EvaluateTableElement(const HandleProgram& shader, const Shader::TextureDescriptor& descriptor,
+                         u32 element) {
+    REQUIRE(descriptor.handle_program < shader.program.info.handle_programs.size());
+    const auto result{Shader::EvaluateHandleProgram(
+        shader.program.info.handle_programs[descriptor.handle_program],
+        [](u32, u32) -> u32 { throw std::logic_error("Unexpected evaluator cbuf read"); },
+        [](u32 binding, u32 offset) -> u32 {
+            REQUIRE(binding == 1);
+            return 0x1000 + offset;
+        },
+        element)};
+    REQUIRE(result.has_value());
+    return *result;
+}
+} // namespace
+
+TEST_CASE("A handle read from a table at a per-invocation index is a descriptor array",
+          "[video_core][texture_handles]") {
+    HandleProgram shader;
+    const LightTable table{shader};
+    auto& first{shader.Sample(table.handle)};
+    auto& second{shader.Sample(table.handle)};
+    shader.Run();
+
+    REQUIRE(shader.program.info.texture_descriptors.size() == 1);
+    const auto& descriptor{shader.Descriptor(first)};
+    CHECK(descriptor.count == 64);
+    CHECK(descriptor.size_shift == 0);
+    // Element k holds the handle of table entry k.
+    for (const u32 element : {0U, 1U, 63U}) {
+        CHECK(EvaluateTableElement(shader, descriptor, element) == 0x1000 + element * 96 + 16);
+    }
+    // Each instruction indexes the array with the light index it read, clamped to the array.
+    for (const IR::Inst* const sample : {&first, &second}) {
+        REQUIRE_FALSE(sample->Arg(0).IsEmpty());
+        const IR::Inst* const selection{sample->Arg(0).InstRecursive()};
+        REQUIRE(selection->GetOpcode() == Opcode::UMin32);
+        CHECK(selection->Arg(0).Resolve() == table.light.Resolve());
+        CHECK(selection->Arg(1).U32() == 63);
+    }
+}
+
+TEST_CASE("A table index not defined where the texture is read takes the first element",
+          "[video_core][texture_handles]") {
+    HandleProgram shader;
+    shader.insertion_block = &shader.left;
+    const LightTable table{shader};
+    shader.insertion_block = &shader.right;
+    const Value other{shader.Emit(Opcode::GetRegister, {Value{IR::Reg::R1}})};
+    auto& sample{shader.Sample(shader.Phi(table.handle, other))};
+    shader.Run();
+
+    const auto& descriptor{shader.Descriptor(sample)};
+    CHECK(descriptor.count == 1);
+    CHECK(EvaluateTableElement(shader, descriptor, 0) == 0x1000 + 16);
+    CHECK(sample.Arg(0).IsEmpty());
 }
 
 TEST_CASE("Handle tracking skips the floating-point math a reused register leads to",

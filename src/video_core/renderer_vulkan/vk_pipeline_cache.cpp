@@ -609,6 +609,18 @@ PipelineCache::PipelineCache(Tegra::MaxwellDeviceMemoryManager& device_memory_,
     };
     host_info.ApplyDescriptorLimitPolicy();
 
+    {
+        // The descriptor arrays of bindless handle tables (HandleTableSize in texture_pass.cpp).
+        const char* const table = std::getenv("LICHII_BINDLESS_TABLE");
+        LOG_INFO(Render_Vulkan,
+                 "Bindless handle tables: LICHII_BINDLESS_TABLE {}, sampled image arrays "
+                 "indexed per invocation {}, up to {} sampled images per stage",
+                 table != nullptr && table[0] != '\0' ? table : "default (64)",
+                 device.IsSampledImageArrayNonUniformIndexingSupported() ? "supported"
+                                                                         : "unsupported",
+                 device.GetMaxPerStageDescriptorSampledImages());
+    }
+
     if (device.GetMaxVertexInputAttributes() < Maxwell::NumVertexAttributes) {
         LOG_WARNING(Render_Vulkan, "maxVertexInputAttributes is too low: {} < {}",
                     device.GetMaxVertexInputAttributes(), Maxwell::NumVertexAttributes);
