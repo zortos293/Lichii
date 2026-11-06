@@ -153,6 +153,11 @@ bool ShaderCache::RefreshStages(std::array<u64, 6>& unique_hashes) try {
         }
         const ShaderInfo* shader_info{TryGet(*cpu_shader_addr)};
         if (!shader_info && native && IsRejected(*cpu_shader_addr)) {
+            if (!mesh && index > 1 && index < 5) {
+                shader_infos[index] = nullptr;
+                unique_hashes[index] = 0;
+                continue;
+            }
             // A rejected program fails the same way every time it is bound: skip its draws
             // without rethrowing (two C++ throws each time cost ~1-2% of the GPU thread).
             maxwell3d->GetNativeMacroEngine().native_execution_failed = true;
@@ -210,6 +215,11 @@ bool ShaderCache::RefreshStages(std::array<u64, 6>& unique_hashes) try {
                         }
                     }
                 }
+                if (native && !mesh && index > 1 && index < 5) {
+                    shader_infos[index] = nullptr;
+                    unique_hashes[index] = 0;
+                    continue;
+                }
                 throw;
             }
         }
@@ -218,6 +228,14 @@ bool ShaderCache::RefreshStages(std::array<u64, 6>& unique_hashes) try {
         if (mesh && (program == Tegra::Engines::Maxwell3D::Regs::ShaderType::VertexB ||
                      program == Tegra::Engines::Maxwell3D::Regs::ShaderType::Tessellation)) {
             unique_hashes[index] ^= MeshStateHash();
+        }
+    }
+    if (native && !mesh &&
+        maxwell3d->draw_manager.draw_state.topology ==
+            Tegra::Engines::Maxwell3D::Regs::PrimitiveTopology::Patches) {
+        if (!unique_hashes[2] && !unique_hashes[3]) {
+            last_shaders_valid = false;
+            return false;
         }
     }
     last_shaders_valid = true;

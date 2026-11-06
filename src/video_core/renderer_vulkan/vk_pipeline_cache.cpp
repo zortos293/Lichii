@@ -386,6 +386,18 @@ size_t GetTotalPipelineWorkers() {
     const size_t max_core_threads =
         std::max<size_t>(static_cast<size_t>(std::thread::hardware_concurrency()), 2ULL) - 1ULL;
 #ifdef __ANDROID__
+    constexpr size_t safe_worker_limit = 8;
+#else
+    constexpr size_t safe_worker_limit = 128;
+#endif
+    if (const char* const text = std::getenv("EDEN_NX2_TRANSLATION_WORKERS")) {
+        char* end = nullptr;
+        const auto val = std::strtoul(text, &end, 10);
+        if (end != text && *end == '\0' && val > 0 && val <= safe_worker_limit) {
+            return val;
+        }
+    }
+#ifdef __ANDROID__
     const int configured = AndroidSettings::values.pipeline_worker_count.GetValue();
     const int clamped = std::clamp(configured, 2, 8);
     const size_t desired = static_cast<size_t>(clamped);
@@ -394,7 +406,7 @@ size_t GetTotalPipelineWorkers() {
     }
     return std::min(max_core_threads, desired);
 #else
-    return max_core_threads;
+    return std::min<size_t>(max_core_threads, safe_worker_limit);
 #endif
 }
 
@@ -862,6 +874,9 @@ void PipelineCache::LoadDiskResources(u64 title_id, std::stop_token stop_loading
     size_t skipped_pipelines = 0;
     size_t deferred_pipelines = 0;
     size_t queued_graphics = 0;
+    std::array<std::unordered_set<u64>, Maxwell::MaxShaderProgram> covered_shader_units;
+    constexpr size_t MaxUnitCoverPipelines = 3000;
+    size_t queued_unit_covers = 0;
 
     if (use_vulkan_pipeline_cache) {
         vulkan_pipeline_cache_filename =
@@ -946,7 +961,16 @@ void PipelineCache::LoadDiskResources(u64 title_id, std::stop_token stop_loading
         if (!disk_pipelines.insert(hash).second) {
             return;
         }
-        if (!PreloadAllPipelines() &&
+        bool unit_cover_needed = false;
+        if (queued_unit_covers < MaxUnitCoverPipelines) {
+            for (size_t stage = 0; stage < key.unique_hashes.size(); ++stage) {
+                const u64 stage_hash = key.unique_hashes[stage];
+                if (stage_hash != 0 && covered_shader_units[stage].insert(stage_hash).second) {
+                    unit_cover_needed = true;
+                }
+            }
+        }
+        if (!PreloadAllPipelines() && !unit_cover_needed &&
             (used_pipelines.empty() ? queued_graphics >= MaxPipelinesWithoutUsedList
                                     : !used_pipelines.contains(hash))) {
             ++skipped_pipelines;
@@ -974,11 +998,15 @@ void PipelineCache::LoadDiskResources(u64 title_id, std::stop_token stop_loading
             }
             return;
         }
+        if (unit_cover_needed) {
+            ++queued_unit_covers;
+        }
         ++queued_graphics;
 
         workers.QueueWork([this, key, envs_ = std::move(envs), &state, &callback]() mutable {
             ShaderPools pools;
-            boost::container::static_vector<Shader::Environment*, 5> env_ptrs;
+            boost::container::static_vector<Shader::Environment*, Maxwell::MaxShaderProgram>
+                env_ptrs;
             for (auto& env : envs_) {
                 env_ptrs.push_back(&env);
             }
