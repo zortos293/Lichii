@@ -12,6 +12,7 @@
 #include <thread>
 #include <type_traits>
 #include <unordered_map>
+#include <unordered_set>
 
 #include "common/common_types.h"
 
@@ -211,8 +212,25 @@ public:
     /// Front: a write that lands when a host query completes or a fence signals (counter
     /// reports, timed releases), not when the back runs it (Tegra::Nx2AsyncReportsSettled).
     void NoteAsyncWrite(u64 begin, u64 size) {
+        NoteReportWrite(begin, size);
         for (u64 slot = begin >> 4; slot <= (begin + size - 1) >> 4; ++slot) {
             async_writes[slot] = write_position;
+        }
+    }
+    /// Front: whether these bytes lie on 4 KiB pages reports or semaphore releases write (query
+    /// and semaphore pools), which draws and dispatches don't write.
+    [[nodiscard]] bool IsReportMemory(u64 begin, u64 size) const {
+        for (u64 page = begin >> 12; page <= (begin + size - 1) >> 12; ++page) {
+            if (!report_pages.contains(page)) {
+                return false;
+            }
+        }
+        return true;
+    }
+    /// Front: a report or semaphore release was sent to these bytes.
+    void NoteReportWrite(u64 begin, u64 size) {
+        for (u64 page = begin >> 12; page <= (begin + size - 1) >> 12; ++page) {
+            report_pages.insert(page);
         }
     }
     /// Front: the ring position of the newest async write noted to these bytes, or 0.
@@ -254,6 +272,7 @@ private:
     static constexpr u64 Direct = 1 << 6; ///< Method: call it even if not executable (macros)
 
     std::unordered_map<u64, u64> async_writes; ///< Front: 16-byte slot -> ring position
+    std::unordered_set<u64> report_pages;      ///< Front: 4 KiB pages reports and releases wrote
 
     static constexpr size_t RingWords = size_t{1} << 20; // 8 MiB
     static constexpr size_t RingMask = RingWords - 1;

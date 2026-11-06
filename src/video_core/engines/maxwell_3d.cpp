@@ -1379,6 +1379,7 @@ void Maxwell3D::FrontNoteMemoryWrite(VideoCommon::GpuSplit& split, FrontState& f
             query_regs.query.report == Regs::ReportSemaphore::Report::Payload) {
             const u32 payload = fs.regs[base + 2];
             split.NoteMemoryWriteData(*device, &payload, 1);
+            split.NoteReportWrite(*device, 4);
         } else {
             // Counters and timed releases are written when the host query completes, not when
             // the back runs them: reads of these bytes wait until the back ran the report and
@@ -1440,18 +1441,28 @@ void Maxwell3D::FrontNoteMemoryWrite(VideoCommon::GpuSplit& split, FrontState& f
 
 bool Maxwell3D::FrontDmaReadQueued(VideoCommon::GpuSplit& split, FrontState& fs, u32 macro,
                                    u32 method, GPUVAddr source, u32 words) {
-    // Without draining the back: the words in guest memory, with the queued writes the front
-    // knows the words of on top (inline uploads, fence releases), once the back ran the queued
-    // writes it doesn't know that overlap the read. Pages GPU shaders or copies wrote, and
-    // counter reports whose host query hasn't completed, take the drained path.
+    // Without draining the back, for reads of report memory only (pages 3D reports and
+    // semaphore releases write, such as occlusion results): the words in guest memory, with the
+    // queued writes the front knows the words of on top (fence releases, inline uploads), once
+    // the back ran the queued writes it doesn't know that overlap the read. Other memory may be
+    // written by queued draws or dispatches the front doesn't track; pages GPU shaders or copies
+    // wrote, and counter reports whose host query hasn't completed, take the drained path too.
     const size_t read_bytes = size_t{words} * sizeof(u32);
+    if (words == 0) {
+        return false;
+    }
+    const auto device = memory_manager.GpuToCpuAddress(source);
+    if (!device ||
+        memory_manager.GpuToCpuAddress(source + read_bytes - 1) != *device + read_bytes - 1 ||
+        !split.IsReportMemory(*device, read_bytes)) {
+        return false;
+    }
     for (GPUVAddr page = source & ~GPUVAddr{0xfff}; page < source + read_bytes; page += 0x1000) {
-        const auto device = memory_manager.GpuToCpuAddress(page);
-        if (!device || Tegra::Nx2IsGpuWritten(*device)) {
+        const auto page_device = memory_manager.GpuToCpuAddress(page);
+        if (!page_device || Tegra::Nx2IsGpuWritten(*page_device)) {
             return false;
         }
     }
-    const auto device = memory_manager.GpuToCpuAddress(source);
     if (const u64 async_position = split.HasAsyncWrite(*device, read_bytes);
         async_position != 0 && (async_position > split.ConsumedNow() ||
                                 !Tegra::Nx2AsyncReportsSettled(*device, read_bytes))) {
