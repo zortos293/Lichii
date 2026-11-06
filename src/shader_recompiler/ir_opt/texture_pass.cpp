@@ -394,6 +394,14 @@ bool IsMemoryLoad(IR::Opcode opcode) {
     }
 }
 
+bool IsFloatValue(const IR::Inst& inst) {
+    constexpr IR::Type floats{IR::Type::F16 | IR::Type::F32 | IR::Type::F64 | IR::Type::F16x2 |
+                              IR::Type::F16x3 | IR::Type::F16x4 | IR::Type::F32x2 |
+                              IR::Type::F32x3 | IR::Type::F32x4 | IR::Type::F64x2 |
+                              IR::Type::F64x3 | IR::Type::F64x4};
+    return (inst.Type() & floats) != IR::Type::Void;
+}
+
 std::optional<ConstBufferAddr> Track(const IR::Value& value, Environment& env, const HostTranslateInfo& host_info, const IR::Block* block) {
     // A value loaded from memory is not a constant buffer word, whatever its address is built
     // from: the search does not look into a load's operands (a handle read from a storage
@@ -413,6 +421,12 @@ std::optional<ConstBufferAddr> Track(const IR::Value& value, Environment& env, c
             return result;
         }
         if (IsMemoryLoad(inst->GetOpcode())) {
+            continue;
+        }
+        // Nor into a texture instruction or floating-point math: no handle is made from them,
+        // while a register the program reuses for the handle and for a sample result (a Phi of
+        // both) would lead the search through the sample's coordinates to an unrelated word.
+        if (IsTextureInstruction(*inst) || IsFloatValue(*inst)) {
             continue;
         }
         for (size_t arg = inst->NumArgs(); arg--;) {
