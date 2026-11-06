@@ -6,6 +6,8 @@
 
 #pragma once
 
+#include <span>
+
 #include "shader_recompiler/environment.h"
 #include "shader_recompiler/frontend/ir/program.h"
 
@@ -32,6 +34,10 @@ void PositionPass(Environment& env, IR::Program& program);
 void BlitConstantsPass(Environment& env, IR::Program& program);
 void TexturePass(Environment& env, IR::Program& program, const HostTranslateInfo& host_info);
 void LimitSampledTextureArrays(IR::Program& program, const HostTranslateInfo& host_info);
+/// Shrinks the texture arrays of a pipeline's stages to fit the descriptor set limits, which count
+/// every stage; LimitSampledTextureArrays sizes a stage's arrays as if it had them to itself
+void LimitPipelineSampledTextureArrays(std::span<IR::Program* const> programs,
+                                       const HostTranslateInfo& host_info);
 void LayerPass(IR::Program& program, const HostTranslateInfo& host_info);
 void VendorWorkaroundPass(IR::Program& program);
 void VerificationPass(const IR::Program& program);

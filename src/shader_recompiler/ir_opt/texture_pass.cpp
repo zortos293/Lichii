@@ -136,22 +136,104 @@ template <typename T>
 u32 DynamicSampledTextureCap(const Info& info, const HostTranslateInfo& host_info, u32 dynamic_arrays) {
     auto const sampled_limit = (std::max)(1U, std::min(host_info.max_per_stage_descriptor_sampled_images,
                                                        host_info.max_descriptor_set_sampled_images));
+    // A texture is a combined image sampler: it takes a sampler as well as a sampled image.
+    auto const sampler_limit = (std::max)(1U, std::min(host_info.max_per_stage_descriptor_samplers,
+                                                       host_info.max_descriptor_set_samplers));
     auto const resource_limit = (std::max)(1U, host_info.max_per_stage_resources);
     if (dynamic_arrays > 0) {
-        auto const sampled_static_count = StaticDescriptorCount(info.texture_buffer_descriptors) + StaticDescriptorCount(info.texture_descriptors);
+        auto const sampler_static_count = StaticDescriptorCount(info.texture_descriptors);
+        auto const sampled_static_count = StaticDescriptorCount(info.texture_buffer_descriptors) + sampler_static_count;
         auto const resource_static_count =
             NumDescriptors(info.constant_buffer_descriptors)
             + NumDescriptors(info.storage_buffers_descriptors)
             + sampled_static_count + NumDescriptors(info.image_buffer_descriptors)
             + NumDescriptors(info.image_descriptors);
-        auto const sampled_budget = SaturatingSub(sampled_limit, sampled_static_count);
+        auto const sampled_budget = (std::min)(SaturatingSub(sampled_limit, sampled_static_count),
+                                               SaturatingSub(sampler_limit, sampler_static_count));
         auto const resource_budget = SaturatingSub(resource_limit, resource_static_count);
         auto const sampled_cap = sampled_budget / dynamic_arrays;
         auto const resource_cap = resource_budget / dynamic_arrays;
         return (std::max)(1U, (std::min)(sampled_cap, resource_cap));
     }
-    return (std::min)({DESCRIPTOR_MAX_COUNT, sampled_limit, resource_limit});
+    return (std::min)({DESCRIPTOR_MAX_COUNT, sampled_limit, sampler_limit, resource_limit});
 }
+
+// Shrinks the texture arrays of a program to at most cap elements, clamping the element index of
+// every instruction that reads an array it shrank.
+void CapTextureArrays(IR::Program& program, u32 cap) {
+    auto& descriptors = program.info.texture_descriptors;
+    boost::container::small_vector<bool, 16> shrunk(descriptors.size());
+    for (size_t index = 0; index < descriptors.size(); ++index) {
+        if (descriptors[index].count > cap) {
+            descriptors[index].count = cap;
+            shrunk[index] = true;
+        }
+    }
+    for (IR::Block* const block : program.post_order_blocks) {
+        for (IR::Inst& inst : block->Instructions()) {
+            switch (inst.GetOpcode()) {
+            case IR::Opcode::ImageSampleImplicitLod:
+            case IR::Opcode::ImageSampleExplicitLod:
+            case IR::Opcode::ImageSampleDrefImplicitLod:
+            case IR::Opcode::ImageSampleDrefExplicitLod:
+            case IR::Opcode::ImageGather:
+            case IR::Opcode::ImageGatherDref:
+            case IR::Opcode::ImageFetch:
+            case IR::Opcode::ImageQueryDimensions:
+            case IR::Opcode::ImageQueryLod:
+            case IR::Opcode::ImageGradient:
+                break;
+            default:
+                continue;
+            }
+            const auto flags = inst.Flags<IR::TextureInstInfo>();
+            if (flags.type == TextureType::Buffer || inst.Arg(0).IsEmpty() ||
+                !shrunk[flags.descriptor_index]) {
+                continue;
+            }
+            const u32 count = descriptors[flags.descriptor_index].count;
+            if (count == 1) {
+                inst.SetArg(0, IR::Value{});
+                continue;
+            }
+            IR::IREmitter ir{*block, IR::Block::InstructionList::s_iterator_to(inst)};
+            inst.SetArg(0, ir.UMin(IR::U32{inst.Arg(0)}, ir.Imm32(count - 1)));
+        }
+    }
+}
+
+// The textures of a pipeline's stages. Each is a combined image sampler, which the descriptor set
+// limits count as a sampler and as a sampled image (as they do a texel buffer).
+struct PipelineTextures {
+    u32 arrays{};             ///< Texture arrays, which can shrink
+    u32 samplers{};           ///< Textures
+    u32 sampled_images{};     ///< Textures and texel buffers
+    u32 fixed_samplers{};     ///< Textures outside the arrays
+    u32 fixed_sampled_images{}; ///< Sampled images outside the texture arrays
+
+    explicit PipelineTextures(std::span<IR::Program* const> programs) {
+        for (const IR::Program* const program : programs) {
+            for (const auto& desc : program->info.texture_descriptors) {
+                samplers += desc.count;
+                if (desc.count > 1) {
+                    ++arrays;
+                } else {
+                    fixed_samplers += desc.count;
+                }
+            }
+            const u32 texel_buffers = NumDescriptors(program->info.texture_buffer_descriptors);
+            sampled_images += texel_buffers;
+            fixed_sampled_images += texel_buffers;
+        }
+        sampled_images += samplers;
+        fixed_sampled_images += fixed_samplers;
+    }
+
+    [[nodiscard]] bool Fit(const HostTranslateInfo& host_info) const noexcept {
+        return samplers <= host_info.max_descriptor_set_samplers &&
+               sampled_images <= host_info.max_descriptor_set_sampled_images;
+    }
+};
 
 IR::Opcode IndexedInstruction(const IR::Inst& inst) {
     switch (inst.GetOpcode()) {
@@ -1678,55 +1760,47 @@ void LimitSampledTextureArrays(IR::Program& program, const HostTranslateInfo& ho
                                    NumDescriptors(info.storage_buffers_descriptors) +
                                    NumDescriptors(info.image_descriptors) +
                                    NumDescriptors(info.image_buffer_descriptors);
-    const u32 original_sampled = NumDescriptors(info.texture_descriptors) +
-                                 NumDescriptors(info.texture_buffer_descriptors);
-    if (original_sampled <= host_info.max_per_stage_descriptor_sampled_images &&
-        original_sampled <= host_info.max_descriptor_set_sampled_images &&
-        original_sampled + buffers_and_images <= host_info.max_per_stage_resources) {
+    // Textures are combined image samplers, counted as samplers too; texel buffers are not.
+    const auto fit = [&](u32 samplers, u32 sampled) {
+        return sampled <= host_info.max_per_stage_descriptor_sampled_images &&
+               sampled <= host_info.max_descriptor_set_sampled_images &&
+               samplers <= host_info.max_per_stage_descriptor_samplers &&
+               samplers <= host_info.max_descriptor_set_samplers &&
+               sampled + buffers_and_images <= host_info.max_per_stage_resources;
+    };
+    const u32 original_samplers = NumDescriptors(info.texture_descriptors);
+    if (fit(original_samplers,
+            original_samplers + NumDescriptors(info.texture_buffer_descriptors))) {
         return;
     }
-    const u32 cap = DynamicSampledTextureCap(info, host_info, arrays);
-    for (auto& desc : info.texture_descriptors) {
-        desc.count = std::min(desc.count, cap);
+    CapTextureArrays(program, DynamicSampledTextureCap(info, host_info, arrays));
+    const u32 samplers = NumDescriptors(info.texture_descriptors);
+    const u32 sampled = samplers + NumDescriptors(info.texture_buffer_descriptors);
+    if (!fit(samplers, sampled)) {
+        throw NotImplementedException(
+            "Texture arrays exceed descriptor limits: samplers={}, sampled={}, resources={}",
+            samplers, sampled, sampled + buffers_and_images);
     }
-    const u32 sampled = NumDescriptors(info.texture_descriptors) +
-                        NumDescriptors(info.texture_buffer_descriptors);
-    const u32 resources = sampled + buffers_and_images;
-    if (sampled > host_info.max_per_stage_descriptor_sampled_images ||
-        sampled > host_info.max_descriptor_set_sampled_images ||
-        resources > host_info.max_per_stage_resources) {
-        throw NotImplementedException("Texture arrays exceed descriptor limits: sampled={}, resources={}",
-                                      sampled, resources);
+}
+
+void LimitPipelineSampledTextureArrays(std::span<IR::Program* const> programs,
+                                       const HostTranslateInfo& host_info) {
+    const PipelineTextures textures{programs};
+    if (textures.arrays == 0 || textures.Fit(host_info)) {
+        return;
     }
-    for (IR::Block* const block : program.post_order_blocks) {
-        for (IR::Inst& inst : block->Instructions()) {
-            switch (inst.GetOpcode()) {
-            case IR::Opcode::ImageSampleImplicitLod:
-            case IR::Opcode::ImageSampleExplicitLod:
-            case IR::Opcode::ImageSampleDrefImplicitLod:
-            case IR::Opcode::ImageSampleDrefExplicitLod:
-            case IR::Opcode::ImageGather:
-            case IR::Opcode::ImageGatherDref:
-            case IR::Opcode::ImageFetch:
-            case IR::Opcode::ImageQueryDimensions:
-            case IR::Opcode::ImageQueryLod:
-            case IR::Opcode::ImageGradient:
-                break;
-            default:
-                continue;
-            }
-            const auto flags = inst.Flags<IR::TextureInstInfo>();
-            if (flags.type == TextureType::Buffer || inst.Arg(0).IsEmpty()) {
-                continue;
-            }
-            const u32 count = info.texture_descriptors[flags.descriptor_index].count;
-            if (count == 1) {
-                inst.SetArg(0, IR::Value{});
-                continue;
-            }
-            IR::IREmitter ir{*block, IR::Block::InstructionList::s_iterator_to(inst)};
-            inst.SetArg(0, ir.UMin(IR::U32{inst.Arg(0)}, ir.Imm32(count - 1)));
-        }
+    const u32 budget = (std::min)(
+        SaturatingSub(host_info.max_descriptor_set_samplers, textures.fixed_samplers),
+        SaturatingSub(host_info.max_descriptor_set_sampled_images, textures.fixed_sampled_images));
+    const u32 cap = (std::max)(1U, budget / textures.arrays);
+    for (IR::Program* const program : programs) {
+        CapTextureArrays(*program, cap);
+    }
+    const PipelineTextures capped{programs};
+    if (!capped.Fit(host_info)) {
+        throw NotImplementedException(
+            "Texture arrays exceed the pipeline's descriptor limits: samplers={}, sampled={}",
+            capped.samplers, capped.sampled_images);
     }
 }
 

@@ -278,6 +278,48 @@ TEST_CASE("Texture arrays reserve the final static and buffer resources",
     }
 }
 
+TEST_CASE("Texture arrays fit the sampler limits of their stage and pipeline",
+          "[video_core][texture_handles]") {
+    std::array<HandleProgram, 2> stages;
+    std::array<IR::Inst*, 2> samples{};
+    for (size_t i = 0; i < stages.size(); ++i) {
+        HandleProgram& shader{stages[i]};
+        const Value offset{shader.Emit(Opcode::ShiftLeftLogical32, {shader.Storage(0), Value{4U}})};
+        samples[i] = &shader.Sample(shader.Emit(Opcode::GetCbufU32, {Value{0U}, offset}));
+        shader.Run();
+        REQUIRE(shader.program.info.texture_descriptors.front().count > 16);
+    }
+    auto& first = stages[0].program.info;
+    auto& second = stages[1].program.info;
+    // Texel buffers take sampled images, not samplers.
+    for (u32 i = 0; i < 4; ++i) {
+        first.texture_buffer_descriptors.push_back({.count = 1});
+    }
+    Shader::HostTranslateInfo host;
+    host.ApplyDescriptorLimitPolicy();
+    host.max_per_stage_descriptor_sampled_images = 12;
+    host.max_per_stage_descriptor_samplers = 8;
+    Shader::Optimization::LimitSampledTextureArrays(stages[0].program, host);
+    CHECK(first.texture_descriptors.front().count == 8);
+    CHECK(samples[0]->Arg(0).InstRecursive()->Arg(1).U32() == 7);
+
+    // The descriptor set limits count the textures of both stages.
+    auto fixed = second.texture_descriptors.front();
+    fixed.count = 1;
+    second.texture_descriptors.push_back(fixed);
+    second.texture_descriptors.push_back(fixed);
+    host.max_descriptor_set_samplers = 20;
+    const std::array programs{&stages[0].program, &stages[1].program};
+    Shader::Optimization::LimitPipelineSampledTextureArrays(programs, host);
+    CHECK(first.texture_descriptors.front().count == 8);
+    CHECK(samples[0]->Arg(0).InstRecursive()->Arg(1).U32() == 7);
+    CHECK(second.texture_descriptors.front().count == 9);
+    CHECK(samples[1]->Arg(0).InstRecursive()->Arg(1).U32() == 8);
+
+    host.max_descriptor_set_samplers = 3;
+    REQUIRE_THROWS(Shader::Optimization::LimitPipelineSampledTextureArrays(programs, host));
+}
+
 TEST_CASE("Failed Phi handle subtrees discard their cached values",
           "[video_core][texture_handles]") {
     for (const bool nested : {false, true}) {
