@@ -6,6 +6,8 @@
 
 #pragma once
 
+#include <initializer_list>
+
 #include "common/common_types.h"
 
 namespace Shader {
@@ -19,6 +21,7 @@ struct HostTranslateInfo {
 
     u64 min_ssbo_alignment{};            ///< Minimum alignment supported by the device for SSBOs
     u32 max_per_stage_descriptor_sampled_images{}; ///< maximum sampled descriptors per stage
+    u32 max_per_stage_descriptor_storage_buffers{}; ///< maximum storage buffers per stage
     u32 max_per_stage_resources{};                 ///< maximum resources per stage
     u32 max_descriptor_set_samplers{};
     u32 max_descriptor_set_uniform_buffers{};
@@ -42,11 +45,25 @@ struct HostTranslateInfo {
     bool single_lane_geometry_subgroups{};
     bool support_byte_addressed_r16{};
 
+    /// Storage buffers a shader may bind on this host, at most `shader_limit`. An unset limit
+    /// doesn't count.
+    [[nodiscard]] u32 StorageBufferLimit(u32 shader_limit) const noexcept {
+        u32 limit = shader_limit;
+        for (const u32 host_limit :
+             {max_per_stage_descriptor_storage_buffers, max_descriptor_set_storage_buffers}) {
+            if (host_limit != 0 && host_limit < limit) {
+                limit = host_limit;
+            }
+        }
+        return limit;
+    }
+
     void ApplyDescriptorLimitPolicy() noexcept {
         if (min_ssbo_alignment == 0) {
             min_ssbo_alignment = 1;
         }
         ApplyDescriptorLimitFallback(max_per_stage_descriptor_sampled_images);
+        ApplyDescriptorLimitFallback(max_per_stage_descriptor_storage_buffers);
         ApplyDescriptorLimitFallback(max_per_stage_resources);
         ApplyDescriptorLimitFallback(max_descriptor_set_samplers);
         ApplyDescriptorLimitFallback(max_descriptor_set_uniform_buffers);

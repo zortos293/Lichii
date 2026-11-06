@@ -5,6 +5,7 @@
 #include <utility>
 #include <catch2/catch_test_macros.hpp>
 
+#include "shader_recompiler/host_translate_info.h"
 #include "video_core/buffer_cache/buffer_cache_base.h"
 
 TEST_CASE("Buffer cache holds every shader storage binding", "[video_core][storage_bindings]") {
@@ -36,4 +37,20 @@ TEST_CASE("Buffer cache holds every shader storage binding", "[video_core][stora
         ++count;
     }
     REQUIRE(count == Shader::Info::MAX_SSBOS);
+}
+
+TEST_CASE("Storage buffer limit follows the host's lowest limit", "[video_core][storage_bindings]") {
+    constexpr u32 shader_limit = Shader::Info::MAX_SSBOS;
+    Shader::HostTranslateInfo host{};
+    REQUIRE(host.StorageBufferLimit(shader_limit) == shader_limit);
+
+    host.max_per_stage_descriptor_storage_buffers = 1000;
+    host.max_descriptor_set_storage_buffers = 1000;
+    REQUIRE(host.StorageBufferLimit(shader_limit) == shader_limit);
+
+    host.max_per_stage_descriptor_storage_buffers = 24;
+    REQUIRE(host.StorageBufferLimit(shader_limit) == 24);
+
+    host.max_descriptor_set_storage_buffers = 16;
+    REQUIRE(host.StorageBufferLimit(shader_limit) == 16);
 }

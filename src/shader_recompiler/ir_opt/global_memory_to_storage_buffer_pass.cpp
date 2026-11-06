@@ -91,6 +91,7 @@ struct StorageInfo {
     bool tables_seen{};
     size_t table_budget{};
     size_t table_used{};
+    bool table_dropped{};
     small_vector<StorageBufferAddr, 8> table_candidates;
 };
 
@@ -1389,6 +1390,7 @@ void CollectStorageBuffers(IR::Block& block, IR::Inst& inst, StorageInfo& info, 
                              ? 1U
                              : 0U)};
                     if (info.table_used + added > info.table_budget) {
+                        info.table_dropped = true;
                         continue;
                     }
                     info.table_used += added;
@@ -1622,7 +1624,8 @@ void GlobalMemoryToStorageBufferPass(Environment& env, IR::Program& program,
         }
     };
     collect();
-    if (info.competing_loaded_bound && info.set.size() > Info::MAX_SSBOS) {
+    const size_t storage_limit{host_info.StorageBufferLimit(u32{Info::MAX_SSBOS})};
+    if (info.competing_loaded_bound && info.set.size() > storage_limit) {
         // Not enough bindings for the loaded pointers that compete with paired ones: keep the
         // pairs, as if no loaded pointer competed.
         StorageInfo paired;
@@ -1632,16 +1635,20 @@ void GlobalMemoryToStorageBufferPass(Environment& env, IR::Program& program,
         info = std::move(paired);
         collect();
     }
-    if (info.tables_seen && info.set.size() < Info::MAX_SSBOS) {
+    if (info.tables_seen && info.set.size() < storage_limit) {
         // Again with pointer table entries, in the bindings the first pass left free.
         StorageInfo with_tables;
         with_tables.iterator_words = std::move(info.iterator_words);
         with_tables.atomic_pointers = std::move(info.atomic_pointers);
         with_tables.bind_competing_loaded = info.bind_competing_loaded;
         with_tables.tables_enabled = true;
-        with_tables.table_budget = Info::MAX_SSBOS - info.set.size();
+        with_tables.table_budget = storage_limit - info.set.size();
         info = std::move(with_tables);
         collect();
+    }
+    if (info.table_dropped) {
+        LOG_WARNING(Shader, "Pointer table entries past the {} storage buffers of this host read 0",
+                    storage_limit);
     }
     program.info.native_global_bounds |= info.native_runtime_bounds;
     for (const StorageBufferAddr& storage_buffer : info.set) {

@@ -250,6 +250,8 @@ ShaderCache::ShaderCache(Tegra::MaxwellDeviceMemoryManager& device_memory_,
         .min_ssbo_alignment = static_cast<u32>(device.GetShaderStorageBufferAlignment()),
         .max_per_stage_descriptor_sampled_images =
             Shader::HostTranslateInfo::DEFAULT_DESCRIPTOR_LIMIT,
+        .max_per_stage_descriptor_storage_buffers =
+            Shader::HostTranslateInfo::DEFAULT_DESCRIPTOR_LIMIT,
         .max_per_stage_resources = Shader::HostTranslateInfo::DEFAULT_DESCRIPTOR_LIMIT,
         .max_descriptor_set_samplers = Shader::HostTranslateInfo::DEFAULT_DESCRIPTOR_LIMIT,
         .max_descriptor_set_uniform_buffers = Shader::HostTranslateInfo::DEFAULT_DESCRIPTOR_LIMIT,

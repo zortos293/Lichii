@@ -577,6 +577,13 @@ PipelineCache::PipelineCache(Tegra::MaxwellDeviceMemoryManager& device_memory_,
     host_info = Shader::HostTranslateInfo{
         .min_ssbo_alignment = device.GetStorageBufferAlignment(),
         .max_per_stage_descriptor_sampled_images = device.GetMaxPerStageDescriptorSampledImages(),
+        .max_per_stage_descriptor_storage_buffers =
+            driver_id == VK_DRIVER_ID_QUALCOMM_PROPRIETARY ||
+                    driver_id == VK_DRIVER_ID_ARM_PROPRIETARY
+                // The buffer cache holds these drivers to the dynamic limit.
+                ? (std::min)(device.GetMaxPerStageDescriptorStorageBuffers(),
+                             device.GetMaxDescriptorSetStorageBuffersDynamic())
+                : device.GetMaxPerStageDescriptorStorageBuffers(),
         .max_per_stage_resources = device.GetMaxPerStageResources(),
         .max_descriptor_set_samplers = device.GetMaxDescriptorSetSamplers(),
         .max_descriptor_set_uniform_buffers = device.GetMaxDescriptorSetUniformBuffers(),
