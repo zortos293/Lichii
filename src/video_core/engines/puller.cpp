@@ -11,6 +11,8 @@
 #include "common/logging.h"
 #include "common/settings.h"
 #include "core/core.h"
+#include <optional>
+
 #include "video_core/nx2_profile.h"
 #include "video_core/control/channel_state.h"
 #include "video_core/dma_pusher.h"
@@ -211,6 +213,7 @@ void Puller::ProcessFenceActionMethod(DmaPusher& dma_pusher) {
     }
 }
 
+
 void Puller::ProcessSemaphoreTriggerMethod(DmaPusher& dma_pusher) {
     const auto semaphoreOperationMask = 0xF;
     const auto op = GpuSemaphoreOperation(regs.semaphore_trigger & semaphoreOperationMask);
@@ -362,6 +365,24 @@ void Puller::ProcessSemaphoreExecute(DmaPusher& dma_pusher, u32 argument) {
     }
 }
 
+// A semaphore release queued for the split's back: the front's macro DMA reads of those bytes
+// wait for it (Maxwell3D::FrontDmaRead).
+// A fence release (`fence_payload`): reads overlay its payload while it is queued.
+static void NoteSemaphoreWrite(DmaPusher& dma_pusher, GPUVAddr address,
+                               std::optional<u32> fence_payload) {
+    auto& split = VideoCommon::GpuSplit::Get();
+    const auto device = dma_pusher.memory_manager.GpuToCpuAddress(address);
+    if (!device) {
+        return; // Queries write nothing at an unmapped address.
+    } else if (fence_payload) {
+        split.NoteMemoryWriteData(*device, &*fence_payload, 1);
+    } else {
+        // Written when its fence is signalled: reads wait until the back ran it and it was.
+        split.NoteAsyncWrite(*device, 16);
+        split.NoteMemoryWrite(*device, 16, "semaphore (timed)");
+    }
+}
+
 /// Calls a GPU puller method.
 void Puller::CallPullerMethod(DmaPusher& dma_pusher, const MethodCall& method_call) {
     static const bool nx2_trace = std::getenv("EDEN_NX2_PULLER_TRACE") != nullptr;
@@ -396,6 +417,12 @@ void Puller::CallPullerMethod(DmaPusher& dma_pusher, const MethodCall& method_ca
         break;
     case BufferMethods::SemaphoreOperation: {
         ProcessSemaphoreTriggerMethod(dma_pusher);
+        if (static_cast<GpuSemaphoreOperation>(regs.semaphore_trigger & 0xF) ==
+            GpuSemaphoreOperation::WriteLong) {
+            const bool fence = g_nx2_ampere && (regs.semaphore_trigger & (1U << 24)) != 0;
+            NoteSemaphoreWrite(dma_pusher, regs.semaphore_address.SemaphoreAddress(),
+                               fence ? std::optional<u32>{regs.semaphore_sequence} : std::nullopt);
+        }
         break;
     }
     case BufferMethods::NonStallInterrupt: {
@@ -428,6 +455,15 @@ void Puller::CallPullerMethod(DmaPusher& dma_pusher, const MethodCall& method_ca
             ProcessSemaphoreExecute(dma_pusher, method_call.argument);
         } else {
             ProcessSemaphoreRelease(dma_pusher);
+        }
+        if (g_nx2_ampere && (method_call.argument & 7) == 1) {
+            NoteSemaphoreWrite(dma_pusher,
+                               (GPUVAddr{regs.reg_array[0x18] & 0x1FFFFFF} << 32) |
+                                   (regs.reg_array[0x17] & ~3U),
+                               regs.reg_array[0x19]);
+        } else if (!g_nx2_ampere) {
+            NoteSemaphoreWrite(dma_pusher, regs.semaphore_address.SemaphoreAddress(),
+                               std::nullopt);
         }
         break;
     }

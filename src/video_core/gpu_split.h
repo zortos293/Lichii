@@ -3,6 +3,7 @@
 
 #pragma once
 
+#include <algorithm>
 #include <array>
 #include <atomic>
 #include <cstring>
@@ -10,6 +11,7 @@
 #include <memory>
 #include <thread>
 #include <type_traits>
+#include <unordered_map>
 
 #include "common/common_types.h"
 
@@ -165,6 +167,68 @@ public:
     /// Waits until the back executed the compute and copy work sent so far (not what came after).
     /// Returns whether any of it was still queued.
     bool WaitForWriters();
+    /// Work that writes the device range [begin, begin + size) was just sent (an inline upload, a
+    /// report, a semaphore release). size ~0 means an unknown range.
+    void NoteMemoryWrite(u64 begin, u64 size, const char* what = "unknown") {
+        PendingWrite& write = pending_writes[pending_write_count++ % pending_writes.size()];
+        write.what = what;
+        write.begin = begin;
+        write.end = size == ~u64{0} ? ~u64{0} : begin + size;
+        write.position = write_position;
+        write.words = 0;
+    }
+    /// As NoteMemoryWrite, for a write whose words the front knows (a fence release payload,
+    /// linear inline upload data): reads overlay them instead of waiting.
+    void NoteMemoryWriteData(u64 begin, const u32* data, u32 words) {
+        while (words != 0) {
+            const u32 count = (std::min<u32>)(words, PendingWriteWords);
+            PendingWrite& write = pending_writes[pending_write_count++ % pending_writes.size()];
+            write.what = "known";
+            write.begin = begin;
+            write.end = begin + u64{count} * sizeof(u32);
+            write.position = write_position;
+            write.words = count;
+            std::memcpy(write.data.data(), data, count * sizeof(u32));
+            begin += u64{count} * sizeof(u32);
+            data += count;
+            words -= count;
+        }
+    }
+    /// The back's position, for OverlayQueuedWrites: take it before reading guest memory.
+    [[nodiscard]] u64 ConsumedNow() {
+        return consumed.load(std::memory_order_acquire);
+    }
+    /// Applies to `out` (the words at device address `begin`, read from guest memory after
+    /// `since` = ConsumedNow()) the queued writes the front knows the words of. False when an
+    /// overlapping queued write's words are unknown (the caller waits instead).
+    bool OverlayQueuedWrites(u64 since, u64 begin, u32* out, u32 words);
+    /// Waits until the back executed the noted writes that overlap [begin, begin + size).
+    /// Returns false when more writes are queued than are remembered (the caller drains).
+    bool WaitForWritesTo(u64 begin, u64 size);
+    /// Whether a noted write that overlaps [begin, begin + size) is still queued (or too many
+    /// are queued to tell).
+    bool HasQueuedWritesTo(u64 begin, u64 size);
+    /// Front: a write that lands when a host query completes or a fence signals (counter
+    /// reports, timed releases), not when the back runs it (Tegra::Nx2AsyncReportsSettled).
+    void NoteAsyncWrite(u64 begin, u64 size) {
+        for (u64 slot = begin >> 4; slot <= (begin + size - 1) >> 4; ++slot) {
+            async_writes[slot] = write_position;
+        }
+    }
+    /// Front: the ring position of the newest async write noted to these bytes, or 0.
+    [[nodiscard]] u64 HasAsyncWrite(u64 begin, u64 size) const {
+        u64 newest = 0;
+        if (async_writes.empty()) {
+            return newest;
+        }
+        for (u64 slot = begin >> 4; slot <= (begin + size - 1) >> 4; ++slot) {
+            if (const auto it = async_writes.find(slot); it != async_writes.end()) {
+                newest = (std::max)(newest, it->second);
+            }
+        }
+        return newest;
+    }
+
     /// A host-level wait was just sent (a syncpoint acquire, a host WFI, a GP entry with its sync
     /// bit; semaphore acquires drain): the guest's GPU work before it is complete before the
     /// commands after it are fetched.
@@ -188,6 +252,8 @@ private:
     static constexpr u64 IsLast = 1 << 4;
     static constexpr u64 HasSegment = 1 << 5;
     static constexpr u64 Direct = 1 << 6; ///< Method: call it even if not executable (macros)
+
+    std::unordered_map<u64, u64> async_writes; ///< Front: 16-byte slot -> ring position
 
     static constexpr size_t RingWords = size_t{1} << 20; // 8 MiB
     static constexpr size_t RingMask = RingWords - 1;
@@ -246,6 +312,17 @@ private:
     // Front side.
     u64 write_position{};
     u64 last_writer_position{};
+    static constexpr u32 PendingWriteWords = 8;
+    struct PendingWrite {
+        u64 begin;
+        u64 end;
+        u64 position;
+        u32 words; ///< Known words from begin, or 0 (unknown contents)
+        const char* what;
+        std::array<u32, PendingWriteWords> data;
+    };
+    std::array<PendingWrite, 8192> pending_writes{};
+    u64 pending_write_count{};
     u64 last_sync_position{};
     u64 published_local{};
     u64 consumed_cache{};
