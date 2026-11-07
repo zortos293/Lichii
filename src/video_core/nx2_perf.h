@@ -7,12 +7,14 @@
 
 namespace VideoCommon::Nx2Perf {
 
+// Read once at startup: Verify() runs for every 3D method on the GPU thread (no guard to check).
+inline const bool g_verify = [] {
+    const char* value = std::getenv("EDEN_NX2_PERF_VERIFY");
+    return value != nullptr && value[0] == '1';
+}();
+
 inline bool Verify() {
-    static const bool verify = [] {
-        const char* value = std::getenv("EDEN_NX2_PERF_VERIFY");
-        return value != nullptr && value[0] == '1';
-    }();
-    return verify;
+    return g_verify;
 }
 
 } // namespace VideoCommon::Nx2Perf
