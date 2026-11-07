@@ -1739,7 +1739,7 @@ private:
         if (Common::DkbFrameTrace::Enabled()) {
             m_vsync->trace_present.store(m_presents, std::memory_order_relaxed);
         }
-        Core::g_nx2_present_count.fetch_add(1, std::memory_order_relaxed);
+        const u64 present_index = Core::g_nx2_present_count.fetch_add(1, std::memory_order_relaxed);
         if (m_presents <= 4 || (m_presents % 600) == 0) {
             LOG_INFO(Service, "nx2:vi2 229 present #{} token={:#x} slot={} image={}", m_presents,
                      u64{w[2]} | (u64{w[3]} << 32), w[4], w[5]);
@@ -1793,6 +1793,15 @@ private:
         m_previous_fence_id = ~w[22];
         m_previous_fence_value = w[24];
         const auto waited = std::chrono::steady_clock::now();
+        {
+            const auto slot = present_index % Core::Nx2PresentHistory;
+            Core::g_nx2_present_times[slot].store(
+                static_cast<u64>(entered.time_since_epoch() / std::chrono::nanoseconds{1}),
+                std::memory_order_relaxed);
+            Core::g_nx2_present_fence_ns[slot].store(
+                static_cast<u64>((waited - entered) / std::chrono::nanoseconds{1}),
+                std::memory_order_release);
+        }
         Composite(w[5], ~w[22], w[24], w[7]);
         const auto composited = std::chrono::steady_clock::now();
         PaceToVblank(w[12], ctx.GetThread().GetOwnerProcess());

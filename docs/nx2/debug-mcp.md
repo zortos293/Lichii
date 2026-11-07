@@ -148,8 +148,12 @@ server is on but idle, its thread sleeps in `epoll`/IOCP.
 
 **`status`** `{fps_window_ms?}`. It reads the title and program id that `Load` saw, the build from
 `Common::g_build_fullname` and `g_scm_rev`, and `System::IsPaused`. It measures fps from
-`Core::g_nx2_present_count` (`src/core/core.cpp:78`) over a short window. It does not call
-`GetAndResetPerfStats`, which would reset the Qt status bar's counters.
+`Core::g_nx2_present_count` (`src/core/core.cpp:78`) over a short window (up to 30 s). It does not
+call `GetAndResetPerfStats`, which would reset the Qt status bar's counters. `frame_ms` gives the
+intervals between the presents in that window: `count`, `median`, `p90`, `p99`, `max` and
+`over_100ms`, plus `fence_mean` and `fence_max`, the time each present waited for a GPU fence
+(`nx2:vi2` stores both per present in `Core::g_nx2_present_times` and `g_nx2_present_fence_ns`, a
+ring of the last 4096). It is null when fewer than three presents fell in the window.
 
 **`screenshot`** `{height?, save?, timeout_s?}`. It requests a 16:9 layout from
 `Layout::DefaultFrameLayout`, and the renderer blits the presented framebuffers into it. The

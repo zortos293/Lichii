@@ -123,6 +123,7 @@ class AdapterTest(unittest.TestCase):
         sequence = {"steps": [{"frames": 300}, {"frames": 300, "buttons": ["A"]}]}
         self.assertEqual(debug_mcp.default_timeout("input_sequence", sequence), 40)
         self.assertEqual(debug_mcp.default_timeout("status", {}), 5)
+        self.assertEqual(debug_mcp.default_timeout("status", {"fps_window_ms": 10000}), 15)
         result = self.call("input_sequence", sequence)
         self.assertFalse(result["isError"])
         self.assertEqual(self.fake.requests[-1]["params"], sequence)

@@ -78,6 +78,8 @@
 namespace Core {
 
 std::atomic<u64> g_nx2_present_count{};
+std::array<std::atomic<u64>, Nx2PresentHistory> g_nx2_present_times{};
+std::array<std::atomic<u64>, Nx2PresentHistory> g_nx2_present_fence_ns{};
 
 FileSys::VirtualFile GetGameFileFromPath(const FileSys::VirtualFilesystem& vfs,
                                          const std::string& path) {

@@ -32,11 +32,12 @@ TOOLS = [
     {
         "name": "status",
         "description": "Game title, program id, build, renderer, paused state, presented frame "
-                       "count and fps (measured over fps_window_ms), dump directory, live log "
-                       "filter and the shader hashes rejected at runtime.",
+                       "count, fps and frame times (median, p90, p99, max, over 100 ms, fence "
+                       "wait; measured over fps_window_ms), dump directory, live log filter and "
+                       "the shader hashes rejected at runtime.",
         "inputSchema": {
             "type": "object",
-            "properties": {"fps_window_ms": {"type": "integer", "minimum": 0, "maximum": 5000}},
+            "properties": {"fps_window_ms": {"type": "integer", "minimum": 0, "maximum": 30000}},
         },
     },
     {
@@ -302,6 +303,8 @@ def default_timeout(name, params):
     if name in ("input", "input_sequence"):
         steps = params.get("steps", []) if name == "input_sequence" else [params]
         return sum(int(step.get("frames", 0)) for step in steps) // 20 + 10
+    if name == "status":
+        return int(params.get("fps_window_ms", 500)) // 1000 + 5
     return 5
 
 

@@ -6,6 +6,7 @@
 
 #pragma once
 
+#include <array>
 #include <atomic>
 #include <cstddef>
 #include <deque>
@@ -118,6 +119,12 @@ namespace Core {
 
 /// Frames the guest has presented (Switch 2 vi2 present calls); input replay is locked to it.
 extern std::atomic<u64> g_nx2_present_count;
+
+/// The last presents' steady clock times and fence waits (ns), for the debug server's frame time
+/// statistics. Written by the present thread only; entry n % size is present n.
+inline constexpr size_t Nx2PresentHistory = 4096;
+extern std::array<std::atomic<u64>, Nx2PresentHistory> g_nx2_present_times;
+extern std::array<std::atomic<u64>, Nx2PresentHistory> g_nx2_present_fence_ns;
 
 class CpuManager;
 class Debugger;

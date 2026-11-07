@@ -176,8 +176,48 @@ void AppendPng(void* context, void* data, int size) {
     png.insert(png.end(), bytes, bytes + size);
 }
 
+/// Intervals between the presents in [first, last) (frame times) and their fence waits, in ms.
+json FrameTimes(u64 first, u64 last) {
+    // The newest present may not have stored its time yet; the ring keeps Nx2PresentHistory.
+    last = last > 0 ? last - 1 : 0;
+    first = (std::max)(first, last > Nx2PresentHistory - 1 ? last - (Nx2PresentHistory - 1) : 0);
+    if (last < first + 2) {
+        return nullptr;
+    }
+    std::vector<double> frames;
+    double fence_total = 0.0;
+    double fence_max = 0.0;
+    for (u64 present = first + 1; present < last; ++present) {
+        const u64 fence =
+            g_nx2_present_fence_ns[present % Nx2PresentHistory].load(std::memory_order_acquire);
+        const u64 previous = g_nx2_present_times[(present - 1) % Nx2PresentHistory].load(
+            std::memory_order_relaxed);
+        const u64 current =
+            g_nx2_present_times[present % Nx2PresentHistory].load(std::memory_order_relaxed);
+        frames.push_back(static_cast<double>(current - previous) / 1e6);
+        fence_total += static_cast<double>(fence) / 1e6;
+        fence_max = (std::max)(fence_max, static_cast<double>(fence) / 1e6);
+    }
+    std::vector<double> sorted = frames;
+    std::ranges::sort(sorted);
+    const auto at = [&sorted](double quantile) {
+        return sorted[(std::min)(sorted.size() - 1,
+                                 static_cast<size_t>(quantile * static_cast<double>(sorted.size())))];
+    };
+    return {
+        {"count", sorted.size()},
+        {"median", at(0.5)},
+        {"p90", at(0.9)},
+        {"p99", at(0.99)},
+        {"max", sorted.back()},
+        {"over_100ms", std::ranges::count_if(sorted, [](double ms) { return ms > 100.0; })},
+        {"fence_mean", fence_total / static_cast<double>(frames.size())},
+        {"fence_max", fence_max},
+    };
+}
+
 json Status(ToolState& state, const json& params) {
-    const auto window = std::chrono::milliseconds{Param<int>(params, "fps_window_ms", 500, 0, 5000)};
+    const auto window = std::chrono::milliseconds{Param<int>(params, "fps_window_ms", 500, 0, 30000)};
     const u64 before = g_nx2_present_count.load(std::memory_order_relaxed);
     const auto begin = std::chrono::steady_clock::now();
     while (std::chrono::steady_clock::now() - begin < window &&
@@ -198,6 +238,7 @@ json Status(ToolState& state, const json& params) {
         {"paused", state.system.IsPaused()},
         {"presents", after},
         {"fps", seconds > 0.0 ? static_cast<double>(after - before) / seconds : 0.0},
+        {"frame_ms", FrameTimes(before, after)},
         {"uptime_s", std::chrono::duration<double>(std::chrono::steady_clock::now() - state.start)
                          .count()},
         {"dump_dir", state.dump_directory.generic_string()},
