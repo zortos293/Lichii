@@ -426,6 +426,8 @@ private:
     void DefineImages(const Info& info, u32& binding, u32& scaling_index);
     void DefineAttributeMemAccess(const Info& info);
     void DefineWriteStorageCasLoopFunction(const Info& info);
+    /// Defines the helpers global memory accesses call: each finds the storage buffer holding
+    /// the address and loads, writes or atomically updates it there.
     void DefineGlobalMemoryFunctions(const IR::Program& program);
     void DefineRescalingInput(const Info& info);
     void DefineRescalingInputPushConstant();

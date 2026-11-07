@@ -438,6 +438,9 @@ void RasterizerVulkan::PrepareDraw(bool is_indexed, Func&& draw_func, bool is_in
         TraceRenderState(is_indexed, "no-pipeline", nullptr);
         return;
     }
+    if (VideoCommon::OotNetwork::BypassEnabled(Settings::GetCurrentProgramID())) {
+        TrackOotTonemappedImage(*pipeline);
+    }
     // Task/mesh pipelines: the draw's vertex count is the number of task workgroups.
     mesh_draw = pipeline->IsMeshPipeline();
     // EDEN_NX2_NO_MESH=1: skip task/mesh draws as before they were supported (A/B comparisons).
@@ -937,6 +940,18 @@ void RasterizerVulkan::DrawIndirect() {
         }
     }, true);
     buffer_cache.SetDrawIndirect(nullptr);
+}
+
+void RasterizerVulkan::TrackOotTonemappedImage(const GraphicsPipeline& pipeline) {
+    const auto& hashes = pipeline.ShaderHashes();
+    if (std::none_of(hashes.begin(), hashes.end(), VideoCommon::OotNetwork::IsTonemapShader)) {
+        return;
+    }
+    const GPUVAddr target = maxwell3d->regs.rt[0].Address();
+    if (target != 0 &&
+        oot_network_bypass.tonemapped_image.exchange(target, std::memory_order_relaxed) != target) {
+        LOG_INFO(Render_Vulkan, "Ocarina of Time: tonemapped image at {:#x}", target);
+    }
 }
 
 void RasterizerVulkan::TraceDrawFailure(std::string_view reason) {
@@ -1667,7 +1682,17 @@ void RasterizerVulkan::InnerInvalidation(std::span<const std::pair<DAddr, std::s
     if (Settings::values.skip_cpu_inner_invalidation.GetValue()) {
         return;
     }
-    {
+    // The GPU's own cached writes (constant buffer data, every draw): most land where no image,
+    // query or shader was ever registered, which page_filter tells without the caches' locks.
+    const auto any = [&](const VideoCommon::PageFilter& filter) {
+        for (const auto& [addr, size] : sequences) {
+            if (filter.Any(addr, size)) {
+                return true;
+            }
+        }
+        return false;
+    };
+    if (any(texture_cache.page_filter)) {
         std::scoped_lock lock{texture_cache.mutex};
         for (const auto& [addr, size] : sequences) {
             texture_cache.WriteMemory(addr, size);
@@ -1679,10 +1704,14 @@ void RasterizerVulkan::InnerInvalidation(std::span<const std::pair<DAddr, std::s
             buffer_cache.WriteMemory(addr, size);
         }
     }
-    for (const auto& [addr, size] : sequences) {
-        query_cache.InvalidateRegion(addr, size);
+    if (any(query_cache.page_filter)) {
+        for (const auto& [addr, size] : sequences) {
+            query_cache.InvalidateRegion(addr, size);
+        }
     }
-    pipeline_cache.InvalidateRegions(sequences);
+    if (any(pipeline_cache.page_filter)) {
+        pipeline_cache.InvalidateRegions(sequences);
+    }
 }
 
 bool RasterizerVulkan::OnCPUWrite(DAddr addr, u64 size) {

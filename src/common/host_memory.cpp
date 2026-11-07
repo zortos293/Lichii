@@ -57,6 +57,7 @@
 #include <cstdlib>
 #include <mutex>
 #include <random>
+#include <utility>
 
 #include "common/alignment.h"
 #include "common/assert.h"
@@ -912,6 +913,7 @@ HostMemory::HostMemory(size_t backing_size_, size_t virtual_size_)
     granules = std::make_unique<std::atomic<u8>[]>(num_granules);
 #if defined(__OPENORBIS__) || defined(__managarm__)
     LOG_WARNING(HW_Memory, "Platform doesn't support fastmem");
+    fallback_buffer = true;
     backing_base = static_cast<u8*>(mmap(nullptr, backing_size, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0));
     virtual_base = nullptr;
 #else
@@ -947,9 +949,37 @@ HostMemory::~HostMemory() {
 #endif
 }
 
-HostMemory::HostMemory(HostMemory&&) noexcept = default;
+HostMemory::HostMemory(HostMemory&& other) noexcept
+    : backing_size{std::exchange(other.backing_size, 0)}
+    , virtual_size{std::exchange(other.virtual_size, 0)}
+#if !(defined(__OPENORBIS__) || defined(__managarm__))
+    , impl{std::move(other.impl)}
+#endif
+    , backing_base{std::exchange(other.backing_base, nullptr)}
+    , virtual_base{std::exchange(other.virtual_base, nullptr)}
+    , virtual_base_offset{std::exchange(other.virtual_base_offset, 0)}
+    , granules{std::move(other.granules)}
+    , num_granules{std::exchange(other.num_granules, 0)}
+    , fallback_buffer{std::exchange(other.fallback_buffer, false)}
+{}
 
-HostMemory& HostMemory::operator=(HostMemory&&) noexcept = default;
+HostMemory& HostMemory::operator=(HostMemory&& other) noexcept {
+    if (this != &other) {
+        HostMemory moved{std::move(other)};
+        std::swap(backing_size, moved.backing_size);
+        std::swap(virtual_size, moved.virtual_size);
+#if !(defined(__OPENORBIS__) || defined(__managarm__))
+        std::swap(impl, moved.impl);
+#endif
+        std::swap(backing_base, moved.backing_base);
+        std::swap(virtual_base, moved.virtual_base);
+        std::swap(virtual_base_offset, moved.virtual_base_offset);
+        std::swap(granules, moved.granules);
+        std::swap(num_granules, moved.num_granules);
+        std::swap(fallback_buffer, moved.fallback_buffer);
+    }
+    return *this;
+}
 
 void HostMemory::Map(size_t virtual_offset, size_t host_offset, size_t length, MemoryPermission perms, bool separate_heap) {
 #if !(defined(__OPENORBIS__) || defined(__managarm__))

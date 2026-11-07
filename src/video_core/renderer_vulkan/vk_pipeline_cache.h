@@ -126,12 +126,15 @@ public:
                            TextureCache& texture_cache, VideoCore::ShaderNotify& shader_notify_);
     ~PipelineCache();
 
+    /// The pipeline for the current 3D state, built or queued when it isn't cached; null when
+    /// the shaders can't be used.
     [[nodiscard]] GraphicsPipeline* CurrentGraphicsPipeline();
 
     void TickFrame();
 
     [[nodiscard]] ComputePipeline* CurrentComputePipeline();
 
+    /// Loads the title's disk caches and builds or queues their pipelines.
     void LoadDiskResources(u64 title_id, std::stop_token stop_loading,
                            const VideoCore::DiskResourceLoadCallback& callback);
 
@@ -182,9 +185,11 @@ private:
     EmissionBudget emission_budget;
 
     GraphicsPipelineCacheKey graphics_key{};
+    u64 vertex_attribute_types{}; ///< graphics_key's attribute types before the program's mask
     GraphicsPipeline* current_pipeline{};
 
-    /// Destroys graphics pipelines unused for a while, once the GPU is done with them.
+    /// Over the pipeline memory budget, destroys the least recently used graphics pipelines unused
+    /// for a while, once the GPU is done with them.
     void EvictUnusedPipelines();
     u64 frame_count{};
     std::deque<std::pair<u64, std::unique_ptr<GraphicsPipeline>>> evicted_pipelines; ///< (tick, pipeline)

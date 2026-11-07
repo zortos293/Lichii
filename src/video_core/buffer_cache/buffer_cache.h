@@ -21,6 +21,7 @@
 #include "video_core/buffer_cache/buffer_cache_base.h"
 #include "video_core/buffer_cache/multi_range_refresh.h"
 #include "video_core/buffer_cache/uniform_stream_reuse.h"
+#include "video_core/gpu_split.h"
 #include "video_core/guest_memory.h"
 #include "video_core/host1x/gpu_device_memory_manager.h"
 #include "video_core/nx2.h"
@@ -107,6 +108,7 @@ void BufferCache<P>::RunGarbageCollector(bool aggressive_gc) {
 
 template <class P>
 void BufferCache<P>::TickFrame() {
+    ApplyDeferredPageWrites();
     // Homebrew console apps don't create or bind any channels, so this will be nullptr.
     if (!channel_state) {
         return;
@@ -181,6 +183,7 @@ void BufferCache<P>::UnmapGPUMemory(size_t as_id, GPUVAddr gpu_addr, size_t size
 template <class P>
 void BufferCache<P>::WriteMemory(DAddr device_addr, u64 size, bool keep_page_gpu_data) {
     Nx2NoteListHostWrite(device_addr, size);
+    ApplyDeferredPageWrites();
     // The written range lies within its pages: when they hold no GPU-written data, both lookups
     // below find nothing, so one lookup answers them.
     if (keep_page_gpu_data) {
@@ -210,9 +213,32 @@ void BufferCache<P>::WriteMemory(DAddr device_addr, u64 size, bool keep_page_gpu
     // structures next to the draw arguments its compute dispatches fill in; the draws then read
     // leftover bytes as vertex counts. Download those bytes first (the CPU's own were subtracted
     // above, so they aren't overwritten).
+    // Only the scheduler's owner may download (it records and submits): unmaps and other writes
+    // reach this from CPU and service threads too, and submitting there raced the GPU thread's
+    // own submissions (crashes in Scheduler::SubmitExecution). Their writes wait for the owner
+    // (ApplyDeferredPageWrites): marking the pages now would hide the GPU-written bytes from
+    // downloads until the next upload, and an upload that doesn't skip them would overwrite them.
     const DAddr page_begin = Common::AlignDown(device_addr, DEVICE_PAGESIZE);
     const DAddr page_end = Common::AlignUp(device_addr + size, DEVICE_PAGESIZE);
-    if (keep_page_gpu_data && gpu_modified_ranges.Intersects(page_begin, page_end - page_begin)) {
+    // Without a GPU thread nothing would apply them, so those writes keep the old behaviour.
+    if (keep_page_gpu_data && gpu_modified_ranges.Intersects(page_begin, page_end - page_begin) &&
+        (VideoCommon::GpuSplit::OwnsScheduler() || VideoCommon::GpuSplit::HasGpuThread())) {
+        if (!VideoCommon::GpuSplit::OwnsScheduler()) {
+            DeferPageWrite(device_addr, size);
+            return;
+        }
+        PreservePageGpuData(device_addr, size);
+        return;
+    }
+    memory_tracker.MarkRegionAsCpuModified(device_addr, size);
+    MarkVertexBuffersStale(device_addr, size);
+}
+
+template <class P>
+void BufferCache<P>::PreservePageGpuData(DAddr device_addr, u64 size) {
+    const DAddr page_begin = Common::AlignDown(device_addr, DEVICE_PAGESIZE);
+    const DAddr page_end = Common::AlignUp(device_addr + size, DEVICE_PAGESIZE);
+    if (gpu_modified_ranges.Intersects(page_begin, page_end - page_begin)) {
         // Switch 2 titles: upload the CPU's bytes into the buffer instead, as CachedWriteMemory
         // does, so the page stays GPU-owned and nothing waits for the host GPU.
         static const int forced = [] {
@@ -234,7 +260,45 @@ void BufferCache<P>::WriteMemory(DAddr device_addr, u64 size, bool keep_page_gpu
 }
 
 template <class P>
+void BufferCache<P>::DeferPageWrite(DAddr device_addr, u64 size) {
+    std::scoped_lock lock{deferred_page_writes_mutex};
+    // Only ranges that overlap or touch merge: the inline path uploads the whole range from
+    // guest memory, which holds stale bytes wherever the CPU didn't write.
+    const DAddr end = device_addr + size;
+    const auto merged = std::ranges::find_if(deferred_page_writes, [&](const auto& write) {
+        return write.first <= end && device_addr <= write.first + write.second;
+    });
+    if (merged != deferred_page_writes.end()) {
+        const DAddr begin = (std::min)(merged->first, device_addr);
+        merged->second = (std::max)(merged->first + merged->second, end) - begin;
+        merged->first = begin;
+    } else {
+        deferred_page_writes.emplace_back(device_addr, size);
+    }
+    has_deferred_page_writes.store(true, std::memory_order_release);
+}
+
+template <class P>
+void BufferCache<P>::ApplyDeferredPageWrites() {
+    if (!has_deferred_page_writes.load(std::memory_order_acquire) ||
+        !VideoCommon::GpuSplit::OwnsScheduler()) {
+        return;
+    }
+    // Taken first: the downloads below come back here.
+    std::vector<std::pair<DAddr, u64>> writes;
+    {
+        std::scoped_lock lock{deferred_page_writes_mutex};
+        writes = std::exchange(deferred_page_writes, {});
+        has_deferred_page_writes.store(false, std::memory_order_relaxed);
+    }
+    for (const auto& [device_addr, size] : writes) {
+        PreservePageGpuData(device_addr, size);
+    }
+}
+
+template <class P>
 void BufferCache<P>::CachedWriteMemory(DAddr device_addr, u64 size) {
+    ApplyDeferredPageWrites();
     const bool is_dirty = IsRegionRegistered(device_addr, size);
     if (!is_dirty) {
         return;
@@ -313,6 +377,7 @@ std::optional<VideoCore::RasterizerDownloadArea> BufferCache<P>::GetFlushArea(DA
 
 template <class P>
 void BufferCache<P>::DownloadMemory(DAddr device_addr, u64 size) {
+    ApplyDeferredPageWrites();
     if constexpr (USE_MEMORY_MAPS) {
         if (download_cpu_read_ranges) {
             download_cpu_read_ranges = false;
@@ -338,6 +403,7 @@ void BufferCache<P>::DownloadMemory(DAddr device_addr, u64 size) {
 
 template <class P>
 void BufferCache<P>::DownloadRangesMemory(std::span<const std::pair<DAddr, u64>> ranges) {
+    ApplyDeferredPageWrites();
     constexpr bool has_mapped = requires(Buffer& buffer) { buffer.Mapped(); };
     if constexpr (!USE_MEMORY_MAPS) {
         for (const auto& [device_addr, size] : ranges) {
@@ -437,6 +503,7 @@ void BufferCache<P>::ClearDownload(DAddr device_addr, u64 size) {
 
 template <class P>
 bool BufferCache<P>::DMACopy(GPUVAddr src_address, GPUVAddr dest_address, u64 amount) {
+    ApplyDeferredPageWrites();
     const std::optional<DAddr> cpu_src_address = gpu_memory->GpuToCpuAddress(src_address);
     const std::optional<DAddr> cpu_dest_address = gpu_memory->GpuToCpuAddress(dest_address);
     if (!cpu_src_address || !cpu_dest_address) {
@@ -507,6 +574,7 @@ bool BufferCache<P>::DMACopy(GPUVAddr src_address, GPUVAddr dest_address, u64 am
 
 template <class P>
 bool BufferCache<P>::DMAClear(GPUVAddr dst_address, u64 amount, u32 value) {
+    ApplyDeferredPageWrites();
     const std::optional<DAddr> cpu_dst_address = gpu_memory->GpuToCpuAddress(dst_address);
     if (!cpu_dst_address) {
         return false;
@@ -532,6 +600,7 @@ template <class P>
 std::pair<typename P::Buffer*, u32> BufferCache<P>::ObtainBuffer(GPUVAddr gpu_addr, u32 size,
                                                                  ObtainBufferSynchronize sync_info,
                                                                  ObtainBufferOperation post_op) {
+    ApplyDeferredPageWrites();
     const std::optional<DAddr> device_addr = gpu_memory->GpuToCpuAddress(gpu_addr);
     if (!device_addr) {
         return {&slot_buffers[NULL_BUFFER_ID], 0};
@@ -542,6 +611,7 @@ std::pair<typename P::Buffer*, u32> BufferCache<P>::ObtainBuffer(GPUVAddr gpu_ad
 template <class P>
 std::pair<typename P::Buffer*, u32> BufferCache<P>::ObtainCPUBuffer(
     DAddr device_addr, u32 size, ObtainBufferSynchronize sync_info, ObtainBufferOperation post_op) {
+    ApplyDeferredPageWrites();
     const BufferId buffer_id = FindBuffer(device_addr, size, false);
     Buffer& buffer = slot_buffers[buffer_id];
 
@@ -599,6 +669,7 @@ void BufferCache<P>::DisableGraphicsUniformBuffer(size_t stage, u32 index) {
 
 template <class P>
 void BufferCache<P>::UpdateGraphicsBuffers(bool is_indexed) {
+    ApplyDeferredPageWrites();
     do {
         channel_state->has_deleted_buffers = false;
         DoUpdateGraphicsBuffers(is_indexed);
@@ -607,6 +678,7 @@ void BufferCache<P>::UpdateGraphicsBuffers(bool is_indexed) {
 
 template <class P>
 void BufferCache<P>::UpdateComputeBuffers() {
+    ApplyDeferredPageWrites();
     do {
         channel_state->has_deleted_buffers = false;
         DoUpdateComputeBuffers();

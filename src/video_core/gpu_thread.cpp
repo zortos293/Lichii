@@ -51,6 +51,10 @@ void ThreadManager::StartThread(VideoCore::RendererBase& renderer, Core::Fronten
     thread = std::jthread([&](std::stop_token stop_token) {
         const Common::DkbCpuTrace::Registration cpu_trace{Common::DkbCpuTrace::Role::GpuCommand};
         Common::SetCurrentThreadName("GPU");
+        VideoCommon::GpuSplit::MarkGpuThread();
+        SCOPE_EXIT {
+            VideoCommon::GpuSplit::UnmarkGpuThread();
+        };
         Common::SetCurrentThreadPriority(Common::ThreadPriority::Critical);
         Common::SetCurrentThreadToPerformanceCores();
         system.RegisterHostThread();

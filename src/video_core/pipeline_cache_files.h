@@ -4,6 +4,8 @@
 #include <array>
 #include <filesystem>
 #include <fstream>
+#include <optional>
+#include <span>
 #include <string_view>
 #include <system_error>
 
@@ -14,7 +16,12 @@
 namespace VideoCommon {
 
 inline constexpr u32 OpenGLPipelineCacheVersion = 48;
-inline constexpr u32 VulkanPipelineCacheVersion = 53;
+inline constexpr u32 VulkanPipelineCacheVersion = 54;
+
+/// Earlier versions whose driver pipeline cache (vulkan_pipelines) is copied forward, newest
+/// first. Their shader caches are not: from version 54 graphics keys mask the vertex attribute
+/// types a program doesn't read, so an older key is never looked up again.
+inline constexpr std::array<u32, 2> VulkanDriverCacheMigrationSources{53, 52};
 
 // Official Eglantine (cache version 18 at c0cb3325) and this fork (a different version) both
 // used <shader dir>/<title>/vulkan.bin and vulkan_pipelines.bin. Each build deletes a file
@@ -58,6 +65,8 @@ inline bool AdoptLegacyPipelineCache(const std::filesystem::path& legacy,
     return !error;
 }
 
+/// Copies a cache of `source_version` to `destination` relabelled `destination_version`, through
+/// a temporary file; never replaces an existing destination.
 inline bool CopyCompatiblePipelineCache(const std::filesystem::path& source,
                                         const std::filesystem::path& destination,
                                         const std::array<char, 8>& magic, u32 source_version,
@@ -90,6 +99,21 @@ inline bool CopyCompatiblePipelineCache(const std::filesystem::path& source,
         return false;
     }
     return true;
+}
+
+/// Copies the first of `sources` that CopyCompatiblePipelineCache accepts to `destination`.
+/// @return The version copied, or nullopt when none was (or `destination` already exists).
+inline std::optional<u32> CopyNewestCompatiblePipelineCache(
+    const std::filesystem::path& directory, std::string_view stem,
+    const std::filesystem::path& destination, const std::array<char, 8>& magic,
+    std::span<const u32> sources, u32 destination_version) {
+    for (const u32 version : sources) {
+        if (CopyCompatiblePipelineCache(VersionedPipelineCachePath(directory, stem, version),
+                                        destination, magic, version, destination_version)) {
+            return version;
+        }
+    }
+    return std::nullopt;
 }
 
 } // namespace VideoCommon

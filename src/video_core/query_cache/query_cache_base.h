@@ -10,6 +10,7 @@
 #include <mutex>
 #include <optional>
 #include <span>
+#include "video_core/page_filter.h"
 #include "common/container/unordered_map.h"
 #include <utility>
 
@@ -41,6 +42,9 @@ class QueryCacheBase : public VideoCommon::ChannelSetupCaches<VideoCommon::Chann
     using RuntimeType = typename Traits::RuntimeType;
 
 public:
+    /// Device pages this cache ever registered objects on (InnerInvalidation skips the rest).
+    VideoCommon::PageFilter page_filter;
+
     union QueryLocation {
         BitField<27, 5, u32> stream_id;
         BitField<0, 27, u32> query_id;
@@ -102,6 +106,8 @@ public:
 
     void CounterClose(QueryType counter_type);
 
+    /// Queues a query report (a counter value or the payload, with a timestamp when flagged) to
+    /// be written at `addr`.
     void CounterReport(GPUVAddr addr, QueryType counter_type, QueryPropertiesFlags flags,
                        u32 payload, u32 subreport);
 

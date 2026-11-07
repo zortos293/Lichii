@@ -76,6 +76,26 @@ public:
     [[nodiscard]] static bool OnBackThread() {
         return on_back_thread;
     }
+    /// Marks the calling thread as the GPU thread (the front, or the only one without the split).
+    static void MarkGpuThread() {
+        on_gpu_thread = true;
+        gpu_threads.fetch_add(1, std::memory_order_acq_rel);
+    }
+    /// Undoes MarkGpuThread when the GPU thread exits.
+    static void UnmarkGpuThread() {
+        on_gpu_thread = false;
+        gpu_threads.fetch_sub(1, std::memory_order_acq_rel);
+    }
+    /// Any thread: whether a GPU thread runs. Without one (synchronous GPU emulation) no thread
+    /// owns the scheduler, so nothing can be left for its owner to do.
+    [[nodiscard]] static bool HasGpuThread() {
+        return gpu_threads.load(std::memory_order_acquire) != 0;
+    }
+    /// Whether the calling thread owns the Vulkan scheduler: the back while it runs, else the
+    /// GPU thread. Other threads (CPU cores, services) must not record or submit work.
+    [[nodiscard]] static bool OwnsScheduler() {
+        return Get().BackRunning() ? on_back_thread : on_gpu_thread;
+    }
     /// Called on the back before it sleeps waiting for work (the rasterizer submits deferred work).
     void SetIdleHook(void (*hook)(void*), void* argument) {
         idle_hook = hook;
@@ -234,6 +254,7 @@ private:
         }
     }
 
+    /// The back thread: executes the ring's entries in order until stopped.
     void BackLoop(std::stop_token stop_token);
     /// Runs the entry at `entry` (of the `words` published before the ring's end), returns its size.
     size_t Execute(const u64* entry, size_t words);
@@ -256,12 +277,22 @@ private:
     // Back side.
     Tegra::Engines::EngineInterface* back_engine{};
 
+    /// Whether the back is done with the Vulkan scheduler until it gets more work: set after its
+    /// idle hook ran, cleared before it executes entries.
+    [[nodiscard]] bool BackQuiet() const {
+        return back_quiet.load(std::memory_order_acquire) ||
+               !back_running.load(std::memory_order_acquire);
+    }
+
     static GpuSplit instance;
     static inline thread_local bool on_back_thread{};
+    static inline thread_local bool on_gpu_thread{};
+    static inline std::atomic<u32> gpu_threads{};
     void (*idle_hook)(void*){};
     void* idle_argument{};
     alignas(64) std::atomic<bool> hook_requested{};
     std::atomic<bool> back_running{};
+    std::atomic<bool> back_quiet{true};
 
     // 128 bytes: x86 spatial prefetchers pull 64-byte lines in pairs. back_waiting and wake are
     // always touched together by both threads, so they share a block.

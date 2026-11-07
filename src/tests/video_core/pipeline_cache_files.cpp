@@ -223,6 +223,89 @@ TEST_CASE("Cancelled mesh loading preserves its disk cache and queues no work",
     REQUIRE(ReadAll(path) == before);
 }
 
+TEST_CASE("Driver cache migration sources are older versions, newest first",
+          "[pipeline_cache_files][attribute_keys]") {
+    constexpr auto& sources = VideoCommon::VulkanDriverCacheMigrationSources;
+    REQUIRE_FALSE(sources.empty());
+    for (size_t index = 0; index < sources.size(); ++index) {
+        CHECK(sources[index] < VideoCommon::VulkanPipelineCacheVersion);
+        if (index != 0) {
+            CHECK(sources[index] < sources[index - 1]);
+        }
+    }
+}
+
+TEST_CASE("The newest compatible driver cache is copied forward and the others are left alone",
+          "[pipeline_cache_files][attribute_keys]") {
+    TempDir temp;
+    const auto v52 = VideoCommon::VersionedPipelineCachePath(temp.path, "vulkan_pipelines", 52);
+    const auto v53 = VideoCommon::VersionedPipelineCachePath(temp.path, "vulkan_pipelines", 53);
+    const auto current = VideoCommon::VersionedPipelineCachePath(
+        temp.path, "vulkan_pipelines", VideoCommon::VulkanPipelineCacheVersion);
+    WriteCache(v52, OtherMagic, 52, "driver blob 52");
+    WriteCache(v53, OtherMagic, 53, "driver blob 53");
+    const auto before52 = ReadAll(v52);
+    const auto before53 = ReadAll(v53);
+
+    const auto copied = VideoCommon::CopyNewestCompatiblePipelineCache(
+        temp.path, "vulkan_pipelines", current, OtherMagic,
+        VideoCommon::VulkanDriverCacheMigrationSources, VideoCommon::VulkanPipelineCacheVersion);
+    REQUIRE(copied == 53u);
+    CHECK(VideoCommon::PipelineCacheHeaderMatches(current, OtherMagic,
+                                                  VideoCommon::VulkanPipelineCacheVersion));
+    CHECK(ReadAll(current).substr(12) == "driver blob 53");
+    CHECK(ReadAll(v52) == before52);
+    CHECK(ReadAll(v53) == before53);
+
+    // An existing current cache is never replaced.
+    CHECK_FALSE(VideoCommon::CopyNewestCompatiblePipelineCache(
+                    temp.path, "vulkan_pipelines", current, OtherMagic,
+                    VideoCommon::VulkanDriverCacheMigrationSources,
+                    VideoCommon::VulkanPipelineCacheVersion)
+                    .has_value());
+    CHECK(ReadAll(current).substr(12) == "driver blob 53");
+}
+
+TEST_CASE("Driver cache migration falls back to an older version when the newest is unusable",
+          "[pipeline_cache_files][attribute_keys]") {
+    TempDir temp;
+    const auto v52 = VideoCommon::VersionedPipelineCachePath(temp.path, "vulkan_pipelines", 52);
+    const auto v53 = VideoCommon::VersionedPipelineCachePath(temp.path, "vulkan_pipelines", 53);
+    const auto current = VideoCommon::VersionedPipelineCachePath(
+        temp.path, "vulkan_pipelines", VideoCommon::VulkanPipelineCacheVersion);
+    WriteCache(v52, OtherMagic, 52, "driver blob 52");
+
+    SECTION("newest missing") {}
+    SECTION("newest has the wrong magic") {
+        WriteCache(v53, Magic, 53, "shader cache");
+    }
+    SECTION("newest was written by another version") {
+        WriteCache(v53, OtherMagic, 50, "mislabelled");
+    }
+    const auto copied = VideoCommon::CopyNewestCompatiblePipelineCache(
+        temp.path, "vulkan_pipelines", current, OtherMagic,
+        VideoCommon::VulkanDriverCacheMigrationSources, VideoCommon::VulkanPipelineCacheVersion);
+    REQUIRE(copied == 52u);
+    CHECK(ReadAll(current).substr(12) == "driver blob 52");
+}
+
+TEST_CASE("Driver cache migration copies nothing without a compatible source",
+          "[pipeline_cache_files][attribute_keys]") {
+    TempDir temp;
+    const auto current = VideoCommon::VersionedPipelineCachePath(
+        temp.path, "vulkan_pipelines", VideoCommon::VulkanPipelineCacheVersion);
+    CHECK_FALSE(VideoCommon::CopyNewestCompatiblePipelineCache(
+                    temp.path, "vulkan_pipelines", current, OtherMagic,
+                    VideoCommon::VulkanDriverCacheMigrationSources,
+                    VideoCommon::VulkanPipelineCacheVersion)
+                    .has_value());
+    CHECK_FALSE(std::filesystem::exists(current));
+    CHECK_FALSE(VideoCommon::CopyNewestCompatiblePipelineCache(
+                    temp.path, "vulkan_pipelines", current, OtherMagic, {},
+                    VideoCommon::VulkanPipelineCacheVersion)
+                    .has_value());
+}
+
 TEST_CASE("Pipeline cache names are version-suffixed per build", "[pipeline_cache_files]") {
     const std::filesystem::path dir{"shader"};
     CHECK(VideoCommon::VersionedPipelineCachePath(dir, "vulkan", 39).filename() ==
