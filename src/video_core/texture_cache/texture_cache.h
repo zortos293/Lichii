@@ -3089,7 +3089,14 @@ ImageViewId TextureCache<P>::FindDepthBuffer() {
     if (gpu_addr == 0) {
         return ImageViewId{};
     }
-    const ImageInfo info(regs.zeta, regs.zeta_size, regs.anti_alias_samples_mode);
+    ImageInfo info(regs.zeta, regs.zeta_size, regs.anti_alias_samples_mode);
+    // Ocarina of Time renders its shadow maps with the width aligned up to 16 (800x793), then
+    // samples them as the square texture they are (793x793) at the same address. Two images meant
+    // a copy between them for each new size, and these change every frame while the camera moves.
+    if (info.format == VideoCore::Surface::PixelFormat::D32_FLOAT && info.type == ImageType::e2D &&
+        info.size.width != info.size.height && info.size.width == Common::AlignUp(info.size.height, 16U)) {
+        info.size.width = info.size.height;
+    }
     return FindRenderTargetView(info, gpu_addr);
 }
 
