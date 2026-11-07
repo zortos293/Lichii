@@ -1080,6 +1080,32 @@ void TryTransformSwizzleIfNeeded(PixelFormat format, std::array<SwizzleSource, 4
     return VK_FORMAT_R32_UINT;
 }
 
+void RecordInitialLayout(Scheduler& scheduler, VkImage image, VkImageAspectFlags aspect_mask) {
+    const VkImageMemoryBarrier barrier{
+        .sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER,
+        .pNext = nullptr,
+        .srcAccessMask = VK_ACCESS_NONE,
+        .dstAccessMask = VK_ACCESS_MEMORY_READ_BIT | VK_ACCESS_MEMORY_WRITE_BIT,
+        .oldLayout = VK_IMAGE_LAYOUT_UNDEFINED,
+        .newLayout = VK_IMAGE_LAYOUT_GENERAL,
+        .srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
+        .dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
+        .image = image,
+        .subresourceRange{
+            .aspectMask = aspect_mask,
+            .baseMipLevel = 0,
+            .levelCount = VK_REMAINING_MIP_LEVELS,
+            .baseArrayLayer = 0,
+            .layerCount = VK_REMAINING_ARRAY_LAYERS,
+        },
+    };
+    scheduler.RequestOutsideRenderPassOperationContext();
+    scheduler.Record([barrier](vk::CommandBuffer cmdbuf) {
+        cmdbuf.PipelineBarrier(vk::PIPELINE_STAGE_GRAPHICS_COMPUTE,
+                               vk::PIPELINE_STAGE_GRAPHICS_COMPUTE, 0, barrier);
+    });
+}
+
 void BlitScale(Scheduler& scheduler, VkImage src_image, VkImage dst_image, const ImageInfo& info,
                VkImageAspectFlags aspect_mask, const Settings::ResolutionScalingInfo& resolution,
                bool up_scaling = true) {
@@ -2964,7 +2990,8 @@ Image::Image(TextureCacheRuntime& runtime_, const ImageInfo& info_, GPUVAddr gpu
              VAddr cpu_addr_)
     : VideoCommon::ImageBase(info_, gpu_addr_, cpu_addr_), scheduler{&runtime_.scheduler},
       runtime{&runtime_},
-      original_image(MakeImage(runtime_.device, runtime_.memory_allocator,
+      original_pending(info_.scaled_only),
+      original_image(original_pending ? vk::Image{} : MakeImage(runtime_.device, runtime_.memory_allocator,
                                TrimmedHostInfo(runtime_.device, info, host_level_offset),
                                IsHugeAstcArray(runtime_.device, info)
                                    ? std::span<const VkFormat>{HugeAstcViewFormats}
@@ -3033,7 +3060,7 @@ Image::Image(TextureCacheRuntime& runtime_, const ImageInfo& info_, GPUVAddr gpu
         const VkFormat storage_format = VK_FORMAT_A8B8G8R8_UNORM_PACK32;
         for (s32 level = 0; level < host_levels; ++level) {
             storage_image_views[level] =
-                MakeStorageView(device, level, *original_image, storage_format);
+                MakeStorageView(device, level, *OriginalImage(), storage_format);
         }
     }
 }
@@ -3043,7 +3070,7 @@ Image::Image(const VideoCommon::NullImageParams& params) : VideoCommon::ImageBas
 Image::~Image() {
     if (ENABLE_MSAA_RESOLVE_CONSUME && runtime != nullptr) {
         if (original_image) {
-            runtime->EraseResolveShadow(*original_image);
+            runtime->EraseResolveShadow(*OriginalImage());
         }
         if (scaled_image) {
             runtime->EraseResolveShadow(*scaled_image);
@@ -3188,7 +3215,7 @@ void Image::UploadMemory(VkBuffer buffer, VkDeviceSize offset,
     scheduler->RequestOutsideRenderPassOperationContext();
     auto vk_copies = TransformBufferImageCopies(copies, offset, aspect_mask);
     const VkBuffer src_buffer = buffer;
-    const VkImage vk_image = *original_image;
+    const VkImage vk_image = *OriginalImage();
     const VkImageAspectFlags vk_aspect_mask = aspect_mask;
     const bool was_initialized = std::exchange(initialized, true);
 
@@ -3219,6 +3246,7 @@ void Image::DownloadMemory(VkBuffer buffer, size_t offset,
 
 void Image::DownloadMemory(std::span<VkBuffer> buffers_span, std::span<size_t> offsets_span,
                             std::span<const VideoCommon::BufferImageCopy> copies) {
+    OriginalImage();
     if (!original_image) {
         LOG_CRITICAL(Render_Vulkan, "Missing image at download: gpu={:#x}, cpu={:#x}, type={}, format={}, flags={:#x}, size={}, dimensions={}x{}",
                      gpu_addr, cpu_addr, static_cast<u32>(info.type), static_cast<u32>(info.format),
@@ -3388,7 +3416,7 @@ void Image::DownloadMemory(std::span<VkBuffer> buffers_span, std::span<size_t> o
                 TransformBufferImageCopies(copies, offsets_span[index], aspect_mask));
         }
         scheduler->RequestOutsideRenderPassOperationContext();
-        scheduler->Record([buffers = std::move(buffers_vector), image = *original_image,
+        scheduler->Record([buffers = std::move(buffers_vector), image = *OriginalImage(),
                            aspect_mask_ = aspect_mask, vk_copies](vk::CommandBuffer cmdbuf) {
             const VkImageMemoryBarrier read_barrier{
                 .sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER,
@@ -3476,7 +3504,7 @@ VkImageView Image::StorageImageView(s32 level) noexcept {
 
 bool Image::InitSparseLayers() {
     const Device& device = runtime->device;
-    const VkImage handle = *original_image;
+    const VkImage handle = *OriginalImage();
     const auto requirements = device.GetLogical().GetImageSparseMemoryRequirements(handle);
     const auto it = std::ranges::find_if(requirements, [](const auto& r) {
         return (r.formatProperties.aspectMask & VK_IMAGE_ASPECT_COLOR_BIT) != 0;
@@ -3548,7 +3576,7 @@ bool Image::InitSparseLayers() {
 
 bool Image::InitSparseTiles() {
     const Device& device = runtime->device;
-    const VkImage handle = *original_image;
+    const VkImage handle = *OriginalImage();
     const auto requirements = device.GetLogical().GetImageSparseMemoryRequirements(handle);
     const auto it = std::ranges::find_if(requirements, [](const auto& r) {
         return (r.formatProperties.aspectMask & VK_IMAGE_ASPECT_COLOR_BIT) != 0;
@@ -3657,12 +3685,12 @@ bool Image::BindZeroBlock() {
         });
     }
     const VkSparseImageMemoryBindInfo image_bind_info{
-        .image = *original_image,
+        .image = *OriginalImage(),
         .bindCount = static_cast<u32>(image_binds.size()),
         .pBinds = image_binds.data(),
     };
     const VkSparseImageOpaqueMemoryBindInfo opaque_bind_info{
-        .image = *original_image,
+        .image = *OriginalImage(),
         .bindCount = static_cast<u32>(opaque_binds.size()),
         .pBinds = opaque_binds.data(),
     };
@@ -3703,7 +3731,7 @@ bool Image::BindZeroBlock() {
 
 void Image::ClearTiles() {
     scheduler->RequestOutsideRenderPassOperationContext();
-    const VkImage vk_image = *original_image;
+    const VkImage vk_image = *OriginalImage();
     const bool was_initialized = std::exchange(initialized, true);
     scheduler->Record([vk_image, was_initialized](vk::CommandBuffer cmdbuf) {
         static constexpr VkImageSubresourceRange range{
@@ -3877,12 +3905,12 @@ bool Image::BindTiles(std::span<const VideoCommon::LevelRect> rects) {
         return true;
     }
     const VkSparseImageMemoryBindInfo image_bind_info{
-        .image = *original_image,
+        .image = *OriginalImage(),
         .bindCount = static_cast<u32>(image_binds.size()),
         .pBinds = image_binds.data(),
     };
     const VkSparseImageOpaqueMemoryBindInfo opaque_bind_info{
-        .image = *original_image,
+        .image = *OriginalImage(),
         .bindCount = static_cast<u32>(opaque_binds.size()),
         .pBinds = opaque_binds.data(),
     };
@@ -4036,12 +4064,12 @@ std::vector<u32> Image::BindLayers(std::span<const u32> layers) {
         return bound;
     }
     const VkSparseImageMemoryBindInfo image_bind_info{
-        .image = *original_image,
+        .image = *OriginalImage(),
         .bindCount = static_cast<u32>(image_binds.size()),
         .pBinds = image_binds.data(),
     };
     const VkSparseImageOpaqueMemoryBindInfo opaque_bind_info{
-        .image = *original_image,
+        .image = *OriginalImage(),
         .bindCount = static_cast<u32>(opaque_binds.size()),
         .pBinds = opaque_binds.data(),
     };
@@ -4098,6 +4126,27 @@ bool Image::IsRescaled() const noexcept {
     return True(flags & ImageFlagBits::Rescaled);
 }
 
+vk::Image& Image::OriginalImage() {
+    if (!original_pending) {
+        return original_image;
+    }
+    original_pending = false;
+    original_image = MakeImage(runtime->device, runtime->memory_allocator,
+                               TrimmedHostInfo(runtime->device, info, host_level_offset),
+                               runtime->ViewFormats(info.format), AstcHostFormat(runtime->device, info),
+                               false, false, runtime, &original_pool_key, &original_pool_bytes);
+    RecordInitialLayout(*scheduler, *original_image, aspect_mask != 0 ? aspect_mask : ImageAspectMask(info.format));
+    return original_image;
+}
+
+bool Image::StartScaled() {
+    if (!original_pending || !ScaleUp()) {
+        return false;
+    }
+    initialized = true;
+    return true;
+}
+
 bool Image::ScaleUp(bool ignore) {
     const auto& resolution = runtime->resolution;
     if (!resolution.active) {
@@ -4120,6 +4169,12 @@ bool Image::ScaleUp(bool ignore) {
                                  runtime->ViewFormats(info.format), {}, false, false, runtime,
                                  &scaled_pool_key, &scaled_pool_bytes);
         ignore = false;
+        if (original_pending) {
+            // Nothing to scale up: the new image only needs its layout.
+            RecordInitialLayout(*scheduler, *scaled_image, aspect_mask != 0 ? aspect_mask : ImageAspectMask(info.format));
+            current_image = &Image::scaled_image;
+            return true;
+        }
     }
     current_image = &Image::scaled_image;
     if (ignore) {
@@ -4134,12 +4189,13 @@ bool Image::ScaleUp(bool ignore) {
             return false;
         }
     } else {
-        BlitScale(*scheduler, *original_image, *scaled_image, info, aspect_mask, resolution);
+        BlitScale(*scheduler, *OriginalImage(), *scaled_image, info, aspect_mask, resolution);
     }
     return true;
 }
 
 bool Image::ScaleDown(bool ignore) {
+    OriginalImage();
     const auto& resolution = runtime->resolution;
     if (!resolution.active) {
         return false;
@@ -4163,7 +4219,7 @@ bool Image::ScaleDown(bool ignore) {
             return false;
         }
     } else {
-        BlitScale(*scheduler, *scaled_image, *original_image, info, aspect_mask, resolution, false);
+        BlitScale(*scheduler, *scaled_image, *OriginalImage(), info, aspect_mask, resolution, false);
     }
     return true;
 }

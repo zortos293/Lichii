@@ -532,6 +532,9 @@ public:
     void AllocateComputeUnswizzleImage();
 
     [[nodiscard]] VkImage Handle() const noexcept {
+        if (current_image == &Image::original_image && !original_image) {
+            const_cast<Image*>(this)->OriginalImage();
+        }
         return *(this->*current_image);
     }
 
@@ -594,6 +597,9 @@ public:
     bool IsRescaled() const noexcept;
 
     bool ScaleUp(bool ignore = false);
+
+    /// Goes straight to the scaled image of a scaled_only image. False for other images.
+    bool StartScaled();
 
     bool ScaleDown(bool ignore = false);
 
@@ -704,6 +710,9 @@ private:
     u64 original_pool_bytes{};
     u64 scaled_pool_bytes{};
 
+    /// The unscaled image of a scaled_only image, made on first use.
+    vk::Image& OriginalImage();
+    bool original_pending = false;
     vk::Image original_image;
     vk::Image scaled_image;
 
