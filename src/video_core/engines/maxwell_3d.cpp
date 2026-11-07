@@ -1375,7 +1375,9 @@ void Maxwell3D::FrontRunMacro(Core::System& system, VideoCommon::GpuSplit& split
     }
 }
 
-void Maxwell3D::FrontTrackInstanceLoop(FrontState& fs, u32 method, u32 value) {
+// Not inlined: GCC 13 -O3 unswitches FrontCallMultiMethod's loop on this switch and drops the
+// macro upload cases from the loop the other methods take (an empty macro RAM on the front).
+[[gnu::noinline]] void Maxwell3D::FrontTrackInstanceLoop(FrontState& fs, u32 method, u32 value) {
     switch (method) {
     case MAXWELL3D_REG_INDEX(draw.begin):
         // Instance id, bits 27:26: First leaves an instance loop, Subsequent enters one.
