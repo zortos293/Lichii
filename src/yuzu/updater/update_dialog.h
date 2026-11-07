@@ -22,6 +22,12 @@ private slots:
     void Download();
 
 private:
+#ifdef _WIN32
+    /// Extracts the downloaded package and starts a helper that waits for this process to exit,
+    /// copies the new files over the install and starts the emulator again.
+    bool InstallAndRestart(const QString& package_path);
+#endif
+
     Ui::UpdateDialog* ui;
     QList<QRadioButton*> m_buttons;
     Common::Net::Asset m_asset;
