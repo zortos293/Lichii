@@ -450,10 +450,16 @@ constexpr std::array<VkFormat, 2> OpaqueAstcViewFormats{VK_FORMAT_BC1_RGBA_UNORM
     return image_ci;
 }
 
+/// With `pool` (the runtime), takes a pooled image made with the same create info when there is
+/// one, and writes what this image is made with to `pool_key` and `pool_bytes` so the image can go
+/// back to the pool when it is deleted. Unbacked images are never pooled.
 [[nodiscard]] vk::Image MakeImage(const Device& device, const MemoryAllocator& allocator,
                                   const ImageInfo& info, std::span<const VkFormat> view_formats,
                                   std::optional<VkFormat> format_override = {},
-                                  bool unbacked = false, bool aliased = false) {
+                                  bool unbacked = false, bool aliased = false,
+                                  TextureCacheRuntime* pool = nullptr,
+                                  std::optional<TextureCacheRuntime::PooledImageKey>* pool_key = nullptr,
+                                  u64* pool_bytes = nullptr) {
     if (info.type == ImageType::Buffer) {
         return vk::Image{};
     }
@@ -483,6 +489,32 @@ constexpr std::array<VkFormat, 2> OpaqueAstcViewFormats{VK_FORMAT_BC1_RGBA_UNORM
     }
     if (unbacked) {
         if (vk::Image image = allocator.CreateUnbackedImage(image_ci, aliased)) {
+            return image;
+        }
+    }
+    if (pool != nullptr && pool_key != nullptr) {
+        u64 view_hash = 0xcbf29ce484222325ULL;
+        for (const VkFormat view_format : view_formats) {
+            view_hash = (view_hash ^ static_cast<u64>(view_format)) * 0x100000001b3ULL;
+        }
+        const TextureCacheRuntime::PooledImageKey key{
+            .flags = image_ci.flags,
+            .type = image_ci.imageType,
+            .format = image_ci.format,
+            .width = image_ci.extent.width,
+            .height = image_ci.extent.height,
+            .depth = image_ci.extent.depth,
+            .levels = image_ci.mipLevels,
+            .layers = image_ci.arrayLayers,
+            .samples = image_ci.samples,
+            .usage = image_ci.usage,
+            .view_formats_hash = view_hash,
+        };
+        *pool_key = key;
+        if (pool_bytes != nullptr) {
+            *pool_bytes = VideoCommon::CalculateGuestSizeInBytes(info);
+        }
+        if (vk::Image image = pool->TakePooledImage(key)) {
             return image;
         }
     }
@@ -1400,6 +1432,41 @@ void TextureCacheRuntime::InvalidateResolveShadow(VkImage msaa_image) {
     if (it != resolve_shadows.end()) {
         it->second.up_to_date = false;
     }
+}
+
+vk::Image TextureCacheRuntime::TakePooledImage(const PooledImageKey& key) {
+    // Newest first: the image just parked is the likeliest to be warm in the driver.
+    for (auto it = image_pool.rbegin(); it != image_pool.rend(); ++it) {
+        if (it->key == key) {
+            vk::Image image = std::move(it->image);
+            image_pool_bytes -= it->bytes;
+            image_pool.erase(std::next(it).base());
+            return image;
+        }
+    }
+    return vk::Image{};
+}
+
+void TextureCacheRuntime::ParkImage(const PooledImageKey& key, vk::Image&& image, u64 bytes) {
+    // Bounded so the pool never holds much device memory the texture cache doesn't count.
+    static constexpr u64 MaxPoolBytes = u64{256} << 20;
+    static constexpr size_t MaxPoolImages = 256;
+    if (bytes > MaxPoolBytes) {
+        vk::Image freed = std::move(image);
+        return;
+    }
+    size_t evicted = 0;
+    u64 evicted_bytes = 0;
+    while (evicted < image_pool.size() &&
+           (image_pool_bytes - evicted_bytes + bytes > MaxPoolBytes ||
+            image_pool.size() - evicted >= MaxPoolImages)) {
+        evicted_bytes += image_pool[evicted].bytes;
+        ++evicted;
+    }
+    image_pool_bytes -= evicted_bytes;
+    image_pool.erase(image_pool.begin(), image_pool.begin() + static_cast<std::ptrdiff_t>(evicted));
+    image_pool_bytes += bytes;
+    image_pool.push_back({key, std::move(image), bytes, image_pool_frame});
 }
 
 void TextureCacheRuntime::EraseResolveShadow(VkImage msaa_image) {
@@ -2840,6 +2907,16 @@ void TextureCacheRuntime::ReleaseMsaaScratchImage(VkImage image) {
 }
 
 void TextureCacheRuntime::TickFrame() {
+    // Pooled images nobody took for about 10 s (at 60 fps) are freed for real.
+    static constexpr u64 MaxPooledFrames = 600;
+    ++image_pool_frame;
+    std::erase_if(image_pool, [this](PooledImage& pooled) {
+        if (image_pool_frame - pooled.parked_frame <= MaxPooledFrames) {
+            return false;
+        }
+        image_pool_bytes -= pooled.bytes;
+        return true;
+    });
     while (!pending_byte_addressed_shadows.empty() &&
            scheduler.IsFree(pending_byte_addressed_shadows.front().tick)) {
         pending_byte_addressed_shadows.pop_front();
@@ -2899,7 +2976,8 @@ Image::Image(TextureCacheRuntime& runtime_, const ImageInfo& info_, GPUVAddr gpu
                                    UsesSparseTiles(runtime_.device, info, gpu_addr_) ||
                                    IsUnwrittenSparse(runtime_.device, info, gpu_addr_),
                                UsesSparseTiles(runtime_.device, info, gpu_addr_) &&
-                                   SparseTilesModeOf(runtime_.device) == SparseTilesMode::Aliased)),
+                                   SparseTilesModeOf(runtime_.device) == SparseTilesMode::Aliased,
+                               &runtime_, &original_pool_key, &original_pool_bytes)),
       aspect_mask(ImageAspectMask(info.format)) {
     if (original_image.IsUnbacked()) {
         flags |= VideoCommon::ImageFlagBits::Unbacked;
@@ -2969,6 +3047,16 @@ Image::~Image() {
         }
         if (scaled_image) {
             runtime->EraseResolveShadow(*scaled_image);
+        }
+    }
+    // Deleted images arrive here through the delayed destruction ring: the GPU is done with
+    // them, so the VkImages can serve the next image with the same create info.
+    if (runtime != nullptr) {
+        if (original_pool_key && original_image && !original_image.IsUnbacked()) {
+            runtime->ParkImage(*original_pool_key, std::move(original_image), original_pool_bytes);
+        }
+        if (scaled_pool_key && scaled_image && !scaled_image.IsUnbacked()) {
+            runtime->ParkImage(*scaled_pool_key, std::move(scaled_image), scaled_pool_bytes);
         }
     }
 }
@@ -4029,7 +4117,8 @@ bool Image::ScaleUp(bool ignore) {
         scaled_info.size.width = scaled_width;
         scaled_info.size.height = scaled_height;
         scaled_image = MakeImage(runtime->device, runtime->memory_allocator, scaled_info,
-                                 runtime->ViewFormats(info.format));
+                                 runtime->ViewFormats(info.format), {}, false, false, runtime,
+                                 &scaled_pool_key, &scaled_pool_bytes);
         ignore = false;
     }
     current_image = &Image::scaled_image;
