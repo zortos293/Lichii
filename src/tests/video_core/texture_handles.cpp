@@ -99,10 +99,10 @@ struct HandleProgram {
         return value;
     }
 
-    IR::Inst& Sample(Value handle) {
+    IR::Inst& Sample(Value handle, Shader::TextureType type = Shader::TextureType::Color2D) {
         IR::IREmitter ir{*insertion_block};
         IR::TextureInstInfo flags{};
-        flags.type.Assign(Shader::TextureType::Color2D);
+        flags.type.Assign(type);
         return *ir.ImageSampleExplicitLod(handle,
                                          ir.CompositeConstruct(ir.Imm32(0.0f), ir.Imm32(0.0f)),
                                          ir.Imm32(0.0f), {}, flags).Inst();
@@ -527,22 +527,39 @@ TEST_CASE("Handle tracking skips the floating-point math a reused register leads
     CHECK(shader.Evaluate(sample) == 0x1234);
 }
 
-TEST_CASE("Dual vertex programs join the handle programs of both halves",
+TEST_CASE("Dual vertex programs join the descriptors and storage buffers of both halves",
           "[video_core][texture_handles]") {
-    // Vertex A reads a handle at offset 4 of its storage buffer 0. Vertex B reads one at offset 0
-    // of its buffer 0 and, for an array texture, the one Vertex A reads, at offset 4 of its buffer
-    // 1, which is Vertex A's buffer 0: Vertex B's buffers swap bindings when they join.
+    // Vertex A samples a 2D and a 3D texture with the handle at offset 4 of its storage buffer 0,
+    // and stores that word. Vertex B samples a texture with the handle at offset 0 of its buffer
+    // 0, and Vertex A's 2D texture and an array texture with the handle Vertex A reads, at offset
+    // 4 of its buffer 1, which is Vertex A's buffer 0; it stores that word in its buffer 0. Vertex
+    // B's buffers swap bindings when they join, and its textures go past Vertex A's or onto them.
+    using Shader::TextureType;
     HandleProgram vertex_a;
     HandleProgram vertex_b;
     vertex_a.program.stage = Shader::Stage::VertexA;
     vertex_b.program.stage = Shader::Stage::VertexB;
-    vertex_a.Sample(vertex_a.Storage(4));
-    vertex_b.Sample(vertex_b.Storage(0));
-    auto& array_sample{
-        vertex_b.Sample(vertex_b.Emit(Opcode::LoadStorage32, {Value{1U}, Value{4U}}))};
-    auto flags{array_sample.Flags<IR::TextureInstInfo>()};
-    flags.type.Assign(Shader::TextureType::ColorArray2D);
-    array_sample.SetFlags(flags);
+    // Outputs a sample's result, which keeps the sample through dead code elimination.
+    size_t outputs{};
+    const auto keep = [&outputs](HandleProgram& shader, IR::Inst& sample) {
+        IR::IREmitter ir{*shader.insertion_block};
+        ir.SetAttribute(IR::Attribute::Generic0X + outputs++ * 4,
+                        IR::F32{ir.CompositeExtract(Value{&sample}, 0)}, ir.Imm32(0));
+    };
+    const Value word_a{vertex_a.Storage(4)};
+    auto& sample_a{vertex_a.Sample(word_a)};
+    auto& volume_a{vertex_a.Sample(word_a, TextureType::Color3D)};
+    keep(vertex_a, sample_a);
+    keep(vertex_a, volume_a);
+    auto& store_a{*vertex_a.Emit(Opcode::WriteStorage32, {Value{0U}, Value{8U}, word_a}).Inst()};
+    auto& sample_b{vertex_b.Sample(vertex_b.Storage(0))};
+    const Value word_b{vertex_b.Emit(Opcode::LoadStorage32, {Value{1U}, Value{4U}})};
+    auto& shared_b{vertex_b.Sample(word_b)};
+    auto& array_b{vertex_b.Sample(word_b, TextureType::ColorArray2D)};
+    keep(vertex_b, sample_b);
+    keep(vertex_b, shared_b);
+    keep(vertex_b, array_b);
+    auto& store_b{*vertex_b.Emit(Opcode::WriteStorage32, {Value{0U}, Value{8U}, word_b}).Inst()};
     vertex_a.Run();
     vertex_b.Run();
     vertex_a.program.info.storage_buffers_descriptors.push_back(
@@ -553,6 +570,8 @@ TEST_CASE("Dual vertex programs join the handle programs of both halves",
         {.cbuf_index = 0, .cbuf_offset = 0x10, .count = 1, .is_written = false});
     REQUIRE(vertex_a.program.info.handle_programs.size() == 1);
     REQUIRE(vertex_b.program.info.handle_programs.size() == 2);
+    REQUIRE(vertex_a.program.info.texture_descriptors.size() == 2);
+    REQUIRE(vertex_b.program.info.texture_descriptors.size() == 3);
     const auto program_a{vertex_a.program.info.handle_programs.front()};
     for (HandleProgram* const half : {&vertex_a, &vertex_b}) {
         half->program.syntax_list = {
@@ -570,7 +589,7 @@ TEST_CASE("Dual vertex programs join the handle programs of both halves",
     // Vertex A's program keeps its index, and Vertex B's reading the same word is that one.
     REQUIRE(info.handle_programs.size() == 2);
     CHECK(info.handle_programs.front() == program_a);
-    REQUIRE(info.texture_descriptors.size() == 3);
+    REQUIRE(info.texture_descriptors.size() == 4);
     // The storage buffer whose address constant buffer 0 holds at 0x10 is at 0x2000, the one at
     // 0x20 at 0x3000; a program reading the wrong one gets 0xd0 or 0xd4.
     constexpr GPUVAddr cbuf = 0x1000;
@@ -582,20 +601,89 @@ TEST_CASE("Dual vertex programs join the handle programs of both halves",
     memory.words[0x2000] = 0xd0;
     memory.words[0x3004] = 0xd4;
     const auto cbuf_address = [](u32 index) -> GPUVAddr { return index == 0 ? cbuf : 0; };
-    using Shader::TextureType;
-    std::vector<std::pair<TextureType, u32>> handles;
-    for (const auto& descriptor : info.texture_descriptors) {
-        REQUIRE(descriptor.handle_program < info.handle_programs.size());
-        handles.emplace_back(descriptor.type,
-                             VideoCommon::EvaluateTextureHandle(info, descriptor.handle_program,
-                                                                memory, cbuf_address));
-    }
-    std::vector<std::pair<TextureType, u32>> expected{
-        {TextureType::Color2D, 0xa0},
-        {TextureType::Color2D, 0xb0},
-        {TextureType::ColorArray2D, 0xa0},
+    // Each instruction reads the texture and the storage buffer it read before the merge.
+    const auto descriptor_index = [](const IR::Inst& sample) -> u32 {
+        return sample.Flags<IR::TextureInstInfo>().descriptor_index;
     };
-    std::ranges::sort(handles);
-    std::ranges::sort(expected);
-    CHECK(handles == expected);
+    const auto texture = [&](const IR::Inst& sample) {
+        REQUIRE(descriptor_index(sample) < info.texture_descriptors.size());
+        const auto& descriptor{info.texture_descriptors[descriptor_index(sample)]};
+        REQUIRE(descriptor.handle_program < info.handle_programs.size());
+        return std::pair{descriptor.type,
+                         VideoCommon::EvaluateTextureHandle(info, descriptor.handle_program, memory,
+                                                            cbuf_address)};
+    };
+    CHECK(texture(sample_a) == std::pair{TextureType::Color2D, 0xa0U});
+    CHECK(texture(volume_a) == std::pair{TextureType::Color3D, 0xa0U});
+    CHECK(texture(sample_b) == std::pair{TextureType::Color2D, 0xb0U});
+    CHECK(texture(shared_b) == std::pair{TextureType::Color2D, 0xa0U});
+    CHECK(texture(array_b) == std::pair{TextureType::ColorArray2D, 0xa0U});
+    CHECK(descriptor_index(shared_b) == descriptor_index(sample_a));
+    const auto buffer = [&](const IR::Inst& inst) {
+        REQUIRE(inst.Arg(0).IsImmediate());
+        REQUIRE(inst.Arg(0).U32() < info.storage_buffers_descriptors.size());
+        return info.storage_buffers_descriptors[inst.Arg(0).U32()].cbuf_offset;
+    };
+    CHECK(buffer(*word_a.Inst()) == 0x10);
+    CHECK(buffer(store_a) == 0x10);
+    CHECK(buffer(*word_b.Inst()) == 0x10);
+    CHECK(buffer(store_b) == 0x20);
+}
+
+TEST_CASE("Joined descriptor indices follow the list each instruction reads",
+          "[video_core][texture_handles]") {
+    // Descriptor i of each kind moves to element i of its kind's list, storage buffer binding i
+    // to element i of the bindings.
+    HandleProgram shader;
+    const Value none{};
+    const auto texture = [&](Opcode opcode, std::initializer_list<Value> args,
+                             Shader::TextureType type, u32 index) -> IR::Inst& {
+        IR::Inst& inst{*shader.Emit(opcode, args).Inst()};
+        IR::TextureInstInfo flags{};
+        flags.type.Assign(type);
+        flags.descriptor_index.Assign(index);
+        inst.SetFlags(flags);
+        return inst;
+    };
+    using Shader::TextureType;
+    auto& texel_fetch{
+        texture(Opcode::ImageFetch, {none, none, none, none, none}, TextureType::Buffer, 0)};
+    auto& sample{
+        texture(Opcode::ImageSampleImplicitLod, {none, none, none, none}, TextureType::Color2D, 1)};
+    auto& texel_read{texture(Opcode::ImageRead, {none, none}, TextureType::Buffer, 0)};
+    auto& image_write{texture(Opcode::ImageWrite, {none, none, none}, TextureType::Color2D, 1)};
+    auto& image_atomic{
+        texture(Opcode::ImageAtomicIAdd32, {none, none, none}, TextureType::Color2D, 0)};
+    auto& texture_scaled{*shader.Emit(Opcode::IsTextureScaled, {Value{1U}}).Inst()};
+    auto& image_scaled{*shader.Emit(Opcode::IsImageScaled, {Value{1U}}).Inst()};
+    auto& load{*shader.Emit(Opcode::LoadStorage32, {Value{1U}, none}).Inst()};
+    auto& store{*shader.Emit(Opcode::WriteStorage64, {Value{0U}, none, none}).Inst()};
+    auto& atomic{*shader.Emit(Opcode::StorageAtomicIAdd32, {Value{2U}, none, none}).Inst()};
+    auto& cbuf{*shader.Emit(Opcode::GetCbufU32, {Value{1U}, Value{0U}}).Inst()};
+
+    const Shader::Optimization::JoinedDescriptors joined{
+        .texture_buffers = {5},
+        .image_buffers = {6},
+        .textures = {7, 8},
+        .images = {9, 10},
+    };
+    Shader::Optimization::RemapTextureDescriptors(shader.program, joined);
+    const std::array<u32, 3> bindings{3, 4, 5};
+    Shader::Optimization::RemapStorageBindings(shader.program, bindings);
+
+    const auto descriptor_index = [](const IR::Inst& inst) -> u32 {
+        return inst.Flags<IR::TextureInstInfo>().descriptor_index;
+    };
+    CHECK(descriptor_index(texel_fetch) == 5);
+    CHECK(descriptor_index(sample) == 8);
+    CHECK(descriptor_index(texel_read) == 6);
+    CHECK(descriptor_index(image_write) == 10);
+    CHECK(descriptor_index(image_atomic) == 9);
+    CHECK(texture_scaled.Arg(0).U32() == 8);
+    CHECK(image_scaled.Arg(0).U32() == 10);
+    CHECK(load.Arg(0).U32() == 4);
+    CHECK(store.Arg(0).U32() == 3);
+    CHECK(atomic.Arg(0).U32() == 5);
+    // A constant buffer index is no storage buffer binding.
+    CHECK(cbuf.Arg(0).U32() == 1);
 }

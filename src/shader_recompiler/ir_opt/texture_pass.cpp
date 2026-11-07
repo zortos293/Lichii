@@ -158,6 +158,25 @@ u32 DynamicSampledTextureCap(const Info& info, const HostTranslateInfo& host_inf
     return (std::min)({DESCRIPTOR_MAX_COUNT, sampled_limit, sampler_limit, resource_limit});
 }
 
+// Whether opcode is an instruction past the texture pass reading a texture (or a texel buffer).
+bool IsSampledImageOpcode(IR::Opcode opcode) {
+    switch (opcode) {
+    case IR::Opcode::ImageSampleImplicitLod:
+    case IR::Opcode::ImageSampleExplicitLod:
+    case IR::Opcode::ImageSampleDrefImplicitLod:
+    case IR::Opcode::ImageSampleDrefExplicitLod:
+    case IR::Opcode::ImageGather:
+    case IR::Opcode::ImageGatherDref:
+    case IR::Opcode::ImageFetch:
+    case IR::Opcode::ImageQueryDimensions:
+    case IR::Opcode::ImageQueryLod:
+    case IR::Opcode::ImageGradient:
+        return true;
+    default:
+        return false;
+    }
+}
+
 // Shrinks the texture arrays of a program to at most cap elements, clamping the element index of
 // every instruction that reads an array it shrank.
 void CapTextureArrays(IR::Program& program, u32 cap) {
@@ -171,19 +190,7 @@ void CapTextureArrays(IR::Program& program, u32 cap) {
     }
     for (IR::Block* const block : program.post_order_blocks) {
         for (IR::Inst& inst : block->Instructions()) {
-            switch (inst.GetOpcode()) {
-            case IR::Opcode::ImageSampleImplicitLod:
-            case IR::Opcode::ImageSampleExplicitLod:
-            case IR::Opcode::ImageSampleDrefImplicitLod:
-            case IR::Opcode::ImageSampleDrefExplicitLod:
-            case IR::Opcode::ImageGather:
-            case IR::Opcode::ImageGatherDref:
-            case IR::Opcode::ImageFetch:
-            case IR::Opcode::ImageQueryDimensions:
-            case IR::Opcode::ImageQueryLod:
-            case IR::Opcode::ImageGradient:
-                break;
-            default:
+            if (!IsSampledImageOpcode(inst.GetOpcode())) {
                 continue;
             }
             const auto flags = inst.Flags<IR::TextureInstInfo>();
@@ -1807,7 +1814,7 @@ void LimitPipelineSampledTextureArrays(std::span<IR::Program* const> programs,
     }
 }
 
-void JoinTextureInfo(Info& base, Info& source, std::span<const u32> storage_bindings) {
+JoinedDescriptors JoinTextureInfo(Info& base, Info& source, std::span<const u32> storage_bindings) {
     base.requires_coherent_image_memory |= source.requires_coherent_image_memory;
     // The handle programs of source join those of base (once each, as the pass keeps them),
     // reading its storage buffers at their bindings in base.
@@ -1835,23 +1842,58 @@ void JoinTextureInfo(Info& base, Info& source, std::span<const u32> storage_bind
         base.texture_descriptors,
         base.image_descriptors,
     };
-    const auto add = [&](auto desc) {
+    JoinedDescriptors joined;
+    const auto add = [&](auto desc, std::vector<u32>& indices) {
         if (desc.handle_program != ~0U) {
             desc.handle_program = program_index[desc.handle_program];
         }
-        descriptors.Add(desc);
+        indices.push_back(descriptors.Add(desc));
     };
     for (auto& desc : source.texture_buffer_descriptors) {
-        add(desc);
+        add(desc, joined.texture_buffers);
     }
     for (auto& desc : source.image_buffer_descriptors) {
-        add(desc);
+        add(desc, joined.image_buffers);
     }
     for (auto& desc : source.texture_descriptors) {
-        add(desc);
+        add(desc, joined.textures);
     }
     for (auto& desc : source.image_descriptors) {
-        add(desc);
+        add(desc, joined.images);
+    }
+    return joined;
+}
+
+void RemapTextureDescriptors(IR::Program& program, const JoinedDescriptors& descriptors) {
+    const auto remap = [](const std::vector<u32>& indices, u32 index) {
+        return index < indices.size() ? indices[index] : index;
+    };
+    for (IR::Block* const block : program.post_order_blocks) {
+        for (IR::Inst& inst : block->Instructions()) {
+            const IR::Opcode opcode{inst.GetOpcode()};
+            if (opcode == IR::Opcode::IsTextureScaled || opcode == IR::Opcode::IsImageScaled) {
+                // The rescaling pass's test of a descriptor, which the pipeline's rescaling bits
+                // number as the texture and image descriptors are.
+                if (inst.Arg(0).IsImmediate()) {
+                    const auto& indices{opcode == IR::Opcode::IsTextureScaled ? descriptors.textures
+                                                                              : descriptors.images};
+                    inst.SetArg(0, IR::Value{remap(indices, inst.Arg(0).U32())});
+                }
+                continue;
+            }
+            const bool is_image{IsStorageImageOpcode(opcode)};
+            if (!is_image && !IsSampledImageOpcode(opcode)) {
+                continue;
+            }
+            // The lists the texture pass took the descriptor from.
+            auto flags{inst.Flags<IR::TextureInstInfo>()};
+            const bool is_buffer{flags.type == TextureType::Buffer};
+            const auto& indices{
+                is_image ? (is_buffer ? descriptors.image_buffers : descriptors.images)
+                         : (is_buffer ? descriptors.texture_buffers : descriptors.textures)};
+            flags.descriptor_index.Assign(remap(indices, flags.descriptor_index));
+            inst.SetFlags(flags);
+        }
     }
 }
 
