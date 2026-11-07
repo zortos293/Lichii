@@ -329,6 +329,19 @@ public:
         }
     }
 
+    void PushTexture(bool is_rescaled, bool is_depth24, bool point_depth24) noexcept {
+        if (!depth24) {
+            depth24.emplace();
+        }
+        // Reuse the stock rescaling cursor without changing its ordinary update path.
+        const auto word = static_cast<size_t>(texture_ptr - words.data());
+        if (word < Shader::Backend::SPIRV::NUM_TEXTURE_SCALING_WORDS) {
+            depth24->fetch[word] |= is_depth24 ? texture_bit : 0;
+            depth24->point[word] |= is_depth24 && point_depth24 ? texture_bit : 0;
+        }
+        PushTexture(is_rescaled);
+    }
+
     void PushImage(bool is_rescaled) noexcept {
         *image_ptr |= is_rescaled ? image_bit : 0u;
         image_bit <<= 1u;
@@ -338,16 +351,31 @@ public:
         }
     }
 
+    bool HasDepth24Data() const noexcept { return depth24.has_value(); }
+    const auto& Depth24Data() const noexcept {
+        return depth24 ? depth24->fetch : EMPTY_DEPTH24_MASK;
+    }
+    const auto& Depth24PointData() const noexcept {
+        return depth24 ? depth24->point : EMPTY_DEPTH24_MASK;
+    }
+
     const std::array<u32, NUM_TEXTURE_AND_IMAGE_SCALING_WORDS>& Data() const noexcept {
         return words;
     }
 
 private:
+    using Depth24Mask = std::array<u32, Shader::Backend::SPIRV::NUM_TEXTURE_SCALING_WORDS>;
+    static constexpr Depth24Mask EMPTY_DEPTH24_MASK{};
+    struct Depth24Masks {
+        Depth24Mask fetch{};
+        Depth24Mask point{};
+    };
     std::array<u32, NUM_TEXTURE_AND_IMAGE_SCALING_WORDS> words{};
     u32* texture_ptr{words.data()};
     u32* image_ptr{words.data() + Shader::Backend::SPIRV::NUM_TEXTURE_SCALING_WORDS};
     u32 texture_bit{1u};
     u32 image_bit{1u};
+    std::optional<Depth24Masks> depth24;
 };
 
 class RenderAreaPushConstant {
@@ -356,6 +384,7 @@ public:
     std::array<f32, 4> words{};
 };
 
+template <bool track_depth24 = false>
 inline void PushImageDescriptors(TextureCache& texture_cache,
                                  GuestDescriptorQueue& guest_descriptor_queue,
                                  const Shader::Info& info, RescalingPushConstant& rescaling,
@@ -367,22 +396,35 @@ inline void PushImageDescriptors(TextureCache& texture_cache,
     views += num_image_buffers;
     for (const auto& desc : info.texture_descriptors) {
         bool is_rescaled{};
+        bool is_depth24{};
+        bool point_depth24{};
         for (u32 index = 0; index < desc.count; ++index) {
             const VideoCommon::ImageViewId image_view_id{(views++)->id};
             const VideoCommon::SamplerId sampler_id{*(samplers++)};
             ImageView& image_view{texture_cache.GetImageView(image_view_id)};
             VkImageView vk_image_view{image_view.Handle(desc.type)};
+            if constexpr (track_depth24) {
+                is_depth24 = desc.count == 1 && vk_image_view != VK_NULL_HANDLE &&
+                             image_view.SamplesDepth24();
+            }
             if (vk_image_view == VK_NULL_HANDLE) {
                 const VkImageView null_image_view{texture_cache.GetImageView(VideoCommon::NULL_IMAGE_VIEW_ID).Handle(desc.type)};
                 if (null_image_view != VK_NULL_HANDLE) vk_image_view = null_image_view;
             }
             Sampler& sampler{texture_cache.GetSampler(sampler_id)};
+            if constexpr (track_depth24) {
+                point_depth24 = is_depth24 && sampler.SamplesSingleTexel(image_view);
+            }
             guest_descriptor_queue.AddSampledImage(vk_image_view,
                                                    sampler.HandleFor(image_view, desc.is_depth));
             const bool element_rescaled{texture_cache.IsRescaling(image_view)};
             is_rescaled |= element_rescaled;
         }
-        rescaling.PushTexture(is_rescaled);
+        if constexpr (track_depth24) {
+            rescaling.PushTexture(is_rescaled, is_depth24, point_depth24);
+        } else {
+            rescaling.PushTexture(is_rescaled);
+        }
     }
     for (const auto& desc : info.image_descriptors) {
         bool is_rescaled{};

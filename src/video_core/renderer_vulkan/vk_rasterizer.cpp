@@ -254,6 +254,13 @@ bool IsPrimitiveRestartSupported(const Device& device, VkPrimitiveTopology topol
 }
 } // Anonymous namespace
 
+std::array<f32, 4> GetHostViewport0(const Device& device, const Maxwell& regs, bool is_rescaling) {
+    // PositionVaryingPass excludes the render-area path (viewport transform disabled).
+    const float scale = is_rescaling ? Settings::values.resolution_info.up_factor : 1.0f;
+    const VkViewport viewport{GetViewportState(device, regs, 0, scale)};
+    return {viewport.x, viewport.y, viewport.width, viewport.height};
+}
+
 RasterizerVulkan::RasterizerVulkan(Core::Frontend::EmuWindow& emu_window_, Tegra::GPU& gpu_,
                                    Tegra::MaxwellDeviceMemoryManager& device_memory_,
                                    const Device& device_, MemoryAllocator& memory_allocator_,

@@ -1,3 +1,5 @@
+// SPDX-FileCopyrightText: Copyright 2026 Eden Emulator Project
+// SPDX-License-Identifier: GPL-3.0-or-later
 // SPDX-FileCopyrightText: Copyright 2021 yuzu Emulator Project
 // SPDX-License-Identifier: GPL-2.0-or-later
 
@@ -463,6 +465,10 @@ void EmitResolutionDownFactor(EmitContext& ctx, IR::Inst& inst) {
 
 void EmitRenderArea(EmitContext& ctx, IR::Inst& inst) {
     ctx.AddF32x4("{}=render_area;", inst);
+}
+
+void EmitHostViewport(EmitContext&, IR::Inst&) {
+    throw NotImplementedException("GLSL instruction");
 }
 
 void EmitLoadLocal(EmitContext& ctx, IR::Inst& inst, std::string_view word_offset) {

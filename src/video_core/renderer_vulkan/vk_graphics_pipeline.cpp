@@ -46,6 +46,9 @@
 #endif
 
 namespace Vulkan {
+using Shader::Backend::SPIRV::HOST_VIEWPORT_LAYOUT_OFFSET;
+using Shader::Backend::SPIRV::DEPTH24_LAYOUT_OFFSET;
+using Shader::Backend::SPIRV::DEPTH24_POINT_LAYOUT_OFFSET;
 namespace {
 using boost::container::small_vector;
 using boost::container::static_vector;
@@ -296,6 +299,8 @@ GraphicsPipeline::GraphicsPipeline(
         if (!info) {
             continue;
         }
+        uses_host_viewport |= info->uses_host_viewport;
+        uses_depth24_fetch |= info->uses_depth24_fetch;
         stage_infos[stage] = *info;
         enabled_uniform_buffer_masks[stage] = info->constant_buffer_mask;
         std::ranges::copy(info->constant_buffer_used_sizes, uniform_buffer_sizes[stage].begin());
@@ -663,8 +668,13 @@ bool GraphicsPipeline::ConfigureImpl(bool is_indexed) {
         }
         {
             Profile::Scope scope{Profile::Zone::PushDescriptors};
-            PushImageDescriptors(texture_cache, guest_descriptor_queue, stage_infos[stage],
-                                 rescaling, samplers_it, views_it);
+            if (stage_infos[stage].uses_depth24_fetch) {
+                PushImageDescriptors<true>(texture_cache, guest_descriptor_queue, stage_infos[stage],
+                                           rescaling, samplers_it, views_it);
+            } else {
+                PushImageDescriptors(texture_cache, guest_descriptor_queue, stage_infos[stage],
+                                     rescaling, samplers_it, views_it);
+            }
         }
         const auto& info{stage_infos[stage]};
         if (info.uses_render_area) {
@@ -698,6 +708,9 @@ bool GraphicsPipeline::ConfigureImpl(bool is_indexed) {
     {
         Profile::Scope scope{Profile::Zone::RenderTargets};
         texture_cache.UpdateRenderTargets(false);
+        if (uses_host_viewport) {
+            host_viewport_words = GetHostViewport0(device, regs, texture_cache.IsRescaling());
+        }
         const std::span<const VideoCommon::ImageViewInOut> view_span{views.data(), views.size()};
         texture_cache.CheckFeedbackLoop(view_span);
         if (scheduler.HasFragmentBarrier() &&
@@ -790,6 +803,25 @@ bool GraphicsPipeline::ConfigureDraw(const RescalingPushConstant& rescaling,
         if (update_descriptors) {
             last_descriptor_payload.assign(entries, entries + num_descriptor_entries);
         }
+    }
+    if (uses_depth24_fetch) {
+        scheduler.Record([this, fetch = rescaling.Depth24Data(),
+                          point = rescaling.Depth24PointData()](vk::CommandBuffer cmdbuf) {
+            const VkShaderStageFlags stages =
+                IsMeshPipeline() ? VK_SHADER_STAGE_ALL_GRAPHICS | VK_SHADER_STAGE_TASK_BIT_EXT |
+                                       VK_SHADER_STAGE_MESH_BIT_EXT
+                                 : VK_SHADER_STAGE_ALL_GRAPHICS;
+            cmdbuf.PushConstants(*pipeline_layout, stages, DEPTH24_LAYOUT_OFFSET,
+                                sizeof(fetch), fetch.data());
+            cmdbuf.PushConstants(*pipeline_layout, stages, DEPTH24_POINT_LAYOUT_OFFSET,
+                                sizeof(point), point.data());
+        });
+    }
+    if (uses_host_viewport) {
+        scheduler.Record([this, viewport = host_viewport_words](vk::CommandBuffer cmdbuf) {
+            cmdbuf.PushConstants(*pipeline_layout, VK_SHADER_STAGE_ALL_GRAPHICS,
+                                HOST_VIEWPORT_LAYOUT_OFFSET, sizeof(viewport), viewport.data());
+        });
     }
     scheduler.Record([this, descriptor_data, bind_pipeline, update_descriptors,
                       descriptor_buffer_offset, descriptor_buffer_chunk, bind_descriptor_buffer,

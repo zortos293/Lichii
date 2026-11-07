@@ -503,6 +503,46 @@ EmitContext::EmitContext(const Profile& profile_, const RuntimeInfo& runtime_inf
     DefineGlobalMemoryFunctions(program);
     DefineRescalingInput(program.info);
     DefineRenderArea(program.info);
+    DefineDepth24Function(program.info);
+}
+
+void EmitContext::DefineDepth24Function(const Info& info) {
+    if (!info.uses_depth24_fetch) {
+        return;
+    }
+    // A separate function leaves the caller's block labels and deferred Phi parents intact.
+    const Id function_type{TypeFunction(F32[4], F32[4], U1)};
+    quantize_depth24_function =
+        OpFunction(F32[4], spv::FunctionControlMask::MaskNone, function_type);
+    Name(quantize_depth24_function, "quantize_depth24");
+    const Id original{OpFunctionParameter(F32[4])};
+    const Id enabled{OpFunctionParameter(U1)};
+    AddLabel();
+    const Id quantize{OpLabel()};
+    const Id passthrough{OpLabel()};
+    OpSelectionMerge(passthrough, spv::SelectionControlMask::DontFlatten);
+    OpBranchConditional(enabled, quantize, passthrough);
+    AddLabel(quantize);
+    std::array<Id, 4> result;
+    for (u32 component = 0; component < 4; ++component) {
+        const Id value{OpCompositeExtract(F32[1], original, component)};
+        const Id normalized{OpLogicalAnd(U1, OpFOrdGreaterThanEqual(U1, value, Const(0.0f)),
+                                        OpFOrdLessThanEqual(U1, value, Const(1.0f)))};
+        const Id safe_value{OpSelect(F32[1], normalized, value, Const(0.0f))};
+        const Id packed{OpConvertFToU(U32[1], OpRoundEven(
+            F32[1], OpFMul(F32[1], safe_value, Const(16777215.0f))))};
+        // Match x8d24_conversion.glsl; a rounded reciprocal of 2^24 - 1 is not exact.
+        const Id scaled{OpFMul(F32[1], OpConvertUToF(F32[1], packed),
+                               Const(1.0f / 16777216.0f))};
+        const Id increment{OpSelect(U32[1], OpINotEqual(U1, packed, Const(0U)),
+                                    Const(1U), Const(0U))};
+        const Id bits{OpIAdd(U32[1], OpBitcast(U32[1], scaled), increment)};
+        result[component] = OpSelect(F32[1], normalized, OpBitcast(F32[1], bits), value);
+    }
+    OpReturnValue(OpCompositeConstruct(F32[4], result));
+    AddLabel(passthrough);
+    OpReturnValue(original);
+    OpFunctionEnd();
 }
 
 EmitContext::~EmitContext() = default;
@@ -1258,18 +1298,18 @@ void EmitContext::DefineGlobalMemoryFunctions(const IR::Program& program) {
 }
 
 void EmitContext::DefineRescalingInput(const Info& info) {
-    if (!info.uses_rescaling_uniform) {
+    if (!info.uses_rescaling_uniform && !info.uses_host_viewport && !info.uses_depth24_fetch) {
         return;
     }
     if (profile.unified_descriptor_binding) {
-        DefineRescalingInputPushConstant();
+        DefineRescalingInputPushConstant(info);
     } else {
         DefineRescalingInputUniformConstant();
     }
 }
 
-void EmitContext::DefineRescalingInputPushConstant() {
-    boost::container::static_vector<Id, 3> members{};
+void EmitContext::DefineRescalingInputPushConstant(const Info& info) {
+    boost::container::static_vector<Id, 6> members{};
     u32 member_index{0};
 
     rescaling_textures_type = TypeArray(U32[1], Const(4u));
@@ -1285,6 +1325,16 @@ void EmitContext::DefineRescalingInputPushConstant() {
     if (stage != Stage::Compute) {
         members.push_back(F32[1]);
         rescaling_downfactor_member_index = member_index++;
+    }
+    if (info.uses_host_viewport) {
+        members.push_back(F32[4]);
+        host_viewport_member_index = member_index++;
+    }
+    if (info.uses_depth24_fetch) {
+        members.push_back(rescaling_textures_type);
+        depth24_member_index = member_index++;
+        members.push_back(rescaling_textures_type);
+        depth24_point_member_index = member_index++;
     }
     const Id push_constant_struct{TypeStruct(std::span(members.data(), members.size()))};
     Decorate(push_constant_struct, spv::Decoration::Block);
@@ -1303,6 +1353,19 @@ void EmitContext::DefineRescalingInputPushConstant() {
                        spv::Decoration::Offset,
                        static_cast<u32>(offsetof(RescalingLayout, down_factor)));
         MemberName(push_constant_struct, rescaling_downfactor_member_index, "down_factor");
+    }
+    if (info.uses_host_viewport) {
+        MemberDecorate(push_constant_struct, host_viewport_member_index, spv::Decoration::Offset,
+                       HOST_VIEWPORT_LAYOUT_OFFSET);
+        MemberName(push_constant_struct, host_viewport_member_index, "host_viewport");
+    }
+    if (info.uses_depth24_fetch) {
+        MemberDecorate(push_constant_struct, depth24_member_index, spv::Decoration::Offset,
+                       DEPTH24_LAYOUT_OFFSET);
+        MemberName(push_constant_struct, depth24_member_index, "depth24_textures");
+        MemberDecorate(push_constant_struct, depth24_point_member_index, spv::Decoration::Offset,
+                       DEPTH24_POINT_LAYOUT_OFFSET);
+        MemberName(push_constant_struct, depth24_point_member_index, "depth24_point_textures");
     }
     const Id pointer_type{TypePointer(spv::StorageClass::PushConstant, push_constant_struct)};
     rescaling_push_constants = AddGlobalVariable(pointer_type, spv::StorageClass::PushConstant);

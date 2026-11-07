@@ -425,6 +425,10 @@ F32 IREmitter::RenderAreaHeight() {
     return F32(CompositeExtract(Inst<Value>(Opcode::RenderArea), 1));
 }
 
+F32 IREmitter::HostViewport(size_t component) {
+    return F32(CompositeExtract(Inst<Value>(Opcode::HostViewport), component));
+}
+
 U32 IREmitter::LaneId() {
     return Inst<U32>(Opcode::LaneId);
 }
@@ -2070,6 +2074,18 @@ Value IREmitter::ImageAtomicExchange(const Value& handle, const Value& coords, c
     const Opcode op{handle.IsImmediate() ? Opcode::BoundImageAtomicExchange32
                                          : Opcode::BindlessImageAtomicExchange32};
     return Inst(op, Flags{info}, handle, coords, value);
+}
+
+U1 IREmitter::IsTexturePointDepth24(const U32& index) {
+    return Inst<U1>(Opcode::IsTexturePointDepth24, index);
+}
+
+Value IREmitter::QuantizeDepth24(const Value& value, const U1& enabled) {
+    return Inst(Opcode::QuantizeDepth24, value, enabled);
+}
+
+U1 IREmitter::IsTextureDepth24(const U32& index) {
+    return Inst<U1>(Opcode::IsTextureDepth24, index);
 }
 
 U1 IREmitter::IsTextureScaled(const U32& index) {

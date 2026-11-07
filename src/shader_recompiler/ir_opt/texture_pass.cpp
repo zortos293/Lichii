@@ -1129,6 +1129,18 @@ bool IsPixelFormatSNorm(TexturePixelFormat pixel_format) {
     }
 }
 
+void QuantizeDepth24Read(IR::Block& block, IR::Inst& inst, bool requires_point_sampler) {
+    const auto it = IR::Block::InstructionList::s_iterator_to(inst);
+    IR::IREmitter ir{block, it};
+    const IR::Value fetched{&*block.PrependNewInst(it, inst)};
+    const auto flags = inst.Flags<IR::TextureInstInfo>();
+    const IR::U1 depth24 = requires_point_sampler
+        ? ir.IsTexturePointDepth24(ir.Imm32(flags.descriptor_index))
+        : ir.IsTextureDepth24(ir.Imm32(flags.descriptor_index));
+    // Keep the sample outside the conditional helper, including its implicit derivatives.
+    inst.ReplaceUsesWith(ir.QuantizeDepth24(fetched, depth24));
+}
+
 void PatchTexelFetch(IR::Block& block, IR::Inst& inst, TexturePixelFormat pixel_format) {
     const auto it{IR::Block::InstructionList::s_iterator_to(inst)};
     IR::IREmitter ir{block, IR::Block::InstructionList::s_iterator_to(inst)};
@@ -1402,6 +1414,19 @@ void TexturePass(Environment& env, IR::Program& program, const HostTranslateInfo
         }
         if (is_rect_sample) {
             PatchImageSampleImplicitLod(*texture_inst.block, *texture_inst.inst);
+        }
+
+        if (host_info.emulate_depth24_reads && program.stage == Stage::Fragment &&
+            !program.info.uses_render_area &&
+            (inst->GetOpcode() == IR::Opcode::ImageFetch ||
+             inst->GetOpcode() == IR::Opcode::ImageSampleImplicitLod ||
+             inst->GetOpcode() == IR::Opcode::ImageSampleExplicitLod) &&
+            flags.type != TextureType::Buffer && flags.is_integer == 0 && flags.is_depth == 0 &&
+            cbuf.count == 1 && cbuf.handle_program == ~0U) {
+            // Sample operations require a single-texel sampler at this draw, not at compilation.
+            QuantizeDepth24Read(*texture_inst.block, *inst,
+                               inst->GetOpcode() != IR::Opcode::ImageFetch);
+            program.info.uses_depth24_fetch = true;
         }
 
         if (!host_info.support_snorm_render_buffer && inst->GetOpcode() == IR::Opcode::ImageFetch &&

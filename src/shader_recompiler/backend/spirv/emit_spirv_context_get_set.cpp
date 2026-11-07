@@ -623,6 +623,16 @@ Id EmitRenderArea(EmitContext& ctx) {
     }
 }
 
+Id EmitHostViewport(EmitContext& ctx) {
+    if (!ctx.profile.unified_descriptor_binding) {
+        throw NotImplementedException("SPIR-V Instruction");
+    }
+    const Id pointer_type{ctx.TypePointer(spv::StorageClass::PushConstant, ctx.F32[4])};
+    const Id index{ctx.Const(ctx.host_viewport_member_index)};
+    const Id pointer{ctx.OpAccessChain(pointer_type, ctx.rescaling_push_constants, index)};
+    return ctx.OpLoad(ctx.F32[4], pointer);
+}
+
 Id EmitLoadLocal(EmitContext& ctx, Id word_offset) {
     const Id pointer{
         ctx.OpAccessChain(ctx.private_u32, ctx.local_memory, word_offset, ctx.Const(0U))};

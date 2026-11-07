@@ -666,6 +666,18 @@ void EmitImageAtomicExchange32(EmitContext& ctx, IR::Inst& inst, const IR::Value
                value);
 }
 
+void EmitQuantizeDepth24(EmitContext&, IR::Inst&, const IR::Value&, const IR::Value&) {
+    throw NotImplementedException("Experimental D24 quantization is Vulkan-only");
+}
+
+void EmitIsTextureDepth24(EmitContext&, IR::Inst&, const IR::Value&) {
+    throw NotImplementedException("Vulkan-only D24 emulation");
+}
+
+void EmitIsTexturePointDepth24(EmitContext&, IR::Inst&, const IR::Value&) {
+    throw NotImplementedException("Vulkan-only D24 emulation");
+}
+
 void EmitIsTextureScaled(EmitContext& ctx, IR::Inst& inst, const IR::Value& index) {
     if (!index.IsImmediate()) {
         throw NotImplementedException("Non-constant texture rescaling");

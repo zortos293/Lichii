@@ -74,6 +74,7 @@ OPCODE(SR_WScaleFactorZ,                                    U32,                
 OPCODE(YDirection,                                          F32,                                                                                            )
 OPCODE(ResolutionDownFactor,                                F32,                                                                                            )
 OPCODE(RenderArea,                                          F32x4,                                                                                          )
+OPCODE(HostViewport,                                          F32x4,                                                                                          )
 
 // Undefined
 OPCODE(UndefU1,                                             U1,                                                                                             )
@@ -534,6 +535,9 @@ OPCODE(ImageRead,                                           U32x4,          Opaq
 OPCODE(ImageWrite,                                          Void,           Opaque,         Opaque,         U32x4,                                          )
 
 OPCODE(IsTextureScaled,                                     U1,             U32,                                                                            )
+OPCODE(QuantizeDepth24,                                    F32x4,           F32x4,          U1,                                                             )
+OPCODE(IsTextureDepth24,                                     U1,             U32,                                                                            )
+OPCODE(IsTexturePointDepth24,                                     U1,             U32,                                                                            )
 OPCODE(IsImageScaled,                                       U1,             U32,                                                                            )
 
 // Atomic Image operations

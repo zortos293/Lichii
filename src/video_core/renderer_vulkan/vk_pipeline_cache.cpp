@@ -52,6 +52,7 @@
 #include "video_core/shader_environment.h"
 #include "video_core/shader_notify.h"
 #include "video_core/surface.h"
+#include "video_core/xc2_cloud_policy.h"
 #include "video_core/vulkan_common/vulkan_device.h"
 #include "video_core/vulkan_common/vulkan_wrapper.h"
 #include "video_core/gpu_logging/gpu_logging.h"
@@ -574,6 +575,8 @@ PipelineCache::PipelineCache(Tegra::MaxwellDeviceMemoryManager& device_memory_,
         .max_user_clip_distances = device.GetMaxUserClipDistances()
     };
 
+    const bool xc2_cloud_title =
+        VideoCore::IsXenoblade2CloudTitle(Settings::GetCurrentProgramID());
     host_info = Shader::HostTranslateInfo{
         .min_ssbo_alignment = device.GetStorageBufferAlignment(),
         .max_per_stage_descriptor_sampled_images = device.GetMaxPerStageDescriptorSampledImages(),
@@ -599,6 +602,10 @@ PipelineCache::PipelineCache(Tegra::MaxwellDeviceMemoryManager& device_memory_,
         .support_conditional_barrier = device.SupportsConditionalBarriers(),
         .single_lane_geometry_subgroups = !profile.SupportsSubgroupStage(Shader::Stage::Geometry),
         .support_byte_addressed_r16 = true,
+        .reconstruct_position_varyings = xc2_cloud_title &&
+            (driver_id == VK_DRIVER_ID_AMD_PROPRIETARY ||
+             driver_id == VK_DRIVER_ID_AMD_OPEN_SOURCE || driver_id == VK_DRIVER_ID_MESA_RADV),
+        .emulate_depth24_reads = xc2_cloud_title && !device.SupportsD24DepthBuffer(),
     };
     host_info.ApplyDescriptorLimitPolicy();
 
@@ -1349,6 +1356,18 @@ std::unique_ptr<GraphicsPipeline> PipelineCache::CreateGraphicsPipeline(
                 return nullptr;
             }
         }
+    }
+    const bool triangle_fill =
+        (key.state.topology == Maxwell::PrimitiveTopology::Triangles ||
+         key.state.topology == Maxwell::PrimitiveTopology::TriangleStrip ||
+         key.state.topology == Maxwell::PrimitiveTopology::TriangleFan) &&
+        FixedPipelineState::UnpackPolygonMode(key.state.polygon_mode) == Maxwell::PolygonMode::Fill;
+    if (host_info.reconstruct_position_varyings &&
+        Settings::values.resolution_info.up_factor == 1.0f && triangle_fill &&
+        key.state.msaa_mode.Value() == Tegra::Texture::MsaaMode::Msaa1x1 &&
+        !layer_source_program && key.unique_hashes[2] == 0 && key.unique_hashes[3] == 0 &&
+        key.unique_hashes[4] == 0 && uses_vertex_b && key.unique_hashes[5] != 0) {
+        Shader::Optimization::PositionVaryingPass(programs[1], programs[5]);
     }
     std::array<const Shader::Info*, Maxwell::MaxShaderStage> infos{};
     std::array<vk::ShaderModule, Maxwell::MaxShaderStage> modules;

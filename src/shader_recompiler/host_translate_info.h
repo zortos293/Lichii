@@ -41,6 +41,8 @@ struct HostTranslateInfo {
                                         ///< control flow
     bool single_lane_geometry_subgroups{};
     bool support_byte_addressed_r16{};
+    bool reconstruct_position_varyings{};
+    bool emulate_depth24_reads{};
 
     void ApplyDescriptorLimitPolicy() noexcept {
         if (min_ssbo_alignment == 0) {

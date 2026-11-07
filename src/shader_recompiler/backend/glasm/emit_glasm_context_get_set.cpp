@@ -1,3 +1,5 @@
+// SPDX-FileCopyrightText: Copyright 2026 Eden Emulator Project
+// SPDX-License-Identifier: GPL-3.0-or-later
 // SPDX-FileCopyrightText: Copyright 2021 yuzu Emulator Project
 // SPDX-License-Identifier: GPL-2.0-or-later
 
@@ -444,6 +446,10 @@ void EmitResolutionDownFactor(EmitContext& ctx, IR::Inst& inst) {
 
 void EmitRenderArea(EmitContext& ctx, IR::Inst& inst) {
     ctx.Add("MOV.F {},render_area[0];", inst);
+}
+
+void EmitHostViewport(EmitContext&, IR::Inst&) {
+    throw NotImplementedException("GLASM instruction");
 }
 
 void EmitLoadLocal(EmitContext& ctx, IR::Inst& inst, ScalarU32 word_offset) {

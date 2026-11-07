@@ -98,6 +98,7 @@ void EmitSR_WScaleFactorZ(EmitContext& ctx, IR::Inst& inst);
 void EmitYDirection(EmitContext& ctx, IR::Inst& inst);
 void EmitResolutionDownFactor(EmitContext& ctx, IR::Inst& inst);
 void EmitRenderArea(EmitContext& ctx, IR::Inst& inst);
+void EmitHostViewport(EmitContext& ctx, IR::Inst& inst);
 void EmitLoadLocal(EmitContext& ctx, IR::Inst& inst, std::string_view word_offset);
 void EmitWriteLocal(EmitContext& ctx, std::string_view word_offset, std::string_view value);
 void EmitUndefU1(EmitContext& ctx, IR::Inst& inst);
@@ -686,6 +687,10 @@ void EmitImageRead(EmitContext& ctx, IR::Inst& inst, const IR::Value& index,
 void EmitImageWrite(EmitContext& ctx, IR::Inst& inst, const IR::Value& index,
                     std::string_view coords, std::string_view color);
 void EmitIsTextureScaled(EmitContext& ctx, IR::Inst& inst, const IR::Value& index);
+void EmitQuantizeDepth24(EmitContext& ctx, IR::Inst& inst, const IR::Value& value,
+                         const IR::Value& enabled);
+void EmitIsTextureDepth24(EmitContext& ctx, IR::Inst& inst, const IR::Value& index);
+void EmitIsTexturePointDepth24(EmitContext& ctx, IR::Inst& inst, const IR::Value& index);
 void EmitIsImageScaled(EmitContext& ctx, IR::Inst& inst, const IR::Value& index);
 void EmitBindlessImageAtomicIAdd32(EmitContext&);
 void EmitBindlessImageAtomicSMin32(EmitContext&);

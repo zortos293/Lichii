@@ -811,6 +811,28 @@ void EmitImageWrite(EmitContext& ctx, IR::Inst* inst, const IR::Value& index, Id
     ctx.OpImageWrite(image, coords, color);
 }
 
+Id EmitQuantizeDepth24(EmitContext& ctx, Id value, Id enabled) {
+    return ctx.OpFunctionCall(ctx.F32[4], ctx.quantize_depth24_function, value, enabled);
+}
+
+Id EmitIsTextureDepth24(EmitContext& ctx, const IR::Value& index) {
+    if (!index.IsImmediate() ||
+        static_cast<u64>(index.U32()) + ctx.texture_rescaling_index >= NUM_TEXTURE_SCALING_WORDS * 32) {
+        return ctx.false_value;
+    }
+    const Id member_index{ctx.Const(ctx.depth24_member_index)};
+    return IsScaled(ctx, index, member_index, ctx.texture_rescaling_index);
+}
+
+Id EmitIsTexturePointDepth24(EmitContext& ctx, const IR::Value& index) {
+    if (!index.IsImmediate() ||
+        static_cast<u64>(index.U32()) + ctx.texture_rescaling_index >= NUM_TEXTURE_SCALING_WORDS * 32) {
+        return ctx.false_value;
+    }
+    const Id member_index{ctx.Const(ctx.depth24_point_member_index)};
+    return IsScaled(ctx, index, member_index, ctx.texture_rescaling_index);
+}
+
 Id EmitIsTextureScaled(EmitContext& ctx, const IR::Value& index) {
     if (ctx.profile.unified_descriptor_binding) {
         const Id member_index{ctx.Const(ctx.rescaling_textures_member_index)};

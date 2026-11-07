@@ -118,6 +118,7 @@ public:
 
     [[nodiscard]] F32 RenderAreaWidth();
     [[nodiscard]] F32 RenderAreaHeight();
+    [[nodiscard]] F32 HostViewport(size_t component);
 
     [[nodiscard]] U32 LaneId();
 
@@ -384,6 +385,9 @@ public:
                                             const Value& value, TextureInstInfo info);
 
     [[nodiscard]] U1 IsTextureScaled(const U32& index);
+    [[nodiscard]] Value QuantizeDepth24(const Value& value, const U1& enabled);
+    [[nodiscard]] U1 IsTextureDepth24(const U32& index);
+    [[nodiscard]] U1 IsTexturePointDepth24(const U32& index);
     [[nodiscard]] U1 IsImageScaled(const U32& index);
 
     [[nodiscard]] U1 VoteAll(const U1& value);

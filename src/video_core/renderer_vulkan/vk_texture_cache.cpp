@@ -27,6 +27,7 @@
 #include "shader_recompiler/exception.h"
 
 #include "video_core/renderer_vulkan/vk_texture_cache.h"
+#include "video_core/textures/depth_aspect.h"
 #include "video_core/nx2.h"
 #include "video_core/render_trace.h"
 #include "video_core/gpu_logging/gpu_logging.h"
@@ -544,16 +545,12 @@ constexpr std::array<VkFormat, 2> OpaqueAstcViewFormats{VK_FORMAT_BC1_RGBA_UNORM
     if (info.IsRenderTarget()) {
         return ImageAspectMask(info.format);
     }
-    bool any_r =
-        std::ranges::any_of(info.Swizzle(), [](SwizzleSource s) { return s == SwizzleSource::R; });
     switch (info.format) {
     case PixelFormat::D24_UNORM_S8_UINT:
     case PixelFormat::D32_FLOAT_S8_UINT:
-        // R = depth, G = stencil
-        return any_r ? VK_IMAGE_ASPECT_DEPTH_BIT : VK_IMAGE_ASPECT_STENCIL_BIT;
     case PixelFormat::S8_UINT_D24_UNORM:
-        // R = stencil, G = depth
-        return any_r ? VK_IMAGE_ASPECT_STENCIL_BIT : VK_IMAGE_ASPECT_DEPTH_BIT;
+        return Tegra::Texture::SamplesStencil(info.format, info.Swizzle())
+                   ? VK_IMAGE_ASPECT_STENCIL_BIT : VK_IMAGE_ASPECT_DEPTH_BIT;
     case PixelFormat::D16_UNORM:
     case PixelFormat::D32_FLOAT:
     case PixelFormat::X8_D24_UNORM:
@@ -4173,6 +4170,9 @@ ImageView::ImageView(TextureCacheRuntime& runtime, const VideoCommon::ImageViewI
     using Shader::TextureType;
 
     const VkImageAspectFlags aspect_mask = ImageViewAspectMask(info);
+    samples_depth24 = aspect_mask == VK_IMAGE_ASPECT_DEPTH_BIT &&
+        (format == PixelFormat::X8_D24_UNORM || format == PixelFormat::D24_UNORM_S8_UINT ||
+         format == PixelFormat::S8_UINT_D24_UNORM);
     std::array<SwizzleSource, 4> swizzle{
         SwizzleSource::R,
         SwizzleSource::G,
@@ -4595,6 +4595,28 @@ VkSampler Sampler::Find(const VariantKey& key) const noexcept {
     return *it->sampler;
 }
 
+VkSamplerCreateInfo Sampler::EffectiveCreateInfo(const VariantKey& key) const noexcept {
+    VkSamplerCreateInfo create_info = base_ci;
+    if (key.force_nearest) {
+        create_info.magFilter = VK_FILTER_NEAREST;
+        create_info.minFilter = VK_FILTER_NEAREST;
+        create_info.mipmapMode = VK_SAMPLER_MIPMAP_MODE_NEAREST;
+        create_info.anisotropyEnable = VK_FALSE;
+        create_info.maxAnisotropy = 1.0f;
+    } else if (key.reduce_anisotropy) {
+        create_info.anisotropyEnable = static_cast<VkBool32>(default_anisotropy > 1.0f);
+        create_info.maxAnisotropy = default_anisotropy;
+    }
+    return create_info;
+}
+
+bool Sampler::SamplesSingleTexel(const ImageView& image_view) const noexcept {
+    const VariantKey key = MakeKey(image_view, false);
+    const auto mode = has_minmax_reduction && !key.drop_reduction
+        ? reduction_mode : VK_SAMPLER_REDUCTION_MODE_WEIGHTED_AVERAGE_EXT;
+    return IsPointDepthSampler(EffectiveCreateInfo(key), mode);
+}
+
 VkSampler Sampler::Emplace(VariantKey key) {
     bool custom_border = has_custom_border_colors && !key.drop_custom_border;
     if (custom_border && !custom_border_color_budget.TryAcquire(*device_ptr, 1)) {
@@ -4642,18 +4664,8 @@ VkSampler Sampler::Emplace(VariantKey key) {
         chain = &reduction_ci;
     }
 
-    VkSamplerCreateInfo create_info = base_ci;
+    VkSamplerCreateInfo create_info = EffectiveCreateInfo(key);
     create_info.pNext = chain;
-    if (key.force_nearest) {
-        create_info.magFilter = VK_FILTER_NEAREST;
-        create_info.minFilter = VK_FILTER_NEAREST;
-        create_info.mipmapMode = VK_SAMPLER_MIPMAP_MODE_NEAREST;
-        create_info.anisotropyEnable = VK_FALSE;
-        create_info.maxAnisotropy = 1.0f;
-    } else if (key.reduce_anisotropy) {
-        create_info.anisotropyEnable = static_cast<VkBool32>(default_anisotropy > 1.0f);
-        create_info.maxAnisotropy = default_anisotropy;
-    }
     if (!custom_border) {
         create_info.borderColor = ConvertBorderColor(color);
     }
