@@ -351,6 +351,7 @@ private slots:
     void OnGameListLoadFile(QString game_path, u64 program_id);
     void OnGameListOpenFolder(u64 program_id, GameListOpenTarget target,
                               const std::string& game_path);
+    void OnGameListImportShaderPack(u64 program_id);
     void OnGameListRemoveInstalledEntry(u64 program_id, QtCommon::Game::InstalledEntryType type);
     void OnGameListRemoveFile(u64 program_id, QtCommon::Game::GameListRemoveTarget target,
                               const std::string& game_path);

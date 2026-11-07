@@ -6,6 +6,7 @@
 #include <fstream>
 #include <string>
 #include <unordered_map>
+#include <vector>
 
 #include <catch2/catch_test_macros.hpp>
 
@@ -320,4 +321,31 @@ TEST_CASE("Cached compute failures retain their cause and the current dispatch a
     CHECK(entry->second.failure.empty());
     CHECK(entry->second.Get(false, 0x2120633c00, other) == nullptr);
     REQUIRE_THROWS_AS(entry->second.Get(true, 0x2120633c00, other), Shader::RuntimeError);
+}
+
+TEST_CASE("Pipeline cache header validation", "[video_core]") {
+    using VideoCommon::PipelineCacheHeaderResult;
+    const auto make = [](const std::array<char, 8>& magic, u32 version) {
+        std::vector<u8> bytes(magic.begin(), magic.end());
+        bytes.resize(bytes.size() + sizeof(version));
+        std::memcpy(bytes.data() + magic.size(), &version, sizeof(version));
+        return bytes;
+    };
+    const u32 current = VideoCommon::VulkanPipelineCacheVersion;
+    CHECK(VideoCommon::ValidatePipelineCacheHeader(make(Magic, current)) ==
+          PipelineCacheHeaderResult::Valid);
+    CHECK(VideoCommon::ValidatePipelineCacheHeader(make(OtherMagic, current)) ==
+          PipelineCacheHeaderResult::Valid);
+    u32 found{};
+    CHECK(VideoCommon::ValidatePipelineCacheHeader(make(Magic, current - 1), &found) ==
+          PipelineCacheHeaderResult::VersionMismatch);
+    CHECK(found == current - 1);
+    CHECK(VideoCommon::ValidatePipelineCacheHeader(make({'n', 'o', 'p', 'e', 'n', 'o', 'p', 'e'},
+                                                        current)) ==
+          PipelineCacheHeaderResult::BadMagic);
+    auto truncated = make(Magic, current);
+    truncated.resize(VideoCommon::PipelineCacheHeaderSize - 1);
+    CHECK(VideoCommon::ValidatePipelineCacheHeader(truncated) ==
+          PipelineCacheHeaderResult::TooSmall);
+    CHECK(VideoCommon::ValidatePipelineCacheHeader({}) == PipelineCacheHeaderResult::TooSmall);
 }

@@ -2,8 +2,10 @@
 #pragma once
 
 #include <array>
+#include <cstring>
 #include <filesystem>
 #include <fstream>
+#include <span>
 #include <string_view>
 #include <system_error>
 
@@ -15,6 +17,40 @@ namespace VideoCommon {
 
 inline constexpr u32 OpenGLPipelineCacheVersion = 48;
 inline constexpr u32 VulkanPipelineCacheVersion = 53;
+
+inline constexpr std::array<char, 8> ShaderPipelineCacheMagic{'y', 'u', 'z', 'u', 'c', 'a', 'c', 'h'};
+inline constexpr std::array<char, 8> VulkanPipelineCacheMagic{'y', 'u', 'z', 'u', 'v', 'k', 'c', 'h'};
+inline constexpr size_t PipelineCacheHeaderSize = 8 + sizeof(u32);
+
+enum class PipelineCacheHeaderResult {
+    Valid,
+    TooSmall,
+    BadMagic,
+    VersionMismatch,
+};
+
+/// Checks the first bytes of a Vulkan pipeline cache file: either of the two magics the Vulkan
+/// backend writes (shader cache "yuzucach", driver cache "yuzuvkch") followed by the current
+/// VulkanPipelineCacheVersion. found_version is set whenever the header is long enough.
+[[nodiscard]] inline PipelineCacheHeaderResult ValidatePipelineCacheHeader(
+    std::span<const u8> header, u32* found_version = nullptr) {
+    if (header.size() < PipelineCacheHeaderSize) {
+        return PipelineCacheHeaderResult::TooSmall;
+    }
+    const auto has_magic = [&](const std::array<char, 8>& magic) {
+        return std::memcmp(header.data(), magic.data(), magic.size()) == 0;
+    };
+    if (!has_magic(ShaderPipelineCacheMagic) && !has_magic(VulkanPipelineCacheMagic)) {
+        return PipelineCacheHeaderResult::BadMagic;
+    }
+    u32 version{};
+    std::memcpy(&version, header.data() + 8, sizeof(version));
+    if (found_version != nullptr) {
+        *found_version = version;
+    }
+    return version == VulkanPipelineCacheVersion ? PipelineCacheHeaderResult::Valid
+                                                 : PipelineCacheHeaderResult::VersionMismatch;
+}
 
 // Official Eglantine (cache version 18 at c0cb3325) and this fork (a different version) both
 // used <shader dir>/<title>/vulkan.bin and vulkan_pipelines.bin. Each build deletes a file

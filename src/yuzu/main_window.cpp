@@ -3,6 +3,12 @@
 
 // Static Qt on macOS doesn't use Vulkan
 // Other platforms do, and thus have conflicting VulkanMemoryAllocator symbols
+#include <algorithm>
+#include <array>
+#include <atomic>
+#include <memory>
+#include <span>
+#include <vector>
 #include "core/launch_params.h"
 #if defined(QT_STATICPLUGIN) && !defined(__APPLE__)
 #undef VMA_IMPLEMENTATION
@@ -75,7 +81,10 @@
 #include <QCheckBox>
 #include <QClipboard>
 #include <QDesktopServices>
+#include <QDateTime>
 #include <QDir>
+#include <QFile>
+#include <QTimer>
 #include <QElapsedTimer>
 #include <QEventLoop>
 #include <QFileDialog>
@@ -172,6 +181,7 @@ static FileSys::VirtualFile VfsDirectoryCreateFileWrapper(const FileSys::Virtual
 
 // Video Core //
 #include "video_core/gpu.h"
+#include "video_core/pipeline_cache_files.h"
 #include "video_core/renderer_base.h"
 #include "video_core/shader_notify.h"
 
@@ -1468,6 +1478,8 @@ void MainWindow::ConnectWidgetEvents() {
     connect(game_list, &GameList::OpenFolderRequested, this, &MainWindow::OnGameListOpenFolder);
     connect(game_list, &GameList::OpenTransferableShaderCacheRequested, this,
             [this](u64 program_id) { QtCommon::Path::OpenShaderCache(program_id, this); });
+    connect(game_list, &GameList::ImportShaderPackRequested, this,
+            &MainWindow::OnGameListImportShaderPack);
     connect(game_list, &GameList::RemoveInstalledEntryRequested, this,
             &MainWindow::OnGameListRemoveInstalledEntry);
     connect(game_list, &GameList::RemoveFileRequested, this, &MainWindow::OnGameListRemoveFile);
@@ -2489,6 +2501,220 @@ void MainWindow::OnGameListLoadFile(QString game_path, u64 program_id) {
     params.program_id = program_id;
 
     BootGame(game_path, params);
+}
+
+void MainWindow::OnGameListImportShaderPack(u64 program_id) {
+    // A booting or closing game still reads and writes the shader cache folder.
+    if (emulation_running || boot_in_progress || close_pending) {
+        QMessageBox::warning(this, tr("Import Shader Pack"),
+                             tr("Stop the running game before importing a shader pack."));
+        return;
+    }
+
+    // Only loose .bin files: no zip reader is linked into the project. Qt reads a filter's
+    // patterns only from the parentheses that end it, so the hint goes in the caption.
+    const QStringList sources = QFileDialog::getOpenFileNames(
+        this, tr("Import Shader Pack (extract a zipped pack first)"), QString{},
+        tr("Pipeline cache files (*.bin);;All files (*)"));
+    if (sources.isEmpty()) {
+        return;
+    }
+
+    struct Entry {
+        QString source;
+        QString name;
+        qint64 size;
+    };
+    std::vector<Entry> entries;
+    for (const QString& source : sources) {
+        QFile file(source);
+        std::array<u8, VideoCommon::PipelineCacheHeaderSize> header{};
+        qint64 got = 0;
+        if (file.open(QIODevice::ReadOnly)) {
+            got = std::max<qint64>(
+                file.read(reinterpret_cast<char*>(header.data()), static_cast<qint64>(header.size())),
+                0);
+        }
+        u32 found_version = 0;
+        const auto result = VideoCommon::ValidatePipelineCacheHeader(
+            std::span<const u8>(header.data(), static_cast<size_t>(got)), &found_version);
+        const QString name = QFileInfo(source).fileName();
+        switch (result) {
+        case VideoCommon::PipelineCacheHeaderResult::Valid:
+            break;
+        case VideoCommon::PipelineCacheHeaderResult::VersionMismatch:
+            QMessageBox::critical(
+                this, tr("Import Shader Pack"),
+                tr("%1 was built for pipeline cache version %2, but this build expects "
+                   "version %3.")
+                    .arg(name)
+                    .arg(found_version)
+                    .arg(VideoCommon::VulkanPipelineCacheVersion));
+            return;
+        default:
+            QMessageBox::critical(
+                this, tr("Import Shader Pack"),
+                tr("%1 is not a Vulkan pipeline cache file (missing or truncated header).")
+                    .arg(name));
+            return;
+        }
+        entries.push_back({source, name, file.size()});
+    }
+
+    const auto folder_path = QtCommon::Path::ShaderCacheFolder(program_id);
+    if (!Common::FS::CreateDirs(folder_path)) {
+        QMessageBox::warning(this, tr("Import Shader Pack"),
+                             tr("Failed to create the pipeline cache folder for this title."));
+        return;
+    }
+    const QString folder = QString::fromStdString(Common::FS::PathToUTF8String(folder_path));
+    const QDir dir(folder);
+
+    QString summary;
+    bool overwrites = false;
+    qint64 total = 0;
+    for (const Entry& entry : entries) {
+        summary += tr("%1 (%2 MiB)").arg(entry.name).arg(entry.size / (1024 * 1024)) +
+                   QLatin1Char('\n');
+        overwrites |= dir.exists(entry.name);
+        total += entry.size;
+    }
+    QString question =
+        tr("Import these files into the pipeline cache of this title?") + QStringLiteral("\n\n") +
+        summary;
+    if (overwrites) {
+        question += QLatin1Char('\n') +
+                    tr("Existing files with the same name are moved to a backup folder next to "
+                       "the cache folder.");
+    }
+    if (QMessageBox::question(this, tr("Import Shader Pack"), question) != QMessageBox::Yes) {
+        return;
+    }
+
+    constexpr qint64 progress_unit = 1024 * 1024;
+    QProgressDialog progress(tr("Importing shader pack..."), tr("Cancel"), 0,
+                             static_cast<int>(std::max<qint64>(total / progress_unit, 1)), this);
+    progress.setWindowModality(Qt::WindowModal);
+    progress.setMinimumDuration(0);
+    progress.setAutoClose(false);
+    progress.setAutoReset(false);
+    progress.setValue(0);
+
+    auto copied = std::make_shared<std::atomic<qint64>>(0);
+    auto cancel = std::make_shared<std::atomic_bool>(false);
+    connect(&progress, &QProgressDialog::canceled, this, [cancel] { cancel->store(true); });
+
+    const QString backup_path = folder + QStringLiteral(".backup-") +
+                                QDateTime::currentDateTime().toString(
+                                    QStringLiteral("yyyyMMdd-HHmmss"));
+    const QString temp_suffix = QStringLiteral(".importing");
+
+    // Returns an empty string on success, "cancelled" when the user cancelled, or an error text.
+    // Files are copied to temp names first, so a failure never leaves a half-written cache.
+    const auto work = [entries, folder, backup_path, temp_suffix, copied, cancel]() -> QString {
+        const QDir out_dir(folder);
+        QStringList temps;
+        const auto cleanup = [&] {
+            for (const QString& temp : temps) {
+                QFile::remove(temp);
+            }
+        };
+        std::vector<char> buffer(4 * 1024 * 1024);
+        for (const Entry& entry : entries) {
+            const QString temp = out_dir.filePath(entry.name + temp_suffix);
+            QFile in(entry.source);
+            QFile out(temp);
+            if (!in.open(QIODevice::ReadOnly) || !out.open(QIODevice::WriteOnly)) {
+                cleanup();
+                return QStringLiteral("Cannot open %1 or its destination.").arg(entry.name);
+            }
+            temps.push_back(temp);
+            while (!in.atEnd()) {
+                if (cancel->load()) {
+                    out.close();
+                    cleanup();
+                    return QStringLiteral("cancelled");
+                }
+                const qint64 read = in.read(buffer.data(), static_cast<qint64>(buffer.size()));
+                if (read < 0 || out.write(buffer.data(), read) != read) {
+                    out.close();
+                    cleanup();
+                    return QStringLiteral("Failed to copy %1 (disk full?).").arg(entry.name);
+                }
+                copied->fetch_add(read);
+            }
+            if (!out.flush()) {
+                out.close();
+                cleanup();
+                return QStringLiteral("Failed to write %1.").arg(entry.name);
+            }
+            out.close();
+        }
+
+        // Past this point nothing is cancellable: move the replaced files to the backup folder,
+        // then rename the finished temp files into place.
+        QStringList moved;
+        const QDir backup_dir(backup_path);
+        const auto rollback = [&] {
+            for (const QString& name : moved) {
+                QFile::remove(out_dir.filePath(name));
+                QFile::rename(backup_dir.filePath(name), out_dir.filePath(name));
+            }
+            cleanup();
+        };
+        for (const Entry& entry : entries) {
+            if (!out_dir.exists(entry.name)) {
+                continue;
+            }
+            if (!QDir().mkpath(backup_path) ||
+                !QFile::rename(out_dir.filePath(entry.name), backup_dir.filePath(entry.name))) {
+                rollback();
+                return QStringLiteral("Failed to back up %1.").arg(entry.name);
+            }
+            moved.push_back(entry.name);
+        }
+        QStringList placed;
+        for (const Entry& entry : entries) {
+            if (!QFile::rename(out_dir.filePath(entry.name + temp_suffix),
+                               out_dir.filePath(entry.name))) {
+                for (const QString& name : placed) {
+                    QFile::remove(out_dir.filePath(name));
+                }
+                rollback();
+                return QStringLiteral("Failed to place %1.").arg(entry.name);
+            }
+            placed.push_back(entry.name);
+        }
+        return {};
+    };
+
+    QFutureWatcher<QString> watcher;
+    QEventLoop loop;
+    connect(&watcher, &QFutureWatcher<QString>::finished, &loop, &QEventLoop::quit);
+    QTimer ticker;
+    connect(&ticker, &QTimer::timeout, this, [&] {
+        progress.setValue(static_cast<int>(copied->load() / progress_unit));
+    });
+    ticker.start(100);
+    watcher.setFuture(QtConcurrent::run(work));
+    loop.exec();
+    ticker.stop();
+    progress.close();
+
+    const QString outcome = watcher.result();
+    if (outcome.isEmpty()) {
+        LOG_INFO(Frontend, "Imported {} shader pack file(s) for program_id={:016x}",
+                 entries.size(), program_id);
+        QMessageBox::information(
+            this, tr("Import Shader Pack"),
+            tr("Imported %n pipeline file(s).", "", static_cast<int>(entries.size())) +
+                QLatin1Char(' ') +
+                tr("To build them at boot, enable pre-compilation by adding "
+                   "EDEN_NX2_PRELOAD_ALL_PIPELINES=1 to nx2_switches.txt."));
+    } else if (outcome != QStringLiteral("cancelled")) {
+        QMessageBox::critical(this, tr("Import Shader Pack"),
+                              tr("Import failed: %1 Nothing was changed.").arg(outcome));
+    }
 }
 
 // TODO(crueter): Common profile selector
