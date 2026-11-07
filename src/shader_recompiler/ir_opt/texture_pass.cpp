@@ -339,16 +339,38 @@ bool IsStorageImageOpcode(IR::Opcode opcode) {
     }
 }
 
+// The size_shift of the descriptor of the handle at cbuf (see TextureDescriptor). The index of an
+// array of handle program results is the element itself.
+u32 DescriptorSizeShift(const ConstBufferAddr& cbuf) {
+    return cbuf.count <= 1              ? DESCRIPTOR_SIZE_SHIFT
+           : cbuf.handle_program != ~0U ? 0U
+                                        : DynamicDescriptorSizeShift(cbuf.dynamic_offset);
+}
+
 u32 DynamicSampledTextureArrayCount(const TextureInstVector& to_replace) {
     // Arrays, not instructions: every instruction reading an array shares its descriptor (a
-    // light loop samples one table of shadow maps from dozens of places).
-    boost::container::small_vector<std::tuple<u32, u32, u32, u32, bool>, 8> arrays;
+    // light loop samples one table of shadow maps from dozens of places). Arrays differ where
+    // their descriptors do (Descriptors::Add) but for the count, which the cap sets: two arrays
+    // differing only in count share a descriptor once both reach it.
+    boost::container::small_vector<
+        std::tuple<u32, u32, u32, bool, u32, u32, u32, u32, u32, u32, bool>, 8>
+        arrays;
     for (const TextureInst& inst : to_replace) {
+        const ConstBufferAddr& cbuf{inst.cbuf};
         const auto flags{inst.inst->Flags<IR::TextureInstInfo>()};
-        if (inst.cbuf.count > 1 && !IsStorageImageOpcode(IndexedInstruction(*inst.inst)) &&
+        if (cbuf.count > 1 && !IsStorageImageOpcode(IndexedInstruction(*inst.inst)) &&
             flags.type != TextureType::Buffer) {
-            const std::tuple array{inst.cbuf.index, inst.cbuf.offset, inst.cbuf.handle_program,
-                                   static_cast<u32>(flags.type.Value()), flags.is_depth != 0};
+            const std::tuple array{cbuf.index,
+                                   cbuf.offset,
+                                   cbuf.shift_left,
+                                   cbuf.has_secondary,
+                                   cbuf.secondary_index,
+                                   cbuf.secondary_offset,
+                                   cbuf.secondary_shift_left,
+                                   DescriptorSizeShift(cbuf),
+                                   cbuf.handle_program,
+                                   static_cast<u32>(flags.type.Value()),
+                                   flags.is_depth != 0};
             if (std::ranges::find(arrays, array) == arrays.end()) {
                 arrays.push_back(array);
             }
@@ -1609,10 +1631,7 @@ void TexturePass(Environment& env, IR::Program& program, const HostTranslateInfo
             break;
         }
         u32 index;
-        // The index of an array of handle program results is the element itself.
-        u32 size_shift = cbuf.count <= 1                ? DESCRIPTOR_SIZE_SHIFT
-                         : cbuf.handle_program != ~0U ? 0U
-                                                       : DynamicDescriptorSizeShift(cbuf.dynamic_offset);
+        const u32 size_shift{DescriptorSizeShift(cbuf)};
         u32 count = cbuf.count;
         switch (inst->GetOpcode()) {
         case IR::Opcode::ImageRead:

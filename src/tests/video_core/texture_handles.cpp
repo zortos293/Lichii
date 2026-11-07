@@ -687,3 +687,33 @@ TEST_CASE("Joined descriptor indices follow the list each instruction reads",
     // A constant buffer index is no storage buffer binding.
     CHECK(cbuf.Arg(0).U32() == 1);
 }
+
+TEST_CASE("Texture arrays that become distinct descriptors share the cap",
+          "[video_core][texture_handles]") {
+    // One table of textures sampled with two samplers: two descriptors, so two arrays, which the
+    // third sample (with the first sampler) doesn't add to.
+    HandleProgram shader;
+    shader.env.cbuf_values = {{{6, 0}, 0x123}, {{2, 0x570}, 0x24000000}, {{2, 0x580}, 0x24000000}};
+    shader.env.expected_handle = 0x24000123;
+    const Value offset{shader.Emit(Opcode::ShiftLeftLogical32, {shader.Storage(0), Value{4U}})};
+    const Value texture{shader.Emit(Opcode::GetCbufU32, {Value{6U}, offset})};
+    std::vector<IR::Inst*> samples;
+    for (const u32 sampler_offset : {0x570U, 0x580U, 0x570U}) {
+        const Value sampler{shader.Emit(Opcode::GetCbufU32, {Value{2U}, Value{sampler_offset}})};
+        samples.push_back(&shader.Sample(shader.Emit(Opcode::BitwiseOr32, {texture, sampler})));
+    }
+    Shader::HostTranslateInfo host;
+    host.ApplyDescriptorLimitPolicy();
+    host.max_per_stage_descriptor_sampled_images = 16;
+    host.max_descriptor_set_sampled_images = 16;
+    Shader::Optimization::TexturePass(shader.env, shader.program, host);
+
+    const auto& descriptors{shader.program.info.texture_descriptors};
+    REQUIRE(descriptors.size() == 2);
+    CHECK(descriptors[0].secondary_cbuf_offset != descriptors[1].secondary_cbuf_offset);
+    for (const auto& descriptor : descriptors) {
+        CHECK(descriptor.count == 8);
+    }
+    CHECK(samples[0]->Flags<IR::TextureInstInfo>().descriptor_index ==
+          samples[2]->Flags<IR::TextureInstInfo>().descriptor_index);
+}
