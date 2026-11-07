@@ -135,6 +135,11 @@ void MeshEpilogue(EmitContext& ctx) {
     for (u32 first = 0; first < mesh.max_vertices; first += threads) {
         const Id vertex{ctx.OpIAdd(ctx.U32[1], invocation, ctx.Const(first))};
         const auto copy = [&] {
+            if (mesh.IsPoints()) {
+                const Id size_pointer{ctx.TypePointer(spv::StorageClass::Output, ctx.F32[1])};
+                ctx.OpStore(ctx.OpAccessChain(size_pointer, ctx.mesh_point_size, vertex),
+                            ctx.Const(1.0f));
+            }
             CopyLines(ctx, vertex, 0, vertex_lines, ctx.mesh_vertex_targets);
             if (convert_depth) {
                 ConvertDepth(ctx, vertex);
@@ -150,6 +155,16 @@ void MeshEpilogue(EmitContext& ctx) {
     for (u32 first = 0; first < mesh.max_primitives; first += threads) {
         const Id primitive{ctx.OpIAdd(ctx.U32[1], invocation, ctx.Const(first))};
         If(ctx, ctx.OpULessThan(ctx.U1, primitive, count), [&] {
+            if (mesh.IsPoints()) {
+                // Vertex index: map byte 4 + primitive.
+                const Id address{ctx.OpIAdd(ctx.U32[1], primitive, ctx.Const(4U))};
+                const Id output_index{ctx.TypePointer(spv::StorageClass::Output, ctx.U32[1])};
+                ctx.OpStore(ctx.OpAccessChain(output_index, ctx.mesh_primitive_indices, primitive),
+                            ctx.OpLoad(ctx.U32[1], SharedWord(ctx, ctx.mesh_map, address)));
+                CopyLines(ctx, primitive, ctx.mesh_primitive_base, primitive_lines,
+                          ctx.mesh_primitive_targets);
+                return;
+            }
             // Vertex indices: map bytes 4 + 3 * primitive.
             const Id byte{ctx.OpIAdd(ctx.U32[1], ctx.OpIMul(ctx.U32[1], primitive, ctx.Const(3U)),
                                      ctx.Const(4U))};
