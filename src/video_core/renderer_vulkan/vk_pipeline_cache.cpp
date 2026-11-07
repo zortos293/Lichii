@@ -850,13 +850,18 @@ void PipelineCache::LoadDiskResources(u64 title_id, std::stop_token stop_loading
     used_pipelines_filename =
         VideoCommon::VersionedPipelineCachePath(base_dir, "vulkan_used", CACHE_VERSION);
     constexpr std::array<char, 8> shader_magic{'y', 'u', 'z', 'u', 'c', 'a', 'c', 'h'};
-    VideoCommon::CopyCompatiblePipelineCache(
-        VideoCommon::VersionedPipelineCachePath(base_dir, "vulkan", 52), pipeline_cache_filename,
-        shader_magic, 52, CACHE_VERSION);
-    std::error_code migration_error;
-    std::filesystem::copy_file(VideoCommon::VersionedPipelineCachePath(base_dir, "vulkan_used", 52),
-                               used_pipelines_filename, std::filesystem::copy_options::none,
-                               migration_error);
+    // Versions 52 and 53 store the same records; only translation output changed since, and it is
+    // rebuilt at load. The newest one present is copied.
+    constexpr std::array<u32, 2> compatible_versions{53, 52};
+    for (const u32 version : compatible_versions) {
+        VideoCommon::CopyCompatiblePipelineCache(
+            VideoCommon::VersionedPipelineCachePath(base_dir, "vulkan", version),
+            pipeline_cache_filename, shader_magic, version, CACHE_VERSION);
+        std::error_code migration_error;
+        std::filesystem::copy_file(
+            VideoCommon::VersionedPipelineCachePath(base_dir, "vulkan_used", version),
+            used_pipelines_filename, std::filesystem::copy_options::none, migration_error);
+    }
     used_pipelines = LoadUsedPipelines(used_pipelines_filename, MaxUsedPipelineAge(device));
     used_pipelines_saved = std::chrono::steady_clock::now();
     size_t skipped_pipelines = 0;
@@ -866,9 +871,11 @@ void PipelineCache::LoadDiskResources(u64 title_id, std::stop_token stop_loading
     if (use_vulkan_pipeline_cache) {
         vulkan_pipeline_cache_filename =
             VideoCommon::VersionedPipelineCachePath(base_dir, "vulkan_pipelines", CACHE_VERSION);
-        VideoCommon::CopyCompatiblePipelineCache(
-            VideoCommon::VersionedPipelineCachePath(base_dir, "vulkan_pipelines", 52),
-            vulkan_pipeline_cache_filename, VULKAN_CACHE_MAGIC_NUMBER, 52, CACHE_VERSION);
+        for (const u32 version : compatible_versions) {
+            VideoCommon::CopyCompatiblePipelineCache(
+                VideoCommon::VersionedPipelineCachePath(base_dir, "vulkan_pipelines", version),
+                vulkan_pipeline_cache_filename, VULKAN_CACHE_MAGIC_NUMBER, version, CACHE_VERSION);
+        }
         vulkan_pipeline_cache =
             LoadVulkanPipelineCache(vulkan_pipeline_cache_filename, CACHE_VERSION);
     }
