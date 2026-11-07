@@ -21,6 +21,12 @@
 
 namespace ConfigurationShared {
 
+/**
+ * Builds the label and tooltip every settings widget shows, keyed by setting id.
+ *
+ * @param parent Object used for translation lookups.
+ * @return The translation map.
+ */
 std::unique_ptr<TranslationMap> InitializeTranslations(QObject* parent) {
     std::unique_ptr<TranslationMap> translations = std::make_unique<TranslationMap>();
     const auto& tr = [](const char* text) -> QString { return QCoreApplication::translate("ConfigurationShared", text); };
@@ -209,6 +215,9 @@ std::unique_ptr<TranslationMap> InitializeTranslations(QObject* parent) {
     INSERT(Settings, skip_cpu_inner_invalidation, tr("Skip CPU Inner Invalidation"),
            tr("Skips certain cache invalidations during memory updates, reducing CPU usage and "
               "improving latency. This may cause soft-crashes."));
+    INSERT(Settings, fps_limit, tr("FPS Limit"),
+           tr("Caps how often the game presents, so the game itself runs at this rate. 0 leaves "
+              "the frame rate to the game and the display."));
     INSERT(Settings, vsync_mode, tr("VSync Mode:"),
            tr("FIFO (VSync) does not drop frames or exhibit tearing but is limited by the screen "
               "refresh rate.\nFIFO Relaxed allows tearing as it recovers from a slow down.\n"

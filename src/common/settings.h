@@ -357,6 +357,18 @@ struct Values {
                                                   true,
                                                   true};
 
+    // Lichii: caps how often the game's own compositor presents, so the game itself is paced to
+    // this rate instead of only the display. 0 keeps the game's vblank and swap interval.
+    SwitchableSetting<u32, true> fps_limit{linkage,
+                                           0,
+                                           0,
+                                           480,
+                                           "fps_limit",
+                                           Category::Renderer,
+                                           Specialization::Countable,
+                                           true,
+                                           true};
+
     SwitchableSetting<ScalingFilter> scaling_filter{linkage,
                                                     ScalingFilter::ScaleForce,
                                                     "scaling_filter",
