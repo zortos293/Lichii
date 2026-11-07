@@ -86,6 +86,14 @@ constexpr std::array DYNAMIC_FPS_RECORDS{
     BuiltinPatchRecord{0x3C46200, DYNAMIC_FPS_ROUTINE, {}, true},
 };
 
+constexpr std::array<u8, 4> TEXTURE_POOL_ORIGINAL{0xE8, 0x27, 0x01, 0xA9};
+constexpr std::array<u8, 4> TEXTURE_POOL_BRANCH{0xD5, 0x6F, 0xC0, 0x14};
+constexpr std::array<u8, 12> TEXTURE_POOL_ROUTINE{0x08, 0x01, 0x08, 0x8B, 0xE8, 0x27, 0x01, 0xA9, 0x2A, 0x90, 0x3F, 0x17};
+constexpr std::array TEXTURE_POOL_RECORDS{
+    BuiltinPatchRecord{0xC2A36C, TEXTURE_POOL_BRANCH, TEXTURE_POOL_ORIGINAL},
+    BuiltinPatchRecord{0x3C462C0, TEXTURE_POOL_ROUTINE, {}, true},
+};
+
 constexpr std::array BUILTIN_PATCHES{
     // Ocarina of Time takes its "dynamic resolution disabled" path, so the 3D renders at full scale
     // instead of following the GPU-time controller down to its 480p floor.
@@ -95,6 +103,17 @@ constexpr std::array BUILTIN_PATCHES{
         .module = "main",
         .build_id = "E0F3CCFAF50065AE4EA01EB5AEB13B1A45DA3348",
         .records = MAX_RESOLUTION_RECORDS,
+    },
+    // Max Resolution keeps the game's full-screen targets at full size, which its dynamic texture
+    // allocator was not sized for: where many local shadow maps are near, an allocation fails and
+    // the game frees what it got back, which corrupts the allocator. Doubling its size (305 MiB)
+    // comes first: this must also hold when Max Resolution comes from a mod.
+    BuiltinPatch{
+        .name = "Texture pool for Max Resolution (built-in)",
+        .title_id = 0x0400486024DEC000,
+        .module = "main",
+        .build_id = "E0F3CCFAF50065AE4EA01EB5AEB13B1A45DA3348",
+        .records = TEXTURE_POOL_RECORDS,
     },
     BuiltinPatch{
         .name = "Dynamic FPS by Dark (built-in)",
