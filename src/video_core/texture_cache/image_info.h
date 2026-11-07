@@ -50,6 +50,8 @@ struct ImageInfo {
     u32 tile_width_spacing = 0;
     bool native_tiling = false;
     bool rescaleable = false;
+    /// Start at the scaled size, with the unscaled image made only if something asks for it.
+    bool scaled_only = false;
     bool downscaleable = false;
     bool forced_flushed = false;
     bool dma_downloaded = false;

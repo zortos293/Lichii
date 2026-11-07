@@ -1,7 +1,9 @@
 // SPDX-FileCopyrightText: Copyright 2026 Eden Emulator Project
 // SPDX-License-Identifier: GPL-3.0-or-later
 #pragma once
+#include <algorithm>
 #include <array>
+#include <bit>
 #include <vector>
 #include "shader_recompiler/frontend/ampere/instruction.h"
 
@@ -101,6 +103,21 @@ inline RegisterPressure PrepareRegisterPressure(const Instruction& input, u32 re
         operand(24);
         operand(32);
         break;
+    case 0x9a8: // ATOMG: result in Rd, data operand at bit 32.
+        operand(16);
+        operand(32);
+        break;
+    case 0xb6c:
+    case 0xf6c: { // TXD: results in Rd/Rd+1 and the second destination, coordinates in Ra, gradients in Rb..Rb+3.
+        const u32 channels = static_cast<u32>(std::popcount(input.Bits(72, 4)));
+        operand(16, (std::min)((std::max)(channels, 1U), 2U));
+        operand(24, input.Bits(61, 3) == 5 ? 3 : 2); // ARRAY_2D also reads the layer
+        operand(32, 4);
+        if (channels > 2) {
+            operand(64, channels - 2);
+        }
+        break;
+    }
     case 0x224:
     case 0x223:
         operand(16);

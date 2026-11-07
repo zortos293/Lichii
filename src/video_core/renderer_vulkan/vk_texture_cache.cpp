@@ -450,10 +450,16 @@ constexpr std::array<VkFormat, 2> OpaqueAstcViewFormats{VK_FORMAT_BC1_RGBA_UNORM
     return image_ci;
 }
 
+/// With `pool` (the runtime), takes a pooled image made with the same create info when there is
+/// one, and writes what this image is made with to `pool_key` and `pool_bytes` so the image can go
+/// back to the pool when it is deleted. Unbacked images are never pooled.
 [[nodiscard]] vk::Image MakeImage(const Device& device, const MemoryAllocator& allocator,
                                   const ImageInfo& info, std::span<const VkFormat> view_formats,
                                   std::optional<VkFormat> format_override = {},
-                                  bool unbacked = false, bool aliased = false) {
+                                  bool unbacked = false, bool aliased = false,
+                                  TextureCacheRuntime* pool = nullptr,
+                                  std::optional<TextureCacheRuntime::PooledImageKey>* pool_key = nullptr,
+                                  u64* pool_bytes = nullptr) {
     if (info.type == ImageType::Buffer) {
         return vk::Image{};
     }
@@ -483,6 +489,32 @@ constexpr std::array<VkFormat, 2> OpaqueAstcViewFormats{VK_FORMAT_BC1_RGBA_UNORM
     }
     if (unbacked) {
         if (vk::Image image = allocator.CreateUnbackedImage(image_ci, aliased)) {
+            return image;
+        }
+    }
+    if (pool != nullptr && pool_key != nullptr) {
+        u64 view_hash = 0xcbf29ce484222325ULL;
+        for (const VkFormat view_format : view_formats) {
+            view_hash = (view_hash ^ static_cast<u64>(view_format)) * 0x100000001b3ULL;
+        }
+        const TextureCacheRuntime::PooledImageKey key{
+            .flags = image_ci.flags,
+            .type = image_ci.imageType,
+            .format = image_ci.format,
+            .width = image_ci.extent.width,
+            .height = image_ci.extent.height,
+            .depth = image_ci.extent.depth,
+            .levels = image_ci.mipLevels,
+            .layers = image_ci.arrayLayers,
+            .samples = image_ci.samples,
+            .usage = image_ci.usage,
+            .view_formats_hash = view_hash,
+        };
+        *pool_key = key;
+        if (pool_bytes != nullptr) {
+            *pool_bytes = VideoCommon::CalculateGuestSizeInBytes(info);
+        }
+        if (vk::Image image = pool->TakePooledImage(key)) {
             return image;
         }
     }
@@ -1048,6 +1080,32 @@ void TryTransformSwizzleIfNeeded(PixelFormat format, std::array<SwizzleSource, 4
     return VK_FORMAT_R32_UINT;
 }
 
+void RecordInitialLayout(Scheduler& scheduler, VkImage image, VkImageAspectFlags aspect_mask) {
+    const VkImageMemoryBarrier barrier{
+        .sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER,
+        .pNext = nullptr,
+        .srcAccessMask = VK_ACCESS_NONE,
+        .dstAccessMask = VK_ACCESS_MEMORY_READ_BIT | VK_ACCESS_MEMORY_WRITE_BIT,
+        .oldLayout = VK_IMAGE_LAYOUT_UNDEFINED,
+        .newLayout = VK_IMAGE_LAYOUT_GENERAL,
+        .srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
+        .dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
+        .image = image,
+        .subresourceRange{
+            .aspectMask = aspect_mask,
+            .baseMipLevel = 0,
+            .levelCount = VK_REMAINING_MIP_LEVELS,
+            .baseArrayLayer = 0,
+            .layerCount = VK_REMAINING_ARRAY_LAYERS,
+        },
+    };
+    scheduler.RequestOutsideRenderPassOperationContext();
+    scheduler.Record([barrier](vk::CommandBuffer cmdbuf) {
+        cmdbuf.PipelineBarrier(vk::PIPELINE_STAGE_GRAPHICS_COMPUTE,
+                               vk::PIPELINE_STAGE_GRAPHICS_COMPUTE, 0, barrier);
+    });
+}
+
 void BlitScale(Scheduler& scheduler, VkImage src_image, VkImage dst_image, const ImageInfo& info,
                VkImageAspectFlags aspect_mask, const Settings::ResolutionScalingInfo& resolution,
                bool up_scaling = true) {
@@ -1400,6 +1458,45 @@ void TextureCacheRuntime::InvalidateResolveShadow(VkImage msaa_image) {
     if (it != resolve_shadows.end()) {
         it->second.up_to_date = false;
     }
+}
+
+vk::Image TextureCacheRuntime::TakePooledImage(const PooledImageKey& key) {
+    // Newest first: the image just parked is the likeliest to be warm in the driver.
+    for (auto it = image_pool.rbegin(); it != image_pool.rend(); ++it) {
+        if (it->key == key) {
+            vk::Image image = std::move(it->image);
+            image_pool_bytes -= it->bytes;
+            image_pool.erase(std::next(it).base());
+            return image;
+        }
+    }
+    return vk::Image{};
+}
+
+void TextureCacheRuntime::DestroyWhenIdle(vk::Image&& image) {
+    images_to_destroy.emplace_back(scheduler.CurrentTick(), std::move(image));
+}
+
+void TextureCacheRuntime::ParkImage(const PooledImageKey& key, vk::Image&& image, u64 bytes) {
+    // Bounded so the pool never holds much device memory the texture cache doesn't count.
+    static constexpr u64 MaxPoolBytes = u64{256} << 20;
+    static constexpr size_t MaxPoolImages = 256;
+    if (bytes > MaxPoolBytes) {
+        vk::Image freed = std::move(image);
+        return;
+    }
+    size_t evicted = 0;
+    u64 evicted_bytes = 0;
+    while (evicted < image_pool.size() &&
+           (image_pool_bytes - evicted_bytes + bytes > MaxPoolBytes ||
+            image_pool.size() - evicted >= MaxPoolImages)) {
+        evicted_bytes += image_pool[evicted].bytes;
+        ++evicted;
+    }
+    image_pool_bytes -= evicted_bytes;
+    image_pool.erase(image_pool.begin(), image_pool.begin() + static_cast<std::ptrdiff_t>(evicted));
+    image_pool_bytes += bytes;
+    image_pool.push_back({key, std::move(image), bytes, image_pool_frame});
 }
 
 void TextureCacheRuntime::EraseResolveShadow(VkImage msaa_image) {
@@ -2840,6 +2937,19 @@ void TextureCacheRuntime::ReleaseMsaaScratchImage(VkImage image) {
 }
 
 void TextureCacheRuntime::TickFrame() {
+    while (!images_to_destroy.empty() && scheduler.IsFree(images_to_destroy.front().first)) {
+        images_to_destroy.pop_front();
+    }
+    // Pooled images nobody took for about 10 s (at 60 fps) are freed for real.
+    static constexpr u64 MaxPooledFrames = 600;
+    ++image_pool_frame;
+    std::erase_if(image_pool, [this](PooledImage& pooled) {
+        if (image_pool_frame - pooled.parked_frame <= MaxPooledFrames) {
+            return false;
+        }
+        image_pool_bytes -= pooled.bytes;
+        return true;
+    });
     while (!pending_byte_addressed_shadows.empty() &&
            scheduler.IsFree(pending_byte_addressed_shadows.front().tick)) {
         pending_byte_addressed_shadows.pop_front();
@@ -2887,7 +2997,8 @@ Image::Image(TextureCacheRuntime& runtime_, const ImageInfo& info_, GPUVAddr gpu
              VAddr cpu_addr_)
     : VideoCommon::ImageBase(info_, gpu_addr_, cpu_addr_), scheduler{&runtime_.scheduler},
       runtime{&runtime_},
-      original_image(MakeImage(runtime_.device, runtime_.memory_allocator,
+      original_pending(info_.scaled_only),
+      original_image(original_pending ? vk::Image{} : MakeImage(runtime_.device, runtime_.memory_allocator,
                                TrimmedHostInfo(runtime_.device, info, host_level_offset),
                                IsHugeAstcArray(runtime_.device, info)
                                    ? std::span<const VkFormat>{HugeAstcViewFormats}
@@ -2899,8 +3010,12 @@ Image::Image(TextureCacheRuntime& runtime_, const ImageInfo& info_, GPUVAddr gpu
                                    UsesSparseTiles(runtime_.device, info, gpu_addr_) ||
                                    IsUnwrittenSparse(runtime_.device, info, gpu_addr_),
                                UsesSparseTiles(runtime_.device, info, gpu_addr_) &&
-                                   SparseTilesModeOf(runtime_.device) == SparseTilesMode::Aliased)),
+                                   SparseTilesModeOf(runtime_.device) == SparseTilesMode::Aliased,
+                               &runtime_, &original_pool_key, &original_pool_bytes)),
       aspect_mask(ImageAspectMask(info.format)) {
+    original_releasable = original_image && !original_image.IsUnbacked() && info.type == ImageType::e2D &&
+                          info.num_samples == 1 && info.resources.levels == 1 && !info.is_sparse &&
+                          host_level_offset == 0 && !IsPixelFormatASTC(info.format) && !IsPixelFormatBCn(info.format);
     if (original_image.IsUnbacked()) {
         flags |= VideoCommon::ImageFlagBits::Unbacked;
         const ImageInfo host_info = TrimmedHostInfo(runtime_.device, info, host_level_offset);
@@ -2955,7 +3070,7 @@ Image::Image(TextureCacheRuntime& runtime_, const ImageInfo& info_, GPUVAddr gpu
         const VkFormat storage_format = VK_FORMAT_A8B8G8R8_UNORM_PACK32;
         for (s32 level = 0; level < host_levels; ++level) {
             storage_image_views[level] =
-                MakeStorageView(device, level, *original_image, storage_format);
+                MakeStorageView(device, level, *OriginalImage(), storage_format);
         }
     }
 }
@@ -2965,10 +3080,20 @@ Image::Image(const VideoCommon::NullImageParams& params) : VideoCommon::ImageBas
 Image::~Image() {
     if (ENABLE_MSAA_RESOLVE_CONSUME && runtime != nullptr) {
         if (original_image) {
-            runtime->EraseResolveShadow(*original_image);
+            runtime->EraseResolveShadow(*OriginalImage());
         }
         if (scaled_image) {
             runtime->EraseResolveShadow(*scaled_image);
+        }
+    }
+    // Deleted images arrive here through the delayed destruction ring: the GPU is done with
+    // them, so the VkImages can serve the next image with the same create info.
+    if (runtime != nullptr) {
+        if (original_pool_key && original_image && !original_image.IsUnbacked()) {
+            runtime->ParkImage(*original_pool_key, std::move(original_image), original_pool_bytes);
+        }
+        if (scaled_pool_key && scaled_image && !scaled_image.IsUnbacked()) {
+            runtime->ParkImage(*scaled_pool_key, std::move(scaled_image), scaled_pool_bytes);
         }
     }
 }
@@ -3100,7 +3225,7 @@ void Image::UploadMemory(VkBuffer buffer, VkDeviceSize offset,
     scheduler->RequestOutsideRenderPassOperationContext();
     auto vk_copies = TransformBufferImageCopies(copies, offset, aspect_mask);
     const VkBuffer src_buffer = buffer;
-    const VkImage vk_image = *original_image;
+    const VkImage vk_image = *OriginalImage();
     const VkImageAspectFlags vk_aspect_mask = aspect_mask;
     const bool was_initialized = std::exchange(initialized, true);
 
@@ -3131,6 +3256,7 @@ void Image::DownloadMemory(VkBuffer buffer, size_t offset,
 
 void Image::DownloadMemory(std::span<VkBuffer> buffers_span, std::span<size_t> offsets_span,
                             std::span<const VideoCommon::BufferImageCopy> copies) {
+    OriginalImage();
     if (!original_image) {
         LOG_CRITICAL(Render_Vulkan, "Missing image at download: gpu={:#x}, cpu={:#x}, type={}, format={}, flags={:#x}, size={}, dimensions={}x{}",
                      gpu_addr, cpu_addr, static_cast<u32>(info.type), static_cast<u32>(info.format),
@@ -3300,7 +3426,7 @@ void Image::DownloadMemory(std::span<VkBuffer> buffers_span, std::span<size_t> o
                 TransformBufferImageCopies(copies, offsets_span[index], aspect_mask));
         }
         scheduler->RequestOutsideRenderPassOperationContext();
-        scheduler->Record([buffers = std::move(buffers_vector), image = *original_image,
+        scheduler->Record([buffers = std::move(buffers_vector), image = *OriginalImage(),
                            aspect_mask_ = aspect_mask, vk_copies](vk::CommandBuffer cmdbuf) {
             const VkImageMemoryBarrier read_barrier{
                 .sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER,
@@ -3388,7 +3514,7 @@ VkImageView Image::StorageImageView(s32 level) noexcept {
 
 bool Image::InitSparseLayers() {
     const Device& device = runtime->device;
-    const VkImage handle = *original_image;
+    const VkImage handle = *OriginalImage();
     const auto requirements = device.GetLogical().GetImageSparseMemoryRequirements(handle);
     const auto it = std::ranges::find_if(requirements, [](const auto& r) {
         return (r.formatProperties.aspectMask & VK_IMAGE_ASPECT_COLOR_BIT) != 0;
@@ -3460,7 +3586,7 @@ bool Image::InitSparseLayers() {
 
 bool Image::InitSparseTiles() {
     const Device& device = runtime->device;
-    const VkImage handle = *original_image;
+    const VkImage handle = *OriginalImage();
     const auto requirements = device.GetLogical().GetImageSparseMemoryRequirements(handle);
     const auto it = std::ranges::find_if(requirements, [](const auto& r) {
         return (r.formatProperties.aspectMask & VK_IMAGE_ASPECT_COLOR_BIT) != 0;
@@ -3569,12 +3695,12 @@ bool Image::BindZeroBlock() {
         });
     }
     const VkSparseImageMemoryBindInfo image_bind_info{
-        .image = *original_image,
+        .image = *OriginalImage(),
         .bindCount = static_cast<u32>(image_binds.size()),
         .pBinds = image_binds.data(),
     };
     const VkSparseImageOpaqueMemoryBindInfo opaque_bind_info{
-        .image = *original_image,
+        .image = *OriginalImage(),
         .bindCount = static_cast<u32>(opaque_binds.size()),
         .pBinds = opaque_binds.data(),
     };
@@ -3615,7 +3741,7 @@ bool Image::BindZeroBlock() {
 
 void Image::ClearTiles() {
     scheduler->RequestOutsideRenderPassOperationContext();
-    const VkImage vk_image = *original_image;
+    const VkImage vk_image = *OriginalImage();
     const bool was_initialized = std::exchange(initialized, true);
     scheduler->Record([vk_image, was_initialized](vk::CommandBuffer cmdbuf) {
         static constexpr VkImageSubresourceRange range{
@@ -3789,12 +3915,12 @@ bool Image::BindTiles(std::span<const VideoCommon::LevelRect> rects) {
         return true;
     }
     const VkSparseImageMemoryBindInfo image_bind_info{
-        .image = *original_image,
+        .image = *OriginalImage(),
         .bindCount = static_cast<u32>(image_binds.size()),
         .pBinds = image_binds.data(),
     };
     const VkSparseImageOpaqueMemoryBindInfo opaque_bind_info{
-        .image = *original_image,
+        .image = *OriginalImage(),
         .bindCount = static_cast<u32>(opaque_binds.size()),
         .pBinds = opaque_binds.data(),
     };
@@ -3948,12 +4074,12 @@ std::vector<u32> Image::BindLayers(std::span<const u32> layers) {
         return bound;
     }
     const VkSparseImageMemoryBindInfo image_bind_info{
-        .image = *original_image,
+        .image = *OriginalImage(),
         .bindCount = static_cast<u32>(image_binds.size()),
         .pBinds = image_binds.data(),
     };
     const VkSparseImageOpaqueMemoryBindInfo opaque_bind_info{
-        .image = *original_image,
+        .image = *OriginalImage(),
         .bindCount = static_cast<u32>(opaque_binds.size()),
         .pBinds = opaque_binds.data(),
     };
@@ -4010,6 +4136,27 @@ bool Image::IsRescaled() const noexcept {
     return True(flags & ImageFlagBits::Rescaled);
 }
 
+vk::Image& Image::OriginalImage() {
+    if (!original_pending) {
+        return original_image;
+    }
+    original_pending = false;
+    original_image = MakeImage(runtime->device, runtime->memory_allocator,
+                               TrimmedHostInfo(runtime->device, info, host_level_offset),
+                               runtime->ViewFormats(info.format), AstcHostFormat(runtime->device, info),
+                               false, false, runtime, &original_pool_key, &original_pool_bytes);
+    RecordInitialLayout(*scheduler, *original_image, aspect_mask != 0 ? aspect_mask : ImageAspectMask(info.format));
+    return original_image;
+}
+
+bool Image::StartScaled() {
+    if (!original_pending || !ScaleUp()) {
+        return false;
+    }
+    initialized = true;
+    return true;
+}
+
 bool Image::ScaleUp(bool ignore) {
     const auto& resolution = runtime->resolution;
     if (!resolution.active) {
@@ -4029,8 +4176,15 @@ bool Image::ScaleUp(bool ignore) {
         scaled_info.size.width = scaled_width;
         scaled_info.size.height = scaled_height;
         scaled_image = MakeImage(runtime->device, runtime->memory_allocator, scaled_info,
-                                 runtime->ViewFormats(info.format));
+                                 runtime->ViewFormats(info.format), {}, false, false, runtime,
+                                 &scaled_pool_key, &scaled_pool_bytes);
         ignore = false;
+        if (original_pending) {
+            // Nothing to scale up: the new image only needs its layout.
+            RecordInitialLayout(*scheduler, *scaled_image, aspect_mask != 0 ? aspect_mask : ImageAspectMask(info.format));
+            current_image = &Image::scaled_image;
+            return true;
+        }
     }
     current_image = &Image::scaled_image;
     if (ignore) {
@@ -4045,12 +4199,21 @@ bool Image::ScaleUp(bool ignore) {
             return false;
         }
     } else {
-        BlitScale(*scheduler, *original_image, *scaled_image, info, aspect_mask, resolution);
+        BlitScale(*scheduler, *OriginalImage(), *scaled_image, info, aspect_mask, resolution);
+    }
+    // From here on the scaled image holds the contents. Whatever needs the unscaled one again
+    // (an upload, a download, going back to 1x) makes it.
+    if (original_releasable && original_image) {
+        runtime->DestroyWhenIdle(std::move(original_image));
+        original_image = vk::Image{};
+        original_pool_key.reset();
+        original_pending = true;
     }
     return true;
 }
 
 bool Image::ScaleDown(bool ignore) {
+    OriginalImage();
     const auto& resolution = runtime->resolution;
     if (!resolution.active) {
         return false;
@@ -4074,7 +4237,7 @@ bool Image::ScaleDown(bool ignore) {
             return false;
         }
     } else {
-        BlitScale(*scheduler, *scaled_image, *original_image, info, aspect_mask, resolution, false);
+        BlitScale(*scheduler, *scaled_image, *OriginalImage(), info, aspect_mask, resolution, false);
     }
     return true;
 }

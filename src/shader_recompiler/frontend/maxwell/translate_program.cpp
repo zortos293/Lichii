@@ -411,7 +411,7 @@ IR::Program TranslateProgram(ObjectPool<IR::Inst>& inst_pool, ObjectPool<IR::Blo
         const u32 threads{program.stage == Stage::Task ? init & 0x3f : (shader_b >> 20) & 0x3f};
         program.workgroup_size = {(std::max)(threads, 1U), 1, 1};
         if (program.stage == Stage::Mesh) {
-            if (program.mesh.topology != 4) {
+            if (program.mesh.topology != 4 && program.mesh.topology != 0) {
                 throw NotImplementedException("Mesh output topology {} (SET_MESH_SHADER_A {:#010x})",
                                               program.mesh.topology, shader_a);
             }
@@ -502,8 +502,13 @@ IR::Program MergeDualVertexPrograms(IR::Program& vertex_a, IR::Program& vertex_b
     result.info.loads.mask |= vertex_b.info.loads.mask;
     result.info.stores.mask |= vertex_b.info.stores.mask;
 
-    Optimization::JoinTextureInfo(result.info, vertex_b.info);
-    Optimization::JoinStorageInfo(result.info, vertex_b.info);
+    // Vertex B's descriptors and storage buffers join Vertex A's, which keep their indices; its
+    // handle programs and the instructions of its blocks read them where they are here.
+    const auto storage_bindings{Optimization::JoinStorageInfo(result.info, vertex_b.info)};
+    const auto descriptors{
+        Optimization::JoinTextureInfo(result.info, vertex_b.info, storage_bindings)};
+    Optimization::RemapTextureDescriptors(vertex_b, descriptors);
+    Optimization::RemapStorageBindings(vertex_b, storage_bindings);
     Optimization::DeadCodeEliminationPass(result);
     if (Settings::values.renderer_debug) {
         Optimization::VerificationPass(result);

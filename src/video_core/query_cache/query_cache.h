@@ -22,6 +22,7 @@
 #include "video_core/engines/maxwell_3d.h"
 #include "video_core/gpu.h"
 #include "video_core/host1x/gpu_device_memory_manager.h"
+#include "video_core/report_filter.h"
 #include "video_core/memory_manager.h"
 #include "video_core/nx2.h"
 #include "video_core/query_cache/bank_base.h"
@@ -264,7 +265,11 @@ void QueryCacheBase<Traits>::CounterReport(GPUVAddr addr, QueryType counter_type
                  cpu_addr_opt.has_value(), static_cast<u32>(requested_type),
                  static_cast<u32>(counter_type), static_cast<u32>(flags), payload, subreport);
     }
+    const bool front_counted = VideoCore::ReportFilter::t_counted;
     if (!cpu_addr_opt) [[unlikely]] {
+        if (front_counted) {
+            VideoCore::ReportFilter::Done(addr);
+        }
         return;
     }
     DAddr cpu_addr = *cpu_addr_opt;
@@ -285,7 +290,24 @@ void QueryCacheBase<Traits>::CounterReport(GPUVAddr addr, QueryType counter_type
     bool is_synced = (Settings::IsGPUFenceBehaviorDefault() ? !Settings::IsGPULevelHigh() : !Settings::IsGPUFenceBehaviorBalanced() && !Settings::IsGPUFenceBehaviorAccurate()) && is_fence;
     std::function<void()> operation([this, is_synced, streamer, query_base = query, query_location,
                                      pointer, pointer_timestamp, cpu_addr, addr,
-                                     asid = gpu_memory->GetID(), counter_type] {
+                                     asid = gpu_memory->GetID(), counter_type, front_counted] {
+        // The report is finished whichever way this operation leaves (after the guest write).
+        struct FilterGuard {
+            GPUVAddr address;
+            bool counted;
+            ~FilterGuard() {
+                if (counted) {
+                    VideoCore::ReportFilter::Done(address);
+                }
+            }
+        } const filter_guard{addr, front_counted};
+        struct Settle {
+            DAddr address;
+            ~Settle() {
+                Tegra::g_nx2_async_reports_completed[Tegra::Nx2AsyncReportSlot(address)].fetch_add(
+                    1, std::memory_order_release);
+            }
+        } const settle{cpu_addr};
         if (True(query_base->flags & QueryFlagBits::IsInvalidated)) {
             if (const u64 trace = QueryTrace::Sample(QueryTrace::Event::Discard)) {
                 LOG_INFO(HW_GPU,
@@ -339,6 +361,8 @@ void QueryCacheBase<Traits>::CounterReport(GPUVAddr addr, QueryType counter_type
         }
     });
     if (is_fence) {
+        Tegra::g_nx2_async_reports_issued[Tegra::Nx2AsyncReportSlot(cpu_addr)].fetch_add(
+            1, std::memory_order_release);
         impl->rasterizer.SignalFence(std::move(operation));
     } else {
         if (!Settings::IsGPULevelHigh() && counter_type == QueryType::Payload) {
@@ -351,6 +375,9 @@ void QueryCacheBase<Traits>::CounterReport(GPUVAddr addr, QueryType counter_type
                 std::memcpy(pointer, &payload, sizeof(payload));
             }
             Tegra::Nx2SemaphoreWaiters::Get().OnWrite(cpu_addr, payload);
+            if (front_counted) {
+                VideoCore::ReportFilter::Done(addr);
+            }
             if (const u64 trace = QueryTrace::Sample(QueryTrace::Event::Write)) {
                 LOG_INFO(HW_GPU,
                          "DKB_QUERY write n={} path=immediate as={} gpu={:#x} device={:#x} type={} "
@@ -362,6 +389,8 @@ void QueryCacheBase<Traits>::CounterReport(GPUVAddr addr, QueryType counter_type
             streamer->Free(new_query_id);
             return;
         }
+        Tegra::g_nx2_async_reports_issued[Tegra::Nx2AsyncReportSlot(cpu_addr)].fetch_add(
+            1, std::memory_order_release);
         impl->rasterizer.SyncOperation(std::move(operation));
     }
     if (is_synced) {
