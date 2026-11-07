@@ -3,6 +3,7 @@
 
 #pragma once
 
+#include <filesystem>
 #include <QDialog>
 #include "common/net/net.h"
 
@@ -21,10 +22,18 @@ public:
     explicit UpdateDialog(const Common::Net::Release& release, QWidget* parent = nullptr);
     ~UpdateDialog();
 
+    // Start `target` again once this process has exited, then close `window`.
+    static void Restart(QWidget* window, const QString& target);
+
 private slots:
     void Download();
 
 private:
+    // Download the asset to `filename`, verified against the published size and SHA-256.
+    bool DownloadTo(const QString& filename);
+    // Replace the running AppImage with the new one, keeping the old one for a rollback.
+    void InstallInPlace(const std::filesystem::path& target);
+
     Ui::UpdateDialog* ui;
     QList<QRadioButton*> m_buttons;
     Common::Net::Asset m_asset;

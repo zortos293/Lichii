@@ -129,6 +129,7 @@ static FileSys::VirtualFile VfsDirectoryCreateFileWrapper(const FileSys::Virtual
 
 #ifdef ENABLE_UPDATE_CHECKER
 #include "frontend_common/update_checker.h"
+#include "frontend_common/update_installer.h"
 #endif
 
 // Common //
@@ -1653,6 +1654,47 @@ void MainWindow::ConnectMenuEvents() {
     connect_menu(ui->action_About, &MainWindow::OnAbout);
     connect_menu(ui->action_Eden_Dependencies, &MainWindow::OnEdenDependencies);
     connect_menu(ui->action_Data_Manager, &MainWindow::OnDataDialog);
+
+#if defined(ENABLE_UPDATE_CHECKER) && defined(__linux__)
+    auto* restore_action = ui->menu_Help->addAction(tr("Restore Previous Version..."));
+    restore_action->setVisible(false);
+    const auto previous_version = [] {
+        const std::filesystem::path target{qEnvironmentVariable("APPIMAGE").toStdString()};
+        std::error_code ec;
+        return !target.empty() && std::filesystem::is_regular_file(
+                                      UpdateInstaller::PreviousPath(target), ec)
+                   ? target
+                   : std::filesystem::path{};
+    };
+    connect(ui->menu_Help, &QMenu::aboutToShow, restore_action,
+            [restore_action, previous_version] {
+                restore_action->setVisible(!previous_version().empty());
+            });
+    connect(restore_action, &QAction::triggered, this, [this, previous_version] {
+        const auto target = previous_version();
+        if (target.empty()) {
+            return;
+        }
+        const auto answer = QtCommon::Frontend::Question(
+            tr("Restore Previous Version"),
+            tr("Swap %1 with the version it replaced? Your settings and data are not changed.")
+                .arg(QString::fromStdString(target.string())),
+            QtCommon::Frontend::Yes | QtCommon::Frontend::No);
+        if (answer != QtCommon::Frontend::Yes) {
+            return;
+        }
+        std::error_code ec;
+        if (!UpdateInstaller::Rollback(target, ec)) {
+            LOG_ERROR(Frontend, "Could not restore the previous version: {}", ec.message());
+            QtCommon::Frontend::Critical(tr("Failed to restore"),
+                                         tr("Could not restore the previous version: %1")
+                                             .arg(QString::fromStdString(ec.message())));
+            return;
+        }
+        LOG_INFO(Frontend, "Restored the previous version of {}", target.string());
+        UpdateDialog::Restart(this, QString::fromStdString(target.string()));
+    });
+#endif
 }
 
 void MainWindow::UpdateMenuState() {

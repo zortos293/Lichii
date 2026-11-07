@@ -1,8 +1,12 @@
 // SPDX-FileCopyrightText: Copyright 2026 Eden Emulator Project
 // SPDX-License-Identifier: GPL-3.0-or-later
 
+#include <filesystem>
+#include <QCoreApplication>
 #include <QCryptographicHash>
 #include <QDir>
+#include <QProcess>
+#include <QProcessEnvironment>
 #include <QPushButton>
 #include <QRadioButton>
 #include <QSaveFile>
@@ -10,6 +14,7 @@
 #include <qdesktopservices.h>
 #include "common/logging.h"
 #include "common/scm_rev.h"
+#include "frontend_common/update_installer.h"
 #include "qt_common/abstract/frontend.h"
 #include "qt_common/abstract/progress.h"
 #include "ui_update_dialog.h"
@@ -89,8 +94,61 @@ UpdateDialog::~UpdateDialog() {
     delete ui;
 }
 
-// TODO: migrate to a net.cpp wrapper
+void UpdateDialog::Restart(QWidget* window, const QString& target) {
+    auto environment = QProcessEnvironment::systemEnvironment();
+    const auto app_dir = environment.value(QStringLiteral("APPDIR"));
+    if (!app_dir.isEmpty()) {
+        for (const auto& key : environment.keys()) {
+            const auto value = environment.value(key);
+            if (!value.contains(app_dir)) {
+                continue;
+            }
+            const auto stripped = UpdateInstaller::StripPathListEntries(value.toStdString(),
+                                                                        app_dir.toStdString());
+            if (stripped.empty()) {
+                environment.remove(key);
+            } else {
+                environment.insert(key, QString::fromStdString(stripped));
+            }
+        }
+    }
+    for (const auto& key : {"APPDIR", "APPIMAGE", "ARGV0", "OWD"}) {
+        environment.remove(QString::fromLatin1(key));
+    }
+
+    // Wait for this process to exit, so the new one reads the settings this one writes on close.
+    QProcess process;
+    process.setProgram(QStringLiteral("/bin/sh"));
+    process.setArguments(
+        {QStringLiteral("-c"),
+         QStringLiteral("i=0; while kill -0 \"$1\" 2>/dev/null && [ \"$i\" -lt 1500 ]; do "
+                        "sleep 0.2; i=$((i+1)); done; kill -0 \"$1\" 2>/dev/null && exit 0; "
+                        "exec \"$2\""),
+         QStringLiteral("sh"), QString::number(QCoreApplication::applicationPid()), target});
+    process.setProcessEnvironment(environment);
+    if (!process.startDetached()) {
+        LOG_ERROR(Frontend, "Could not start the restart helper for {}", target.toStdString());
+        QtCommon::Frontend::Critical(tr("Failed to restart"),
+                                     tr("Please start %1 again yourself.").arg(target));
+        return;
+    }
+    if (window) {
+        QMetaObject::invokeMethod(window, &QWidget::close, Qt::QueuedConnection);
+    }
+}
+
 void UpdateDialog::Download() {
+#ifdef __linux__
+    if (Common::Net::CurrentLinuxPackage() == Common::Net::LinuxPackage::AppImage &&
+        m_asset.filename.ends_with(".AppImage")) {
+        const std::filesystem::path target{qEnvironmentVariable("APPIMAGE").toStdString()};
+        if (UpdateInstaller::CanReplace(target)) {
+            InstallInPlace(target);
+            return;
+        }
+    }
+#endif
+
     // The application folder is read-only inside an AppImage and is the app bundle on macOS.
     auto default_dir = QStandardPaths::writableLocation(QStandardPaths::DownloadLocation);
     if (default_dir.isEmpty()) {
@@ -102,15 +160,57 @@ void UpdateDialog::Download() {
         default_dir % QStringLiteral("/") % QString::fromStdString(m_asset.filename),
         tr("All Files (*.*)"));
 
-    if (filename.isEmpty())
+    if (filename.isEmpty() || !DownloadTo(filename))
         return;
 
+    // Download is complete. User may choose to open in the file manager.
+    auto button =
+        QtCommon::Frontend::Question(tr("Download Complete"),
+                                     tr("Successfully downloaded %1. Would you like to open it?")
+                                         .arg(QString::fromStdString(m_asset.filename)),
+                                     QtCommon::Frontend::Yes | QtCommon::Frontend::No);
+
+    if (button == QtCommon::Frontend::Yes) {
+        QDesktopServices::openUrl(QUrl::fromLocalFile(filename));
+    }
+}
+
+void UpdateDialog::InstallInPlace(const std::filesystem::path& target) {
+    const auto staged = UpdateInstaller::StagedPath(target);
+    if (!DownloadTo(QString::fromStdString(staged.string()))) {
+        return;
+    }
+
+    std::error_code ec;
+    if (!UpdateInstaller::Swap(staged, target, ec)) {
+        LOG_ERROR(Frontend, "Could not replace {}: {}", target.string(), ec.message());
+        std::filesystem::remove(staged, ec);
+        QtCommon::Frontend::Critical(
+            tr("Failed to install the update"),
+            tr("Could not replace %1. Your installation was not changed.")
+                .arg(QString::fromStdString(target.string())));
+        return;
+    }
+
+    LOG_INFO(Frontend, "Installed {} over {}", m_asset.filename, target.string());
+    const auto button = QtCommon::Frontend::Question(
+        tr("Update Installed"),
+        tr("The new version is installed. The previous version is kept as %1.\n\nRestart now?")
+            .arg(QString::fromStdString(UpdateInstaller::PreviousPath(target).string())),
+        QtCommon::Frontend::Yes | QtCommon::Frontend::No);
+    if (button == QtCommon::Frontend::Yes) {
+        Restart(parentWidget(), QString::fromStdString(target.string()));
+    }
+}
+
+// TODO: migrate to a net.cpp wrapper
+bool UpdateDialog::DownloadTo(const QString& filename) {
     QSaveFile file(filename);
     if (!file.open(QIODevice::Truncate | QIODevice::WriteOnly)) {
         LOG_WARNING(Frontend, "Could not open file {}", filename.toStdString());
         QtCommon::Frontend::Critical(tr("Failed to save file"),
                                      tr("Could not open file %1 for writing.").arg(filename));
-        return;
+        return false;
     }
 
     // TODO(crueter): Move to net.cpp
@@ -128,7 +228,7 @@ void UpdateDialog::Download() {
 
     if (client == nullptr) {
         LOG_ERROR(Frontend, "Invalid URL {}{}", m_asset.url, m_asset.path);
-        return;
+        return false;
     }
 
     auto progress =
@@ -171,7 +271,7 @@ void UpdateDialog::Download() {
 
     if (!result) {
         LOG_ERROR(Frontend, "GET to {}{} returned null", m_asset.url, m_asset.path);
-        return;
+        return false;
     }
 
     const auto& response = result.value();
@@ -183,11 +283,11 @@ void UpdateDialog::Download() {
                                          .arg(QString::fromStdString(m_asset.url),
                                               QString::fromStdString(m_asset.path),
                                               QString::number(response.status)));
-        return;
+        return false;
     }
     if (!response.has_header("content-type")) {
         LOG_ERROR(Frontend, "GET to {}{} returned no content", m_asset.url, m_asset.path);
-        return;
+        return false;
     }
 
     const bool wrong_size = m_asset.size != 0 && received != m_asset.size;
@@ -202,24 +302,15 @@ void UpdateDialog::Download() {
             tr("Download failed verification"),
             tr("The downloaded file does not match the checksum GitHub published for it, so it "
                "was discarded. Try again later."));
-        return;
+        return false;
     }
 
     if (!file.commit()) {
         LOG_WARNING(Frontend, "Could not commit to file {}", filename.toStdString());
         QtCommon::Frontend::Critical(tr("Failed to save file"),
                                      tr("Could not commit to file %1.").arg(filename));
-        return;
+        return false;
     }
 
-    // Download is complete. User may choose to open in the file manager.
-    auto button =
-        QtCommon::Frontend::Question(tr("Download Complete"),
-                                     tr("Successfully downloaded %1. Would you like to open it?")
-                                         .arg(QString::fromStdString(m_asset.filename)),
-                                     QtCommon::Frontend::Yes | QtCommon::Frontend::No);
-
-    if (button == QtCommon::Frontend::Yes) {
-        QDesktopServices::openUrl(QUrl::fromLocalFile(filename));
-    }
+    return true;
 }
