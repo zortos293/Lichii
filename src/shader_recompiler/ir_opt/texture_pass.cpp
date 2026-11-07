@@ -347,7 +347,13 @@ u32 DescriptorSizeShift(const ConstBufferAddr& cbuf) {
                                         : DynamicDescriptorSizeShift(cbuf.dynamic_offset);
 }
 
-u32 DynamicSampledTextureArrayCount(const TextureInstVector& to_replace) {
+TextureType ResolvedTextureType(Environment& env, const TextureInst& texture_inst,
+                                IR::Opcode opcode,
+                                const std::unordered_map<u32, TextureType>& handle_program_types);
+
+u32 DynamicSampledTextureArrayCount(
+    Environment& env, const TextureInstVector& to_replace,
+    const std::unordered_map<u32, TextureType>& handle_program_types) {
     // Arrays, not instructions: every instruction reading an array shares its descriptor (a
     // light loop samples one table of shadow maps from dozens of places). Arrays differ where
     // their descriptors do (Descriptors::Add) but for the count, which the cap sets: two arrays
@@ -357,9 +363,14 @@ u32 DynamicSampledTextureArrayCount(const TextureInstVector& to_replace) {
         arrays;
     for (const TextureInst& inst : to_replace) {
         const ConstBufferAddr& cbuf{inst.cbuf};
-        const auto flags{inst.inst->Flags<IR::TextureInstInfo>()};
-        if (cbuf.count > 1 && !IsStorageImageOpcode(IndexedInstruction(*inst.inst)) &&
-            flags.type != TextureType::Buffer) {
+        const IR::Opcode opcode{IndexedInstruction(*inst.inst)};
+        if (cbuf.count <= 1 || IsStorageImageOpcode(opcode)) {
+            continue;
+        }
+        // The type the replace loop gives the instruction: a size query carries none until then.
+        auto flags{inst.inst->Flags<IR::TextureInstInfo>()};
+        flags.type.Assign(ResolvedTextureType(env, inst, opcode, handle_program_types));
+        if (flags.type != TextureType::Buffer) {
             const std::tuple array{cbuf.index,
                                    cbuf.offset,
                                    cbuf.shift_left,
@@ -1516,6 +1527,36 @@ void PatchTexelFetch(IR::Block& block, IR::Inst& inst, TexturePixelFormat pixel_
                               ir.FPMul(ir.ConvertSToF(32, 32, ir.BitCast<IR::U32>(w)), max_value));
     inst.ReplaceUsesWith(converted);
 }
+
+// The type TexturePass gives the texture an instruction reads, opcode being its indexed one. A
+// size query carries none: it takes that of another instruction with the same handle program, or
+// the one its handle reads as.
+TextureType ResolvedTextureType(Environment& env, const TextureInst& texture_inst,
+                                IR::Opcode opcode,
+                                const std::unordered_map<u32, TextureType>& handle_program_types) {
+    const ConstBufferAddr& cbuf{texture_inst.cbuf};
+    const TextureType type{texture_inst.inst->Flags<IR::TextureInstInfo>().type.Value()};
+    switch (opcode) {
+    case IR::Opcode::ImageQueryDimensions:
+        if (const auto it{handle_program_types.find(cbuf.handle_program)};
+            it != handle_program_types.end()) {
+            return it->second;
+        }
+        return ReadTextureTypeCached(env, cbuf);
+    case IR::Opcode::ImageFetch:
+        // Replace with the bound texture type only when it's a texture buffer
+        // If the instruction is 1D and the bound type is 2D, don't change the code and let
+        // the rasterizer robustness handle it
+        // This happens on Fire Emblem: Three Houses
+        if (type == TextureType::Color1D &&
+            ReadTextureTypeCached(env, cbuf) == TextureType::Buffer) {
+            return TextureType::Buffer;
+        }
+        return type;
+    default:
+        return type;
+    }
+}
 } // Anonymous namespace
 
 void TexturePass(Environment& env, IR::Program& program, const HostTranslateInfo& host_info) {
@@ -1551,7 +1592,6 @@ void TexturePass(Environment& env, IR::Program& program, const HostTranslateInfo
         program.info.texture_descriptors,
         program.info.image_descriptors,
     };
-    const u32 sampled_dynamic_cap = DynamicSampledTextureCap(program.info, host_info, DynamicSampledTextureArrayCount(to_replace));
     bool has_last_is_integer{false};
     u32 last_cbuf_index{};
     u32 last_cbuf_offset{};
@@ -1583,6 +1623,9 @@ void TexturePass(Environment& env, IR::Program& program, const HostTranslateInfo
                 texture_inst.inst->Flags<IR::TextureInstInfo>().type.Value());
         }
     }
+    const u32 sampled_dynamic_cap = DynamicSampledTextureCap(
+        program.info, host_info,
+        DynamicSampledTextureArrayCount(env, to_replace, handle_program_types));
     for (TextureInst& texture_inst : to_replace) {
         // TODO: Handle arrays
         IR::Inst* const inst{texture_inst.inst};
@@ -1594,12 +1637,8 @@ void TexturePass(Environment& env, IR::Program& program, const HostTranslateInfo
         bool is_rect_sample{false};
         switch (inst->GetOpcode()) {
         case IR::Opcode::ImageQueryDimensions:
-            if (const auto it{handle_program_types.find(cbuf.handle_program)};
-                it != handle_program_types.end()) {
-                flags.type.Assign(it->second);
-            } else {
-                flags.type.Assign(ReadTextureTypeCached(env, cbuf));
-            }
+            flags.type.Assign(
+                ResolvedTextureType(env, texture_inst, inst->GetOpcode(), handle_program_types));
             inst->SetFlags(flags);
             break;
         case IR::Opcode::ImageSampleImplicitLod:
@@ -1616,16 +1655,8 @@ void TexturePass(Environment& env, IR::Program& program, const HostTranslateInfo
             } else {
                 inst->SetArg(4, IR::U32{});
             }
-            if (flags.type != TextureType::Color1D) {
-                break;
-            }
-            if (ReadTextureTypeCached(env, cbuf) == TextureType::Buffer) {
-                // Replace with the bound texture type only when it's a texture buffer
-                // If the instruction is 1D and the bound type is 2D, don't change the code and let
-                // the rasterizer robustness handle it
-                // This happens on Fire Emblem: Three Houses
-                flags.type.Assign(TextureType::Buffer);
-            }
+            flags.type.Assign(
+                ResolvedTextureType(env, texture_inst, inst->GetOpcode(), handle_program_types));
             break;
         default:
             break;

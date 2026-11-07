@@ -717,3 +717,36 @@ TEST_CASE("Texture arrays that become distinct descriptors share the cap",
     CHECK(samples[0]->Flags<IR::TextureInstInfo>().descriptor_index ==
           samples[2]->Flags<IR::TextureInstInfo>().descriptor_index);
 }
+
+TEST_CASE("A size query of a table shares the texture array of its sample",
+          "[video_core][texture_handles]") {
+    // The size query carries no type until the pass gives it the sample's: one descriptor, so one
+    // array, which takes the whole budget. A 3D sample of the table adds a second array.
+    for (const bool volume : {false, true}) {
+        CAPTURE(volume);
+        HandleProgram shader;
+        const LightTable table{shader};
+        auto& sample{shader.Sample(table.handle)};
+        IR::IREmitter ir{*shader.insertion_block};
+        auto& query{*ir.ImageQueryDimension(table.handle, ir.Imm32(0), ir.Imm1(true)).Inst()};
+        if (volume) {
+            shader.Sample(table.handle, Shader::TextureType::Color3D);
+        }
+        Shader::HostTranslateInfo host;
+        host.support_handle_table_arrays = true;
+        host.ApplyDescriptorLimitPolicy();
+        host.max_per_stage_descriptor_sampled_images = 16;
+        host.max_descriptor_set_sampled_images = 16;
+        Shader::Optimization::TexturePass(shader.env, shader.program, host);
+
+        const auto& descriptors{shader.program.info.texture_descriptors};
+        REQUIRE(descriptors.size() == (volume ? 2U : 1U));
+        for (const auto& descriptor : descriptors) {
+            CHECK(descriptor.count == (volume ? 8U : 16U));
+        }
+        if (!volume) {
+            CHECK(query.Flags<IR::TextureInstInfo>().descriptor_index ==
+                  sample.Flags<IR::TextureInstInfo>().descriptor_index);
+        }
+    }
+}
