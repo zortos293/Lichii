@@ -641,8 +641,14 @@ Device::Device(VkInstance instance_, vk::PhysicalDevice physical_, VkSurfaceKHR 
             has_broken_cube_compatibility = true;
         }
 
-        // AMD drivers (2026+) have broken float16 math on DKCR
-        if (features.shader_float16_int8.shaderFloat16) {
+        // AMD drivers (2026+) have broken float16 math on DKCR. EDEN_AMD_FP16=1 keeps it for
+        // comparison runs: RDNA runs packed float16 at twice the float32 rate.
+        const char* const amd_fp16 = std::getenv("EDEN_AMD_FP16");
+        const bool keep_amd_fp16 = amd_fp16 != nullptr && amd_fp16[0] == '1';
+        if (features.shader_float16_int8.shaderFloat16 && keep_amd_fp16) {
+            LOG_WARNING(Render_Vulkan,
+                        "EDEN_AMD_FP16=1: keeping float16 on the AMD driver (experimental)");
+        } else if (features.shader_float16_int8.shaderFloat16) {
             LOG_WARNING(Render_Vulkan,
                         "AMD drivers (2026+) have broken float16 math");
             features.shader_float16_int8.shaderFloat16 = false;
