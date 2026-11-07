@@ -4,6 +4,7 @@
 // SPDX-FileCopyrightText: Copyright 2019 yuzu Emulator Project
 // SPDX-License-Identifier: GPL-2.0-or-later
 
+#include <array>
 #include <chrono>
 #include <thread>
 
@@ -18,6 +19,7 @@
 #include "video_core/dma_pusher.h"
 #include "video_core/gpu.h"
 #include "video_core/gpu_thread.h"
+#include "video_core/nx2.h"
 #include "video_core/gpu_split.h"
 #include "video_core/nx2_profile.h"
 #include "video_core/host1x/host1x.h"
@@ -37,6 +39,42 @@ void SignalCommand(SynchState& state, u64 fence, bool block) {
         state.cv.notify_all();
     }
 }
+
+// EDEN_NX2_MME_DMA_STATS: where the GPU thread's time goes while channels are suspended.
+struct ThreadStats {
+    enum Kind : size_t { PendingEmpty, Idle, Count };
+    std::array<u64, Count> ns{};
+    std::chrono::steady_clock::time_point last_log{std::chrono::steady_clock::now()};
+
+    struct Timer {
+        Timer(ThreadStats* stats_, Kind kind_)
+            : stats{stats_}, kind{kind_}, start{std::chrono::steady_clock::now()} {}
+        ~Timer() {
+            if (stats) {
+                stats->ns[kind] += static_cast<u64>(
+                    std::chrono::duration_cast<std::chrono::nanoseconds>(
+                        std::chrono::steady_clock::now() - start)
+                        .count());
+            }
+        }
+        ThreadStats* stats;
+        Kind kind;
+        std::chrono::steady_clock::time_point start;
+    };
+
+    void MaybeLog(bool pending) {
+        const auto now = std::chrono::steady_clock::now();
+        if (now - last_log < std::chrono::seconds{5}) {
+            return;
+        }
+        last_log = now;
+        LOG_INFO(HW_GPU,
+                 "GPU thread (5 s): {} ms waiting for commands with channels suspended, {} ms "
+                 "idle with none suspended (suspended now: {})",
+                 ns[PendingEmpty] / 1000000, ns[Idle] / 1000000, pending);
+        ns = {};
+    }
+};
 
 } // Anonymous namespace
 
@@ -64,11 +102,17 @@ void ThreadManager::StartThread(VideoCore::RendererBase& renderer, Core::Fronten
         auto last_progress = std::chrono::steady_clock::now();
         namespace Profile = VideoCommon::Nx2Profile;
         auto& split = VideoCommon::GpuSplit::Get();
+        ThreadStats* const thread_stats =
+            std::getenv("EDEN_NX2_MME_DMA_STATS") != nullptr ? new ThreadStats{} : nullptr;
         while (!stop_token.stop_requested()) {
+            if (thread_stats) {
+                thread_stats->MaybeLog(scheduler.HasPendingChannels());
+            }
             Profile::Report();
             split.MaybeStart(system);
             if (scheduler.HasPendingChannels()) {
                 // Suspended channels wait on semaphores the CPU releases: poll them meanwhile.
+                const u64 seen_latch = Tegra::Nx2SemaphoreWaiters::Get().LatchEpoch();
                 {
                     Profile::Scope scope{Profile::Zone::ResumePending};
                     scheduler.ResumePending(system.GPU());
@@ -78,16 +122,21 @@ void ThreadManager::StartThread(VideoCore::RendererBase& renderer, Core::Fronten
                     // millisecond before sleeping, or every wait also waits out a host sleep
                     // (title 1 waits ~25 times a second).
                     Profile::Scope scope{Profile::Zone::PendingSleep};
+                    const ThreadStats::Timer timer{thread_stats, ThreadStats::PendingEmpty};
                     if (std::chrono::steady_clock::now() - last_progress <
                         std::chrono::microseconds{500}) {
                         std::this_thread::yield();
                     } else {
-                        std::this_thread::sleep_for(std::chrono::milliseconds{1});
+                        // A GPU release that meets a suspended acquire wakes this at once;
+                        // CPU releases are still found by polling.
+                        Tegra::Nx2SemaphoreWaiters::Get().WaitForLatch(
+                            seen_latch, std::chrono::milliseconds{1});
                     }
                     continue;
                 }
             } else {
                 Profile::Scope scope{Profile::Zone::Idle};
+                const ThreadStats::Timer timer{thread_stats, ThreadStats::Idle};
                 state.queue.PopWait(next, stop_token);
             }
             if (stop_token.stop_requested()) {

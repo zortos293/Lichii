@@ -6,6 +6,8 @@
 #include <algorithm>
 #include <array>
 #include <atomic>
+#include <chrono>
+#include <condition_variable>
 #include <functional>
 #include <map>
 #include <mutex>
@@ -19,6 +21,10 @@ namespace Tegra {
 // Set once a Switch 2 (Ampere, NVN2) driver is talking to the GPU. Its command streams use
 // Ampere classes and the Turing+ macro ISA, which Eden's Maxwell engines don't implement.
 inline std::atomic<bool> g_nx2_ampere{false};
+
+// Set once a draw wrote a storage or texture buffer: from then on the split's front counts
+// draws as memory writers at the next wait for idle (macro DMA reads of what draws wrote).
+inline std::atomic<bool> g_nx2_draws_write_memory{false};
 
 // Device pages the GPU has written through the buffer cache (shader stores, copies), ever. Title 1
 // runs command lists the GPU writes each frame (20-byte entries its culling fills in); read
@@ -71,6 +77,32 @@ inline void Nx2MarkCommandListPage(u64 device_address) {
     return (g_nx2_command_list_pages[page / 64].load(std::memory_order_relaxed) >> (page % 64)) & 1;
 }
 
+// Reports the query cache holds until their host results are written (Lichii #243): per
+// 16-byte slot hash, how many the back registered and how many it wrote out. Equal counts mean
+// the words in memory are final, so the split front's MME DMA reads of them need no flush.
+inline constexpr u64 Nx2PendingReportSlots = u64{1} << 16;
+inline std::array<std::atomic<u32>, Nx2PendingReportSlots> g_nx2_reports_issued{};
+inline std::array<std::atomic<u32>, Nx2PendingReportSlots> g_nx2_reports_written{};
+
+[[nodiscard]] inline u64 Nx2PendingReportSlot(u64 device_address) {
+    return (device_address >> 4) % Nx2PendingReportSlots;
+}
+
+[[nodiscard]] inline bool Nx2ReportsPending(u64 device_address, u64 size) {
+    if (size == 0) {
+        return false;
+    }
+    const u64 last = (device_address + size - 1) >> 4;
+    for (u64 slot = device_address >> 4; slot <= last; ++slot) {
+        const u64 index = slot % Nx2PendingReportSlots;
+        if (g_nx2_reports_written[index].load(std::memory_order_acquire) !=
+            g_nx2_reports_issued[index].load(std::memory_order_acquire)) {
+            return true;
+        }
+    }
+    return false;
+}
+
 /// A new emulation session starts: no page has been written by its GPU yet.
 inline void Nx2ClearGpuWrittenPages() {
     for (auto& word : g_nx2_gpu_written_pages) {
@@ -78,6 +110,12 @@ inline void Nx2ClearGpuWrittenPages() {
     }
     for (auto& word : g_nx2_command_list_pages) {
         word.store(0, std::memory_order_relaxed);
+    }
+    for (auto& count : g_nx2_reports_issued) {
+        count.store(0, std::memory_order_relaxed);
+    }
+    for (auto& count : g_nx2_reports_written) {
+        count.store(0, std::memory_order_relaxed);
     }
     g_nx2_has_command_list_pages.store(false, std::memory_order_relaxed);
 }
@@ -391,12 +429,33 @@ public:
         if (count.load(std::memory_order_acquire) == 0) {
             return;
         }
-        std::scoped_lock lk{mutex};
-        for (auto& w : waiters) {
-            if (w.address == device_address && !w.latched && Matches(w, value)) {
-                w.latched = true;
+        bool latched = false;
+        {
+            std::scoped_lock lk{mutex};
+            for (auto& w : waiters) {
+                if (w.address == device_address && !w.latched && Matches(w, value)) {
+                    w.latched = true;
+                    latched = true;
+                }
+            }
+            if (latched) {
+                ++latch_epoch;
             }
         }
+        if (latched) {
+            latch_cv.notify_all();
+        }
+    }
+
+    [[nodiscard]] u64 LatchEpoch() {
+        std::scoped_lock lk{mutex};
+        return latch_epoch;
+    }
+
+    /// Sleeps until a waiter latches after `seen` (LatchEpoch) or `timeout` passes.
+    void WaitForLatch(u64 seen, std::chrono::microseconds timeout) {
+        std::unique_lock lk{mutex};
+        latch_cv.wait_for(lk, timeout, [&] { return latch_epoch != seen; });
     }
 
 private:
@@ -422,6 +481,8 @@ private:
     }
 
     std::mutex mutex;
+    std::condition_variable latch_cv;
+    u64 latch_epoch{};
     std::vector<Waiter> waiters;
     std::atomic<size_t> count{};
 };
