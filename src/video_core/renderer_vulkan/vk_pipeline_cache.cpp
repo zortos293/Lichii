@@ -578,6 +578,7 @@ PipelineCache::PipelineCache(Tegra::MaxwellDeviceMemoryManager& device_memory_,
         .min_ssbo_alignment = device.GetStorageBufferAlignment(),
         .max_per_stage_descriptor_sampled_images = device.GetMaxPerStageDescriptorSampledImages(),
         .max_per_stage_resources = device.GetMaxPerStageResources(),
+        .max_per_stage_descriptor_samplers = device.GetMaxPerStageDescriptorSamplers(),
         .max_descriptor_set_samplers = device.GetMaxDescriptorSetSamplers(),
         .max_descriptor_set_uniform_buffers = device.GetMaxDescriptorSetUniformBuffers(),
         .max_descriptor_set_uniform_buffers_dynamic = device.GetMaxDescriptorSetUniformBuffersDynamic(),
@@ -599,8 +600,22 @@ PipelineCache::PipelineCache(Tegra::MaxwellDeviceMemoryManager& device_memory_,
         .support_conditional_barrier = device.SupportsConditionalBarriers(),
         .single_lane_geometry_subgroups = !profile.SupportsSubgroupStage(Shader::Stage::Geometry),
         .support_byte_addressed_r16 = true,
+        // The arrays are indexed per invocation, which needs nonuniform indexing to be defined.
+        .support_handle_table_arrays = device.IsSampledImageArrayNonUniformIndexingSupported(),
     };
     host_info.ApplyDescriptorLimitPolicy();
+
+    {
+        // The descriptor arrays of bindless handle tables (HandleTableSize in texture_pass.cpp).
+        const char* const table = std::getenv("LICHII_BINDLESS_TABLE");
+        LOG_INFO(Render_Vulkan,
+                 "Bindless handle tables: LICHII_BINDLESS_TABLE {}, sampled image arrays "
+                 "indexed per invocation {}, up to {} sampled images per stage",
+                 table != nullptr && table[0] != '\0' ? table : "default (64)",
+                 device.IsSampledImageArrayNonUniformIndexingSupported() ? "supported"
+                                                                         : "unsupported",
+                 device.GetMaxPerStageDescriptorSampledImages());
+    }
 
     if (device.GetMaxVertexInputAttributes() < Maxwell::NumVertexAttributes) {
         LOG_WARNING(Render_Vulkan, "maxVertexInputAttributes is too low: {} < {}",
@@ -1291,6 +1306,9 @@ std::unique_ptr<GraphicsPipeline> PipelineCache::CreateGraphicsPipeline(
             auto& program_va{programs[0]};
             auto program_vb{TranslateProgram(pools.inst, pools.block, env, cfg, host_info)};
             programs[index] = MergeDualVertexPrograms(program_va, program_vb, env);
+            // Each half fit its texture arrays to the stage limits on its own; joined, they are
+            // one stage.
+            Shader::Optimization::LimitSampledTextureArrays(programs[index], host_info);
         }
 
         if (device.GetDriverID() != VK_DRIVER_ID_NVIDIA_PROPRIETARY && Shader::Optimization::HasBrokenPattern(programs[index])) {
@@ -1341,6 +1359,21 @@ std::unique_ptr<GraphicsPipeline> PipelineCache::CreateGraphicsPipeline(
                 return nullptr;
             }
         }
+    }
+    {
+        // The descriptor set limits count the textures of every stage the pipeline emits.
+        std::array<Shader::IR::Program*, Maxwell::MaxShaderProgram> stages{};
+        size_t num_stages{};
+        for (size_t index = uses_vertex_a && uses_vertex_b ? 1 : 0;
+             index < Maxwell::MaxShaderProgram; ++index) {
+            const bool is_emulated_stage = layer_source_program != nullptr &&
+                                           index == static_cast<u32>(Maxwell::ShaderType::Geometry);
+            if (key.unique_hashes[index] != 0 || is_emulated_stage) {
+                stages[num_stages++] = &programs[index];
+            }
+        }
+        Shader::Optimization::LimitPipelineSampledTextureArrays(
+            std::span{stages.data(), num_stages}, host_info);
     }
     std::array<const Shader::Info*, Maxwell::MaxShaderStage> infos{};
     std::array<vk::ShaderModule, Maxwell::MaxShaderStage> modules;
