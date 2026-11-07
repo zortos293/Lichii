@@ -131,6 +131,41 @@ TextureCache<P>::TextureCache(Runtime& runtime_, Tegra::MaxwellDeviceMemoryManag
 }
 
 template <class P>
+void TextureCache<P>::DeleteDeadOverlaps() {
+    // A game that moves its render targets within a memory pool leaves the old images behind: on
+    // the real GPU their memory simply belongs to the new targets. Ocarina of Time does this every
+    // frame while the camera moves (its local shadow maps change size, which shifts what follows
+    // them), about 45 images a frame at a new address, far more than the collector removes. Images
+    // used in turn every frame are not touched: both stay recent.
+    static constexpr u64 MinFramesUnused = 2;
+    if (frame_tick <= MinFramesUnused) {
+        return;
+    }
+    dead_overlap_ids.clear();
+    lru_cache.ForEachItemBelow(frame_tick - MinFramesUnused, [this](ImageId image_id) {
+        const Image& image = slot_images[image_id];
+        if (True(image.flags & ImageFlagBits::IsDecoding)) {
+            return false;
+        }
+        for (const ImageId overlap_id : image.overlapping_images) {
+            if (slot_images[overlap_id].last_use_frame > image.last_use_frame) {
+                dead_overlap_ids.push_back(image_id);
+                break;
+            }
+        }
+        return false;
+    });
+    for (const ImageId image_id : dead_overlap_ids) {
+        Image& image = slot_images[image_id];
+        if (True(image.flags & ImageFlagBits::Tracked)) {
+            UntrackImage(image, image_id);
+        }
+        UnregisterImage(image_id);
+        DeleteImage(image_id, image.scale_tick > frame_tick + 5);
+    }
+}
+
+template <class P>
 void TextureCache<P>::RunGarbageCollector() {
     bool high_priority_mode = false;
     bool aggressive_mode = false;
@@ -280,6 +315,7 @@ void TextureCache<P>::ApplyThresholdOverrides(bool log) {
 
 template <class P>
 void TextureCache<P>::TickFrame() {
+    DeleteDeadOverlaps();
     // Upload buffers grown for one huge image (title 1's 341 MiB terrain layer pools) are freed
     // rather than kept for the rest of the session.
     for (auto* const scratch : {&swizzle_data_buffer, &unswizzle_data_buffer}) {
@@ -3734,6 +3770,7 @@ void TextureCache<P>::PrepareImage(ImageId image_id, bool is_modification, bool 
         MarkModification(image);
     }
     lru_cache.Touch(image.lru_index, frame_tick);
+    image.last_use_frame = frame_tick;
 }
 
 template <class P>

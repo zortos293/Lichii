@@ -388,6 +388,9 @@ private:
     void OnGPUASRegister(size_t map_id) final override;
 
     /// Runs the Garbage Collector.
+    /// Deletes images whose memory now belongs to images used after them.
+    void DeleteDeadOverlaps();
+
     void RunGarbageCollector();
 
     /// Find or create an image view in the guest descriptor table
@@ -653,6 +656,7 @@ private:
 
     // Join caching
     boost::container::small_vector<ImageId, 4> join_overlap_ids;
+    std::vector<ImageId> dead_overlap_ids;
     ::Common::unordered_set<ImageId> join_overlaps_found;
     boost::container::small_vector<ImageId, 4> join_left_aliased_ids;
     boost::container::small_vector<ImageId, 4> join_right_aliased_ids;
