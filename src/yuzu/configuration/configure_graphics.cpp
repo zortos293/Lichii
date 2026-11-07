@@ -229,13 +229,15 @@ void ConfigureGraphics::Setup(const ConfigurationShared::Builder& builder) {
 #endif
 #ifndef EGLANTINE_STREAMLINE
         // Only builds with NVIDIA Streamline (Windows) can use it.
-        if (setting->Id() == Settings::values.nvidia_dlss.Id()) {
+        if (setting->Id() == Settings::values.nvidia_dlss.Id() ||
+            setting->Id() == Settings::values.nvidia_dlss_sharpening.Id()) {
             continue;
         }
 #endif
 
         ConfigurationShared::Widget* widget = [&]() {
-            if (setting->Id() == Settings::values.fsr_sharpening_slider.Id()) {
+            if (setting->Id() == Settings::values.fsr_sharpening_slider.Id() ||
+                setting->Id() == Settings::values.nvidia_dlss_sharpening.Id()) {
                 // FSR needs a reversed slider and a 0.5 multiplier
                 return builder.BuildWidget(
                     setting, apply_funcs, ConfigurationShared::RequestType::ReverseSlider, true,

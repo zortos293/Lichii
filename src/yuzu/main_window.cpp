@@ -171,6 +171,7 @@ static FileSys::VirtualFile VfsDirectoryCreateFileWrapper(const FileSys::Virtual
 #include "input_common/drivers/virtual_amiibo.h"
 
 // Video Core //
+#include "video_core/game_dlss_status.h"
 #include "video_core/gpu.h"
 #include "video_core/renderer_base.h"
 #include "video_core/shader_notify.h"
@@ -1362,6 +1363,20 @@ void MainWindow::InitializeHotkeys() {
         SetFPSSuffix();
     });
 
+    connect_shortcut(QStringLiteral("Toggle NVIDIA DLSS"), [this] {
+        if (!emulation_running) {
+            return;
+        }
+        if (!Settings::values.nvidia_dlss.GetValue()) {
+            ShowOsdMessage(tr("NVIDIA DLSS is off in this game's graphics settings"));
+            return;
+        }
+        const bool paused = !VideoCore::NvidiaDlssPaused();
+        VideoCore::SetNvidiaDlssPaused(paused);
+        LOG_INFO(Frontend, "NVIDIA DLSS {} with the hotkey", paused ? "switched off" : "switched on");
+        ShowOsdMessage(paused ? tr("NVIDIA DLSS: OFF (the game's own image)")
+                              : tr("NVIDIA DLSS: ON"));
+    });
     connect_shortcut(QStringLiteral("Toggle Renderdoc Capture"), [] {
         if (Settings::values.enable_renderdoc_hotkey) {
             QtCommon::system->GetRenderdocAPI().ToggleCapture();
@@ -1913,6 +1928,8 @@ bool MainWindow::SelectAndSetCurrentUser(
 
 void MainWindow::BootGame(const QString& filename, Service::AM::FrontendAppletParameters params,
                           StartGameType type) {
+    // A game starts with NVIDIA DLSS as its settings say, whatever the hotkey left it at.
+    VideoCore::SetNvidiaDlssPaused(false);
     if (nup_running && filename.toStdString() == nup_source_path) {
         QMessageBox::information(this, tr("Conversion in Progress"),
                                  tr("This game cannot be started while its dump is being "
@@ -5024,6 +5041,32 @@ void MainWindow::SetFirmwareVersion() {
 
     firmware_label->setText(QString::fromStdString(display_version));
     firmware_label->setToolTip(QString::fromStdString(display_title));
+}
+
+// A short message over the game: the status bar and window title are hidden in fullscreen.
+void MainWindow::ShowOsdMessage(const QString& text) {
+    if (!osd_label) {
+        osd_label = new QLabel(this);
+        osd_label->setWindowFlags(Qt::ToolTip | Qt::FramelessWindowHint |
+                                  Qt::WindowStaysOnTopHint);
+        osd_label->setAttribute(Qt::WA_ShowWithoutActivating);
+        osd_label->setAttribute(Qt::WA_TransparentForMouseEvents);
+        osd_label->setStyleSheet(QStringLiteral(
+            "QLabel { background: rgba(0, 0, 0, 190); color: white; font-size: 18px; "
+            "padding: 8px 14px; border-radius: 6px; }"));
+        osd_timer.setSingleShot(true);
+        connect(&osd_timer, &QTimer::timeout, osd_label, &QWidget::hide);
+    }
+    osd_label->setText(text);
+    osd_label->adjustSize();
+    QWidget* const anchor = render_window != nullptr && render_window->isVisible()
+                                ? static_cast<QWidget*>(render_window)
+                                : static_cast<QWidget*>(this);
+    osd_label->move(anchor->mapToGlobal(QPoint(24, 24)));
+    osd_label->show();
+    osd_label->raise();
+    osd_timer.start(2000);
+    statusBar()->showMessage(text, 2000);
 }
 
 void MainWindow::SetFPSSuffix() {

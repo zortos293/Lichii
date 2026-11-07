@@ -225,6 +225,14 @@ public:
         return false;
     }
 
+    /// NVIDIA DLSS in place of a game's own anti-aliasing of src into dst at the same size
+    /// (Ocarina of Time; ocarina_upscale.h), with jitter and camera motion from the host. False
+    /// when it can't run; the caller retains its native dispatch.
+    [[nodiscard]] virtual bool AccelerateCameraMotionUpscale(
+        const Tegra::Engines::Fermi2D::Surface& src, const Tegra::Engines::Fermi2D::Surface& dst) {
+        return false;
+    }
+
     /// Whether a game's own DLSS network can run here: its matrix multiplies are emulated with
     /// 32-wide shuffles, and its output must be checkable (ProbeGameDlssOutput).
     [[nodiscard]] virtual bool SupportsGameDlssNetwork() const {

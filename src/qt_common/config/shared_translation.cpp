@@ -155,13 +155,21 @@ std::unique_ptr<TranslationMap> InitializeTranslations(QObject* parent) {
            tr("Strength of RCAS (AMD's contrast-adaptive sharpening) on the upscaler used in place "
               "of a game's DLSS (AMD FSR 3.1); 0% turns it off.\nAlso sets the sharpening "
               "of the AMD FSR 1 and SGSR window adapting filters."));
-    INSERT(Settings, nvidia_dlss, tr("Use NVIDIA DLSS in place of a game's DLSS (experimental)"),
+    INSERT(Settings, nvidia_dlss,
+           tr("Use NVIDIA DLSS in place of a game's DLSS or anti-aliasing (experimental)"),
            tr("Uses NVIDIA DLSS on GeForce RTX cards in place of a Switch 2 game's own DLSS, "
-              "instead of AMD FSR 3.1.\nNeeds NVIDIA's Streamline loader, and NVIDIA DLSS unless "
-              "the NVIDIA app has downloaded it; Lichii does not ship NVIDIA's files. Use the "
-              "download button below.\nCurrently requires Fire Emblem: Fortune's Weave and "
-              "EDEN_NX2_DLSS_REPLACEMENT=dlss. Without that override, its spatial workaround "
-              "remains active.\nTakes effect when a game starts."));
+              "instead of AMD FSR 3.1, or in place of its own anti-aliasing.\nNeeds NVIDIA's "
+              "Streamline loader, and NVIDIA DLSS unless the NVIDIA app has downloaded it; Lichii "
+              "does not ship NVIDIA's files. Use the download button below.\nWorks in The "
+              "Legend of Zelda: Ocarina of Time (as DLAA, at the render resolution). Fire Emblem: "
+              "Fortune's Weave also requires EDEN_NX2_DLSS_REPLACEMENT=dlss; without that "
+              "override, its spatial workaround remains active.\nWhile playing, F7 switches "
+              "between NVIDIA DLSS and the game's own image. While DLSS draws the image, "
+              "the FXAA or SMAA setting is skipped.\nTakes effect when a game "
+              "starts."));
+    INSERT(Settings, nvidia_dlss_sharpening, tr("NVIDIA DLSS Sharpness:"),
+           tr("Strength of RCAS (AMD's contrast-adaptive sharpening) on NVIDIA DLSS's image; 0% "
+              "turns it off.\nChanges take effect at once."));
     INSERT(Settings, anti_aliasing, tr("Anti-Aliasing Method:"),
            tr("The anti-aliasing method to use.\nSMAA offers the best quality.\nFXAA "
               "can produce a more stable picture in lower resolutions."));

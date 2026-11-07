@@ -31,10 +31,12 @@
 #include "video_core/game_dlss_status.h"
 #include "video_core/memory_manager.h"
 #include "video_core/native_query_trace.h"
+#include "video_core/ocarina_upscale.h"
 #ifdef ARCHITECTURE_x86_64
 #include "video_core/macro_turing_jit.h"
 #endif
 #include "video_core/rasterizer_interface.h"
+#include "video_core/texture_cache/image_info.h"
 #include "video_core/textures/decoders.h"
 
 namespace Tegra::Engines {
@@ -1075,6 +1077,69 @@ bool KeplerCompute::TryFireEmblemUpscale(bool allow_history) {
                  output->Width(), output->Height(), jitter->offset[0], jitter->offset[1]);
     }
     return done;
+}
+
+bool KeplerCompute::ProcessOcarinaUpscale(u64 program_id, u64 shader_hash) {
+    using namespace VideoCommon::OcarinaUpscale;
+    if (program_id != ProgramId || (shader_hash != InputPassHash && shader_hash != OutputPassHash) ||
+        !rasterizer->UsesNvidiaDlss()) {
+        return false;
+    }
+    const auto& cbuf = launch_description.const_buffer_config[0];
+    const GPUVAddr address = (GPUVAddr{cbuf.address_high} << 32) | cbuf.address_low;
+    const auto image = [&](u32 offset) -> std::optional<Texture::TICEntry> {
+        if (!(launch_description.const_buffer_enable_mask & 1) ||
+            cbuf.size.Value() < offset + sizeof(u32) ||
+            !memory_manager.IsFullyMappedRange(address + offset, sizeof(u32))) {
+            return std::nullopt;
+        }
+        const u32 index = memory_manager.Read<u32>(address + offset) & 0xfffff;
+        if (index > regs.tic.limit ||
+            !memory_manager.IsFullyMappedRange(regs.tic.Address() + u64{index} * sizeof(Texture::TICEntry),
+                                               sizeof(Texture::TICEntry))) {
+            return std::nullopt;
+        }
+        // Native descriptors keep NVN's layer bookkeeping, which the texture cache ignores.
+        const Texture::TICEntry tic =
+            VideoCommon::TextureViewHeader(GetTICEntry(index), memory_manager.UsesNativeTiling());
+        if (!VideoCommon::FireEmblemUpscale::PlainImage(tic) ||
+            tic.format != Texture::TextureFormat::B10G11R11) {
+            return std::nullopt;
+        }
+        return tic;
+    };
+    if (shader_hash == InputPassHash) {
+        ocarina_input = image(InputColorOffset);
+        return false;
+    }
+    const auto input = std::exchange(ocarina_input, std::nullopt);
+    const auto output = image(OutputColorOffset);
+    if (!input || !output || input->Address() == output->Address() ||
+        input->Width() != output->Width() || input->Height() != output->Height()) {
+        static bool reported{};
+        if (!reported) {
+            reported = true;
+            LOG_WARNING(HW_GPU, "Ocarina of Time anti-aliasing: unexpected images (input {}, "
+                                "output {}); the game's own runs",
+                        input.has_value(), output.has_value());
+        }
+        return false;
+    }
+    const auto surface = [](const Texture::TICEntry& tic) {
+        Fermi2D::Surface result{};
+        result.format = Tegra::RenderTargetFormat::B10G11R11_FLOAT;
+        result.linear = Fermi2D::MemoryLayout::BlockLinear;
+        result.block_width.Assign(tic.block_width);
+        result.block_height.Assign(tic.block_height);
+        result.block_depth.Assign(tic.block_depth);
+        result.depth = 1;
+        result.width = tic.Width();
+        result.height = tic.Height();
+        result.addr_upper = static_cast<u32>(tic.Address() >> 32);
+        result.addr_lower = static_cast<u32>(tic.Address());
+        return result;
+    };
+    return rasterizer->AccelerateCameraMotionUpscale(surface(*input), surface(*output));
 }
 
 void KeplerCompute::ProcessLaunch() {

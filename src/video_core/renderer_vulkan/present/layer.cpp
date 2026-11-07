@@ -12,8 +12,10 @@
 #undef BadValue
 #include "video_core/renderer_vulkan/vk_rasterizer.h"
 
+#include "common/logging.h"
 #include "common/settings.h"
 #include "video_core/framebuffer_config.h"
+#include "video_core/game_dlss_status.h"
 #include "video_core/renderer_vulkan/present/fsr.h"
 #include "video_core/renderer_vulkan/present/fsr3.h"
 #include "video_core/renderer_vulkan/present/sgsr.h"
@@ -124,9 +126,19 @@ void Layer::ConfigureDraw(const Device& device, PresentPushConstants* out_push_c
     VkImageView source_image_view =
         texture_info ? texture_info->image_view : *raw_image_views[image_index];
 
-    if (auto* fxaa = std::get_if<FXAA>(&anti_alias)) {
+    // NVIDIA DLSS already anti-aliased the game's image: FXAA or SMAA on top only blurs it.
+    const bool dlss_drew = VideoCore::NvidiaDlssDrawing();
+    if (dlss_drew && !std::holds_alternative<std::monostate>(anti_alias)) {
+        static bool logged{};
+        if (!logged) {
+            logged = true;
+            LOG_INFO(Render_Vulkan, "NVIDIA DLSS draws the game's image: the FXAA or SMAA "
+                                    "setting is skipped while it does");
+        }
+    }
+    if (auto* fxaa = std::get_if<FXAA>(&anti_alias); fxaa && !dlss_drew) {
         fxaa->Draw(device, scheduler, image_index, &source_image, &source_image_view);
-    } else if (auto* smaa = std::get_if<SMAA>(&anti_alias)) {
+    } else if (auto* smaa = std::get_if<SMAA>(&anti_alias); smaa && !dlss_drew) {
         smaa->Draw(device, scheduler, image_index, &source_image, &source_image_view);
     }
 

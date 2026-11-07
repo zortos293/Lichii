@@ -98,6 +98,12 @@ public:
     void TemporalSharpen(const Framebuffer* dst_framebuffer, VkImageView source,
                          const Region2D& dst_region, f32 sharpness);
 
+    /// dlss_resolve.frag: source (any layout, left in SHADER_READ_ONLY_OPTIMAL) into the whole
+    /// of dst_framebuffer, box-filtered when it is larger, then RCAS when sharpen is set.
+    void ResolveUpscaled(const Framebuffer* dst_framebuffer, VkImageView source,
+                         VkImage source_image, VkExtent2D source_size, bool sharpen,
+                         f32 sharpness);
+
     void BlitColorMSAA(const Framebuffer* dst_framebuffer, const ImageView& src_image_view,
                        const Region2D& dst_region, const Region2D& src_region);
 
@@ -192,6 +198,7 @@ private:
 
     [[nodiscard]] VkPipeline FindOrEmplaceTemporalUpscalePipeline(VkRenderPass renderpass);
     [[nodiscard]] VkPipeline FindOrEmplaceTemporalSharpenPipeline(VkRenderPass renderpass);
+    [[nodiscard]] VkPipeline FindOrEmplaceResolveUpscaledPipeline(VkRenderPass renderpass);
 
     [[nodiscard]] VkPipeline FindOrEmplaceDepthStencilPipeline(const BlitImagePipelineKey& key);
 
@@ -238,6 +245,7 @@ private:
     vk::PipelineLayout two_textures_pipeline_layout;
     vk::PipelineLayout temporal_upscale_pipeline_layout;
     vk::PipelineLayout temporal_sharpen_pipeline_layout;
+    vk::PipelineLayout resolve_upscaled_pipeline_layout;
     vk::PipelineLayout clear_color_pipeline_layout;
     vk::PipelineLayout msaa_copy_pipeline_layout;
     vk::PipelineLayout msaa_copy_depth_stencil_pipeline_layout;
@@ -245,6 +253,7 @@ private:
     vk::ShaderModule blit_color_to_color_frag;
     vk::ShaderModule temporal_upscale_frag;
     vk::ShaderModule temporal_sharpen_frag;
+    vk::ShaderModule dlss_resolve_frag;
     vk::ShaderModule blit_color_srgb_to_linear_frag;
     vk::ShaderModule blit_color_msaa_frag;
     vk::ShaderModule blit_depth_stencil_frag;
@@ -282,6 +291,8 @@ private:
     std::vector<vk::Pipeline> temporal_upscale_pipelines;
     std::vector<VkRenderPass> temporal_sharpen_keys;
     std::vector<vk::Pipeline> temporal_sharpen_pipelines;
+    std::vector<VkRenderPass> resolve_upscaled_keys;
+    std::vector<vk::Pipeline> resolve_upscaled_pipelines;
     std::vector<BlitImagePipelineKey> blit_depth_stencil_keys;
     std::vector<vk::Pipeline> blit_depth_stencil_pipelines;
     std::vector<BlitImagePipelineKey> clear_color_keys;

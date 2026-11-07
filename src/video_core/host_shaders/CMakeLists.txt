@@ -75,6 +75,7 @@ set(SHADER_FILES
     ${CMAKE_CURRENT_SOURCE_DIR}/smaa_blending_weight_calculation.frag
     ${CMAKE_CURRENT_SOURCE_DIR}/smaa_neighborhood_blending.vert
     ${CMAKE_CURRENT_SOURCE_DIR}/smaa_neighborhood_blending.frag
+    ${CMAKE_CURRENT_SOURCE_DIR}/dlss_resolve.frag
     ${CMAKE_CURRENT_SOURCE_DIR}/temporal_sharpen.frag
     ${CMAKE_CURRENT_SOURCE_DIR}/temporal_upscale.frag
     ${CMAKE_CURRENT_SOURCE_DIR}/vulkan_blit_depth_stencil.frag
@@ -101,6 +102,7 @@ set(SHADER_FILES
     ${CMAKE_CURRENT_SOURCE_DIR}/fsr3_optical_flow.comp
     ${CMAKE_CURRENT_SOURCE_DIR}/fsr3_frame_interpolation.comp
     ${CMAKE_CURRENT_SOURCE_DIR}/dlss_network_probe.comp
+    ${CMAKE_CURRENT_SOURCE_DIR}/camera_motion_vectors.comp
 )
 
 if (HAIKUOS)

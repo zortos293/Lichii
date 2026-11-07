@@ -474,6 +474,7 @@ private:
     bool CheckFirmwarePresence();
     void SetFirmwareVersion();
     void SetFPSSuffix();
+    void ShowOsdMessage(const QString& text);
     /**
      * Open (or not) the right confirm dialog based on current setting and game exit lock
      * @returns true if the player confirmed or the settings do no require it
@@ -526,6 +527,8 @@ private:
 
     // Status bar elements
     QLabel* message_label = nullptr;
+    QLabel* osd_label = nullptr; ///< Short messages over the game, see ShowOsdMessage
+    QTimer osd_timer;
     QLabel* shader_building_label = nullptr;
     QLabel* res_scale_label = nullptr;
     QLabel* emu_speed_label = nullptr;

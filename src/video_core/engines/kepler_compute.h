@@ -253,6 +253,9 @@ public:
 
     bool IsNativeMode() const { return native_mode; }
     bool ProcessGameDlss(u64 program_id, u64 native_key);
+    /// NVIDIA DLSS in place of Ocarina of Time's anti-aliasing (ocarina_upscale.h), when the
+    /// setting is on: true when it replaced this dispatch (the network's last pass).
+    bool ProcessOcarinaUpscale(u64 program_id, u64 shader_hash);
     void TraceDlssContract(u64 native_key, bool warn_unvalidated = true);
 
     /// GPU thread split with macros on its front half (gpu_split.h, EDEN_NX2_SPLIT=2), called by
@@ -322,6 +325,8 @@ private:
     u32 dlss_contract_trace_count{};
     GPUVAddr dlss_motion_color{};
     VideoCommon::FireEmblemUpscale::FrameJitter fe_upscale_jitter;
+    /// The tonemapped frame Ocarina of Time's anti-aliasing reads (ProcessOcarinaUpscale).
+    std::optional<Texture::TICEntry> ocarina_input;
     bool ProcessNativeMethod(Core::System& system, u32 method, u32 argument, bool is_last_call);
     NativeQmdScheduler native_qmd;
     std::array<u32, 0xc00>* native_data_ram{};
