@@ -569,6 +569,8 @@ private:
     /// While a clear binds its render targets (UpdateRenderTargets(true)): JoinImages leaves a new
     /// target's upload to ResolveDeferredRtRefreshes, which skips it when the clear overwrites it.
     bool defer_rt_refresh = false;
+    /// FindRenderTargetView is looking for its image.
+    bool inserting_render_target = false;
     std::vector<ImageId> deferred_rt_refreshes;
     bool is_rescaling = false;
     u64 total_used_memory = 0;

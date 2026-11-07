@@ -2796,11 +2796,25 @@ ImageId TextureCache<P>::JoinImages(const ImageInfo& info, GPUVAddr gpu_addr, DA
     // uploaded first, or the upload would overwrite the copies. Alias copies can wait
     // (ResolveDeferredRtRefreshes runs them with the upload); overlaps merged into the image can't,
     // they get deleted.
+    // A new render target over memory whose last contents only the GPU has: the guest bytes are
+    // stale, and a target newly placed in that memory has no defined contents anyway.
+    const bool over_gpu_contents =
+        inserting_render_target && join_copies_to_do.empty() &&
+        std::ranges::any_of(join_bad_overlap_ids, [this](ImageId overlap_id) {
+            return True(slot_images[overlap_id].flags & ImageFlagBits::GpuModified);
+        });
     const bool deferred_refresh =
-        defer_rt_refresh && std::ranges::all_of(join_copies_to_do, [](const JoinCopy& copy) {
+        !over_gpu_contents && defer_rt_refresh &&
+        std::ranges::all_of(join_copies_to_do, [](const JoinCopy& copy) {
             return copy.is_alias;
         });
-    if (deferred_refresh) {
+    if (over_gpu_contents) {
+        new_image.flags &= ~ImageFlagBits::CpuModified;
+        if (False(new_image.flags & ImageFlagBits::Tracked)) {
+            TrackImage(new_image, new_image_id);
+        }
+        runtime.TransitionImageLayout(new_image);
+    } else if (deferred_refresh) {
         deferred_rt_refreshes.push_back(new_image_id);
         runtime.TransitionImageLayout(new_image);
     } else {
@@ -3114,7 +3128,9 @@ ImageViewId TextureCache<P>::FindRenderTargetView(const ImageInfo& info, GPUVAdd
     bool delete_state = has_deleted_images;
     do {
         has_deleted_images = false;
+        inserting_render_target = true;
         image_id = FindOrInsertImage(info, gpu_addr);
+        inserting_render_target = false;
         delete_state |= has_deleted_images;
     } while (has_deleted_images);
     has_deleted_images = delete_state;
