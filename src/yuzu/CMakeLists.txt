@@ -422,6 +422,9 @@ target_link_libraries(yuzu PRIVATE common core input_common frontend_common netw
 target_link_libraries(yuzu PRIVATE Boost::headers Qt6::Widgets Qt6::Charts Qt6::Concurrent Qt6::Network)
 # Unpacks NVIDIA's files from the Streamline release (nvidia_dlss_panel.cpp).
 target_link_libraries(yuzu PRIVATE ZLIB::ZLIB)
+if (WIN32 AND ENABLE_UPDATE_CHECKER)
+    target_link_libraries(yuzu PRIVATE QuaZip::QuaZip)
+endif()
 target_link_libraries(yuzu PRIVATE ${PLATFORM_LIBRARIES} Threads::Threads)
 if (ENABLE_OPENGL)
     target_link_libraries(yuzu PRIVATE glad)

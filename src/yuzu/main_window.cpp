@@ -1655,9 +1655,10 @@ void MainWindow::ConnectMenuEvents() {
     connect_menu(ui->action_Eden_Dependencies, &MainWindow::OnEdenDependencies);
     connect_menu(ui->action_Data_Manager, &MainWindow::OnDataDialog);
 
-#if defined(ENABLE_UPDATE_CHECKER) && defined(__linux__)
+#if defined(ENABLE_UPDATE_CHECKER) && (defined(__linux__) || defined(_WIN32))
     auto* restore_action = ui->menu_Help->addAction(tr("Restore Previous Version..."));
     restore_action->setVisible(false);
+#ifdef __linux__
     const auto previous_version = [] {
         const std::filesystem::path target{qEnvironmentVariable("APPIMAGE").toStdString()};
         std::error_code ec;
@@ -1666,33 +1667,46 @@ void MainWindow::ConnectMenuEvents() {
                    ? target
                    : std::filesystem::path{};
     };
+#else
+    const auto previous_version = [] {
+        const std::filesystem::path backup =
+            std::filesystem::path{QCoreApplication::applicationDirPath().toStdWString()} /
+            UpdateInstaller::BackupName;
+        std::error_code ec;
+        return std::filesystem::is_directory(backup, ec) ? backup : std::filesystem::path{};
+    };
+#endif
     connect(ui->menu_Help, &QMenu::aboutToShow, restore_action,
             [restore_action, previous_version] {
                 restore_action->setVisible(!previous_version().empty());
             });
     connect(restore_action, &QAction::triggered, this, [this, previous_version] {
-        const auto target = previous_version();
-        if (target.empty()) {
+        const auto previous = previous_version();
+        if (previous.empty()) {
             return;
         }
         const auto answer = QtCommon::Frontend::Question(
             tr("Restore Previous Version"),
-            tr("Swap %1 with the version it replaced? Your settings and data are not changed.")
-                .arg(QString::fromStdString(target.string())),
+            tr("Go back to the version this one replaced? Your settings and data are not "
+               "changed."),
             QtCommon::Frontend::Yes | QtCommon::Frontend::No);
         if (answer != QtCommon::Frontend::Yes) {
             return;
         }
+#ifdef __linux__
         std::error_code ec;
-        if (!UpdateInstaller::Rollback(target, ec)) {
+        if (!UpdateInstaller::Rollback(previous, ec)) {
             LOG_ERROR(Frontend, "Could not restore the previous version: {}", ec.message());
             QtCommon::Frontend::Critical(tr("Failed to restore"),
                                          tr("Could not restore the previous version: %1")
                                              .arg(QString::fromStdString(ec.message())));
             return;
         }
-        LOG_INFO(Frontend, "Restored the previous version of {}", target.string());
-        UpdateDialog::Restart(this, QString::fromStdString(target.string()));
+        LOG_INFO(Frontend, "Restored the previous version of {}", previous.string());
+        UpdateDialog::Restart(this, QString::fromStdString(previous.string()));
+#else
+        UpdateDialog::LaunchInstaller(this, QString::fromStdWString(previous.wstring()));
+#endif
     });
 #endif
 }

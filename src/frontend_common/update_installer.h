@@ -28,6 +28,21 @@ bool Swap(const std::filesystem::path& staged, const std::filesystem::path& targ
 // Exchange `target` and PreviousPath(target), so rolling back can itself be undone.
 bool Rollback(const std::filesystem::path& target, std::error_code& ec);
 
+// File in an install folder that lists every file the last update put there, relative to it.
+inline constexpr std::string_view ManifestName = "install-manifest.txt";
+
+// Folder in an install folder that keeps what the last update replaced.
+inline constexpr std::string_view BackupName = ".update-backup";
+
+// Install the files under `staging` over `install_dir`. Files the previous update installed that
+// `staging` no longer has are removed. Everything replaced or removed is kept in
+// `install_dir`/BackupName, replacing the older backup, and `staging` is deleted. `staging` may
+// itself be that backup, which restores the previous version. The top-level folder `user`, which
+// holds portable settings and data, is never read, written or removed. When a step fails every
+// file is put back as it was.
+bool Install(const std::filesystem::path& staging, const std::filesystem::path& install_dir,
+             std::error_code& ec);
+
 // Remove the entries of a ':' separated list that are `dir` or lie below it.
 std::string StripPathListEntries(std::string_view list, std::string_view dir);
 

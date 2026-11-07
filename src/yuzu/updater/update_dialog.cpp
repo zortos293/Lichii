@@ -5,6 +5,7 @@
 #include <QCoreApplication>
 #include <QCryptographicHash>
 #include <QDir>
+#include <QFile>
 #include <QProcess>
 #include <QProcessEnvironment>
 #include <QPushButton>
@@ -17,6 +18,9 @@
 #include "frontend_common/update_installer.h"
 #include "qt_common/abstract/frontend.h"
 #include "qt_common/abstract/progress.h"
+#ifdef _WIN32
+#include "qt_common/util/compress.h"
+#endif
 #include "ui_update_dialog.h"
 #include "update_dialog.h"
 
@@ -137,7 +141,50 @@ void UpdateDialog::Restart(QWidget* window, const QString& target) {
     }
 }
 
+#ifdef _WIN32
+bool UpdateDialog::LaunchInstaller(QWidget* window, const QString& staging) {
+    // The helper runs from a copy, because the installed one is replaced along with everything else.
+    const auto helper =
+        QCoreApplication::applicationDirPath() + QStringLiteral("/lichii-updater.exe");
+    const auto copy = QDir::temp().filePath(
+        QStringLiteral("lichii-updater-%1.exe").arg(QCoreApplication::applicationPid()));
+    QFile::remove(copy);
+    if (!QFile::copy(helper, copy)) {
+        LOG_ERROR(Frontend, "Could not copy the installer helper {}", helper.toStdString());
+        QtCommon::Frontend::Critical(tr("Failed to install the update"),
+                                     tr("Could not start the update installer."));
+        return false;
+    }
+
+    const auto install_dir = QCoreApplication::applicationDirPath();
+    const auto native = [](const QString& path) { return QDir::toNativeSeparators(path); };
+    if (!QProcess::startDetached(
+            copy, {QString::number(QCoreApplication::applicationPid()), native(staging),
+                   native(install_dir), native(QCoreApplication::applicationFilePath())})) {
+        LOG_ERROR(Frontend, "Could not start the installer helper {}", copy.toStdString());
+        QtCommon::Frontend::Critical(tr("Failed to install the update"),
+                                     tr("Could not start the update installer."));
+        return false;
+    }
+    if (window) {
+        QMetaObject::invokeMethod(window, &QWidget::close, Qt::QueuedConnection);
+    }
+    return true;
+}
+#endif
+
 void UpdateDialog::Download() {
+#ifdef _WIN32
+    if (m_asset.filename.ends_with(".zip")) {
+        const std::filesystem::path exe{QCoreApplication::applicationFilePath().toStdWString()};
+        if (UpdateInstaller::CanReplace(exe) &&
+            QFile::exists(QCoreApplication::applicationDirPath() +
+                          QStringLiteral("/lichii-updater.exe"))) {
+            InstallOnRestart(exe);
+            return;
+        }
+    }
+#endif
 #ifdef __linux__
     if (Common::Net::CurrentLinuxPackage() == Common::Net::LinuxPackage::AppImage &&
         m_asset.filename.ends_with(".AppImage")) {
@@ -202,6 +249,63 @@ void UpdateDialog::InstallInPlace(const std::filesystem::path& target) {
         Restart(parentWidget(), QString::fromStdString(target.string()));
     }
 }
+
+#ifdef _WIN32
+void UpdateDialog::InstallOnRestart(const std::filesystem::path& exe) {
+    const auto install_dir = exe.parent_path();
+    const auto staging = install_dir / ".update-staging";
+    const auto archive = install_dir / ".update-download.zip";
+    const auto cleanup = [&] {
+        std::error_code ec;
+        std::filesystem::remove_all(staging, ec);
+        std::filesystem::remove(archive, ec);
+    };
+    const auto fail = [&](const QString& text) {
+        cleanup();
+        QtCommon::Frontend::Critical(tr("Failed to install the update"), text);
+    };
+
+    cleanup();
+    std::error_code ec;
+    std::filesystem::create_directories(staging, ec);
+    if (ec) {
+        fail(tr("Could not create a folder for the update."));
+        return;
+    }
+    if (!DownloadTo(QString::fromStdWString(archive.wstring()))) {
+        cleanup();
+        return;
+    }
+
+    auto progress = QtCommon::Frontend::newProgressDialog(tr("Unpacking..."), tr("Cancel"), 0, 100);
+    progress->show();
+    const auto unpacked = QtCommon::Compress::extractDir(
+        QString::fromStdWString(archive.wstring()), QString::fromStdWString(staging.wstring()),
+        [&](std::size_t total, std::size_t done) {
+            QGuiApplication::processEvents();
+            if (total != 0) {
+                progress->setValue(static_cast<int>((done * 100) / total));
+            }
+            return !progress->wasCanceled();
+        });
+    progress->close();
+    if (unpacked.isEmpty() || !std::filesystem::exists(staging / exe.filename(), ec)) {
+        fail(tr("The downloaded update could not be unpacked."));
+        return;
+    }
+    std::filesystem::remove(archive, ec);
+
+    const auto button = QtCommon::Frontend::Question(
+        tr("Update Ready"),
+        tr("Lichii will close, install the update and start again. The previous version is "
+           "kept, and your settings and data are not changed.\n\nRestart now?"),
+        QtCommon::Frontend::Yes | QtCommon::Frontend::No);
+    if (button != QtCommon::Frontend::Yes ||
+        !LaunchInstaller(parentWidget(), QString::fromStdWString(staging.wstring()))) {
+        cleanup();
+    }
+}
+#endif
 
 // TODO: migrate to a net.cpp wrapper
 bool UpdateDialog::DownloadTo(const QString& filename) {
