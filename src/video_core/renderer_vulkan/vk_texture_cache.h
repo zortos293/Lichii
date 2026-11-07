@@ -255,6 +255,8 @@ public:
     /// Keeps `image` for a later TakePooledImage, forgetting the oldest images when the pool is
     /// full: the ones that just came back are the likeliest to be asked for again.
     void ParkImage(const PooledImageKey& key, vk::Image&& image, u64 bytes);
+    /// Frees `image` once the GPU has finished what was recorded so far.
+    void DestroyWhenIdle(vk::Image&& image);
 
     void BarrierFeedbackLoop();
 
@@ -367,6 +369,7 @@ public:
         u64 bytes;
         u64 parked_frame;
     };
+    std::deque<std::pair<u64, vk::Image>> images_to_destroy;
     std::vector<PooledImage> image_pool;
     u64 image_pool_bytes{};
     u64 image_pool_frame{};
@@ -600,6 +603,10 @@ public:
 
     /// Goes straight to the scaled image of a scaled_only image. False for other images.
     bool StartScaled();
+    /// False while the unscaled image of a scaled image is not made.
+    [[nodiscard]] bool HasOriginalImage() const noexcept {
+        return static_cast<bool>(original_image);
+    }
 
     bool ScaleDown(bool ignore = false);
 
@@ -713,6 +720,8 @@ private:
     /// The unscaled image of a scaled_only image, made on first use.
     vk::Image& OriginalImage();
     bool original_pending = false;
+    /// The unscaled image can be made again from nothing but the create info.
+    bool original_releasable = false;
     vk::Image original_image;
     vk::Image scaled_image;
 

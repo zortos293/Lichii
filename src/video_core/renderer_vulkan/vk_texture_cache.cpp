@@ -1473,6 +1473,10 @@ vk::Image TextureCacheRuntime::TakePooledImage(const PooledImageKey& key) {
     return vk::Image{};
 }
 
+void TextureCacheRuntime::DestroyWhenIdle(vk::Image&& image) {
+    images_to_destroy.emplace_back(scheduler.CurrentTick(), std::move(image));
+}
+
 void TextureCacheRuntime::ParkImage(const PooledImageKey& key, vk::Image&& image, u64 bytes) {
     // Bounded so the pool never holds much device memory the texture cache doesn't count.
     static constexpr u64 MaxPoolBytes = u64{256} << 20;
@@ -2933,6 +2937,9 @@ void TextureCacheRuntime::ReleaseMsaaScratchImage(VkImage image) {
 }
 
 void TextureCacheRuntime::TickFrame() {
+    while (!images_to_destroy.empty() && scheduler.IsFree(images_to_destroy.front().first)) {
+        images_to_destroy.pop_front();
+    }
     // Pooled images nobody took for about 10 s (at 60 fps) are freed for real.
     static constexpr u64 MaxPooledFrames = 600;
     ++image_pool_frame;
@@ -3006,6 +3013,9 @@ Image::Image(TextureCacheRuntime& runtime_, const ImageInfo& info_, GPUVAddr gpu
                                    SparseTilesModeOf(runtime_.device) == SparseTilesMode::Aliased,
                                &runtime_, &original_pool_key, &original_pool_bytes)),
       aspect_mask(ImageAspectMask(info.format)) {
+    original_releasable = original_image && !original_image.IsUnbacked() && info.type == ImageType::e2D &&
+                          info.num_samples == 1 && info.resources.levels == 1 && !info.is_sparse &&
+                          host_level_offset == 0 && !IsPixelFormatASTC(info.format) && !IsPixelFormatBCn(info.format);
     if (original_image.IsUnbacked()) {
         flags |= VideoCommon::ImageFlagBits::Unbacked;
         const ImageInfo host_info = TrimmedHostInfo(runtime_.device, info, host_level_offset);
@@ -4190,6 +4200,14 @@ bool Image::ScaleUp(bool ignore) {
         }
     } else {
         BlitScale(*scheduler, *OriginalImage(), *scaled_image, info, aspect_mask, resolution);
+    }
+    // From here on the scaled image holds the contents. Whatever needs the unscaled one again
+    // (an upload, a download, going back to 1x) makes it.
+    if (original_releasable && original_image) {
+        runtime->DestroyWhenIdle(std::move(original_image));
+        original_image = vk::Image{};
+        original_pool_key.reset();
+        original_pending = true;
     }
     return true;
 }
