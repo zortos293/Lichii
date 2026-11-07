@@ -124,17 +124,20 @@ void Layer::ConfigureDraw(const Device& device, PresentPushConstants* out_push_c
     VkImageView source_image_view =
         texture_info ? texture_info->image_view : *raw_image_views[image_index];
 
-    if (auto* fxaa = std::get_if<FXAA>(&anti_alias)) {
-        fxaa->Draw(device, scheduler, image_index, &source_image, &source_image_view);
-    } else if (auto* smaa = std::get_if<SMAA>(&anti_alias)) {
-        smaa->Draw(device, scheduler, image_index, &source_image, &source_image_view);
-    }
+    const bool already_upscaled = texture_info && texture_info->already_upscaled;
+    if (!already_upscaled) {
+        if (auto* fxaa = std::get_if<FXAA>(&anti_alias)) {
+            fxaa->Draw(device, scheduler, image_index, &source_image, &source_image_view);
+        } else if (auto* smaa = std::get_if<SMAA>(&anti_alias)) {
+            smaa->Draw(device, scheduler, image_index, &source_image, &source_image_view);
+        }
 
 #ifdef HAS_RESHADE
-    if (post_process.has_value()) {
-        post_process->Draw(device, scheduler, image_index, &source_image, &source_image_view);
-    }
+        if (post_process.has_value()) {
+            post_process->Draw(device, scheduler, image_index, &source_image, &source_image_view);
+        }
 #endif
+    }
 
     auto crop_rect = Tegra::NormalizeCrop(framebuffer, texture_width, texture_height);
     const VkExtent2D render_extent{
@@ -142,19 +145,21 @@ void Layer::ConfigureDraw(const Device& device, PresentPushConstants* out_push_c
         .height = scaled_height,
     };
 
-    if (auto* fsr = std::get_if<FSR>(&sr_filter)) {
-        source_image_view = fsr->Draw(device, scheduler, image_index, source_image, source_image_view, render_extent, crop_rect);
-        crop_rect = {0, 0, 1, 1};
-    } else if (auto* sgsr = std::get_if<SGSR>(&sr_filter)) {
-        if (!is_applet) {
-            source_image_view = sgsr->Draw(device, scheduler, image_index, source_image,
+    if (!already_upscaled) {
+        if (auto* fsr = std::get_if<FSR>(&sr_filter)) {
+            source_image_view = fsr->Draw(device, scheduler, image_index, source_image, source_image_view, render_extent, crop_rect);
+            crop_rect = {0, 0, 1, 1};
+        } else if (auto* sgsr = std::get_if<SGSR>(&sr_filter)) {
+            if (!is_applet) {
+                source_image_view = sgsr->Draw(device, scheduler, image_index, source_image,
+                                               source_image_view, render_extent, crop_rect);
+                crop_rect = {0, 0, 1, 1};
+            }
+        } else if (auto* fsr3 = std::get_if<FSR3>(&sr_filter)) {
+            source_image_view = fsr3->Draw(device, scheduler, image_index, source_image,
                                            source_image_view, render_extent, crop_rect);
             crop_rect = {0, 0, 1, 1};
         }
-    } else if (auto* fsr3 = std::get_if<FSR3>(&sr_filter)) {
-        source_image_view = fsr3->Draw(device, scheduler, image_index, source_image,
-                                       source_image_view, render_extent, crop_rect);
-        crop_rect = {0, 0, 1, 1};
     }
 
     SetMatrixData(device, *out_push_constants, layout);
