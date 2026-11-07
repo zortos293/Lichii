@@ -1469,6 +1469,45 @@ private:
             }
         }
     }};
+    // EDEN_NX2_TRIM_ZERO=<seconds>: that often, resident guest pages holding only zeros leave the
+    // working set (Common::HostMemory::TrimZeroPages). Ocarina boots with ~7 GB of them.
+    std::jthread m_zero_trim_thread{[this](std::stop_token stop) {
+        const char* value = std::getenv("EDEN_NX2_TRIM_ZERO");
+        const int interval = value != nullptr ? std::atoi(value) : 0;
+        if (interval <= 0) {
+            return;
+        }
+        Common::SetCurrentThreadName("nx2:ZeroTrim");
+        Common::SetCurrentThreadPriority(Common::ThreadPriority::Low);
+        // After the boot (first 2 minutes) almost nothing new is found, and each pass reads all of
+        // the resident guest memory: then only every EDEN_NX2_TRIM_ZERO_LATER seconds (default 60).
+        const char* later_value = std::getenv("EDEN_NX2_TRIM_ZERO_LATER");
+        const int later = later_value != nullptr ? std::atoi(later_value) : 60;
+        const auto boot = std::chrono::steady_clock::now();
+        auto& buffer = system.DeviceMemory().buffer;
+        while (!stop.stop_requested()) {
+            const bool booting = std::chrono::steady_clock::now() - boot < std::chrono::minutes{2};
+            const int wait = booting ? interval : later;
+            if (wait <= 0) {
+                return;
+            }
+            for (int i = 0; i < wait * 10 && !stop.stop_requested(); ++i) {
+                std::this_thread::sleep_for(std::chrono::milliseconds{100});
+            }
+            if (stop.stop_requested()) {
+                break;
+            }
+            const auto start = std::chrono::steady_clock::now();
+            const auto [resident, trimmed] = buffer.TrimZeroPages();
+            const auto ms = std::chrono::duration_cast<std::chrono::milliseconds>(
+                                std::chrono::steady_clock::now() - start)
+                                .count();
+            LOG_INFO(Service,
+                     "ZERO TRIM: {} MiB of guest memory resident, {} MiB of all-zero pages trimmed "
+                     "in {} ms; kernel zero-filled {} MiB so far",
+                     resident >> 20, trimmed >> 20, ms, Common::HostMemory::ZeroFilledBytes() >> 20);
+        }
+    }};
 };
 
 inline bool Nx2VideoTraceEnabled() {
