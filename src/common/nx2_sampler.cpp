@@ -243,12 +243,20 @@ struct Symbolizer {
             return result;
         }();
         from_address = functions.first;
-        if (functions.second != nullptr) {
-            functions.second(GetCurrentProcess());
-        }
+        refresh_modules = functions.second;
     }
 
-    const std::string& Name(DWORD64 address) {
+    /// Picks up modules loaded since the last report; names that fell back to "module!?" get
+    /// another try.
+    void Refresh() {
+        if (refresh_modules != nullptr) {
+            refresh_modules(GetCurrentProcess());
+        }
+        std::erase_if(cache, [](const auto& entry) { return entry.second.ends_with("!?"); });
+    }
+
+    // By value: a JIT name is not cached, and two names may be looked up in one expression.
+    std::string Name(DWORD64 address) {
         const auto [it, is_new] = cache.try_emplace(address);
         if (!is_new) {
             return it->second;
@@ -272,26 +280,28 @@ struct Symbolizer {
             GetModuleFileNameA(module, path, sizeof(path));
             const char* base = std::strrchr(path, '\\');
             it->second = std::string{base != nullptr ? base + 1 : path} + "!?";
-        } else if (auto block = Common::JitSymbols::Lookup(reinterpret_cast<const void*>(address))) {
-            // JIT code is reused for other blocks after a cache clear: don't keep the name.
-            jit_name = std::move(*block);
-            cache.erase(it);
-            return jit_name;
         } else {
-            it->second = "(jit)";
+            // JIT code is reused for other blocks after a cache clear, and a block may be
+            // registered after this report: don't keep a JIT name or the "(jit)" fallback.
+            cache.erase(it);
+            if (auto block = Common::JitSymbols::Lookup(reinterpret_cast<const void*>(address))) {
+                return std::move(*block);
+            }
+            return "(jit)";
         }
         return it->second;
     }
 
     SymFromAddrFn from_address{};
+    SymRefreshModuleListFn refresh_modules{};
     std::unordered_map<DWORD64, std::string> cache;
-    std::string jit_name;
 };
 
 std::string Report(const std::vector<Target>& targets, const std::vector<Sample>& samples,
                    const char* path) {
     // SymInitialize fails on a second call without SymCleanup, so keep one symbolizer.
     static Symbolizer symbolizer;
+    symbolizer.Refresh();
     std::string text;
     for (unsigned thread = 0; thread < targets.size(); ++thread) {
         std::map<std::string, unsigned> self;
