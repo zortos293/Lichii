@@ -1,11 +1,13 @@
 // SPDX-FileCopyrightText: Copyright 2026 Eden Emulator Project
 // SPDX-License-Identifier: GPL-3.0-or-later
 
+#include <algorithm>
 #include <array>
 #include <chrono>
 #include <cstring>
 #include <optional>
 #include <set>
+#include <thread>
 
 #include "common/logging.h"
 #include "common/settings.h"
@@ -46,6 +48,26 @@ std::optional<NvdecCommon::VideoCodec> CodecFromMime(std::string_view mime) {
         return NvdecCommon::VideoCodec::H264;
     }
     return std::nullopt;
+}
+
+// dav1d defaults to a thread per host thread. That starved the pinned GPU front/back threads
+// and the four guest cores on a 6-core/12-thread host (the OoT intro, which is CPU-decoded,
+// dropped the game to single digits once the full host thread count piled onto the same six
+// physical cores as common/core_pinning.h's GpuThreadPinning). A flat clamp at 8 regressed the
+// opposite way on a 24-thread host (#879, reverted by #912): too few dav1d threads meant too
+// few frames in flight and more intro drops there.
+//
+// Reserve a fixed number of threads for the emulator's own pinned/guest work instead of halving
+// the host's count: a high-thread host keeps most of its threads for the decoder (24 - 6 = 18,
+// clamped to 16, well above the old flat 8), while a low-thread host falls back to the same
+// half-the-host figure the original cap used (12 - 6 = 6, matching hardware_concurrency()/2).
+constexpr unsigned ReservedForEmulator = 6;
+constexpr unsigned MaxDav1dThreads = 16;
+
+int Dav1dThreads() {
+    const unsigned hc = std::max(std::thread::hardware_concurrency(), 1u);
+    const unsigned budget = hc > ReservedForEmulator ? hc - ReservedForEmulator : hc / 2;
+    return static_cast<int>(std::clamp(budget, 2u, MaxDav1dThreads));
 }
 
 } // namespace
@@ -145,6 +167,9 @@ Nx2VideoDecoder::Nx2VideoDecoder(std::string_view mime) : impl{std::make_unique<
     impl->context.emplace(*impl->decoder);
     AVCodecContext* const context = impl->context->GetCodecContext();
     const std::string_view decoder_name = impl->decoder->GetCodec()->name;
+    if (decoder_name == "libdav1d") {
+        context->thread_count = Dav1dThreads();
+    }
     const bool gpu = Settings::values.nvdec_emulation.GetValue() == Settings::NvdecEmulation::Gpu;
     if (gpu) {
         impl->hardware.emplace();
