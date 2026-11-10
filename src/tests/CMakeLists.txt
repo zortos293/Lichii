@@ -152,6 +152,7 @@ add_executable(tests
     common/host_memory.cpp
     common/host_memory_failure.cpp
     common/host_memory_test_access.h
+    common/memory_detect.cpp
     core/host_memory_failure.cpp
     common/multi_level_page_table.cpp
     common/page_table.cpp

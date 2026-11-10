@@ -287,6 +287,10 @@ private:
     s64 native_wait_budget_us{8000};
     s64 native_wait_used_us{}; ///< Budget spent since the last 10 s log line.
     std::deque<std::pair<u64, std::unique_ptr<GraphicsPipeline>>> evicted_pipelines; ///< (tick, pipeline)
+    /// Pipelines were evicted: TickFrame queues QueueHeapTrim once they are all destroyed.
+    bool trim_after_evictions{};
+    /// Common::TrimHeap on the serialization thread (Linux with glibc).
+    void QueueHeapTrim(const char* reason);
     std::unordered_set<u64> used_and_evicted; ///< Key hashes of pipelines used this session, evicted since
     VideoCommon::EvictedPointerSlots evicted_pointer_slots;
 
