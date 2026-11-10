@@ -529,6 +529,14 @@ void TextureCache<P>::TickFrame() {
             runtime.LogMemoryTrace();
         }
     }
+    // Every 600 frames, without EDEN_NX2_TC_LOG: what ended outside video memory (a line only
+    // when it changed).
+    if constexpr (requires { runtime.LogOutsideVideoMemory(); }) {
+        static u64 placement_frames{};
+        if (++placement_frames % 600 == 0) {
+            runtime.LogOutsideVideoMemory();
+        }
+    }
     // Every 600 frames: device memory in use against the collector's thresholds.
     // Skip expensive heap allocation, map construction, and sorting unless debug logging is explicitly enabled.
     static const bool log_tc = std::getenv("EDEN_NX2_TC_LOG") != nullptr;

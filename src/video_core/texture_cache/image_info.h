@@ -56,6 +56,8 @@ struct ImageInfo {
     bool is_sparse = false;
     // ASTC data whose blocks carry no alpha: re-compressed to BC1 instead of BC3 (half the size).
     bool astc_opaque = false;
+    // Made for a render target or a depth buffer: it may use the video memory textures leave free.
+    bool render_target = false;
 };
 
 } // namespace VideoCommon

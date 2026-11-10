@@ -53,6 +53,7 @@
 #ifdef EGLANTINE_STREAMLINE
 #include "video_core/vulkan_common/streamline.h"
 #endif
+#include "video_core/vulkan_common/image_placement.h"
 #include "video_core/vulkan_common/unbacked_fallback.h"
 #include "video_core/vulkan_common/vulkan_memory_allocator.h"
 #include "video_core/vulkan_common/vulkan_wrapper.h"
@@ -533,6 +534,16 @@ constexpr std::array<VkFormat, 2> OpaqueAstcViewFormats{VK_FORMAT_BC1_RGBA_UNORM
                                   std::optional<VkFormat> format_override = {},
                                   bool unbacked = false, bool aliased = false,
                                   bool may_fail = false) {
+    // Not a render target: near the video memory budget it yields to them.
+    // Depth and stencil images count as render targets even when a texture header made them, and
+    // so do single-level color images that are not block-compressed (YieldsAsTexture).
+    const bool texture = YieldsAsTexture(
+        info.render_target,
+        VideoCore::Surface::GetFormatType(info.format) != VideoCore::Surface::SurfaceType::ColorTexture,
+        static_cast<u32>(info.resources.levels),
+        VideoCore::Surface::IsPixelFormatASTC(info.format) ||
+            VideoCore::Surface::IsPixelFormatBCn(info.format) ||
+            VideoCore::Surface::IsPixelFormatETC2(info.format));
     if (info.type == ImageType::Buffer) {
         return vk::Image{};
     }
@@ -565,7 +576,8 @@ constexpr std::array<VkFormat, 2> OpaqueAstcViewFormats{VK_FORMAT_BC1_RGBA_UNORM
             return image;
         }
     }
-    return may_fail ? allocator.TryCreateImage(image_ci) : allocator.CreateImage(image_ci);
+    return may_fail ? allocator.TryCreateImage(image_ci, false, texture)
+                    : allocator.CreateImage(image_ci, false, texture);
 }
 
 [[nodiscard]] vk::ImageView MakeStorageView(const vk::Device& device, u32 level, VkImage image,
@@ -2891,6 +2903,10 @@ void TextureCacheRuntime::LogMemoryTrace() {
     Vulkan::LogMemoryTrace(device);
 }
 
+void TextureCacheRuntime::LogOutsideVideoMemory() const {
+    memory_allocator.LogOutsideVideoMemory();
+}
+
 bool TextureCacheRuntime::UseOpaqueAstcFormat() const {
     // EDEN_NX2_ASTC_BC1=0 keeps every re-compressed ASTC image in BC3.
     static const bool enabled = [] {
@@ -2951,14 +2967,11 @@ void TextureCacheRuntime::TickFrame() {
         pending_byte_addressed_shadows.pop_front();
     }
     static constexpr u32 MAX_UNUSED_SCRATCH_FRAMES = 60;
-    // Finished decode images wait for the next texture of their shape, up to this much memory.
-    static constexpr u64 MaxFreeTranscodeBytes = u64{256} << 20;
+    // Finished decode images wait for the next texture of their shape, up to this much memory; the
+    // same cut decides which ones count twice against the render target reserve.
+    static constexpr u64 MaxFreeTranscodeBytes = MaxKeptDecodeBytes;
     const auto decode_bytes = [](const PendingTranscode& t) {
-        u64 bytes{};
-        for (u32 level = 0; level < t.levels; ++level) {
-            bytes += u64{(std::max)(t.width >> level, 1U)} * (std::max)(t.height >> level, 1U) * 4;
-        }
-        return bytes * t.layers;
+        return DecodeImageBytes(t.width, t.height, t.levels, t.layers);
     };
     u64 free_bytes{};
     for (const PendingTranscode& t : free_transcodes) {
@@ -5160,11 +5173,16 @@ void TextureCacheRuntime::TranscodeAstcToBcn(
             .pQueueFamilyIndices = nullptr,
             .initialLayout = VK_IMAGE_LAYOUT_UNDEFINED,
         };
-        vk::Image decode = memory_allocator.TryCreateImage(decode_ci, true);
+        // Only lives until the BC encoder is done (up to 1365x1365, 90 layers, 11 levels: 853 MiB,
+        // 914 MiB in VMA): it yields to render targets like a texture, counting twice its size
+        // when it is too big to be kept for the next texture of its shape.
+        const bool counts_twice =
+            DecodeImageCountsTwice(DecodeImageBytes(width, height, levels, layers));
+        vk::Image decode = memory_allocator.TryCreateImage(decode_ci, true, true, counts_twice);
         if (!decode && !free_transcodes.empty()) {
             // The GPU is done with these: their memory goes back to the driver now.
             free_transcodes.clear();
-            decode = memory_allocator.TryCreateImage(decode_ci, true);
+            decode = memory_allocator.TryCreateImage(decode_ci, true, true, counts_twice);
         }
         if (!decode) {
             static u32 logged{};

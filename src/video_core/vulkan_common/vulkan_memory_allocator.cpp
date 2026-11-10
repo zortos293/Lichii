@@ -31,6 +31,7 @@
 #include "common/logging.h"
 #include "common/memory_detect.h"
 #include <ranges>
+#include "video_core/vulkan_common/image_placement.h"
 #include "video_core/vulkan_common/unbacked_fallback.h"
 #include "video_core/vulkan_common/vma.h"
 #include "video_core/vulkan_common/vulkan_device.h"
@@ -200,6 +201,12 @@ MemoryAllocator::MemoryAllocator(const Device &device_)
             properties{device_.GetPhysical().GetMemoryProperties().memoryProperties},
             buffer_image_granularity{
                     device_.GetPhysical().GetProperties().limits.bufferImageGranularity} {
+    // Image sizes for the render target reserve without making a probe image per texture.
+    if (HasDeviceImageRequirements(device.ApiVersion())) {
+        device_image_requirements = reinterpret_cast<PFN_vkGetDeviceImageMemoryRequirements>(
+            device.GetDispatchLoader().vkGetDeviceProcAddr(*device.GetLogical(),
+                                                           "vkGetDeviceImageMemoryRequirements"));
+    }
 
     // Preserve the previous "RenderDoc small heap" trimming behavior that we had in original vma minus the heap bug
     if (device.HasDebuggingToolAttached())
@@ -219,16 +226,18 @@ MemoryAllocator::MemoryAllocator(const Device &device_)
 
 MemoryAllocator::~MemoryAllocator() = default;
 
-vk::Image MemoryAllocator::CreateImage(const VkImageCreateInfo &ci, bool dedicated) const
+vk::Image MemoryAllocator::CreateImage(const VkImageCreateInfo &ci, bool dedicated,
+                                       bool texture) const
 {
     vk::Image image;
-    vk::Check(AllocateImage(ci, dedicated, false, image));
+    vk::Check(AllocateImage(ci, dedicated, false, texture, false, image));
     return image;
 }
 
-vk::Image MemoryAllocator::TryCreateImage(const VkImageCreateInfo &ci, bool dedicated) const {
+vk::Image MemoryAllocator::TryCreateImage(const VkImageCreateInfo &ci, bool dedicated,
+                                          bool texture, bool scratch) const {
     vk::Image image;
-    const VkResult result = AllocateImage(ci, dedicated, true, image);
+    const VkResult result = AllocateImage(ci, dedicated, true, texture, scratch, image);
     if (result != VK_ERROR_OUT_OF_DEVICE_MEMORY && result != VK_ERROR_OUT_OF_HOST_MEMORY) {
         vk::Check(result);
     }
@@ -236,31 +245,109 @@ vk::Image MemoryAllocator::TryCreateImage(const VkImageCreateInfo &ci, bool dedi
 }
 
 VkResult MemoryAllocator::AllocateImage(const VkImageCreateInfo &ci, bool dedicated, bool may_fail,
-                                        vk::Image &image) const {
-    const VmaAllocationCreateInfo alloc_ci = {
+                                        bool texture, bool scratch, vk::Image &image) const {
+    // Images require device-local memory. When they only preferred it, with the device-local heap
+    // at its budget VMA moved them to the system memory type without a word: on a GTX 1650 (4 GB,
+    // no ReBAR) a title's load left 805 MiB of images there (VMA type 0: 297 allocations), 2 GB/s
+    // over PCIe each way at 6 fps, and lower texture cache thresholds did not help. Host memory
+    // is only the last, logged fallback.
+    // Only where host memory is a separate type: on an integrated GPU every type is device-local.
+    const bool separate = HasHostMemoryApartFromVideo();
+    const auto steps = ImagePlacementSteps(separate);
+    const auto step_ci = [dedicated](const ImagePlacementStep& step) {
+        return VmaAllocationCreateInfo{
             // Best fit: images freed by the thousand leave holes in the blocks, which new ones
             // should fill before VMA takes another block.
-            .flags = static_cast<VmaAllocationCreateFlags>(VMA_ALLOCATION_CREATE_WITHIN_BUDGET_BIT |
-                                                           VMA_ALLOCATION_CREATE_STRATEGY_MIN_MEMORY_BIT) |
+            .flags = static_cast<VmaAllocationCreateFlags>(
+                         VMA_ALLOCATION_CREATE_STRATEGY_MIN_MEMORY_BIT) |
+                     (step.within_budget
+                          ? VmaAllocationCreateFlags{VMA_ALLOCATION_CREATE_WITHIN_BUDGET_BIT}
+                          : VmaAllocationCreateFlags{0}) |
                      (dedicated ? VmaAllocationCreateFlags{VMA_ALLOCATION_CREATE_DEDICATED_MEMORY_BIT}
-                               : VmaAllocationCreateFlags{0}),
-            .usage = VMA_MEMORY_USAGE_AUTO_PREFER_DEVICE,
-            .requiredFlags = 0,
-            .preferredFlags = VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT,
+                                : VmaAllocationCreateFlags{0}),
+            .usage = step.prefer_host ? VMA_MEMORY_USAGE_AUTO_PREFER_HOST
+                                      : VMA_MEMORY_USAGE_AUTO_PREFER_DEVICE,
+            .requiredFlags = step.require_device_local
+                                 ? VkMemoryPropertyFlags{VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT}
+                                 : VkMemoryPropertyFlags{0},
+            .preferredFlags = step.prefer_host
+                                  ? VkMemoryPropertyFlags{0}
+                                  : VkMemoryPropertyFlags{VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT},
             .memoryTypeBits = 0,
             .pool = VK_NULL_HANDLE,
             .pUserData = nullptr,
             .priority = 0.f,
+        };
     };
+    const VmaAllocationCreateInfo alloc_ci = step_ci(steps[0]);
 
     VkImage handle{};
     VmaAllocation allocation{};
     VmaAllocationInfo alloc_info{};
     const u64 texels = u64{ci.extent.width} * ci.extent.height * ci.extent.depth * ci.arrayLayers;
     const bool huge = texels > MaxBackedImageTexels;
-    VkResult result = huge ? VK_ERROR_OUT_OF_DEVICE_MEMORY
-                           : vmaCreateImage(allocator, &ci, &alloc_ci, &handle, &allocation, &alloc_info);
-    if (result == VK_ERROR_OUT_OF_DEVICE_MEMORY && !huge) {
+    // A texture with the device-local heap within RenderTargetReserveBytes of its budget goes to
+    // host memory now, so the render targets made after it still fit: on a 4 GB GTX 1650 the
+    // textures of a title's load filled the heap and its depth buffer and targets went to system
+    // memory. Not a pressure event: those made the texture cache collect ever harder (1923 images
+    // downloaded in 600 frames).
+    // The image's own size counts: with the reserve at 1024 MiB, something over 512 MiB still got
+    // in right before a 1365x1365x90 array's BC1 copy, and the depth buffers and targets made next
+    // did not fit even over the budget. A decode image for the BC encoder that is too big to be
+    // kept counts twice its size: on the 4 GB card it comes with the heap already past the reserve
+    // (2186 and 2442 of 3702 MiB); on a 12 GB card, counted once, two 914 MiB decodes got in and
+    // the 110 textures made before the next frame freed them yielded (515 MiB).
+    bool yielded = false;
+    u64 heap_usage = 0;
+    u64 heap_budget = 0;
+    u64 image_bytes = 0;
+    if (texture && !huge && separate) {
+        if (const u32 heap = MainDeviceLocalHeap(); heap != ~0U) {
+            std::array<VmaBudget, VK_MAX_MEMORY_HEAPS> budgets{};
+            vmaGetHeapBudgets(allocator, budgets.data());
+            heap_usage = budgets[heap].usage;
+            heap_budget = budgets[heap].budget;
+            if (const u64 reserve = RenderTargetReserveBytes(heap_budget); reserve != 0) {
+                image_bytes = ImageBytes(ci);
+                yielded = YieldsToRenderTargets(false, heap_usage,
+                                                PlacementBytes(scratch, image_bytes), heap_budget,
+                                                reserve);
+            }
+        }
+    }
+    VkResult result{};
+    if (huge) {
+        result = VK_ERROR_OUT_OF_DEVICE_MEMORY;
+    } else if (yielded) {
+        const VmaAllocationCreateInfo host = step_ci(steps[2]);
+        result = vmaCreateImage(allocator, &ci, &host, &handle, &allocation, &alloc_info);
+        if (result == VK_SUCCESS) {
+            textures_yielded.fetch_add(1, std::memory_order_relaxed);
+            texture_bytes_yielded.fetch_add(alloc_info.size, std::memory_order_relaxed);
+            static u32 yield_logged{};
+            if (yield_logged++ < 16) {
+                LOG_INFO(Render_Vulkan,
+                         "Image {}x{}x{} ({} levels, {} layers, format {}, {} MiB) placed in host "
+                         "memory: it would end within the render target reserve{}; video memory "
+                         "{} of {} MiB",
+                         ci.extent.width, ci.extent.height, ci.extent.depth, ci.mipLevels,
+                         ci.arrayLayers, static_cast<u32>(ci.format), image_bytes >> 20,
+                         scratch ? " (decode image, counted twice)" : "", heap_usage >> 20,
+                         heap_budget >> 20);
+            }
+        }
+    } else {
+        result = vmaCreateImage(allocator, &ci, &alloc_ci, &handle, &allocation, &alloc_info);
+    }
+    // No device-local memory type takes this image at all: straight to the host fallback, as
+    // before images required one.
+    const bool no_device_type = result == VK_ERROR_FEATURE_NOT_PRESENT && steps[0].require_device_local;
+    if (no_device_type) {
+        result = VK_ERROR_OUT_OF_DEVICE_MEMORY;
+    }
+    // A texture that yielded never gets a second try in video memory: that would take the room the
+    // reserve keeps for render targets. If host memory refused it, the host retry below decides.
+    if (result == VK_ERROR_OUT_OF_DEVICE_MEMORY && !huge && !no_device_type && !yielded) {
         // Over the device memory budget (Switch 2 titles fill 8 GB cards): let the driver page
         // it out rather than failing the draw and aborting.
         static u32 logged{};
@@ -272,25 +359,32 @@ VkResult MemoryAllocator::AllocateImage(const VkImageCreateInfo &ci, bool dedica
                         ci.arrayLayers, static_cast<u32>(ci.format));
         }
         pressure_events.fetch_add(1, std::memory_order_relaxed);
-        VmaAllocationCreateInfo relaxed = alloc_ci;
-        relaxed.flags &= ~VMA_ALLOCATION_CREATE_WITHIN_BUDGET_BIT;
+        const VmaAllocationCreateInfo relaxed = step_ci(steps[1]);
         result = vmaCreateImage(allocator, &ci, &relaxed, &handle, &allocation, &alloc_info);
     }
     if (result == VK_ERROR_OUT_OF_DEVICE_MEMORY && !huge) {
         // Still out of device memory: a real image in host memory (slow, but valid) beats one
         // with nothing bound, which AMD's drivers do not survive being sampled.
-        VmaAllocationCreateInfo host = alloc_ci;
-        host.flags &= ~VMA_ALLOCATION_CREATE_WITHIN_BUDGET_BIT;
-        host.usage = VMA_MEMORY_USAGE_AUTO_PREFER_HOST;
-        host.preferredFlags = 0;
+        const VmaAllocationCreateInfo host = step_ci(steps[2]);
         result = vmaCreateImage(allocator, &ci, &host, &handle, &allocation, &alloc_info);
         static u32 host_logged{};
         if (result == VK_SUCCESS && host_logged++ < 16) {
+            // The heap as VMA sees it when even the driver refused the image: tells a full card
+            // from memory VMA does not count.
+            u64 usage = 0;
+            u64 budget = 0;
+            if (const u32 heap = MainDeviceLocalHeap(); heap != ~0U) {
+                std::array<VmaBudget, VK_MAX_MEMORY_HEAPS> budgets{};
+                vmaGetHeapBudgets(allocator, budgets.data());
+                usage = budgets[heap].usage;
+                budget = budgets[heap].budget;
+            }
             LOG_WARNING(Render_Vulkan,
-                        "Image {}x{}x{} ({} levels, {} layers, format {}) is out of device memory; "
-                        "placed in host memory",
+                        "Image {}x{}x{} ({} levels, {} layers, format {}, {} MiB) is out of device "
+                        "memory; placed in host memory; video memory {} of {} MiB",
                         ci.extent.width, ci.extent.height, ci.extent.depth, ci.mipLevels,
-                        ci.arrayLayers, static_cast<u32>(ci.format));
+                        ci.arrayLayers, static_cast<u32>(ci.format), alloc_info.size >> 20,
+                        usage >> 20, budget >> 20);
         }
     }
     if (result == VK_ERROR_OUT_OF_DEVICE_MEMORY && !huge) {
@@ -327,6 +421,12 @@ VkResult MemoryAllocator::AllocateImage(const VkImageCreateInfo &ci, bool dedica
         }
         return result;
     }
+    VkMemoryPropertyFlags image_flags{};
+    vmaGetAllocationMemoryProperties(allocator, allocation, &image_flags);
+    if ((image_flags & VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT) == 0) {
+        images_outside.fetch_add(1, std::memory_order_relaxed);
+        image_bytes_outside.fetch_add(alloc_info.size, std::memory_order_relaxed);
+    }
 
     // Log GPU memory allocation for images
     if (GPU::Logging::IsActive() &&
@@ -341,6 +441,32 @@ VkResult MemoryAllocator::AllocateImage(const VkImageCreateInfo &ci, bool dedica
     image = vk::Image(handle, ci.usage, *device.GetLogical(), allocator, allocation,
                       device.GetDispatchLoader());
     return VK_SUCCESS;
+}
+
+u64 MemoryAllocator::ImageBytes(const VkImageCreateInfo &ci) const {
+    if (device_image_requirements != nullptr) {
+        const VkDeviceImageMemoryRequirements info{
+            .sType = VK_STRUCTURE_TYPE_DEVICE_IMAGE_MEMORY_REQUIREMENTS,
+            .pNext = nullptr,
+            .pCreateInfo = &ci,
+            .planeAspect = VkImageAspectFlagBits{},
+        };
+        VkMemoryRequirements2 requirements{
+            .sType = VK_STRUCTURE_TYPE_MEMORY_REQUIREMENTS_2,
+            .pNext = nullptr,
+            .memoryRequirements = {},
+        };
+        device_image_requirements(*device.GetLogical(), &info, &requirements);
+        return requirements.memoryRequirements.size;
+    }
+    const auto &dld = device.GetDispatchLoader();
+    VkImage probe{};
+    if (dld.vkCreateImage(*device.GetLogical(), &ci, nullptr, &probe) != VK_SUCCESS) {
+        return 0;
+    }
+    const VkMemoryRequirements requirements = device.GetLogical().GetImageMemoryRequirements(probe);
+    dld.vkDestroyImage(*device.GetLogical(), probe, nullptr);
+    return requirements.size;
 }
 
 vk::Image MemoryAllocator::CreateUnbackedImage(const VkImageCreateInfo &ci, bool aliased) const {
@@ -491,6 +617,7 @@ vk::Buffer MemoryAllocator::CreateBuffer(const VkBufferCreateInfo &ci, MemoryUsa
         vk::Check(result);
     }
     vmaGetAllocationMemoryProperties(allocator, allocation, &property_flags);
+    NoteDeviceLocalBuffer(usage, property_flags, alloc_info.size);
 
     // Log GPU memory allocation for buffers
     if (GPU::Logging::IsActive() &&
@@ -548,6 +675,7 @@ vk::Buffer MemoryAllocator::CreateBuffer(const VkBufferCreateInfo &ci, MemoryUsa
     vk::Check(vmaCreateBufferWithAlignment(allocator, &ci, &alloc_ci, min_alignment, &handle,
                                            &allocation, &alloc_info));
     vmaGetAllocationMemoryProperties(allocator, allocation, &property_flags);
+    NoteDeviceLocalBuffer(usage, property_flags, alloc_info.size);
 
     u8 *data = reinterpret_cast<u8 *>(alloc_info.pMappedData);
     std::span<u8> mapped_data{};
@@ -740,6 +868,76 @@ void LogMemoryTrace(const Device& device) {
                        s.allocationCount, s.allocationBytes >> 20, s.blockBytes >> 20);
     }
     LOG_INFO(Render_Vulkan, "Memory trace: types {}", types);
+}
+
+void MemoryAllocator::NoteDeviceLocalBuffer(MemoryUsage usage, VkMemoryPropertyFlags flags,
+                                            VkDeviceSize size) const {
+    if (usage == MemoryUsage::DeviceLocal && (flags & VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT) == 0) {
+        buffers_outside.fetch_add(1, std::memory_order_relaxed);
+        buffer_bytes_outside.fetch_add(size, std::memory_order_relaxed);
+    }
+}
+
+bool MemoryAllocator::HasHostMemoryApartFromVideo() const noexcept {
+    std::array<u32, VK_MAX_MEMORY_TYPES> type_flags{};
+    for (u32 type = 0; type < properties.memoryTypeCount; ++type) {
+        type_flags[type] = properties.memoryTypes[type].propertyFlags;
+    }
+    return Vulkan::HasHostMemoryApartFromVideo(type_flags.data(), properties.memoryTypeCount);
+}
+
+u32 MemoryAllocator::MainDeviceLocalHeap() const noexcept {
+    u32 main = ~0U;
+    for (u32 heap = 0; heap < properties.memoryHeapCount; ++heap) {
+        if ((properties.memoryHeaps[heap].flags & VK_MEMORY_HEAP_DEVICE_LOCAL_BIT) != 0 &&
+            (main == ~0U || properties.memoryHeaps[heap].size > properties.memoryHeaps[main].size)) {
+            main = heap;
+        }
+    }
+    return main;
+}
+
+void MemoryAllocator::LogOutsideVideoMemory() const {
+    const u64 images = images_outside.load(std::memory_order_relaxed);
+    const u64 image_bytes = image_bytes_outside.load(std::memory_order_relaxed);
+    const u64 buffers = buffers_outside.load(std::memory_order_relaxed);
+    const u64 buffer_bytes = buffer_bytes_outside.load(std::memory_order_relaxed);
+    // What lives now in memory the GPU sees only over the bus and the CPU cannot map: there go
+    // the images and device-local buffers VMA moved out of video memory (staging buffers are
+    // host-visible and are not counted).
+    VmaTotalStatistics stats{};
+    vmaCalculateStatistics(allocator, &stats);
+    u64 live_bytes{};
+    u32 live_allocations{};
+    constexpr VkMemoryPropertyFlags device_or_mappable =
+        VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT | VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT;
+    for (u32 type = 0; type < properties.memoryTypeCount; ++type) {
+        if ((properties.memoryTypes[type].propertyFlags & device_or_mappable) == 0) {
+            live_bytes += stats.memoryType[type].statistics.allocationBytes;
+            live_allocations += stats.memoryType[type].statistics.allocationCount;
+        }
+    }
+    const u64 yielded = textures_yielded.load(std::memory_order_relaxed);
+    const u64 yielded_bytes = texture_bytes_yielded.load(std::memory_order_relaxed);
+    const std::array<u64, 7> now{images, image_bytes >> 20, buffers, buffer_bytes >> 20,
+                                 live_bytes >> 20, yielded, yielded_bytes >> 20};
+    if (outside_logged && now == last_outside) {
+        return;
+    }
+    outside_logged = true;
+    last_outside = now;
+    u64 reserve = 0;
+    if (const u32 heap = MainDeviceLocalHeap(); heap != ~0U) {
+        std::array<VmaBudget, VK_MAX_MEMORY_HEAPS> budgets{};
+        vmaGetHeapBudgets(allocator, budgets.data());
+        reserve = RenderTargetReserveBytes(budgets[heap].budget);
+    }
+    LOG_INFO(Render_Vulkan,
+             "Outside video memory since start: {} images ({} MiB), {} device-local buffers ({} "
+             "MiB); now {} allocations ({} MiB) in system memory the CPU cannot map; of those "
+             "images, {} textures ({} MiB) left the last {} MiB to render targets",
+             images, image_bytes >> 20, buffers, buffer_bytes >> 20, live_allocations,
+             live_bytes >> 20, yielded, yielded_bytes >> 20, reserve >> 20);
 }
 
 void LogMemoryStatistics(const Device& device) {

@@ -5,6 +5,7 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 
 #include <algorithm>
+#include <array>
 #include <utility>
 #include <vector>
 
@@ -15,9 +16,11 @@
 #include "common/bit_util.h"
 #include "common/common_types.h"
 #include "common/literals.h"
+#include "common/logging.h"
 #include "video_core/nx2_stutter_trace.h"
 #include "video_core/renderer_vulkan/vk_scheduler.h"
 #include "video_core/renderer_vulkan/vk_staging_buffer_pool.h"
+#include "video_core/vulkan_common/image_placement.h"
 #include "video_core/vulkan_common/vulkan_device.h"
 #include "video_core/vulkan_common/vulkan_wrapper.h"
 
@@ -108,7 +111,25 @@ StagingBufferPool::StagingBufferPool(const Device& device_, MemoryAllocator& mem
     if (device.IsBufferDeviceAddressSupported()) {
         stream_ci.usage |= VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT;
     }
-    stream_buffer = memory_allocator.CreateBuffer(stream_ci, MemoryUsage::Stream);
+    // Without resizable BAR the CPU writes video memory slowly: the stream buffer goes to host
+    // memory there (StreamBufferInHostMemory).
+    VkDeviceSize window_bytes = 0;
+    ForEachDeviceLocalHostVisibleHeap(device, [&window_bytes](size_t, VkMemoryHeap& heap) {
+        window_bytes = (std::max)(window_bytes, heap.size);
+    });
+    const auto memory_props = device.GetPhysical().GetMemoryProperties().memoryProperties;
+    std::array<u32, VK_MAX_MEMORY_TYPES> type_flags{};
+    for (u32 type = 0; type < memory_props.memoryTypeCount; ++type) {
+        type_flags[type] = memory_props.memoryTypes[type].propertyFlags;
+    }
+    const bool in_host = StreamBufferInHostMemory(
+        HasHostMemoryApartFromVideo(type_flags.data(), memory_props.memoryTypeCount),
+        window_bytes, device.IsIntegrated());
+    stream_buffer = memory_allocator.CreateBuffer(
+        stream_ci, in_host ? MemoryUsage::Upload : MemoryUsage::Stream);
+    LOG_INFO(Render_Vulkan,
+             "Stream buffer: {} MiB in {} memory (device-local host-visible heap {} MiB)",
+             stream_ci.size >> 20, in_host ? "host" : "video", window_bytes >> 20);
     if (device.HasDebuggingToolAttached()) {
         stream_buffer.SetObjectNameEXT("Stream Buffer");
     }

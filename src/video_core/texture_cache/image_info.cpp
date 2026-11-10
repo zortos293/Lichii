@@ -161,6 +161,7 @@ ImageInfo::ImageInfo(const Maxwell3D::Regs::RenderTargetConfig& ct,
     dma_downloaded = forced_flushed;
     format = VideoCore::Surface::PixelFormatFromRenderTargetFormat(ct.format);
     rescaleable = false;
+    render_target = true;
     if (ct.tile_mode.is_pitch_linear) {
         ASSERT(ct.tile_mode.dim_control ==
                Maxwell3D::Regs::TileMode::DimensionControl::DefineArraySize);
@@ -204,6 +205,7 @@ ImageInfo::ImageInfo(const Maxwell3D::Regs::Zeta& zt, const Maxwell3D::Regs::Zet
     size.width = zt_size.width;
     size.height = zt_size.height;
     rescaleable = false;
+    render_target = true;
     resources.levels = 1;
     layer_stride = zt.array_pitch * 4;
     maybe_unaligned_layer_stride = layer_stride;
