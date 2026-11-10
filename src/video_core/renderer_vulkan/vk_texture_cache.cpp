@@ -4755,6 +4755,25 @@ Sampler::Sampler(TextureCacheRuntime& runtime, const Tegra::Texture::TSCEntry& t
 
     f32 min_lod = 0.0f;
     f32 max_lod = 0.25f;
+    // EDEN_NX2_MIP_NONE_LODS (on for The Duskbloods when unset, =1 for every title, =0 off): a
+    // sampler without mipmap filtering still reads the level an explicit LOD selects, as on the
+    // console. The Duskbloods' bloom blurs level 1 of its mip chain with textureLod(..., 1.0)
+    // through such a sampler; clamped to level 0 it read a level nothing wrote (zeros, or stale
+    // NaNs that spread into black and purple blocks). Its LOD clamps then apply with nearest level
+    // selection.
+    static const int mip_none_lods_setting = [] {
+        const char* const value = std::getenv("EDEN_NX2_MIP_NONE_LODS");
+        return value == nullptr ? -1 : value[0] == '1' ? 1 : value[0] == '0' ? 0 : -1;
+    }();
+    constexpr u64 DuskbloodsNetworkTestProgramId = 0x0400D1D02399A000ULL;
+    const bool mip_none_lods = tsc.mipmap_filter == TextureMipmapFilter::None &&
+                               (mip_none_lods_setting >= 0 ? mip_none_lods_setting == 1
+                                                           : Settings::GetCurrentProgramID() ==
+                                                                 DuskbloodsNetworkTestProgramId);
+    if (mip_none_lods) {
+        min_lod = tsc.MinLod();
+        max_lod = tsc.MaxLod();
+    }
     if (tsc.mipmap_filter != TextureMipmapFilter::None) {
         min_lod = tsc.MinLod();
         max_lod = tsc.MaxLod();
