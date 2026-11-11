@@ -9,6 +9,7 @@
 #include <thread>
 #include "common/scope_exit.h"
 #include "common/settings.h"
+#include "core/arm/arm_interface.h"
 #include "core/core.h"
 #include "core/debugger/debugger.h"
 #include "core/hle/kernel/k_process.h"
@@ -241,6 +242,18 @@ void PhysicalCore::Idle(KernelCore& kernel) {
         const KProcess* process = kernel.ApplicationProcess();
         spin_us = process != nullptr && process->IsSwitch2() ? 100 : 0;
 #endif
+    }
+    // JIT warm-up: compile listed code on this core's thread, in slices that end as soon as a
+    // thread is ready to run here (checked before every block), in place of the spin while
+    // there is any.
+    if (!m_is_single_core) {
+        if (KProcess* const process = kernel.ApplicationProcess(); process != nullptr) {
+            if (Core::ArmInterface* const arm = process->GetArmInterface(m_core_index)) {
+                while (!m_is_interrupted.load(std::memory_order_acquire) &&
+                       arm->WarmUp(m_is_interrupted)) {
+                }
+            }
+        }
     }
     const auto spin = std::chrono::microseconds{spin_us};
     if (spin.count() > 0) {
