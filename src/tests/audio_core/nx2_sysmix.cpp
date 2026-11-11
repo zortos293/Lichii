@@ -285,14 +285,17 @@ TEST_CASE("sysmix plays the Sports Resort Q15 movie ring including wrap and gain
     REQUIRE(stream.GetDataEvent()->IsSignaled(context.system.Kernel()));
 }
 
-TEST_CASE("sysmix advertises only implemented stereo PCM formats", "[sysmix]") {
+TEST_CASE("sysmix advertises only implemented stereo and 5.1 PCM formats", "[sysmix]") {
     REQUIRE(SysmixOutput::IsFormatSupported(2, 2, 48000));
     REQUIRE(SysmixOutput::IsFormatSupported(5, 2, 48000));
+    REQUIRE(SysmixOutput::IsFormatSupported(2, 6, 48000));
+    REQUIRE(SysmixOutput::IsFormatSupported(5, 6, 48000));
     for (const u32 format : {0U, 1U, 3U, 4U, 6U, 258U, 261U}) {
         REQUIRE_FALSE(SysmixOutput::IsFormatSupported(format, 2, 48000));
     }
     REQUIRE_FALSE(SysmixOutput::IsFormatSupported(2, 1, 48000));
-    REQUIRE_FALSE(SysmixOutput::IsFormatSupported(2, 6, 48000));
+    REQUIRE_FALSE(SysmixOutput::IsFormatSupported(2, 4, 48000));
+    REQUIRE_FALSE(SysmixOutput::IsFormatSupported(2, 8, 48000));
     REQUIRE_FALSE(SysmixOutput::IsFormatSupported(2, 2, 44100));
 }
 

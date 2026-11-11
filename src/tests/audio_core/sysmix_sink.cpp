@@ -88,6 +88,32 @@ TEST_CASE("sysmix sink converts stereo to host channels without losing block ali
     }
 }
 
+TEST_CASE("sysmix sink plays 5.1 blocks on stereo and 5.1 hosts", "[sysmix_sink]") {
+    SysmixTests::Context context;
+    AudioCore::Sink::SinkBuffer block{240, 0, 0, false};
+    std::array<s16, 1440> samples{};
+    for (std::size_t i = 0; i < 240; ++i) {
+        samples[i * 6] = 1000;      // front left
+        samples[i * 6 + 1] = -1000; // front right
+    }
+    for (const u32 host_channels : {2U, 6U}) {
+        auto owned_stream = std::make_unique<SysmixTests::Stream>(
+            context.system, AudioCore::Sink::StreamType::Sysmix, host_channels, true);
+        auto& stream = *owned_stream;
+        stream.SetSystemChannels(6);
+        stream.SetSystemVolume(1.0f / Settings::Volume());
+        auto copy = samples;
+        REQUIRE(stream.TryAppendOutputBlock(block, copy));
+        REQUIRE_FALSE(stream.TryAppendOutputBlock(block, std::span{copy}.first(480)));
+        std::array<s16, 1440> output{};
+        stream.ProcessAudioOutAndRender(std::span{output}.first(240 * host_channels), 240);
+        for (std::size_t i = 0; i < 240; ++i) {
+            REQUIRE(output[i * host_channels] == 1000);
+            REQUIRE(output[i * host_channels + 1] == -1000);
+        }
+    }
+}
+
 TEST_CASE("sysmix sink publishes samples before concurrently consumed metadata", "[sysmix_sink]") {
     SysmixTests::Context context;
     auto owned_stream = std::make_unique<SysmixTests::Stream>(
