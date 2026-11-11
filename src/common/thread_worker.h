@@ -78,6 +78,8 @@ public:
                     } else {
                         task();
                     }
+                    // Draining an executed task includes releasing its captured resources.
+                    task = {};
                     ++work_done;
                 }
             }

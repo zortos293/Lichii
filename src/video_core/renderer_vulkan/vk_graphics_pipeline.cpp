@@ -1591,7 +1591,7 @@ void GraphicsPipeline::MakePipeline(VkRenderPass render_pass) {
         };
         // Their binaries are stored under the graphics key, one key per program
         const auto make_compute = [&](VkShaderModule module, VkPipelineLayout layout,
-                                      const Shader::Info* info, u64 program) {
+                                      const Shader::Info* info, u64 program, const char* role) {
             const bool uses_warp_ops{info && (info->uses_subgroup_vote ||
                                               info->uses_subgroup_invocation_id ||
                                               info->uses_subgroup_shuffles ||
@@ -1616,22 +1616,30 @@ void GraphicsPipeline::MakePipeline(VkRenderPass render_pass) {
                 .basePipelineHandle = nullptr,
                 .basePipelineIndex = 0,
             };
-            return binaries ? binaries->CreateComputePipeline(
-                                  compute_ci, *pipeline_cache,
-                                  GraphicsRecordKey(key) ^ (program * 0x9e3779b97f4a7c15ULL))
-                            : device.GetLogical().CreateComputePipeline(compute_ci,
-                                                                        *pipeline_cache);
+            const auto build = [&] {
+                return binaries
+                           ? binaries->CreateComputePipeline(compute_ci, *pipeline_cache,
+                                                             GraphicsRecordKey(key) ^
+                                                                 (program * 0x9e3779b97f4a7c15ULL))
+                           : device.GetLogical().CreateComputePipeline(compute_ci, *pipeline_cache);
+            };
+            auto& trace = GetPipelineBuildTraceWriter();
+            if (!trace.Enabled()) {
+                return build();
+            }
+            return TracePipelineBuild(trace, "compute", key.Hash(), key.unique_hashes, false, build,
+                                      role);
         };
         mesh_vertex_module = BuildShader(device, mesh_emulation->vertex_spirv);
-        mesh_compute_pipeline = make_compute(*spv_modules[mesh_emulation->mesh_stage],
-                                             *pipeline_layout,
-                                             &stage_infos[mesh_emulation->mesh_stage], 1);
+        mesh_compute_pipeline =
+            make_compute(*spv_modules[mesh_emulation->mesh_stage], *pipeline_layout,
+                         &stage_infos[mesh_emulation->mesh_stage], 1, "mesh");
         if (mesh_emulation->has_task) {
             task_compute_pipeline =
-                make_compute(*spv_modules[0], *pipeline_layout, &stage_infos[0], 2);
+                make_compute(*spv_modules[0], *pipeline_layout, &stage_infos[0], 2, "task");
             distribution_module = BuildShader(device, mesh_emulation->distribution_spirv);
-            distribution_pipeline =
-                make_compute(*distribution_module, *distribution_layout, nullptr, 3);
+            distribution_pipeline = make_compute(*distribution_module, *distribution_layout,
+                                                 nullptr, 3, "distribution");
         }
     }
     FixedPipelineState::DynamicState dynamic{};
@@ -2074,8 +2082,6 @@ void GraphicsPipeline::MakePipeline(VkRenderPass render_pass) {
     }
 
     const bool unoptimized = (flags & VK_PIPELINE_CREATE_DISABLE_OPTIMIZATION_BIT) != 0;
-    const auto trace_begin = std::chrono::steady_clock::now();
-    TracePipelineBuild("BEGIN", "graphics", key.Hash(), key.unique_hashes, unoptimized);
     const VkGraphicsPipelineCreateInfo pipeline_ci{
         .sType = VK_STRUCTURE_TYPE_GRAPHICS_PIPELINE_CREATE_INFO,
         .pNext = nullptr,
@@ -2101,13 +2107,11 @@ void GraphicsPipeline::MakePipeline(VkRenderPass render_pass) {
         .basePipelineHandle = nullptr,
         .basePipelineIndex = 0,
     };
-    pipeline = binaries ? binaries->CreateGraphicsPipeline(pipeline_ci, *pipeline_cache,
+    pipeline = TracePipelineBuild("graphics", key.Hash(), key.unique_hashes, unoptimized, [&] {
+        return binaries ? binaries->CreateGraphicsPipeline(pipeline_ci, *pipeline_cache,
                                                            GraphicsRecordKey(key))
                         : device.GetLogical().CreateGraphicsPipeline(pipeline_ci, *pipeline_cache);
-    TracePipelineBuild("END", "graphics", key.Hash(), key.unique_hashes, unoptimized,
-                       std::chrono::duration<double, std::milli>(
-                           std::chrono::steady_clock::now() - trace_begin)
-                           .count());
+    });
 
     // Log graphics pipeline creation
     if (GPU::Logging::IsActive()) {
