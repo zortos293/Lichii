@@ -2558,7 +2558,7 @@ private:
                         vsync_state->trace_late_callbacks +=
                             VblankInterval.count() > 0 && late >= VblankInterval;
                         vsync_state->trace_max_late =
-                            (std::max)(vsync_state->trace_max_late, late.count());
+                            (std::max)(vsync_state->trace_max_late, static_cast<s64>(late.count()));
                         if (vsync_state->trace_last_callback) {
                             const s64 gap = observed - *vsync_state->trace_last_callback;
                             vsync_state->trace_min_gap = vsync_state->trace_min_gap

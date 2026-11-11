@@ -39,7 +39,8 @@ public:
         const VAddr masked_address = address & RESERVATION_GRANULE_MASK;
 
 #ifdef ARCHITECTURE_arm64
-        std::atomic_ref<VAddr>{exclusive_addresses[processor_id]}.store(masked_address, std::memory_order_release);
+        // std::atomic_ref is missing from Android's libc++, so use the equivalent compiler builtin.
+        __atomic_store_n(&exclusive_addresses[processor_id], masked_address, __ATOMIC_RELEASE);
         const T value = op();
         std::memcpy(exclusive_values[processor_id].data(), &value, sizeof(T));
 #else
