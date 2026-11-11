@@ -7,7 +7,7 @@
 #include <QCheckBox>
 #include <QComboBox>
 #include <QDateTime>
-#include <QDesktopServices>
+#include "qt_common/util/open.h"
 #include <QDialogButtonBox>
 #include <QFormLayout>
 #include <QJsonArray>
@@ -260,7 +260,7 @@ Dialog::Dialog(const Session& session, QNetworkAccessManager* network_, QWidget*
     connect(clear, &QPushButton::clicked, this, &Dialog::Clear);
     connect(open_receipt, &QPushButton::clicked, this, [this] {
         if (!receipt_url.isEmpty()) {
-            QDesktopServices::openUrl(receipt_url);
+            QtCommon::OpenUrl(receipt_url);
         }
     });
     connect(query, &QLineEdit::textChanged, this, [this] {

@@ -14,7 +14,6 @@
 #include <QRadioButton>
 #include <QSaveFile>
 #include <QStandardPaths>
-#include <qdesktopservices.h>
 #include "common/logging.h"
 #include "common/scm_rev.h"
 #include "frontend_common/update_installer.h"
@@ -32,7 +31,7 @@
 #include <openssl/cert.h>
 #endif
 
-#include <QDesktopServices>
+#include "qt_common/util/open.h"
 
 #undef GetSaveFileName
 
@@ -62,7 +61,7 @@ UpdateDialog::UpdateDialog(const Common::Net::Release& release, QWidget* parent)
     if (assets.empty()) {
         ui->groupBox->setHidden(true);
         connect(this, &QDialog::accepted, this, [release]() {
-            QDesktopServices::openUrl(QUrl{QString::fromStdString(release.html_url)});
+            QtCommon::OpenUrl(QUrl{QString::fromStdString(release.html_url)});
         });
     } else if (assets.size() == 1) {
         ui->groupBox->setHidden(true);
@@ -220,7 +219,7 @@ void UpdateDialog::Download() {
                                      QtCommon::Frontend::Yes | QtCommon::Frontend::No);
 
     if (button == QtCommon::Frontend::Yes) {
-        QDesktopServices::openUrl(QUrl::fromLocalFile(filename));
+        QtCommon::OpenLocalFolder(filename);
     }
 }
 

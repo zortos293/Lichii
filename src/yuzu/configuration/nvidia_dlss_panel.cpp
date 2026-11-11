@@ -17,7 +17,7 @@
 #include <vector>
 
 #include <QApplication>
-#include <QDesktopServices>
+#include "qt_common/util/open.h"
 #include <QDialog>
 #include <QDialogButtonBox>
 #include <QHBoxLayout>
@@ -27,7 +27,6 @@
 #include <QProgressDialog>
 #include <QPushButton>
 #include <QStringList>
-#include <QUrl>
 #include <QVBoxLayout>
 #include <fmt/format.h>
 #include <zlib.h>
@@ -350,7 +349,7 @@ NvidiaDlssPanel::NvidiaDlssPanel(QWidget* parent) : QWidget(parent) {
         const std::filesystem::path folder = Streamline::FindDlssFiles().folder;
         std::error_code ec;
         std::filesystem::create_directories(folder, ec);
-        QDesktopServices::openUrl(QUrl::fromLocalFile(PathText(folder)));
+        QtCommon::OpenLocalFolder(PathText(folder));
     });
     Refresh();
 }

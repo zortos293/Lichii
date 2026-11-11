@@ -18,6 +18,7 @@ add_library(qt_common STATIC
     config/shared_translation.h
 
     util/path.h util/path.cpp
+    util/open.h util/open.cpp
     util/game.h util/game.cpp
     util/meta.h util/meta.cpp
     util/content.h util/content.cpp

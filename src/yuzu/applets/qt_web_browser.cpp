@@ -4,7 +4,7 @@
 // SPDX-FileCopyrightText: Copyright 2020 yuzu Emulator Project
 // SPDX-License-Identifier: GPL-2.0-or-later
 
-#include <QDesktopServices>
+#include "qt_common/util/open.h"
 #include <QUrl>
 
 #include "common/logging.h"
@@ -424,7 +424,7 @@ void QtWebBrowser::OpenExternalWebPage(const std::string& external_url,
     LOG_INFO(Service_AM, "Opening external URL in host browser: {}", external_url);
 
     const QUrl url(QString::fromStdString(external_url));
-    const bool success = QDesktopServices::openUrl(url);
+    const bool success = QtCommon::OpenUrl(url);
 
     if (success) {
         LOG_INFO(Service_AM, "Successfully opened URL in host browser");

@@ -1,13 +1,12 @@
 // SPDX-FileCopyrightText: Copyright 2026 Eden Emulator Project
 // SPDX-License-Identifier: GPL-3.0-or-later
 
-#include <QDesktopServices>
 #include <QString>
-#include <QUrl>
 #include <fmt/format.h>
 #include "common/fs/fs.h"
 #include "common/fs/path_util.h"
 #include "qt_common/abstract/frontend.h"
+#include "qt_common/util/open.h"
 #include "qt_common/util/path.h"
 
 namespace QtCommon::Path {
@@ -23,7 +22,7 @@ bool OpenShaderCache(u64 program_id, QObject* parent) {
 
     const auto shader_path_string{Common::FS::PathToUTF8String(shader_cache_folder_path)};
     const auto qt_shader_cache_path = QString::fromStdString(shader_path_string);
-    return QDesktopServices::openUrl(QUrl::fromLocalFile(qt_shader_cache_path));
+    return QtCommon::OpenLocalFolder(qt_shader_cache_path);
 }
 
 } // namespace QtCommon::Path

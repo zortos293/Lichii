@@ -2,7 +2,7 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 
 #include <QAbstractTextDocumentLayout>
-#include <QDesktopServices>
+#include "qt_common/util/open.h"
 #include <QIcon>
 #include <QPainter>
 #include <QTableWidget>
@@ -100,7 +100,7 @@ bool LinkItemDelegate::editorEvent(QEvent* event, QAbstractItemModel* model,
                 if (format.isAnchor()) {
                     QString href = format.anchorHref();
                     if (!href.isEmpty()) {
-                        QDesktopServices::openUrl(QUrl(href));
+                        QtCommon::OpenUrl(QUrl(href));
                         return true;
                     }
                 }

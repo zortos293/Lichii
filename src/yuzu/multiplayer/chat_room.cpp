@@ -6,7 +6,7 @@
 #include <array>
 #include <future>
 #include <QColor>
-#include <QDesktopServices>
+#include "qt_common/util/open.h"
 #include <QFutureWatcher>
 #include <QImage>
 #include <QList>
@@ -445,7 +445,7 @@ void ChatRoom::PopupContextMenu(const QPoint& menu_location) {
     if (!username.isEmpty()) {
         QAction* view_profile_action = context_menu.addAction(tr("View Profile"));
         connect(view_profile_action, &QAction::triggered, [username] {
-            QDesktopServices::openUrl(
+            QtCommon::OpenUrl(
                 QUrl(QStringLiteral("https://community.citra-emu.org/u/%1").arg(username)));
         });
     }

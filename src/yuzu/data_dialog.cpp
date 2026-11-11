@@ -8,7 +8,7 @@
 #include "ui_data_dialog.h"
 #include "util/util.h"
 
-#include <QDesktopServices>
+#include "qt_common/util/open.h"
 #include <QFileDialog>
 #include <QFutureWatcher>
 #include <QProgressDialog>
@@ -73,8 +73,8 @@ void DataWidget::open() {
     std::optional<std::string> user_id = selectProfile();
     if (!user_id)
         return;
-    QDesktopServices::openUrl(QUrl::fromLocalFile(QString::fromStdString(
-        FrontendCommon::DataManager::GetDataDirString(m_dir, user_id.value()))));
+    QtCommon::OpenLocalFolder(QString::fromStdString(
+        FrontendCommon::DataManager::GetDataDirString(m_dir, user_id.value())));
 }
 
 void DataWidget::upload() {

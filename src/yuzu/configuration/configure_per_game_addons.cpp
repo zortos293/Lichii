@@ -10,7 +10,7 @@
 
 #include <fmt/format.h>
 
-#include <QDesktopServices>
+#include "qt_common/util/open.h"
 #include <QHeaderView>
 #include <QMenu>
 #include <QStandardItemModel>
@@ -277,7 +277,7 @@ void ConfigurePerGameAddons::showContextMenu(const QPoint& pos) {
         if (QFileInfo::exists(loc)) {
             QAction* open = menu.addAction(tr("&Open in File Manager"));
             connect(open, &QAction::triggered, this,
-                    [selected, loc]() { QDesktopServices::openUrl(QUrl::fromLocalFile(loc)); });
+                    [selected, loc]() { QtCommon::OpenLocalFolder(loc); });
         }
     }
 

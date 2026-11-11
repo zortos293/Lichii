@@ -4,9 +4,8 @@
 // SPDX-FileCopyrightText: 2016 Citra Emulator Project
 // SPDX-License-Identifier: GPL-2.0-or-later
 
-#include <QDesktopServices>
+#include "qt_common/util/open.h"
 #include <QMessageBox>
-#include <QUrl>
 #include "common/fs/path_util.h"
 #include "common/logging.h"
 #include "common/settings.h"
@@ -25,7 +24,7 @@ ConfigureDebug::ConfigureDebug(const Core::System& system_, QWidget* parent)
     connect(ui->open_log_button, &QPushButton::clicked, []() {
         const auto path =
             QString::fromStdString(Common::FS::GetEdenPathString(Common::FS::EdenPath::LogDir));
-        QDesktopServices::openUrl(QUrl::fromLocalFile(path));
+        QtCommon::OpenLocalFolder(path);
     });
 
     connect(ui->toggle_gdbstub, &QCheckBox::toggled,
