@@ -86,6 +86,12 @@ using VideoCommon::ImageViewType;
 
 namespace {
 
+// Experimental Bananza profiling: wall time spent preparing draw calls.
+// This only collects timings when the existing EDEN_DKB_FRAME_TRACE is active.
+// Keep it separate from GPU timing: it measures CPU-side work only.
+u64 dkb_prepare_draw_calls = 0;
+u64 dkb_prepare_draw_ns = 0;
+
 /// read_gpu_memory: the first address space (the bound channel's first) that maps the whole range,
 /// read as the GPU reads it, without flushing GPU caches.
 VideoCore::Nx2Debug::GpuReadResult ReadGpuMemory(std::span<Tegra::MemoryManager* const> spaces,
@@ -216,22 +222,6 @@ VkRect2D GetScissorState(const Maxwell& regs, size_t index, u32 up_scale = 1, u3
         scissor.extent.height = (std::numeric_limits<s32>::max)();
     }
     return scissor;
-}
-
-// The part of a volume slice a clear writes: the scissor (when the clear uses it) limited to the
-// render area and the slice.
-VkRect2D VolumeClearRect(const Maxwell& regs, VkExtent2D render_area, VideoCommon::Extent3D slice) {
-    VkRect2D rect = regs.clear_control.use_scissor ? GetScissorState(regs, 0)
-                                                   : VkRect2D{{0, 0}, {slice.width, slice.height}};
-    const auto clamp_axis = [](s32& offset, u32& extent, u32 limit) {
-        const s64 begin = std::clamp<s64>(offset, 0, limit);
-        const s64 end = std::clamp<s64>(s64{offset} + extent, begin, limit);
-        offset = static_cast<s32>(begin);
-        extent = static_cast<u32>(end - begin);
-    };
-    clamp_axis(rect.offset.x, rect.extent.width, (std::min)(render_area.width, slice.width));
-    clamp_axis(rect.offset.y, rect.extent.height, (std::min)(render_area.height, slice.height));
-    return rect;
 }
 
 DrawParams MakeDrawParams(const Tegra::Engines::Maxwell3D::DrawManager::State& draw_state, u32 num_instances, bool is_indexed) {
@@ -782,6 +772,18 @@ bool RasterizerVulkan::TryNx2IndirectReset(bool is_indexed, u32 instance_count) 
 
 template <typename Func>
 void RasterizerVulkan::PrepareDraw(bool is_indexed, Func&& draw_func, bool is_indirect) {
+
+    const bool dkb_timing_enabled = Common::DkbFrameTrace::Enabled();
+    const auto dkb_begin = dkb_timing_enabled ? std::chrono::steady_clock::now()
+                                              : std::chrono::steady_clock::time_point{};
+    SCOPE_EXIT {
+        if (dkb_timing_enabled) {
+            const auto elapsed_ns = std::chrono::duration_cast<std::chrono::nanoseconds>(
+                                        std::chrono::steady_clock::now() - dkb_begin).count();
+            ++dkb_prepare_draw_calls;
+            dkb_prepare_draw_ns += static_cast<u64>((std::max)(elapsed_ns, 0LL));
+        }
+    };
 
     if (Common::DkbFrameTrace::Enabled()) {
         ++trace_draws;
@@ -1861,86 +1863,6 @@ void RasterizerVulkan::DrawTexture() {
                          sampler->Handle(), dst_region, src_region, src_size);
 }
 
-// A 1-layer depth target bound with a 3D color target limits the framebuffer to one layer, so
-// vkCmdClearAttachments can't reach the target's other slices. Those slices are zeroed by copying
-// zeros into the clear's rectangle of exactly the slices the clear names; the rest of the volume
-// keeps its contents. The rectangle can be smaller than the target: in handheld mode the game
-// clears a 48-wide fog volume through a 64-wide render target.
-bool RasterizerVulkan::ClearVolumeSlices(const Framebuffer* framebuffer, u32 first_slice,
-                                         u32 slice_count) {
-    const auto& regs = maxwell3d->regs;
-    const u32 target_index = regs.clear_surface.RT;
-    const auto& color_buffer_ids = texture_cache.GetRenderTargets().color_buffer_ids;
-    // Depth and stencil clears take the normal path, so only a colour-only clear qualifies.
-    if (target_index >= color_buffer_ids.size() || regs.clear_surface.Z || regs.clear_surface.S) {
-        return false;
-    }
-    const auto view_id = color_buffer_ids[target_index];
-    const u32 depth = regs.rt[target_index].depth;
-    if (!view_id || depth <= framebuffer->Layers() || first_slice >= depth) {
-        return false;
-    }
-    const auto& view = texture_cache.GetImageView(view_id);
-    const bool is_volume = True(view.flags & VideoCommon::ImageViewFlagBits::Slice);
-    const bool clears_all_channels = regs.clear_surface.R && regs.clear_surface.G &&
-                                     regs.clear_surface.B && regs.clear_surface.A;
-    const bool clears_to_zero =
-        std::ranges::all_of(regs.clear_color, [](f32 value) { return value == 0.0f; });
-    if (!is_volume || !clears_all_channels || !clears_to_zero) {
-        return false;
-    }
-    const VkRect2D rect = VolumeClearRect(regs, framebuffer->RenderArea(), view.size);
-    if (rect.extent.width == 0 || rect.extent.height == 0) {
-        return true;
-    }
-    const u32 width = rect.extent.width;
-    const u32 height = rect.extent.height;
-    // The host image can use a wider format than the guest's (B10G11R11 falls back to
-    // R16G16B16A16): size the zeros for the widest color texel, 16 bytes.
-    constexpr size_t WidestTexelBytes = 16;
-    const size_t slice_bytes = size_t{width} * height * WidestTexelBytes;
-    const auto zeros = staging_pool.Request(slice_bytes, MemoryUsage::Upload);
-    std::memset(zeros.mapped_span.data(), 0, slice_bytes);
-    const u32 count = std::min(slice_count, depth - first_slice);
-    const VkImage image = view.ImageHandle();
-    const u32 level = view.range.base.level;
-    // The clear's slices count from the view's first slice.
-    const u32 base_slice = static_cast<u32>(view.range.base.layer);
-    scheduler.RequestOutsideRenderPassOperationContext();
-    scheduler.Record([image, level, base_slice, rect, width, height, first_slice, count,
-                      buffer = zeros.buffer, offset = zeros.offset](vk::CommandBuffer cmdbuf) {
-        // Earlier passes may still be reading or writing the volume.
-        constexpr VkMemoryBarrier clear_waits{
-            .sType = VK_STRUCTURE_TYPE_MEMORY_BARRIER,
-            .pNext = nullptr,
-            .srcAccessMask = VK_ACCESS_MEMORY_READ_BIT | VK_ACCESS_MEMORY_WRITE_BIT,
-            .dstAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT,
-        };
-        cmdbuf.PipelineBarrier(VK_PIPELINE_STAGE_ALL_COMMANDS_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT,
-                               0, clear_waits);
-        for (u32 slice = first_slice; slice < first_slice + count; ++slice) {
-            const VkBufferImageCopy zero_slice{
-                .bufferOffset = offset,
-                .bufferRowLength = 0,
-                .bufferImageHeight = 0,
-                .imageSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, level, 0, 1},
-                .imageOffset = {rect.offset.x, rect.offset.y, static_cast<s32>(base_slice + slice)},
-                .imageExtent = {width, height, 1},
-            };
-            cmdbuf.CopyBufferToImage(buffer, image, VK_IMAGE_LAYOUT_GENERAL, zero_slice);
-        }
-        constexpr VkMemoryBarrier clear_finished{
-            .sType = VK_STRUCTURE_TYPE_MEMORY_BARRIER,
-            .pNext = nullptr,
-            .srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT,
-            .dstAccessMask = VK_ACCESS_MEMORY_READ_BIT | VK_ACCESS_MEMORY_WRITE_BIT,
-        };
-        cmdbuf.PipelineBarrier(VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_ALL_COMMANDS_BIT,
-                               0, clear_finished);
-    });
-    return true;
-}
-
 void RasterizerVulkan::Clear(u32 layer_count) {
     VideoCommon::Nx2Profile::Scope profile_scope{VideoCommon::Nx2Profile::Zone::Clear};
     if (Tegra::Engines::g_nx2_trace_draws_after_upscale > 0) {
@@ -1977,9 +1899,6 @@ void RasterizerVulkan::Clear(u32 layer_count) {
         LOG_DEBUG(Render_Vulkan,
                   "Framebuffer clear layers: base={}, requested={}, clipped={}, framebuffer={}",
                   base_array_layer, layer_count, clear_layers.count, framebuffer->Layers());
-    }
-    if (ClearVolumeSlices(framebuffer, base_array_layer, layer_count)) {
-        return;
     }
     if (clear_layers.count == 0) {
         return;
@@ -2804,13 +2723,6 @@ void RasterizerVulkan::FlushCommands() {
     }
     draw_counter = 0;
     pending_native_work = false;
-    // A fence with a download is submitted by InnerFence::Queue, and SignalFence then comes here
-    // with nothing recorded since: ~4,600 empty submits a second in Ocarina of Time's Castle
-    // Town, each followed by a full rebind (from Fritchii c338269b92).
-    if (!scheduler.RecordedSinceSubmit()) {
-        Scheduler::CountSkippedFlush();
-        return;
-    }
     // Fences with downloads or queries come here right after queueing: ~9,400 a second in
     // Hyrule Warriors: Age of Imprisonment fights. Batched like the fences themselves.
     if (!scheduler.DeferFlush()) {
@@ -3405,6 +3317,17 @@ void RasterizerVulkan::TickFrame() {
         ++trace_window_frames;
         if (trace_sample_frame) {
             LOG_INFO(Render_Vulkan,
+                     "DKB draw_cpu_prepare calls={} total_ms={:.3f} avg_us={:.3f} "
+                     "per_frame_ms={:.3f} frames={}",
+                     dkb_prepare_draw_calls, static_cast<double>(dkb_prepare_draw_ns) / 1e6,
+                     dkb_prepare_draw_calls ? static_cast<double>(dkb_prepare_draw_ns) /
+                                                  (1000.0 * dkb_prepare_draw_calls) : 0.0,
+                     trace_window_frames ? static_cast<double>(dkb_prepare_draw_ns) /
+                                               (1e6 * trace_window_frames) : 0.0,
+                     trace_window_frames);
+            dkb_prepare_draw_calls = 0;
+            dkb_prepare_draw_ns = 0;
+            LOG_INFO(Render_Vulkan,
                      "DKB draws through_frame={} frames={} attempts={} skipped={} indirect={} "
                      "zero_direct={} capture_dropped={} attempts_per_frame={:.1f} "
                      "zero_direct_per_frame={:.1f} (totals since previous line)",
@@ -3474,11 +3397,10 @@ std::optional<VideoCore::GameDlssProbe> RasterizerVulkan::ProbeGameDlssOutput(
 bool RasterizerVulkan::AccelerateTemporalUpscale(
     const Tegra::Engines::Fermi2D::Surface& src, const Tegra::Engines::Fermi2D::Surface& dst,
     const Tegra::Engines::Fermi2D::Surface& motion_vectors, const Tegra::Texture::TICEntry* depth,
-    std::array<f32, 2> jitter, std::array<f32, 2> motion_scale, bool use_history,
-    std::optional<std::array<u32, 2>> render_region) {
+    std::array<f32, 2> jitter, std::array<f32, 2> motion_scale, bool use_history) {
     std::scoped_lock lock{texture_cache.mutex};
     return texture_cache.TemporalUpscale(dst, src, motion_vectors, depth, jitter, motion_scale,
-                                          use_history, render_region);
+                                          use_history);
 }
 
 Tegra::Engines::AccelerateDMAInterface& RasterizerVulkan::AccessAccelerateDMA() {

@@ -1,0 +1,63 @@
+name: Windows DKB profiling build
+on:
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  windows:
+    runs-on: windows-2022
+    timeout-minutes: 180
+    steps:
+      - uses: actions/checkout@v4
+      - name: Set up MSVC environment
+        uses: ilammy/msvc-dev-cmd@v1
+      - name: Install LLVM (matching upstream)
+        shell: pwsh
+        run: ./tools/windows/install-llvm.ps1
+      - name: Qt 6.8.3
+        uses: jurplel/install-qt-action@v4
+        with:
+          version: '6.8.3'
+          host: windows
+          target: desktop
+          arch: win64_msvc2022_64
+          modules: qtcharts
+      - name: Vulkan SDK (matching upstream)
+        shell: pwsh
+        run: ./tools/windows/install-vulkan-sdk.ps1
+      - name: Configure Release x64 (clang-cl + ThinLTO)
+        shell: bash
+        run: |
+          cmake -S . -B build/profile -G Ninja \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DBUILD_TESTING=OFF -DYUZU_TESTS=OFF \
+            -DYUZU_CMD=ON -DYUZU_ROOM=OFF -DYUZU_ROOM_STANDALONE=OFF \
+            -DYUZU_USE_BUNDLED_QT=OFF -DENABLE_QT_TRANSLATION=ON \
+            -DYUZU_USE_BUNDLED_SDL3=ON -DENABLE_UPDATE_CHECKER=ON \
+            -DUSE_DISCORD_PRESENCE=OFF \
+            -DLICHII_BUILD_TAG=dkb-profile-150 \
+            -DLICHII_BUILD_PLATFORM=windows-x86_64 \
+            "-DCMAKE_C_COMPILER=$LLVM_ROOT/bin/clang-cl.exe" \
+            "-DCMAKE_CXX_COMPILER=$LLVM_ROOT/bin/clang-cl.exe" \
+            "-DCMAKE_LINKER=$LLVM_ROOT/bin/lld-link.exe" \
+            "-DCMAKE_AR=$LLVM_ROOT/bin/llvm-lib.exe" \
+            '-DCMAKE_C_FLAGS=-DWIN32 -D_WINDOWS -DNOMINMAX -flto=thin' \
+            '-DCMAKE_CXX_FLAGS=-EHsc -DWIN32 -D_WINDOWS -DNOMINMAX -flto=thin'
+      - name: Build
+        shell: bash
+        run: cmake --build build/profile --target yuzu yuzu-cmd --parallel 4
+      - name: Bundle Qt runtime
+        shell: pwsh
+        run: |
+          if (-not (Test-Path 'build/profile/bin/lichii.exe')) { throw 'lichii.exe missing' }
+          windeployqt --release --no-translations build/profile/bin/lichii.exe
+      - name: Attach diagnostic launcher
+        shell: pwsh
+        run: Copy-Item ./DKB_Profile_Run.bat build/profile/bin/
+      - name: Upload runnable Windows program
+        uses: actions/upload-artifact@v4
+        with:
+          name: Lichii-150-DKB-Profile-Windows-x64
+          path: build/profile/bin/
+          if-no-files-found: error
+          retention-days: 7
