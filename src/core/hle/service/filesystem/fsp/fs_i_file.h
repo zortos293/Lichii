@@ -18,6 +18,7 @@ public:
     explicit IFile(Core::System& system_, FileSys::VirtualFile file_);
 
 private:
+    friend struct FileIoTestAccess;
     std::unique_ptr<FileSys::Fsa::IFile> backend;
 
     Result Read(FileSys::ReadOption option, Out<s64> out_size, s64 offset,
