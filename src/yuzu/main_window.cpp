@@ -433,11 +433,10 @@ MainWindow::MainWindow(bool has_broken_vulkan)
     show();
 
 #ifdef ENABLE_UPDATE_CHECKER
+    connect(&update_watcher, &QFutureWatcher<UpdateChecker::CheckResult>::finished, this,
+            &MainWindow::OnEmulatorUpdateAvailable);
     if (UISettings::values.check_for_updates) {
-        update_future = QtConcurrent::run([]() { return UpdateChecker::Check(); });
-        update_watcher.connect(&update_watcher, &QFutureWatcher<QString>::finished, this,
-                               &MainWindow::OnEmulatorUpdateAvailable);
-        update_watcher.setFuture(update_future);
+        CheckForUpdates(false);
     }
 #endif
 
@@ -1431,6 +1430,7 @@ void MainWindow::RestoreUIState() {
     ToggleWindowMode();
 
     ui->action_Fullscreen->setChecked(UISettings::values.fullscreen.GetValue());
+    ui->action_Preserve_Window_Size->setChecked(UISettings::values.preserve_window_size.GetValue());
 
     ui->action_Enable_Overlay_Applet->setChecked(Settings::values.enable_overlay.GetValue());
 
@@ -1588,6 +1588,11 @@ void MainWindow::ConnectMenuEvents() {
     ui->action_Post_Processing_Shaders->setVisible(false);
 #endif
 
+    connect(ui->action_Preserve_Window_Size, &QAction::triggered, this, [this](bool enabled) {
+        UISettings::values.preserve_window_size = enabled;
+        OnSaveConfig();
+    });
+
     connect_menu(ui->action_Reset_Window_Size_720, &MainWindow::ResetWindowSize720);
     connect_menu(ui->action_Reset_Window_Size_900, &MainWindow::ResetWindowSize900);
     connect_menu(ui->action_Reset_Window_Size_1080, &MainWindow::ResetWindowSize1080);
@@ -1694,6 +1699,11 @@ void MainWindow::ConnectMenuEvents() {
     connect_menu(ui->action_Firmware_From_Folder, &MainWindow::OnInstallFirmware);
     connect_menu(ui->action_Firmware_From_ZIP, &MainWindow::OnInstallFirmwareFromZIP);
     connect_menu(ui->action_Install_Keys, &MainWindow::OnInstallDecryptionKeys);
+#ifdef ENABLE_UPDATE_CHECKER
+    connect_menu(ui->action_Check_For_Updates, [this] { CheckForUpdates(true); });
+#else
+    ui->action_Check_For_Updates->setVisible(false);
+#endif
     connect_menu(ui->action_About, &MainWindow::OnAbout);
     connect_menu(ui->action_Eden_Dependencies, &MainWindow::OnEdenDependencies);
     connect_menu(ui->action_Apply_Recommended_Settings, &MainWindow::OnApplyRecommendedSettings);
@@ -2346,7 +2356,8 @@ void MainWindow::BootGame(const QString& filename, Service::AM::FrontendAppletPa
     emulation_running = true;
     if (ui->action_Fullscreen->isChecked()) {
         ShowFullscreen();
-    } else if (!(ui->action_Single_Window_Mode->isChecked() ? isMaximized()
+    } else if (!UISettings::values.preserve_window_size &&
+               !(ui->action_Single_Window_Mode->isChecked() ? isMaximized()
                                                             : render_window->isMaximized())) {
         if (Settings::IsDockedMode()) {
             ResetWindowSize1080();
@@ -4918,8 +4929,46 @@ void MainWindow::OnCaptureScreenshot() {
 }
 
 #ifdef ENABLE_UPDATE_CHECKER
+void MainWindow::CheckForUpdates(bool manual) {
+    if (update_check_in_progress) {
+        return;
+    }
+    if (manual && (std::string_view{Common::g_build_release_tag}.empty() ||
+                   std::string_view{Common::g_build_release_platform}.empty())) {
+        QMessageBox::information(this, tr("Check for Updates"),
+                                 tr("This build has no release information and cannot check for "
+                                    "updates. Please check the Lichii releases page on GitHub."));
+        return;
+    }
+    manual_update_check = manual;
+    update_check_in_progress = true;
+    ui->action_Check_For_Updates->setEnabled(false);
+    update_future = QtConcurrent::run([]() { return UpdateChecker::Check(); });
+    update_watcher.setFuture(update_future);
+}
+
 void MainWindow::OnEmulatorUpdateAvailable() {
     const auto result = update_future.result();
+    const bool manual = manual_update_check;
+    manual_update_check = false;
+    update_check_in_progress = false;
+    ui->action_Check_For_Updates->setEnabled(true);
+    if (manual && result.failure != UpdateChecker::Failure::None) {
+        QString message;
+        switch (result.failure) {
+        case UpdateChecker::Failure::RateLimited:
+            message = tr("GitHub's request limit has been reached. Please try again later.");
+            break;
+        case UpdateChecker::Failure::Http:
+            message = tr("GitHub answered with HTTP %1. Please try again later.").arg(result.status);
+            break;
+        default:
+            message = tr("Could not connect to GitHub. Check your internet connection and try again.");
+            break;
+        }
+        QMessageBox::warning(this, tr("Check for Updates"), message);
+        return;
+    }
     if (result.failure == UpdateChecker::Failure::RateLimited) {
         statusBar()->showMessage(
             tr("Could not check for updates: GitHub rate limit reached. Lichii will try again at "
@@ -4934,13 +4983,17 @@ void MainWindow::OnEmulatorUpdateAvailable() {
         return;
     }
     if (!result.update) {
+        if (manual) {
+            QMessageBox::information(this, tr("Check for Updates"),
+                                     tr("No newer compatible release was found."));
+        }
         return;
     }
 
     const auto& release = *result.update;
     const auto now = static_cast<unsigned long long>(QDateTime::currentSecsSinceEpoch());
-    if (UISettings::values.skipped_update_tag.GetValue() == release.tag ||
-        UISettings::values.update_remind_at.GetValue() > now) {
+    if (!manual && (UISettings::values.skipped_update_tag.GetValue() == release.tag ||
+                    UISettings::values.update_remind_at.GetValue() > now)) {
         return;
     }
 

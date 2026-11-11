@@ -463,6 +463,7 @@ private slots:
     void OnEmulationStopTimeout();
 
 #ifdef ENABLE_UPDATE_CHECKER
+    void CheckForUpdates(bool manual);
     void OnEmulatorUpdateAvailable();
 #endif
 
@@ -522,6 +523,8 @@ private:
     std::shared_ptr<InputCommon::InputSubsystem> input_subsystem;
 
 #ifdef ENABLE_UPDATE_CHECKER
+    bool update_check_in_progress = false;
+    bool manual_update_check = false;
     QFuture<UpdateChecker::CheckResult> update_future;
     QFutureWatcher<UpdateChecker::CheckResult> update_watcher;
 #endif
