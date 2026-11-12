@@ -3280,6 +3280,11 @@ public:
     static bool IsFastDrawDeltaMethod(u32 method);
     /// A vertex stream's address, size or limit (not its stride or enable).
     static bool IsFastDrawVertexBuffer(u32 method);
+    /// Executable methods whose work leaves what a draw resolves to alone (counter resets, the
+    /// render enable condition): fast draw records nothing for them.
+    static bool IsFastDrawNeutralMethod(u32 method);
+    /// Registers only a report or a macro memory read takes as operands.
+    static bool IsFastDrawReportOperand(u32 method);
     void NoteFastDrawConstantData(GPUVAddr begin, GPUVAddr end);
     /// Writes constant buffer data at `offset` (`bytes` within the buffer) through the buffer
     /// CB_ADDRESS and CB_SIZE select, translated once per selection and memory map. False, having
