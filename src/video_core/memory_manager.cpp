@@ -286,7 +286,7 @@ std::optional<DAddr> MemoryManager::GpuToCpuAddress(GPUVAddr gpu_addr) const {
     const u64 page = gpu_addr >> SubpageBits;
     const u64 serial = map_serial.load(std::memory_order_acquire);
     CachedPage& slot = cache[(page ^ (page >> 11)) % CacheSize];
-    if (slot.owner == owner_id && slot.page == page && slot.serial == serial) [[likely]] {
+    if (slot.owner == owner_id && slot.page == page && slot.serial == serial) {
         return slot.device_page + (gpu_addr & SubpageMask);
     }
     std::optional<DAddr> result;
