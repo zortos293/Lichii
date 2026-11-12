@@ -37,10 +37,12 @@
 #include "shader_recompiler/exception.h"
 #include "shader_recompiler/frontend/maxwell/control_flow.h"
 #include "shader_recompiler/frontend/maxwell/translate_program.h"
+#include "shader_recompiler/ir_opt/fragment_output_guard.h"
 #include "shader_recompiler/ir_opt/passes.h"
 #include "shader_recompiler/program_header.h"
 #include "video_core/engines/kepler_compute.h"
 #include "video_core/engines/maxwell_3d.h"
+#include "video_core/nx2.h"
 #include "video_core/memory_manager.h"
 #include "video_core/nx2_perf.h"
 #include "video_core/nx2_profile.h"
@@ -2591,6 +2593,22 @@ std::unique_ptr<GraphicsPipeline> PipelineCache::CreateGraphicsPipeline(
             }
         }
         ConvertLegacyToGeneric(program, runtime_info);
+        if (program.stage == Shader::Stage::Fragment &&
+            Tegra::g_nx2_ampere.load(std::memory_order_relaxed)) {
+            // A NaN in a float colour target spreads through the bloom chain to the whole frame.
+            u32 float_targets{};
+            for (size_t i = 0; i < 8; ++i) {
+                const auto format = static_cast<Tegra::RenderTargetFormat>(key.state.color_formats[i]);
+                if (format == Tegra::RenderTargetFormat::NONE) {
+                    continue;
+                }
+                const auto pixel_format = VideoCore::Surface::PixelFormatFromRenderTargetFormat(format);
+                if (!VideoCore::Surface::IsPixelFormatInteger(pixel_format)) {
+                    float_targets |= 1U << i;
+                }
+            }
+            Shader::Optimization::GuardFragmentOutputs(program, float_targets);
+        }
         // EDEN_NX2_MESH_EMULATION_DUMP=<dir>: write the emulation's vertex shader for spirv-val.
         // (Emitting the mesh program a second time here to dump its compute shader crashed the
         // build that followed, so only the vertex shader is written.)
