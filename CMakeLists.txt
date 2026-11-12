@@ -733,8 +733,14 @@ if (MSVC AND CXX_CLANG)
         message(FATAL_ERROR "clang-cl: Unsupported architecture ${ARCHITECTURE}")
     endif()
 
-    AddJsonPackage(llvm-mingw)
-    set(LIB_PATH "${llvm-mingw_SOURCE_DIR}/libclang_rt.builtins-${FILE_ARCH}.a")
+    set(LICHII_CLANG_RT_BUILTINS "" CACHE FILEPATH
+        "clang_rt.builtins library to link instead of downloading the llvm-mingw one (clang-cl only)")
+    if (LICHII_CLANG_RT_BUILTINS)
+        set(LIB_PATH "${LICHII_CLANG_RT_BUILTINS}")
+    else()
+        AddJsonPackage(llvm-mingw)
+        set(LIB_PATH "${llvm-mingw_SOURCE_DIR}/libclang_rt.builtins-${FILE_ARCH}.a")
+    endif()
 
     add_library(llvm-mingw-runtime STATIC IMPORTED)
     set_target_properties(llvm-mingw-runtime PROPERTIES
