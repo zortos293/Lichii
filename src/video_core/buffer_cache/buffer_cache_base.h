@@ -11,6 +11,7 @@
 #include <array>
 #include <bit>
 #include <chrono>
+#include <condition_variable>
 #include <functional>
 #include <memory>
 #include <mutex>
@@ -45,6 +46,7 @@
 #include "video_core/engines/kepler_compute.h"
 #include "video_core/engines/maxwell_3d.h"
 #include "video_core/memory_manager.h"
+#include "video_core/nx2.h"
 #include "video_core/nx2_download_trace.h"
 #include "video_core/nx2_async_readback.h"
 #include "video_core/nx2_fast_draw.h"
@@ -53,6 +55,15 @@
 #include "video_core/texture_cache/types.h"
 
 namespace VideoCommon {
+
+/// Whether native titles mark the pages the guest CPU read Preflushable, so their GPU writes are
+/// downloaded at every fence (BufferCache::GetFlushArea). EDEN_NX2_PREFLUSH=0 keeps read traps and
+/// flushes on demand instead, with early downloads for pages read after each write. Read once at
+/// startup; tests set it per case.
+inline bool g_nx2_native_preflush = [] {
+    const char* value = std::getenv("EDEN_NX2_PREFLUSH");
+    return value == nullptr || value[0] != '0';
+}();
 
 using BufferId = Common::SlotId;
 
@@ -418,6 +429,16 @@ public:
 
     /// Pop asynchronous downloads
     void PopAsyncFlushes();
+
+    /// Whether GPU data in the range is downloading with a fence not released yet (not in guest
+    /// memory yet). The caller holds the mutex.
+    [[nodiscard]] bool IsDownloadInFlight(DAddr addr, u64 size) const;
+
+    /// Fences whose downloads have reached guest memory so far.
+    [[nodiscard]] u64 LandedDownloads();
+
+    /// Waits until another fence's downloads land (LandedDownloads passes `seen`) or `timeout`.
+    void WaitForLandedDownloads(u64 seen, std::chrono::microseconds timeout);
     void PopAsyncBuffers();
 
     bool DMACopy(GPUVAddr src_address, GPUVAddr dest_address, u64 amount);
@@ -862,6 +883,13 @@ private:
             const char* value = std::getenv("EDEN_NX2_EXACT_PREFLUSH");
             return value == nullptr || value[0] != '0';
         }();
+        // Native titles: until this write's download lands, a guest read of a Preflushable page
+        // must reach GetFlushArea, which waits for the download or flushes it. Arming its read
+        // trap again also drops the cores' cached read areas (reactive flushing).
+        if (Tegra::g_nx2_ampere.load(std::memory_order_relaxed) &&
+            memory_tracker.IsRegionPreflushable(device_addr, size)) {
+            ArmReadTraps(device_addr, size);
+        }
         if (AsyncBufferDownloads()) {
             uncommitted_gpu_modified_ranges.Add(device_addr, size);
             return;
@@ -894,6 +922,7 @@ private:
 
     /// GPU writes that are not downloaded at fences: trap the guest CPU's next read of their
     /// pages, which flushes them on demand (or marks them Preflushable with preflushing enabled).
+    /// Native titles also arm it for Preflushable pages until their download lands.
     void ArmReadTraps(DAddr device_addr, u64 size) {
         const DAddr begin = Common::AlignDown(device_addr, Core::DEVICE_PAGESIZE);
         const DAddr end = Common::AlignUp(device_addr + size, Core::DEVICE_PAGESIZE);
@@ -919,6 +948,11 @@ private:
     /// fence pops. A write to a range after a download was taken removes it from that download
     /// (and every other pending one): its bytes are older than the write.
     std::deque<Common::RangeSet<DAddr>> pending_download_ranges;
+    /// Counts fences whose downloads reached guest memory (PopAsyncBuffers); guest reads that
+    /// found their data downloading wait on landed_cv for it (WaitForLandedDownloads).
+    std::mutex landed_mutex;
+    std::condition_variable landed_cv;
+    u64 landed_downloads = 0;
     PendingCpuWrites pending_cpu_writes;
     std::optional<Async_Buffer> current_buffer;
 

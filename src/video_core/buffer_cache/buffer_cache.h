@@ -342,13 +342,36 @@ std::optional<VideoCore::RasterizerDownloadArea> BufferCache<P>::GetFlushArea(DA
     DAddr device_addr_end_aligned = Common::AlignUp(device_addr + size, Core::DEVICE_PAGESIZE);
     area->start_address = device_addr_start_aligned;
     area->end_address = device_addr_end_aligned;
+    const bool native = Tegra::g_nx2_ampere.load(std::memory_order_relaxed);
+    const u64 aligned_size = device_addr_end_aligned - device_addr_start_aligned;
     if (memory_tracker.IsRegionPreflushable(device_addr, size)) {
         // Fence downloads keep it, once the first read's download is in guest memory.
         area->in_flight = std::ranges::any_of(read_downloads, [&](const ReadDownload& download) {
-            return download.write_ranges.Intersects(
-                device_addr_start_aligned, device_addr_end_aligned - device_addr_start_aligned);
+            return download.write_ranges.Intersects(device_addr_start_aligned, aligned_size);
         });
         area->preemtive = !area->in_flight;
+        // Native titles never read GPU data before it lands: a read while it is downloading with
+        // a fence waits for that fence (on the reading thread, not the GPU thread), and a read of
+        // GPU writes not committed to a fence yet flushes them. Other titles read guest memory
+        // as it is, like upstream yuzu.
+        // The core consumed this read's trap before asking: forget it, so the next GPU write
+        // arms it again instead of being skipped as still armed.
+        if (native) {
+            read_trapped_ranges.Subtract(device_addr_start_aligned, aligned_size);
+        }
+        if (native && !area->in_flight &&
+            IsRegionGpuModified(device_addr_start_aligned, aligned_size)) {
+            const auto queued = [&](const Common::RangeSet<DAddr>& ranges) {
+                return ranges.Intersects(device_addr_start_aligned, aligned_size);
+            };
+            if (queued(uncommitted_gpu_modified_ranges) ||
+                std::ranges::any_of(committed_gpu_modified_ranges, queued) ||
+                !IsDownloadInFlight(device_addr_start_aligned, aligned_size)) {
+                area->preemtive = false;
+            } else {
+                area->wait_downloads = true;
+            }
+        }
         return area;
     };
     area->preemtive = !IsRegionGpuModified(device_addr_start_aligned,
@@ -381,32 +404,25 @@ std::optional<VideoCore::RasterizerDownloadArea> BufferCache<P>::GetFlushArea(DA
     if (check_early) {
         area->preemtive = false;
     }
-    // A preflushable mark persists and downloads later GPU writes at every fence. Native titles
-    // instead keep read traps and flush on demand.
-    const bool preflush = !Tegra::g_nx2_ampere.load(std::memory_order_relaxed);
+    // A preflushable mark persists and downloads later GPU writes at every fence, so later reads
+    // find the data in guest memory or wait for its fence (above) instead of flushing.
+    // EDEN_NX2_PREFLUSH=0: native titles keep read traps and flush on demand instead
+    // (g_nx2_native_preflush).
+    const bool preflush = !native || g_nx2_native_preflush;
+    // The core consumed this read's trap before GetFlushArea (or keeps an area with no mark).
+    // Forget it either way, so the next GPU write here really arms the core again instead of
+    // being skipped by the deduplication cache, also once the read marks the page Preflushable.
+    read_trapped_ranges.Subtract(device_addr_start_aligned, aligned_size);
     if (!area->preemtive) {
         if (Nx2DownloadTrace::g_enabled) [[unlikely]] {
-            Nx2DownloadTrace::Marked(device_addr_start_aligned,
-                                     device_addr_end_aligned - device_addr_start_aligned, preflush);
+            Nx2DownloadTrace::Marked(device_addr_start_aligned, aligned_size, preflush);
         }
         if (preflush) {
-            memory_tracker.MarkRegionAsPreflushable(
-                device_addr_start_aligned, device_addr_end_aligned - device_addr_start_aligned);
-        } else {
-            if constexpr (USE_MEMORY_MAPS) {
-                cpu_read_ranges.Add(area->start_address, area->end_address - area->start_address);
-                download_cpu_read_ranges = true;
-            }
-            // The core consumed this trap before GetFlushArea. Forget it so the next GPU write
-            // really rearms the core instead of being skipped by the deduplication cache.
-            read_trapped_ranges.Subtract(
-                device_addr_start_aligned, device_addr_end_aligned - device_addr_start_aligned);
+            memory_tracker.MarkRegionAsPreflushable(device_addr_start_aligned, aligned_size);
+        } else if constexpr (USE_MEMORY_MAPS) {
+            cpu_read_ranges.Add(area->start_address, area->end_address - area->start_address);
+            download_cpu_read_ranges = true;
         }
-    } else {
-        // The core keeps this area and has no mark. The next GPU write here must arm the range
-        // again, which ends the area and sets the trap.
-        read_trapped_ranges.Subtract(device_addr_start_aligned,
-                                     device_addr_end_aligned - device_addr_start_aligned);
     }
     return area;
 }
@@ -2184,6 +2200,31 @@ void BufferCache<P>::PopAsyncBuffers() {
     async_buffers.pop_front();
     pending_downloads.pop_front();
     pending_download_ranges.pop_front();
+    {
+        std::scoped_lock lock{landed_mutex};
+        ++landed_downloads;
+    }
+    landed_cv.notify_all();
+}
+
+template <class P>
+bool BufferCache<P>::IsDownloadInFlight(DAddr addr, u64 size) const {
+    return std::ranges::any_of(pending_download_ranges,
+                               [&](const Common::RangeSet<DAddr>& ranges) {
+                                   return ranges.Intersects(addr, size);
+                               });
+}
+
+template <class P>
+u64 BufferCache<P>::LandedDownloads() {
+    std::scoped_lock lock{landed_mutex};
+    return landed_downloads;
+}
+
+template <class P>
+void BufferCache<P>::WaitForLandedDownloads(u64 seen, std::chrono::microseconds timeout) {
+    std::unique_lock lock{landed_mutex};
+    landed_cv.wait_for(lock, timeout, [&] { return landed_downloads != seen; });
 }
 
 template <class P>

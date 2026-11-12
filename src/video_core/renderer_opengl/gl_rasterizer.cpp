@@ -411,6 +411,9 @@ void RasterizerOpenGL::DispatchCompute() {
     if (pipeline->UsesLocalMemory()) {
         program_manager.LocalMemoryWarmup();
     }
+    // Like draws (and Vulkan's dispatches): guest threads read the caches' state under these
+    // locks (GetFlushArea, WaitForPendingDownloads) while a dispatch binds and marks buffers.
+    std::scoped_lock lock{buffer_cache.mutex, texture_cache.mutex};
     pipeline->SetEngine(kepler_compute, gpu_memory);
     pipeline->Configure();
     const auto& qmd{kepler_compute->launch_description};
@@ -546,6 +549,28 @@ VideoCore::RasterizerDownloadArea RasterizerOpenGL::GetFlushArea(DAddr addr, u64
         .preemtive = true,
     };
     return new_area;
+}
+
+void RasterizerOpenGL::WaitForPendingDownloads(DAddr addr, u64 size) {
+    // Bounded: the caller flushes the range if its fence never lands.
+    for (u32 attempt = 0; attempt < 200; ++attempt) {
+        const u64 seen = buffer_cache.LandedDownloads();
+        {
+            std::scoped_lock lock{buffer_cache.mutex};
+            if (!buffer_cache.IsDownloadInFlight(addr, size)) {
+                return;
+            }
+        }
+        // OpenGL has no fencing thread: fences the host GPU passed are only released (and their
+        // downloads land) when the GPU thread checks them. Ask it to, between draws (TickWork);
+        // SignalOrdering releases the signaled fences without waiting for the others.
+        if (attempt % 16 == 0) {
+            (void)gpu.RunOnGpuThread([this] { fence_manager.SignalOrdering(); });
+            // The GPU thread may be idle (the guest waits for this data before sending more).
+            gpu.TickGpuThread();
+        }
+        buffer_cache.WaitForLandedDownloads(seen, std::chrono::milliseconds{1});
+    }
 }
 
 void RasterizerOpenGL::PrepareRegionWrite(DAddr addr, u64 size, VideoCommon::CacheType which) {

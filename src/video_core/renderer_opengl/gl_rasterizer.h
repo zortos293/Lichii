@@ -97,6 +97,7 @@ public:
     bool MustFlushRegion(DAddr addr, u64 size,
                          VideoCommon::CacheType which = VideoCommon::CacheType::All) override;
     VideoCore::RasterizerDownloadArea GetFlushArea(PAddr addr, u64 size) override;
+    void WaitForPendingDownloads(DAddr addr, u64 size) override;
     void InvalidateRegion(DAddr addr, u64 size,
                           VideoCommon::CacheType which = VideoCommon::CacheType::All) override;
     void PrepareRegionWrite(DAddr addr, u64 size, VideoCommon::CacheType which) override;

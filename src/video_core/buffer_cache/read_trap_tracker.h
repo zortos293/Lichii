@@ -41,6 +41,11 @@ public:
         return Arm(address, size, [](DAddr, u64) {});
     }
 
+    /// Whether any part of the range is armed.
+    [[nodiscard]] bool IsArmed(DAddr address, u64 size) const {
+        return ranges.Intersects(address, size);
+    }
+
     /// A CPU read consumes the core's trap; unmapping also forgets the range.
     void Subtract(DAddr address, u64 size) {
         ranges.Subtract(address, size);

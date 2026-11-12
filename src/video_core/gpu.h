@@ -182,6 +182,10 @@ public:
     /// Tick pending requests within the GPU.
     void TickWork();
 
+    /// Any thread: wakes the GPU thread to run queued sync operations (RunOnGpuThread) even
+    /// while it has no commands to process.
+    void TickGpuThread();
+
     /// Gets a mutable reference to the Host1x interface
     [[nodiscard]] Host1x::Host1x& Host1x();
 

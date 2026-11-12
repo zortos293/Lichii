@@ -22,6 +22,9 @@ struct RasterizerDownloadArea {
     /// What guest memory lacks there is on its way for an earlier read: nothing to flush, only to
     /// wait for (RasterizerInterface::FinishRead).
     bool in_flight{};
+    /// GPU data for the area is downloading with a fence that has not been released: the read
+    /// waits for it (RasterizerInterface::WaitForPendingDownloads) and asks again.
+    bool wait_downloads{};
 };
 
 /// Downloads for guest CPU reads that are submitted but not yet written to guest memory

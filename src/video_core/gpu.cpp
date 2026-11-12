@@ -183,6 +183,11 @@ struct GPU::Impl {
         WaitForSyncOperation(fence);
     }
 
+    /// Wakes the GPU thread so it runs queued sync operations (as OnCPURead does after its request).
+    void TickGpuThread() {
+        gpu_thread.TickGPU(is_async);
+    }
+
     /// Tick pending requests within the GPU.
     void TickWork() {
         std::unique_lock lck{sync_request_mutex};
@@ -280,7 +285,19 @@ struct GPU::Impl {
     }
 
     VideoCore::RasterizerDownloadArea OnCPURead(DAddr addr, u64 size) {
-        auto raster_area = renderer->ReadRasterizer()->GetFlushArea(addr, size);
+        auto* const rasterizer = renderer->ReadRasterizer();
+        auto raster_area = rasterizer->GetFlushArea(addr, size);
+        // GPU data on its way with a fence: wait for it rather than read guest memory before it
+        // lands, then look again (the GPU may have written the range since).
+        for (u32 waits = 0; raster_area.wait_downloads && waits < 8; ++waits) {
+            rasterizer->WaitForPendingDownloads(raster_area.start_address,
+                                                raster_area.end_address - raster_area.start_address);
+            raster_area = rasterizer->GetFlushArea(addr, size);
+        }
+        if (raster_area.wait_downloads) {
+            // Still downloading after the waits: flush it like data not queued yet.
+            raster_area.preemtive = false;
+        }
         if (raster_area.preemtive) {
             return raster_area;
         }
@@ -541,6 +558,10 @@ void GPU::WaitForSyncOperation(u64 fence) {
 
 void GPU::TickWork() {
     impl->TickWork();
+}
+
+void GPU::TickGpuThread() {
+    impl->TickGpuThread();
 }
 
 /// Gets a mutable reference to the Host1x interface
