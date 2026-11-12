@@ -1777,6 +1777,41 @@ void Device::RemoveUnsuitableExtensions() {
         LOG_WARNING(Render_Vulkan, "EDEN_NX2_FORCE_MESH_FALLBACK: VK_EXT_mesh_shader disabled");
         extensions.mesh_shader = false;
     }
+    // The Mesh Shaders setting. Automatic leaves the extension disabled on AMD drivers, where
+    // native task/mesh draws hang the GPU (#316, #670, #672, #871), except on RADV 26.2.5 or later
+    // with an RDNA3 or newer GPU. There the hang was a RADV bug that Mesa 26.2.5 fixed (MR 45092:
+    // stale vertex user SGPR state when a mesh shader is bound), and testers' RX 7900 XT/XTX,
+    // Navi 33 and RX 9070 XT run native mesh without hangs. RDNA2 still hangs on 26.2.6 (Mesa
+    // issue 16816), and AMD's own driver times out on the Radeon 780M. RADV reports accelerated
+    // mixed-signedness dot products from GFX11 (RDNA3) on. The compute fallback avoids the hangs,
+    // but it can be slower in scenes full of foliage and skips the mesh programs it can't run
+    // (per-primitive outputs, primitives other than triangles, layered output). Native keeps the
+    // extension, for a setup that no longer hangs; Compute disables it on every device.
+    const Settings::MeshShaderMode mesh_mode = Settings::values.mesh_shaders.GetValue();
+    const VkDriverId mesh_driver = properties.driver.driverID;
+    const bool amd_mesh_driver = mesh_driver == VK_DRIVER_ID_MESA_RADV ||
+                                 mesh_driver == VK_DRIVER_ID_AMD_PROPRIETARY ||
+                                 mesh_driver == VK_DRIVER_ID_AMD_OPEN_SOURCE;
+    const bool fixed_radv_mesh =
+        mesh_driver == VK_DRIVER_ID_MESA_RADV &&
+        properties.properties.driverVersion >= VK_MAKE_VERSION(26, 2, 5) &&
+        properties.integer_dot_product.integerDotProduct4x8BitPackedMixedSignednessAccelerated;
+    if (extensions.mesh_shader && mesh_mode == Settings::MeshShaderMode::Compute) {
+        LOG_INFO(Render_Vulkan, "Mesh Shaders setting: task/mesh draws use the compute fallback");
+        extensions.mesh_shader = false;
+    } else if (extensions.mesh_shader && mesh_mode == Settings::MeshShaderMode::Automatic &&
+               amd_mesh_driver) {
+        if (fixed_radv_mesh) {
+            LOG_INFO(Render_Vulkan, "RADV 26.2.5 or later on RDNA3 or newer: task/mesh draws use "
+                                    "native mesh shaders");
+        } else {
+            LOG_INFO(Render_Vulkan,
+                     "AMD driver: task/mesh draws use the compute fallback, because native mesh "
+                     "draws hang the GPU here (RADV before 26.2.5, RDNA2, or AMD's own driver; "
+                     "Mesh Shaders: Native keeps them)");
+            extensions.mesh_shader = false;
+        }
+    }
     RemoveExtensionFeatureIfUnsuitable(extensions.mesh_shader, features.mesh_shader,
                                        VK_EXT_MESH_SHADER_EXTENSION_NAME);
 
