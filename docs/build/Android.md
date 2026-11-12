@@ -12,21 +12,21 @@
 * **[Vulkan SDK](https://vulkan.lunarg.com/sdk/home#windows)** - **Make sure to select Latest SDK.**
   * A convenience script to install the latest SDK is provided in `.ci\windows\install-vulkan-sdk.ps1`.
 
-## Cloning Eden with Git
+## Cloning Lichii with Git
 
 ```sh
-git clone --recursive https://git.eden-emu.dev/eden-emu/eden.git
+git clone --recursive https://github.com/zortos293/Lichii.git
 ```
 
-Eden by default will be cloned into:
+The clone lands in `Lichii`:
 
-* `C:\Users\<user-name>\eden` on Windows
-* `~/eden` on Linux and macOS
+* `C:\Users\<user-name>\Lichii` on Windows
+* `~/Lichii` on Linux and macOS
 
 ## Building
 
 1. Start Android Studio, on the startup dialog select `Open`.
-2. Navigate to the `eden/src/android` directory and click on `OK`.
+2. Navigate to the `Lichii/src/android` directory and click on `OK`.
 3. In `Build > Select Build Variant`, select `release` or `relWithDebInfo` as the "Active build variant".
 4. Build the project with `Build > Make Project` or run it on an Android device with `Run > Run 'app'`.
 
@@ -37,7 +37,7 @@ Eden by default will be cloned into:
 3. Then set ANDROID_SDK_ROOT and ANDROID_NDK_ROOT in terminal via
 `export ANDROID_SDK_ROOT=path/to/sdk`
 `export ANDROID_NDK_ROOT=path/to/ndk`.
-4. Navigate to `eden/src/android`.
+4. Navigate to `Lichii/src/android`.
 5. Then Build with `./gradlew assembleRelWithDebInfo`.
 6. To build the optimised build use `./gradlew assembleGenshinSpoofRelWithDebInfo`.
 7. You can pass extra variables to cmake via `-PYUZU_ANDROID_ARGS="-D..."`

@@ -1,6 +1,6 @@
 # Dependencies
 
-To build Eden, you MUST have a C++ compiler.
+To build Lichii, you MUST have a C++ compiler.
 
 * On Linux, this is usually [GCC](https://gcc.gnu.org/) 11+ or [Clang](https://clang.llvm.org/) v14+
   * GCC 12 also requires Clang 14+
@@ -44,7 +44,7 @@ If you are on **Windows** and building with **MSVC** or **clang-cl**, you may go
 
 ## Externals
 
-The following are handled by Eden's externals:
+The following are handled in `externals/`:
 
 * [FFmpeg](https://ffmpeg.org/) (should use `-DYUZU_USE_EXTERNAL_FFMPEG=ON`)
 * [SDL3](https://www.libsdl.org/download-2.0.php) 3.2.10+ (Use `-DYUZU_USE_BUNDLED_SDL2=ON` to reduce compile time)

@@ -220,18 +220,18 @@ deps() {
             cp "$dllpath" "$dll"
 
             # also grab the dependencies of the dependent DLL; e.g.
-            # double-conversion is a dep of Qt6Core.dll but NOT eden.exe
+            # double-conversion is a dep of Qt6Core.dll but NOT lichii.exe
             deps "$dllpath"
         fi
     done
 }
 
-# NB: must be done in a directory containing eden.exe
-deps eden.exe
+# NB: must be done in a directory containing lichii.exe
+deps lichii.exe
 
 # deploy Qt plugins and such
 windeployqt6 --no-compiler-runtime --no-opengl-sw --no-system-dxc-compiler \
-    --no-system-d3d-compiler eden.exe
+    --no-system-d3d-compiler lichii.exe
 
 # grab deps for Qt plugins
 find ./*/ -name "*.dll" | while read -r dll; do deps "$dll"; done
