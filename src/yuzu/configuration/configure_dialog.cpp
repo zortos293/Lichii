@@ -35,6 +35,7 @@
 #include "yuzu/configuration/configure_system.h"
 #include "yuzu/configuration/configure_ui.h"
 #include "yuzu/configuration/configure_web.h"
+#include "yuzu/configuration/linux_scrollable_page.h"
 #include "yuzu/hotkeys.h"
 
 ConfigureDialog::ConfigureDialog(QWidget* parent, HotkeyRegistry& registry_,
@@ -92,6 +93,19 @@ ConfigureDialog::ConfigureDialog(QWidget* parent, HotkeyRegistry& registry_,
     hotkeys_tab->Populate(registry);
 
     input_tab->Initialize(input_subsystem);
+
+#if defined(__linux__) && !defined(__ANDROID__)
+    setMinimumHeight(0);
+    for (int index = 0; index < ui->tabWidget->count(); ++index) {
+        QWidget* tab = ui->tabWidget->widget(index);
+        if (tab != input_tab.get()) {
+            ConfigurationShared::MakePageScrollable(tab);
+        }
+    }
+    for (QWidget* tab : input_tab->GetSubTabs()) {
+        ConfigurationShared::MakePageScrollable(tab);
+    }
+#endif
 
     general_tab->SetResetCallback([&] { this->close(); });
 
