@@ -44,6 +44,7 @@ struct HostTranslateInfo {
                                         ///< control flow
     bool single_lane_geometry_subgroups{};
     bool support_byte_addressed_r16{};
+    bool needs_lrz_disable{}; ///< True when fragment shaders must write depth to turn off LRZ
 
     /// The properties that change which values translation reads from the environment, a bit
     /// each: those deciding a pass that reads values, or a pass that changes the program before
