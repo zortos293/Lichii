@@ -36,7 +36,7 @@
          </widget>
         </item>
         <item>
-         <layout class="QHBoxLayout" name="horizontalLayout_2">
+         <layout class="QHBoxLayout" name="horizontalLayout_2" stretch="1,1">
           <item>
            <widget class="QLabel" name="language_label">
             <property name="text">
@@ -50,7 +50,7 @@
          </layout>
         </item>
         <item>
-         <layout class="QHBoxLayout" name="horizontalLayout_3">
+         <layout class="QHBoxLayout" name="horizontalLayout_3" stretch="1,1">
           <item>
            <widget class="QLabel" name="theme_label">
             <property name="text">
@@ -59,7 +59,21 @@
            </widget>
           </item>
           <item>
-           <widget class="QComboBox" name="theme_combobox"/>
+           <layout class="QHBoxLayout" name="theme_choice_layout" stretch="1,0">
+            <item>
+             <widget class="QComboBox" name="theme_combobox"/>
+            </item>
+            <item>
+             <widget class="QPushButton" name="themes_folder_button">
+              <property name="toolTip">
+               <string>Each folder in the themes folder that holds a style.qss is listed as a theme.</string>
+              </property>
+              <property name="text">
+               <string>Open Themes Folder</string>
+              </property>
+             </widget>
+            </item>
+           </layout>
           </item>
          </layout>
         </item>

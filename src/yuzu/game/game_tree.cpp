@@ -100,8 +100,9 @@ public:
             const int star_x = title_rect.right() + 8;
             const int star_y = title_rect.center().y() - 7;
             if (star_x + 14 <= rect.right()) {
-                painter->drawPixmap(QRect(star_x, star_y, 14, 14),
-                                    QPixmap(QStringLiteral(":/lichii/icons/star_accent@2x.png")));
+                painter->drawPixmap(
+                    QRect(star_x, star_y, 14, 14),
+                    AccentPixmap(QStringLiteral(":/lichii/icons/star_accent@2x.png")));
             }
         }
 

@@ -6,8 +6,11 @@
 
 #pragma once
 
+#include <optional>
+#include <QColor>
 #include <QFont>
 #include <QIcon>
+#include <QPixmap>
 #include <QString>
 #include "common/uuid.h"
 
@@ -17,6 +20,13 @@
 /// A menu icon from the Lichii icon set, white on the highlighted row. Other themes keep menus
 /// without icons, so this returns a null icon unless Lichii Dark is active.
 [[nodiscard]] QIcon MenuIcon(const char* name);
+
+/// The accent colour of the custom theme in use, nullopt when it sets none.
+[[nodiscard]] std::optional<QColor> ThemeAccent();
+
+/// An accent coloured image of the Lichii icon set, in the custom theme's accent when it sets one.
+/// scale is the image's pixel ratio: 2 for an @2x file.
+[[nodiscard]] QPixmap AccentPixmap(const QString& path, qreal scale = 1.0);
 
 /**
  * Prompt the user for a profile ID. If there is only one valid profile, returns that profile.

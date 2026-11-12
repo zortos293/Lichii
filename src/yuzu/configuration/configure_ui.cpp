@@ -3,6 +3,7 @@
 
 #include "yuzu/configuration/configure_ui.h"
 
+#include <algorithm>
 #include <array>
 #include <cstdlib>
 #include <set>
@@ -12,12 +13,15 @@
 #include <QCheckBox>
 #include <QComboBox>
 #include <QCoreApplication>
+#include <QDesktopServices>
 #include <QDirIterator>
 #include <QFileDialog>
 #include <QLocale>
 #include <QString>
+#include <QPushButton>
 #include <QToolButton>
 #include <QTranslator>
+#include <QUrl>
 #include <QVariant>
 
 #include "common/common_types.h"
@@ -108,6 +112,14 @@ ConfigureUi::ConfigureUi(Core::System& system_, QWidget* parent)
         ui->theme_combobox->addItem(QString::fromUtf8(theme.first),
                                     QString::fromUtf8(theme.second));
     }
+    // The themes of the user's themes folder follow the built-in ones.
+    for (const auto& theme : UISettings::ScanCustomThemes()) {
+        const QString data = QString::fromUtf8(UISettings::CustomThemePrefix) + theme.id;
+        ui->theme_combobox->addItem(theme.name, data);
+    }
+    connect(ui->themes_folder_button, &QPushButton::clicked, this, [] {
+        QDesktopServices::openUrl(QUrl::fromLocalFile(UISettings::ThemesDir()));
+    });
 
     InitializeIconSizeComboBox();
     InitializeRowComboBoxes();
@@ -184,8 +196,15 @@ void ConfigureUi::RequestGameListUpdate() {
 }
 
 void ConfigureUi::SetConfiguration() {
-    ui->theme_combobox->setCurrentIndex(
-        ui->theme_combobox->findData(QString::fromStdString(UISettings::values.theme)));
+    const QString theme = QString::fromStdString(UISettings::values.theme);
+    if (ui->theme_combobox->findData(theme) == -1) {
+        // A custom theme whose folder is gone, listed so that the setting stays until another
+        // theme is chosen.
+        const QString prefix = QString::fromUtf8(UISettings::CustomThemePrefix);
+        const QString name = theme.startsWith(prefix) ? theme.mid(prefix.size()) : theme;
+        ui->theme_combobox->addItem(tr("%1 - not found").arg(name), theme);
+    }
+    ui->theme_combobox->setCurrentIndex(ui->theme_combobox->findData(theme));
     const QString language = QString::fromStdString(UISettings::values.language.GetValue());
     if (ui->language_combobox->findData(language) == -1) {
         // A language the list doesn't have, listed so that the setting stays until another one is

@@ -64,6 +64,8 @@ private slots:
 signals:
     void LanguageChanged(const QString& locale);
     void ExternalContentDirsChanged();
+    /// The Apply button wrote the settings.
+    void Applied();
 
 private:
     void changeEvent(QEvent* event) override;

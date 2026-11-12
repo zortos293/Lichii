@@ -14,6 +14,7 @@ A copy of this handbook is [available online](https://git.eden-emu.dev/eden-emu/
     - **[Steamdeck](./QuickStart.md#steamdeck)**
     - **[macOS](./QuickStart.md#macos)**
 - **[Settings](./Settings.md)**
+- **[Custom Themes](./CustomThemes.md)**
 - **[Controllers](./Controllers.md)**
     - **[Controller profiles](./Controllers.md#configuring-controller-profiles)**
 - **[Audio](Audio.md)**

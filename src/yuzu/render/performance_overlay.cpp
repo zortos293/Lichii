@@ -11,6 +11,7 @@
 #include <QGuiApplication>
 #include <QMouseEvent>
 #include <QPainter>
+#include <QPen>
 #include <QPolygonF>
 #include <QStringList>
 #include <QWindow>
@@ -116,12 +117,28 @@ PerformanceOverlay::PerformanceOverlay(MainWindow* parent) : QWidget(parent), m_
     setAttribute(Qt::WA_TranslucentBackground);
     setWindowFlags(Qt::FramelessWindowHint | Qt::Tool);
     setFixedSize(OverlayWidth, OverlayHeight);
+    ResetThemeColors();
     raise();
 
     // pos/stats
     resetPosition(m_mainWindow->pos());
     connect(parent, &MainWindow::positionChanged, this, &PerformanceOverlay::resetPosition);
     connect(m_mainWindow, &MainWindow::statsUpdated, this, &PerformanceOverlay::updateStats);
+}
+
+void PerformanceOverlay::ResetThemeColors() {
+    m_backgroundColor = QColor::fromRgba(BackgroundColor);
+    m_borderColor = QColor{Qt::transparent};
+    m_textColor = QColor::fromRgb(TextColor);
+    m_mutedColor = QColor::fromRgb(MutedColor);
+    m_dimColor = QColor::fromRgb(DimColor);
+    m_accentColor = QColor::fromRgb(AccentColor);
+    m_spikeColor = QColor::fromRgb(SpikeColor);
+    m_lineColor = QColor::fromRgba(LineColor);
+    m_axisColor = QColor::fromRgba(AxisColor);
+    m_medianLineColor = QColor::fromRgba(MedianLineColor);
+    m_cornerRadius = 5.0;
+    update();
 }
 
 void PerformanceOverlay::resetPosition(const QPoint& _) {
@@ -225,12 +242,19 @@ void PerformanceOverlay::paintEvent(QPaintEvent* event) {
     painter.setRenderHint(QPainter::TextAntialiasing);
 
     painter.setPen(Qt::NoPen);
-    painter.setBrush(QColor::fromRgba(BackgroundColor));
-    painter.drawRoundedRect(rect(), 5.0, 5.0);
+    painter.setBrush(m_backgroundColor);
+    if (m_borderColor.alpha() > 0) {
+        painter.setPen(QPen{m_borderColor, 1.0});
+        painter.drawRoundedRect(QRectF{rect()}.adjusted(0.5, 0.5, -0.5, -0.5), m_cornerRadius,
+                                m_cornerRadius);
+    } else {
+        painter.setPen(Qt::NoPen);
+        painter.drawRoundedRect(rect(), m_cornerRadius, m_cornerRadius);
+    }
 
-    const QColor text = QColor::fromRgb(TextColor);
-    const QColor muted = QColor::fromRgb(MutedColor);
-    const QColor accent = QColor::fromRgb(AccentColor);
+    const QColor text = m_textColor;
+    const QColor muted = m_mutedColor;
+    const QColor accent = m_accentColor;
     const QFont fps_font = MonoFont(40, QFont::DemiBold);
     const QFont small_font = MonoFont(13);
     const QFont small_bold_font = MonoFont(13, QFont::DemiBold);
@@ -282,7 +306,7 @@ void PerformanceOverlay::paintEvent(QPaintEvent* event) {
     const qreal footer_baseline = Baseline(footer_font, FooterTop, LabelHeight);
     const std::vector<Run> range_runs{
         {fps_range, footer_font, muted},
-        {QStringLiteral(" fps"), footer_font, QColor::fromRgb(DimColor)},
+        {QStringLiteral(" fps"), footer_font, m_dimColor},
     };
     DrawRuns(painter, PaddingX, footer_baseline, range_runs);
 
@@ -295,7 +319,7 @@ void PerformanceOverlay::paintEvent(QPaintEvent* event) {
 
 void PerformanceOverlay::paintGraph(QPainter& painter, const QRectF& area) {
     painter.fillRect(QRectF{area.left() + AxisX, area.top(), 1, area.height()},
-                     QColor::fromRgba(AxisColor));
+                     m_axisColor);
     if (m_frames.size() < 2) {
         return;
     }
@@ -332,19 +356,19 @@ void PerformanceOverlay::paintGraph(QPainter& painter, const QRectF& area) {
     }
 
     painter.setBrush(Qt::NoBrush);
-    QPen median_pen{QColor::fromRgba(MedianLineColor), 0.75};
+    QPen median_pen{m_medianLineColor, 0.75};
     median_pen.setDashPattern({2.0 / 0.75, 3.0 / 0.75});
     painter.setPen(median_pen);
     const qreal median_y = y_of(summary.median_ms);
     painter.drawLine(QPointF{area.left(), median_y}, QPointF{area.left() + PlotWidth, median_y});
 
-    QPen line_pen{QColor::fromRgba(LineColor), 1.1};
+    QPen line_pen{m_lineColor, 1.1};
     line_pen.setJoinStyle(Qt::RoundJoin);
     painter.setPen(line_pen);
     painter.drawPolyline(line);
 
     const float spike_ms = summary.median_ms * SpikeRatio;
-    QPen spike_pen{QColor::fromRgb(SpikeColor), 1.1};
+    QPen spike_pen{m_spikeColor, 1.1};
     spike_pen.setCapStyle(Qt::RoundCap);
     spike_pen.setJoinStyle(Qt::RoundJoin);
     painter.setPen(spike_pen);
@@ -362,10 +386,10 @@ void PerformanceOverlay::paintGraph(QPainter& painter, const QRectF& area) {
     };
     const std::array<Tick, 3> ticks{{
         {summary.max_ms,
-         QColor::fromRgb(summary.max_ms > spike_ms ? SpikeColor : TextColor),
+         summary.max_ms > spike_ms ? m_spikeColor : m_textColor,
          MonoFont(11, QFont::Medium)},
-        {summary.median_ms, QColor::fromRgb(TextColor), MonoFont(11, QFont::Medium)},
-        {summary.min_ms, QColor::fromRgb(MutedColor), MonoFont(11)},
+        {summary.median_ms, m_textColor, MonoFont(11, QFont::Medium)},
+        {summary.min_ms, m_mutedColor, MonoFont(11)},
     }};
     std::array<qreal, 3> label_tops{};
     for (std::size_t i = 0; i < ticks.size(); ++i) {

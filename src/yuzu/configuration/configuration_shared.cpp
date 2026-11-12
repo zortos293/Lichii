@@ -9,6 +9,7 @@
 #include <QScreen>
 #include <QScrollArea>
 #include "yuzu/configuration/configuration_shared.h"
+#include "yuzu/util/util.h"
 
 namespace ConfigurationShared {
 
@@ -20,9 +21,22 @@ QIcon PageIcon(const QString& name) {
     const QString normal = QStringLiteral(":/lichii/icons/%1.png").arg(name);
     const QString active = QStringLiteral(":/lichii/icons/%1_active.png").arg(name);
     icon.addFile(normal, {}, QIcon::Normal, QIcon::Off);
-    icon.addFile(active, {}, QIcon::Normal, QIcon::On);
-    icon.addFile(active, {}, QIcon::Selected, QIcon::Off);
-    icon.addFile(active, {}, QIcon::Selected, QIcon::On);
+    if (!ThemeAccent()) {
+        icon.addFile(active, {}, QIcon::Normal, QIcon::On);
+        icon.addFile(active, {}, QIcon::Selected, QIcon::Off);
+        icon.addFile(active, {}, QIcon::Selected, QIcon::On);
+        return icon;
+    }
+    // A custom theme's accent replaces the icon set's own.
+    const QString active_2x = QStringLiteral(":/lichii/icons/%1_active@2x.png").arg(name);
+    for (const QPixmap& pixmap : {AccentPixmap(active), AccentPixmap(active_2x, 2.0)}) {
+        if (pixmap.isNull()) {
+            continue;
+        }
+        icon.addPixmap(pixmap, QIcon::Normal, QIcon::On);
+        icon.addPixmap(pixmap, QIcon::Selected, QIcon::Off);
+        icon.addPixmap(pixmap, QIcon::Selected, QIcon::On);
+    }
     return icon;
 }
 

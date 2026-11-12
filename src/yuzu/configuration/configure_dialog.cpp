@@ -199,6 +199,7 @@ void ConfigureDialog::RetranslateUI() {
 void ConfigureDialog::HandleApplyButtonClicked() {
     UISettings::values.configuration_applied = true;
     ApplyConfiguration();
+    emit Applied();
 }
 
 Q_DECLARE_METATYPE(QList<QWidget*>);

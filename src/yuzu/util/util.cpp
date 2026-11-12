@@ -26,9 +26,36 @@ QFont GetMonospaceFont() {
     return font;
 }
 
+std::optional<QColor> ThemeAccent() {
+    const auto& theme = UISettings::ActiveCustomTheme();
+    if (!theme || theme->accent.isEmpty()) {
+        return std::nullopt;
+    }
+    const QColor color{theme->accent};
+    if (!color.isValid()) {
+        return std::nullopt;
+    }
+    return color;
+}
+
+QPixmap AccentPixmap(const QString& path, qreal scale) {
+    QPixmap pixmap(path);
+    if (pixmap.isNull()) {
+        return pixmap;
+    }
+    if (const auto accent = ThemeAccent()) {
+        // The image keeps its shape and takes the theme's colour.
+        QPainter painter(&pixmap);
+        painter.setCompositionMode(QPainter::CompositionMode_SourceIn);
+        painter.fillRect(pixmap.rect(), *accent);
+    }
+    pixmap.setDevicePixelRatio(scale);
+    return pixmap;
+}
+
 QIcon MenuIcon(const char* name) {
     QIcon icon;
-    if (UISettings::values.theme != "lichii") {
+    if (UISettings::EffectiveTheme() != "lichii") {
         return icon;
     }
     icon.addFile(QStringLiteral(":/lichii/icons/menu_%1.png").arg(QLatin1String(name)));

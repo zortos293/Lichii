@@ -11,6 +11,7 @@
 
 #include <filesystem>
 #include <QElapsedTimer>
+#include <QFileSystemWatcher>
 #include <QMainWindow>
 #include <QPointer>
 #include <QMessageBox>
@@ -616,6 +617,10 @@ private:
 
     // stores default icon theme search paths for the platform
     QStringList default_theme_paths;
+
+    // reloads a theme from the user's themes folder when its files change
+    QFileSystemWatcher theme_watcher;
+    QTimer theme_reload_timer;
 
     HotkeyRegistry hotkey_registry;
 

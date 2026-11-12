@@ -8,6 +8,8 @@
 
 #include <array>
 #include <atomic>
+#include <optional>
+#include <string>
 #include <vector>
 #include <QByteArray>
 #include <QMetaType>
@@ -68,6 +70,38 @@ static constexpr Theme default_theme{Theme::LichiiDark};
 
 using Themes = std::array<std::pair<const char*, const char*>, 7>;
 extern const Themes themes;
+
+/// A theme loaded from a folder of the user's themes directory.
+/// UISettings::values.theme holds it as CustomThemePrefix followed by the folder's name.
+struct CustomTheme {
+    QString id;   ///< The folder's name
+    QString name; ///< Shown in the theme list
+    QString dir;  ///< Absolute path of the folder
+    /// The built-in theme that provides the icons and the palette
+    QString base;
+    bool dark = true;
+    /// The colour of what is selected, as QColor reads it (#rrggbb); empty keeps the base theme's
+    QString accent;
+    /// Whether the base theme's stylesheet is applied before this theme's
+    bool inherit = false;
+};
+
+inline constexpr const char* CustomThemePrefix = "custom:";
+
+/// The user's themes directory, created if it doesn't exist.
+QString ThemesDir();
+
+/// The themes found in the themes directory, sorted by name.
+std::vector<CustomTheme> ScanCustomThemes();
+
+/// Reads the selected custom theme from disk again. Call before applying the theme.
+void RefreshActiveCustomTheme();
+
+/// The selected custom theme, or nullopt when a built-in theme is selected or its folder is gone.
+const std::optional<CustomTheme>& ActiveCustomTheme();
+
+/// The built-in theme in effect: the selected one, or the base of the selected custom theme.
+std::string EffectiveTheme();
 
 struct GameDir {
     std::string path;

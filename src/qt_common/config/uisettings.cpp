@@ -4,6 +4,8 @@
 // SPDX-FileCopyrightText: 2016 Citra Emulator Project
 // SPDX-License-Identifier: GPL-2.0-or-later
 
+#include <algorithm>
+#include <QDir>
 #include <QSettings>
 #include "common/fs/fs.h"
 #include "common/fs/path_util.h"
@@ -76,11 +78,108 @@ const Themes themes{{
     {"Lichii Dark", "lichii"},
 }};
 
-bool IsDarkTheme() {
-    const auto& theme = UISettings::values.theme;
+namespace {
+
+std::optional<CustomTheme> active_custom_theme;
+
+bool IsDarkBuiltinTheme(const std::string& theme) {
     return theme == std::string("qdarkstyle") || theme == std::string("qdarkstyle_midnight_blue") ||
            theme == std::string("colorful_dark") ||
            theme == std::string("colorful_midnight_blue") || theme == std::string("lichii");
+}
+
+bool IsBuiltinTheme(const QString& id) {
+    return std::any_of(themes.begin(), themes.end(), [&id](const auto& theme) {
+        return id == QString::fromUtf8(theme.second);
+    });
+}
+
+/// A theme folder holds style.qss and, optionally, theme.ini:
+///   [Theme]
+///   name=My Theme     ; shown in the theme list, the folder's name by default
+///   base=lichii       ; the built-in theme that provides the icons and the palette
+///   dark=true         ; whether the title bar and the links are those of a dark theme
+///   inherit=false     ; true applies the base theme's stylesheet before style.qss
+///   accent=#82a88b    ; the colour of selected icons, of the selection and of links
+std::optional<CustomTheme> LoadCustomTheme(const QDir& themes_dir, const QString& id) {
+    const QDir dir{themes_dir.filePath(id)};
+    if (id.isEmpty() || !dir.exists(QStringLiteral("style.qss"))) {
+        return std::nullopt;
+    }
+
+    CustomTheme theme;
+    theme.id = id;
+    theme.name = id;
+    theme.dir = dir.absolutePath();
+    theme.base = QString::fromUtf8(themes[static_cast<size_t>(default_theme)].second);
+
+    const QSettings ini(dir.filePath(QStringLiteral("theme.ini")), QSettings::IniFormat);
+    const QString name = ini.value(QStringLiteral("Theme/name")).toString().trimmed();
+    if (!name.isEmpty()) {
+        theme.name = name;
+    }
+    const QString base = ini.value(QStringLiteral("Theme/base")).toString().trimmed();
+    if (IsBuiltinTheme(base)) {
+        theme.base = base;
+    }
+    theme.dark = ini.value(QStringLiteral("Theme/dark"), IsDarkBuiltinTheme(theme.base.toStdString()))
+                     .toBool();
+    theme.inherit = ini.value(QStringLiteral("Theme/inherit"), false).toBool();
+    theme.accent = ini.value(QStringLiteral("Theme/accent")).toString().trimmed();
+    return theme;
+}
+
+} // Anonymous namespace
+
+QString ThemesDir() {
+    const auto path = FS::GetEdenPath(FS::EdenPath::EdenDir) / "themes";
+    void(FS::CreateDir(path));
+    return QString::fromStdString(FS::PathToUTF8String(path));
+}
+
+std::vector<CustomTheme> ScanCustomThemes() {
+    std::vector<CustomTheme> found;
+    const QDir themes_dir{ThemesDir()};
+    for (const QString& id : themes_dir.entryList(QDir::Dirs | QDir::NoDotAndDotDot, QDir::Name)) {
+        if (auto theme = LoadCustomTheme(themes_dir, id)) {
+            found.push_back(std::move(*theme));
+        }
+    }
+    std::sort(found.begin(), found.end(), [](const CustomTheme& a, const CustomTheme& b) {
+        return a.name.compare(b.name, Qt::CaseInsensitive) < 0;
+    });
+    return found;
+}
+
+void RefreshActiveCustomTheme() {
+    active_custom_theme.reset();
+    const QString theme = QString::fromStdString(values.theme);
+    const QString prefix = QString::fromUtf8(CustomThemePrefix);
+    if (theme.startsWith(prefix)) {
+        active_custom_theme = LoadCustomTheme(QDir{ThemesDir()}, theme.mid(prefix.size()));
+    }
+}
+
+const std::optional<CustomTheme>& ActiveCustomTheme() {
+    return active_custom_theme;
+}
+
+std::string EffectiveTheme() {
+    if (active_custom_theme) {
+        return active_custom_theme->base.toStdString();
+    }
+    if (values.theme.rfind(CustomThemePrefix, 0) == 0) {
+        // A custom theme whose folder is gone
+        return themes[static_cast<size_t>(default_theme)].second;
+    }
+    return values.theme;
+}
+
+bool IsDarkTheme() {
+    if (active_custom_theme) {
+        return active_custom_theme->dark;
+    }
+    return IsDarkBuiltinTheme(EffectiveTheme());
 }
 
 Values values = {};

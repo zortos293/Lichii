@@ -422,6 +422,14 @@ MainWindow::MainWindow(bool has_broken_vulkan)
         UISettings::values.theme =
             UISettings::themes[static_cast<size_t>(UISettings::Theme::LichiiDark)].second;
     }
+
+    // Editors save in several steps and some replace the file: wait for it to settle.
+    theme_reload_timer.setSingleShot(true);
+    theme_reload_timer.setInterval(150);
+    connect(&theme_reload_timer, &QTimer::timeout, this, &MainWindow::UpdateUITheme);
+    connect(&theme_watcher, &QFileSystemWatcher::fileChanged, &theme_reload_timer,
+            qOverload<>(&QTimer::start));
+
     UpdateUITheme();
 
     SetDiscordEnabled(UISettings::values.enable_discord_presence.GetValue());
@@ -3887,7 +3895,7 @@ void MainWindow::ToggleShowGameName() {
 }
 
 void MainWindow::OnConfigure() {
-    const auto old_theme = UISettings::values.theme;
+    auto applied_theme = UISettings::values.theme;
     const bool old_discord_presence = UISettings::values.enable_discord_presence.GetValue();
     const auto old_language_index = Settings::values.language_index.GetValue();
     const bool old_gamemode = UISettings::values.enable_gamemode.GetValue();
@@ -3903,6 +3911,15 @@ void MainWindow::OnConfigure() {
             &MainWindow::OnLanguageChanged);
     connect(&configure_dialog, &ConfigureDialog::ExternalContentDirsChanged, this,
             &MainWindow::OnGameListRefresh);
+
+    // The theme follows Apply as well as OK.
+    const auto apply_theme = [this, &applied_theme] {
+        if (UISettings::values.theme != applied_theme) {
+            applied_theme = UISettings::values.theme;
+            UpdateUITheme();
+        }
+    };
+    connect(&configure_dialog, &ConfigureDialog::Applied, this, apply_theme);
 
     const auto result = configure_dialog.exec();
     if (result != QDialog::Accepted && !UISettings::values.configuration_applied &&
@@ -3949,9 +3966,7 @@ void MainWindow::OnConfigure() {
     }
     InitializeHotkeys();
 
-    if (UISettings::values.theme != old_theme) {
-        UpdateUITheme();
-    }
+    apply_theme();
     if (UISettings::values.enable_discord_presence.GetValue() != old_discord_presence) {
         SetDiscordEnabled(UISettings::values.enable_discord_presence.GetValue());
     }
@@ -5857,7 +5872,9 @@ void MainWindow::filterBarSetChecked(bool state) {
 static void AdjustLinkColor() {
     QPalette new_pal(qApp->palette());
 
-    if (UISettings::values.theme == "lichii")
+    if (const auto accent = ThemeAccent())
+        new_pal.setColor(QPalette::Link, *accent);
+    else if (UISettings::EffectiveTheme() == "lichii")
         new_pal.setColor(QPalette::Link, QColor(0xf4, 0x5a, 0x85));
     else if (UISettings::IsDarkTheme())
         new_pal.setColor(QPalette::Link, QColor(0, 190, 255, 255));
@@ -5968,14 +5985,29 @@ void MainWindow::UpdateMenuIcons() {
 
 void MainWindow::UpdateUITheme() {
     const QString default_theme = QString::fromUtf8(UISettings::themes[size_t(UISettings::default_theme)].second);
-    QString current_theme = QString::fromStdString(UISettings::values.theme);
+
+    // A theme from the user's themes folder sits on a built-in one, which gives the icons and
+    // the palette. From here on current_theme is that built-in theme.
+    UISettings::RefreshActiveCustomTheme();
+    const auto& custom_theme = UISettings::ActiveCustomTheme();
+    if (!custom_theme && UISettings::values.theme.rfind(UISettings::CustomThemePrefix, 0) == 0) {
+        LOG_ERROR(Frontend, "Custom theme \"{}\" not found, fallback to the default theme",
+                  UISettings::values.theme);
+    }
+    QString current_theme = QString::fromStdString(UISettings::EffectiveTheme());
 
     if (current_theme.isEmpty())
         current_theme = default_theme;
 
     static bool lichii_palette = false;
     if (current_theme == QStringLiteral("lichii")) {
-        qApp->setPalette(LichiiPalette());
+        QPalette lichii_colors = LichiiPalette();
+        if (const auto accent = ThemeAccent()) {
+            lichii_colors.setColor(QPalette::Highlight, *accent);
+            lichii_colors.setColor(QPalette::Link, *accent);
+            lichii_colors.setColor(QPalette::LinkVisited, accent->darker(120));
+        }
+        qApp->setPalette(lichii_colors);
         lichii_palette = true;
     } else if (lichii_palette) {
         qApp->setPalette(QPalette());
@@ -6009,18 +6041,54 @@ void MainWindow::UpdateUITheme() {
         }
     }
 
+    QString style_sheet;
     QString theme_uri{QStringLiteral(":%1/style.qss").arg(current_theme)};
     QFile f(theme_uri);
     if (f.open(QFile::ReadOnly | QFile::Text)) {
         QTextStream ts(&f);
-        qApp->setStyleSheet(ts.readAll());
-        setStyleSheet(ts.readAll());
+        style_sheet = ts.readAll();
     } else {
         LOG_ERROR(Frontend, "Unable to set style \"{}\", stylesheet file not found",
                   UISettings::values.theme);
-        qApp->setStyleSheet({});
-        setStyleSheet({});
     }
+
+    // The files a custom theme is made of are watched, so that saving one updates the interface.
+    if (const QStringList watched = theme_watcher.files(); !watched.isEmpty()) {
+        theme_watcher.removePaths(watched);
+    }
+    if (custom_theme) {
+        // style.qss reaches the theme's own files as url(theme:icons/check.svg)
+        QDir::setSearchPaths(QStringLiteral("theme"), {custom_theme->dir});
+
+        const QDir theme_dir{custom_theme->dir};
+        QFile custom_file(theme_dir.filePath(QStringLiteral("style.qss")));
+        if (custom_file.open(QFile::ReadOnly | QFile::Text)) {
+            QTextStream ts(&custom_file);
+            ts.setEncoding(QStringConverter::Utf8);
+            const QString custom_sheet = ts.readAll();
+            if (custom_theme->inherit) {
+                style_sheet += QLatin1Char('\n');
+                style_sheet += custom_sheet;
+            } else {
+                style_sheet = custom_sheet;
+            }
+        } else {
+            LOG_ERROR(Frontend, "Unable to open the custom theme's style.qss in \"{}\"",
+                      custom_theme->dir.toStdString());
+        }
+        for (const char* name : {"style.qss", "theme.ini"}) {
+            if (const QString path = theme_dir.filePath(QLatin1String(name)); QFile::exists(path)) {
+                theme_watcher.addPath(path);
+            }
+        }
+    }
+
+    // A stylesheet only sets the overlay colours it names: start from the built-in ones.
+    if (perf_overlay) {
+        perf_overlay->ResetThemeColors();
+    }
+    qApp->setStyleSheet(style_sheet);
+    setStyleSheet({});
 
     UpdateMenuIcons();
 
