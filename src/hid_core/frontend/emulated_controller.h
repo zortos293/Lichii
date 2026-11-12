@@ -282,6 +282,11 @@ public:
     /// Reverts any mapped changes made that weren't saved
     void RestoreConfig();
 
+#if defined(__linux__) && !defined(__ANDROID__)
+    void SetAnyInputDevice(bool enabled);
+    bool GetAnyInputDevice() const;
+#endif
+
     /// Returns a vector of mapped devices from the mapped button and stick parameters
     std::vector<Common::ParamPackage> GetMappedDevices() const;
 
@@ -614,6 +619,11 @@ private:
     std::atomic<bool> system_buttons_enabled{true};
 
     ButtonParams button_params;
+#if defined(__linux__) && !defined(__ANDROID__)
+    bool any_input_device{};
+    Settings::ButtonsRaw any_keyboard_buttons;
+    Settings::AnalogsRaw any_keyboard_analogs;
+#endif
     StickParams stick_params;
     ControllerMotionParams motion_params;
     TriggerParams trigger_params;

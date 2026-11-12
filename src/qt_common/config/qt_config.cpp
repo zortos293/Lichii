@@ -4,7 +4,14 @@
 // SPDX-FileCopyrightText: 2023 yuzu Emulator Project
 // SPDX-License-Identifier: GPL-2.0-or-later
 
+#if defined(__linux__) && !defined(__ANDROID__)
+#include <algorithm>
+#endif
+
 #include "common/logging.h"
+#if defined(__linux__) && !defined(__ANDROID__)
+#include "common/param_package.h"
+#endif
 #include "input_common/main.h"
 #include "qt_config.h"
 #include "uisettings.h"
@@ -101,6 +108,9 @@ void QtConfig::ReadQtPlayerValues(const std::size_t player_index) {
 
     for (int i = 0; i < Settings::NativeButton::NumButtons; ++i) {
         const std::string default_param = InputCommon::GenerateKeyboardParam(default_buttons[i]);
+#if defined(__linux__) && !defined(__ANDROID__)
+        player.any_keyboard_buttons[i] = default_param;
+#endif
         auto& player_buttons = player.buttons[i];
 
         player_buttons = ReadStringSetting(
@@ -114,6 +124,9 @@ void QtConfig::ReadQtPlayerValues(const std::size_t player_index) {
         const std::string default_param = InputCommon::GenerateAnalogParamFromKeys(
             default_analogs[i][0], default_analogs[i][1], default_analogs[i][2],
             default_analogs[i][3], default_stick_mod[i], 0.5f);
+#if defined(__linux__) && !defined(__ANDROID__)
+        player.any_keyboard_analogs[i] = default_param;
+#endif
         auto& player_analogs = player.analogs[i];
 
         player_analogs = ReadStringSetting(
@@ -133,6 +146,25 @@ void QtConfig::ReadQtPlayerValues(const std::size_t player_index) {
             player_motions = default_param;
         }
     }
+#if defined(__linux__) && !defined(__ANDROID__)
+    std::vector<std::string> identities;
+    const auto add_identity = [&identities](const std::string& value) {
+        const Common::ParamPackage p{value};
+        const auto engine = p.Get("engine", "");
+        if (engine.empty() || engine == "analog_from_button") return;
+        const auto identity = engine + "/" + p.Get("guid", "") + "/" +
+                              std::to_string(p.Get("port", 0)) + "/" +
+                              std::to_string(p.Get("pad", 0));
+        if (std::find(identities.begin(), identities.end(), identity) == identities.end()) {
+            identities.push_back(identity);
+        }
+    };
+    for (const auto& value : player.buttons) add_identity(value);
+    for (const auto& value : player.analogs) add_identity(value);
+    const bool legacy_any = identities.size() != 1 || identities.front().starts_with("keyboard/");
+    player.any_input_device = ReadBooleanSetting(
+        std::string(player_prefix).append("any_input_device"), std::make_optional(legacy_any));
+#endif
 }
 
 void QtConfig::ReadHidbusValues() {
@@ -375,6 +407,11 @@ void QtConfig::SaveQtPlayerValues(const std::size_t player_index) {
         // No custom profile selected
         return;
     }
+
+#if defined(__linux__) && !defined(__ANDROID__)
+    WriteBooleanSetting(std::string(player_prefix).append("any_input_device"),
+                        player.any_input_device);
+#endif
 
     for (int i = 0; i < Settings::NativeButton::NumButtons; ++i) {
         const std::string default_param = InputCommon::GenerateKeyboardParam(default_buttons[i]);

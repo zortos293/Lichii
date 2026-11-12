@@ -37,6 +37,10 @@ add_library(input_common STATIC
     main.h
 )
 
+if (CMAKE_SYSTEM_NAME STREQUAL "Linux" AND NOT ANDROID)
+    target_sources(input_common PRIVATE any_input.cpp any_input.h)
+endif()
+
 if (MSVC)
     target_compile_options(input_common PRIVATE
         /we4242 # 'identifier': conversion from 'type1' to 'type2', possible loss of data

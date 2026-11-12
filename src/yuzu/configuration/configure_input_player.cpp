@@ -902,8 +902,19 @@ void ConfigureInputPlayer::ConnectPlayer(bool connected) {
 }
 
 void ConfigureInputPlayer::UpdateInputDeviceCombobox() {
+#if defined(__linux__) && !defined(__ANDROID__)
+    if (!debug && emulated_controller->GetAnyInputDevice()) {
+        UpdateInputDevices();
+        ui->comboDevices->setCurrentIndex(0);
+        return;
+    }
+#endif
     // Skip input device persistence if "Input Devices" is set to "Any".
+#if defined(__linux__) && !defined(__ANDROID__)
+    if (debug && ui->comboDevices->currentIndex() == 0) {
+#else
     if (ui->comboDevices->currentIndex() == 0) {
+#endif
         UpdateInputDevices();
         return;
     }
@@ -911,11 +922,29 @@ void ConfigureInputPlayer::UpdateInputDeviceCombobox() {
     const auto devices = emulated_controller->GetMappedDevices();
     UpdateInputDevices();
 
+#if defined(__linux__) && !defined(__ANDROID__)
+    const auto select_custom = [this] {
+        Common::ParamPackage placeholder;
+        placeholder.Set("engine", "custom");
+        input_devices.push_back(std::move(placeholder));
+        ui->comboDevices->addItem(tr("Custom mapping"));
+        ui->comboDevices->setCurrentIndex(static_cast<int>(input_devices.size() - 1));
+    };
+#endif
     if (devices.empty()) {
+#if defined(__linux__) && !defined(__ANDROID__)
+        if (!debug) select_custom();
+#endif
         return;
     }
 
     if (devices.size() > 2) {
+#if defined(__linux__) && !defined(__ANDROID__)
+        if (!debug) {
+            select_custom();
+            return;
+        }
+#endif
         ui->comboDevices->setCurrentIndex(0);
         return;
     }
@@ -933,6 +962,16 @@ void ConfigureInputPlayer::UpdateInputDeviceCombobox() {
                        param.Get("guid", "") == first_guid && param.Get("port", 0) == first_port &&
                        param.Get("pad", 0) == first_pad;
             });
+#if defined(__linux__) && !defined(__ANDROID__)
+        if (devices_it == input_devices.end() && !debug &&
+            !emulated_controller->GetAnyInputDevice()) {
+            input_devices.push_back(devices[0]);
+            input_devices.back().Set("unavailable", 1);
+            ui->comboDevices->addItem(tr("Disconnected device"));
+            ui->comboDevices->setCurrentIndex(static_cast<int>(input_devices.size() - 1));
+            return;
+        }
+#endif
         const int device_index =
             devices_it != input_devices.end()
                 ? static_cast<int>(std::distance(input_devices.begin(), devices_it))
@@ -967,12 +1006,24 @@ void ConfigureInputPlayer::UpdateInputDeviceCombobox() {
                 return param.Get("engine", "") == first_engine && is_guid_valid &&
                        param.Get("port", 0) == first_port;
             });
+#if defined(__linux__) && !defined(__ANDROID__)
+        if (devices_it == input_devices.end() && !debug) {
+            select_custom();
+            return;
+        }
+#endif
         const int device_index =
             devices_it != input_devices.end()
                 ? static_cast<int>(std::distance(input_devices.begin(), devices_it))
                 : 0;
         ui->comboDevices->setCurrentIndex(device_index);
     } else {
+#if defined(__linux__) && !defined(__ANDROID__)
+        if (!debug) {
+            select_custom();
+            return;
+        }
+#endif
         ui->comboDevices->setCurrentIndex(0);
     }
 }
@@ -1383,6 +1434,22 @@ void ConfigureInputPlayer::UpdateControllerButtonNames() {
 }
 
 void ConfigureInputPlayer::UpdateMappingWithDefaults() {
+#if defined(__linux__) && !defined(__ANDROID__)
+    if (ui->comboDevices->currentIndex() > 0 &&
+        static_cast<std::size_t>(ui->comboDevices->currentIndex()) < input_devices.size() &&
+        (input_devices[ui->comboDevices->currentIndex()].Get("engine", "") == "custom" ||
+         input_devices[ui->comboDevices->currentIndex()].Get("unavailable", 0) != 0)) {
+        return;
+    }
+    if (!debug) {
+        const bool any = ui->comboDevices->currentIndex() == 0;
+        emulated_controller->SetAnyInputDevice(any);
+        if (player_index == 0) {
+            hid_core.GetEmulatedController(Core::HID::NpadIdType::Player1)->SetAnyInputDevice(any);
+            hid_core.GetEmulatedController(Core::HID::NpadIdType::Handheld)->SetAnyInputDevice(any);
+        }
+    }
+#endif
     if (ui->comboDevices->currentIndex() == 0) {
         return;
     }

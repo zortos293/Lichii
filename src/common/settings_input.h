@@ -386,6 +386,11 @@ struct PlayerInput {
     ButtonsRaw buttons;
     AnalogsRaw analogs;
     MotionsRaw motions;
+#if defined(__linux__) && !defined(__ANDROID__)
+    bool any_input_device{true};
+    ButtonsRaw any_keyboard_buttons;
+    AnalogsRaw any_keyboard_analogs;
+#endif
 
     bool vibration_enabled;
     int vibration_strength;

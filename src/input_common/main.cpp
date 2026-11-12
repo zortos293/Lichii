@@ -7,6 +7,9 @@
 #include <memory>
 #include "common/input.h"
 #include "common/param_package.h"
+#if defined(__linux__) && !defined(__ANDROID__)
+#include "input_common/any_input.h"
+#endif
 #include "input_common/drivers/camera.h"
 #include "input_common/drivers/keyboard.h"
 #include "input_common/drivers/mouse.h"
@@ -99,6 +102,14 @@ struct InputSubsystem::Impl {
                                             std::make_shared<TouchFromButton>());
         Common::Input::RegisterInputFactory("analog_from_button",
                                             std::make_shared<StickFromButton>());
+#if defined(__linux__) && !defined(__ANDROID__)
+        any_input = std::make_shared<AnyInputFactory>(
+            [this] { return GetInputDevices(); },
+            [this](const auto& p) { return GetButtonMappingForDevice(p); },
+            [this](const auto& p) { return GetAnalogMappingForDevice(p); },
+            [this](const auto& p) { return GetMotionMappingForDevice(p); });
+        Common::Input::RegisterInputFactory("any_input", any_input);
+#endif
     }
 
     template <typename Engine>
@@ -109,6 +120,10 @@ struct InputSubsystem::Impl {
     }
 
     void Shutdown() {
+#if defined(__linux__) && !defined(__ANDROID__)
+        Common::Input::UnregisterInputFactory("any_input");
+        any_input.reset();
+#endif
         UnregisterEngine(update_engine);
         UnregisterEngine(keyboard);
         UnregisterEngine(mouse);
@@ -328,6 +343,9 @@ struct InputSubsystem::Impl {
 #ifdef HAVE_SDL3
         sdl->PumpEvents();
 #endif
+#if defined(__linux__) && !defined(__ANDROID__)
+        any_input->Pump();
+#endif
     }
 
     void RegisterInput(const MappingData& data) {
@@ -335,6 +353,9 @@ struct InputSubsystem::Impl {
     }
 
     std::shared_ptr<MappingFactory> mapping_factory;
+#if defined(__linux__) && !defined(__ANDROID__)
+    std::shared_ptr<AnyInputFactory> any_input;
+#endif
 
     std::shared_ptr<UpdateEngine> update_engine;
     std::shared_ptr<Keyboard> keyboard;

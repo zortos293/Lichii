@@ -90,6 +90,12 @@ void EmulatedController::ReloadFromSettings() {
     const auto player_index = Service::HID::NpadIdTypeToIndex(npad_id_type);
     const auto& player = Settings::values.players.GetValue()[player_index];
 
+#if defined(__linux__) && !defined(__ANDROID__)
+    any_input_device = player.any_input_device;
+    any_keyboard_buttons = player.any_keyboard_buttons;
+    any_keyboard_analogs = player.any_keyboard_analogs;
+#endif
+
     for (std::size_t index = 0; index < player.buttons.size(); ++index) {
         button_params[index] = Common::ParamPackage(player.buttons[index]);
     }
@@ -203,8 +209,47 @@ void EmulatedController::LoadDevices() {
     std::ranges::transform(button_params, button_devices.begin(), Common::Input::CreateInputDevice);
     std::ranges::transform(stick_params, stick_devices.begin(), Common::Input::CreateInputDevice);
     std::ranges::transform(motion_params, motion_devices.begin(), Common::Input::CreateInputDevice);
+#if defined(__linux__) && !defined(__ANDROID__)
+    if (any_input_device && (is_connected || is_configuring)) {
+        const auto make_any = [](const Common::ParamPackage& base, const std::string& keyboard,
+                                 const char* kind, std::size_t index) {
+            Common::ParamPackage param;
+            param.Set("engine", "any_input");
+            param.Set("base", base.Serialize());
+            param.Set("keyboard", keyboard);
+            param.Set("kind", kind);
+            param.Set("index", static_cast<int>(index));
+            return Common::Input::CreateInputDevice(param);
+        };
+        for (std::size_t index = 0; index < button_devices.size(); ++index) {
+            button_devices[index] = make_any(button_params[index], any_keyboard_buttons[index],
+                                              "button", index);
+        }
+        for (std::size_t index = 0; index < stick_devices.size(); ++index) {
+            stick_devices[index] = make_any(stick_params[index], any_keyboard_analogs[index],
+                                             "stick", index);
+        }
+        for (std::size_t index = 0; index < motion_devices.size(); ++index) {
+            motion_devices[index] = make_any(motion_params[index], {}, "motion", index);
+        }
+    }
+#endif
     std::ranges::transform(trigger_params, trigger_devices.begin(),
                            Common::Input::CreateInputDevice);
+#if defined(__linux__) && !defined(__ANDROID__)
+    if (any_input_device && (is_connected || is_configuring)) {
+        for (std::size_t index = 0; index < trigger_devices.size(); ++index) {
+            const auto button_index = index == 0 ? Settings::NativeButton::ZL : Settings::NativeButton::ZR;
+            Common::ParamPackage param;
+            param.Set("engine", "any_input");
+            param.Set("base", trigger_params[index].Serialize());
+            param.Set("keyboard", any_keyboard_buttons[button_index]);
+            param.Set("kind", "button");
+            param.Set("index", static_cast<int>(button_index));
+            trigger_devices[index] = Common::Input::CreateInputDevice(param);
+        }
+    }
+#endif
     std::ranges::transform(battery_params, battery_devices.begin(),
                            Common::Input::CreateInputDevice);
     std::ranges::transform(color_params, color_devices.begin(), Common::Input::CreateInputDevice);
@@ -610,6 +655,11 @@ void EmulatedController::DisableConfiguration() {
         }
         Disconnect();
     }
+#if defined(__linux__) && !defined(__ANDROID__)
+    if (any_input_device && !is_connected && is_initialized) {
+        ReloadInput();
+    }
+#endif
 }
 
 void EmulatedController::EnableSystemButtons() {
@@ -636,6 +686,9 @@ void EmulatedController::SaveCurrentConfig() {
     auto& player = Settings::values.players.GetValue()[player_index];
     player.connected = is_connected;
     player.controller_type = MapNPadToSettingsType(npad_type);
+#if defined(__linux__) && !defined(__ANDROID__)
+    player.any_input_device = any_input_device;
+#endif
     for (std::size_t index = 0; index < player.buttons.size(); ++index) {
         player.buttons[index] = button_params[index].Serialize();
     }
@@ -649,6 +702,19 @@ void EmulatedController::SaveCurrentConfig() {
         Settings::values.ringcon_analogs = ring_params[0].Serialize();
     }
 }
+
+#if defined(__linux__) && !defined(__ANDROID__)
+void EmulatedController::SetAnyInputDevice(bool enabled) {
+    if (any_input_device != enabled) {
+        any_input_device = enabled;
+        ReloadInput();
+    }
+}
+
+bool EmulatedController::GetAnyInputDevice() const {
+    return any_input_device;
+}
+#endif
 
 void EmulatedController::RestoreConfig() {
     if (!is_configuring) {
@@ -1681,6 +1747,11 @@ void EmulatedController::Connect(bool use_temporary_value) {
         return;
     }
     is_connected = true;
+#if defined(__linux__) && !defined(__ANDROID__)
+    if (any_input_device && is_initialized) {
+        ReloadInput();
+    }
+#endif
 }
 
 void EmulatedController::Disconnect() {
@@ -1696,6 +1767,11 @@ void EmulatedController::Disconnect() {
         return;
     }
     is_connected = false;
+#if defined(__linux__) && !defined(__ANDROID__)
+    if (any_input_device && is_initialized) {
+        ReloadInput();
+    }
+#endif
 }
 
 bool EmulatedController::IsConnected(bool get_temporary_value) const {

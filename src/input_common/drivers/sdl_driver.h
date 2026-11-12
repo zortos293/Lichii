@@ -117,7 +117,11 @@ private:
 
     /// Map of GUID of a list of corresponding virtual Joysticks
     ::Common::unordered_map<Common::UUID, std::vector<std::shared_ptr<SDLJoystick>>> joystick_map;
+#if defined(__linux__) && !defined(__ANDROID__)
+    mutable std::mutex joystick_map_mutex;
+#else
     std::mutex joystick_map_mutex;
+#endif
     std::chrono::steady_clock::time_point last_motion_stall_check{};
 
     std::atomic<bool> initialized = false;
