@@ -175,6 +175,7 @@ public:
     /// Logs the timer thread's waits once a second (EDEN_NX2_HOSTTIMING_STATS=1, or the debug
     /// server's host_timing).
     std::atomic<bool> host_wait_stats{};
+    bool timer_wake_all{};
 };
 
 /// Creates a core timing event with the given name and callback.

@@ -4,11 +4,15 @@
 // SPDX-FileCopyrightText: Copyright 2023 yuzu Emulator Project
 // SPDX-License-Identifier: GPL-2.0-or-later
 
+#include <atomic>
+#include <bit>
 #include <cinttypes>
 #include <memory>
 
+#include "common/cpu_features.h"
 #include "common/signal_chain.h"
 #include "core/arm/nce/arm_nce.h"
+#include "core/arm/nce/instructions.h"
 #include "core/arm/nce/interpreter_visitor.h"
 #include "core/arm/nce/patcher.h"
 #include "core/core.h"
@@ -26,6 +30,71 @@ namespace {
 
 struct sigaction g_orig_bus_action;
 struct sigaction g_orig_segv_action;
+struct sigaction g_orig_ill_action;
+
+// Switch 2 games target the Cortex-A78C, which has pointer authentication (ARMv8.3 PAuth).
+// Hosts without it raise SIGILL on the non-hint PAuth instructions. With no PAC keys, signing
+// and authenticating leave a pointer unchanged, so they are executed here as their plain forms.
+// Returns false when the instruction is not one of them.
+bool EmulatePointerAuthInstruction(u32 inst, mcontext_t& host_ctx, Core::Memory::Memory& memory) {
+    const auto reg = [&](u32 index) -> u64 { return index == 31 ? 0 : host_ctx.regs[index]; };
+    const auto set_reg = [&](u32 index, u64 value) {
+        if (index != 31) {
+            host_ctx.regs[index] = value;
+        }
+    };
+    const u32 rd = inst & 0x1F;
+    const u32 rn = (inst >> 5) & 0x1F;
+
+    // PACIA, PACIB, PACDA, PACDB, AUTIA, AUTIB, AUTDA, AUTDB and their Z forms.
+    if ((inst & 0xFFFFC000) == 0xDAC10000) {
+        host_ctx.pc += 4;
+        return true;
+    }
+    // XPACI, XPACD.
+    if ((inst & 0xFFFFFBE0) == 0xDAC143E0) {
+        host_ctx.pc += 4;
+        return true;
+    }
+    // PACGA: only the upper 32 bits hold the code.
+    if ((inst & 0xFFE0FC00) == 0x9AC03000) {
+        set_reg(rd, 0);
+        host_ctx.pc += 4;
+        return true;
+    }
+    // RETAA, RETAB.
+    if ((inst & 0xFFFFFBFF) == 0xD65F0BFF) {
+        host_ctx.pc = host_ctx.regs[30];
+        return true;
+    }
+    // BRAA, BRAB, BLRAA, BLRAB and their Z forms.
+    if ((inst & 0xFEDFF800) == 0xD61F0800) {
+        const u64 target = reg(rn);
+        if ((inst >> 21) & 1) {
+            host_ctx.regs[30] = host_ctx.pc + 4;
+        }
+        host_ctx.pc = target;
+        return true;
+    }
+    // LDRAA, LDRAB: a 10-bit signed offset scaled by 8, with optional pre-index writeback.
+    if ((inst & 0xFF200400) == 0xF8200400) {
+        const u32 imm10 = (((inst >> 22) & 1) << 9) | ((inst >> 12) & 0x1FF);
+        const s64 offset = static_cast<s64>(static_cast<s32>(imm10 << 22) >> 22) * 8;
+        const u64 base = rn == 31 ? host_ctx.sp : host_ctx.regs[rn];
+        const u64 address = base + offset;
+        set_reg(rd, memory.Read64(address));
+        if ((inst >> 11) & 1) {
+            if (rn == 31) {
+                host_ctx.sp = address;
+            } else {
+                host_ctx.regs[rn] = address;
+            }
+        }
+        host_ctx.pc += 4;
+        return true;
+    }
+    return false;
+}
 
 // Verify assembly offsets.
 using NativeExecutionParameters = Kernel::KThread::NativeExecutionParameters;
@@ -182,6 +251,41 @@ void ArmNce::HandleHostAccessFault(int sig, void* raw_info, void* raw_context) {
     return g_orig_segv_action.sa_sigaction(sig, static_cast<siginfo_t*>(raw_info), raw_context);
 }
 
+bool ArmNce::HandleGuestIllegalInstruction(GuestContext* guest_ctx, void* raw_info,
+                                           void* raw_context) {
+    auto& host_ctx = static_cast<ucontext_t*>(raw_context)->uc_mcontext;
+    auto& memory = guest_ctx->parent->m_running_thread->GetOwnerProcess()->GetMemory();
+
+    const u32 inst = memory.Read32(host_ctx.pc);
+    if (EmulatePointerAuthInstruction(inst, host_ctx, memory)) {
+        return true;
+    }
+
+    // MRS Xt, CNTPCT_EL0 in code the patcher did not rewrite. Android kernels don't let EL0 read
+    // the physical counter.
+    if (auto mrs = NCE::MRS{inst}; mrs.Verify() && mrs.GetSystemReg() == NCE::CntpctEl0) {
+        static std::atomic<u64> trapped{0};
+        const u64 count = trapped.fetch_add(1, std::memory_order_relaxed) + 1;
+        if (std::has_single_bit(count)) {
+            LOG_WARNING(Core_ARM, "Trapped {} reads of CNTPCT_EL0 (last at {:#x})", count,
+                        host_ctx.pc);
+        }
+        // The same guest-frequency counter the patcher's CNTPCT handler returns.
+        if (mrs.GetRt() != 31) {
+            host_ctx.regs[mrs.GetRt()] = static_cast<u64>(Common::g_wall_clock.GetCNTPCT());
+        }
+        host_ctx.pc += 4;
+        return true;
+    }
+
+    LOG_CRITICAL(Core_ARM, "Unsupported guest instruction {:08X} at {:#x}", inst, host_ctx.pc);
+    return HandleFailedGuestFault(guest_ctx, raw_info, raw_context);
+}
+
+void ArmNce::HandleHostIllegalInstruction(int sig, void* raw_info, void* raw_context) {
+    return g_orig_ill_action.sa_sigaction(sig, static_cast<siginfo_t*>(raw_info), raw_context);
+}
+
 void ArmNce::LockThread(Kernel::KThread* thread) {
     auto* thread_params = &thread->GetNativeExecutionParameters();
     LockThreadParameters(thread_params);
@@ -302,6 +406,7 @@ void ArmNce::Initialize() {
         sigaddset(&signal_mask, BreakFromRunCodeSignal);
         sigaddset(&signal_mask, GuestAlignmentFaultSignal);
         sigaddset(&signal_mask, GuestAccessFaultSignal);
+        sigaddset(&signal_mask, GuestIllegalInstructionSignal);
 
         struct sigaction return_to_run_code_action {};
         return_to_run_code_action.sa_flags = SA_SIGINFO | SA_ONSTACK;
@@ -331,6 +436,14 @@ void ArmNce::Initialize() {
             reinterpret_cast<HandlerType>(&ArmNce::GuestAccessFaultSignalHandler);
         access_fault_action.sa_mask = signal_mask;
         Common::SigAction(GuestAccessFaultSignal, &access_fault_action, &g_orig_segv_action);
+
+        struct sigaction illegal_instruction_action {};
+        illegal_instruction_action.sa_flags = SA_SIGINFO | SA_ONSTACK;
+        illegal_instruction_action.sa_sigaction =
+            reinterpret_cast<HandlerType>(&ArmNce::GuestIllegalInstructionSignalHandler);
+        illegal_instruction_action.sa_mask = signal_mask;
+        Common::SigAction(GuestIllegalInstructionSignal, &illegal_instruction_action,
+                          &g_orig_ill_action);
     });
 }
 

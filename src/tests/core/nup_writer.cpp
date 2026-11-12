@@ -451,7 +451,29 @@ TEST_CASE("NUP reads zstd members above the memory cache through a temporary fil
         REQUIRE(PackedTree(nup.GetRomFSDir(0)) == SourceTree(root / "Base/RomFS"));
         REQUIRE(nup.VerifyIntegrity({}) == Loader::ResultStatus::Success);
     }
-    REQUIRE(std::distance(fs::directory_iterator(spill_dir), fs::directory_iterator{}) == 0);
+    // Completely decoded members stay for later sessions as a .bin with its .done marker; the
+    // integrity check's and the decoders' partial files are gone.
+    size_t kept = 0;
+    for (const auto& entry : fs::directory_iterator(spill_dir)) {
+        const auto extension = entry.path().extension();
+        REQUIRE((extension == ".bin" || extension == ".done"));
+        if (extension == ".bin") {
+            REQUIRE(fs::exists(fs::path{entry.path()}.replace_extension(".done")));
+            ++kept;
+        }
+    }
+    REQUIRE(kept > 0);
+
+    // A later container reads the kept members without decoding them again.
+    {
+        NupContainer nup{real.OpenFile(archive.string(), FileSys::OpenMode::Read), 64 * 1024,
+                         spill_dir};
+        REQUIRE(nup.GetStatus() == Loader::ResultStatus::Success);
+        REQUIRE(PackedTree(nup.GetRomFSDir(0)) == SourceTree(root / "Base/RomFS"));
+        for (const auto& entry : fs::directory_iterator(spill_dir)) {
+            REQUIRE(entry.path().extension() != ".part");
+        }
+    }
 }
 
 TEST_CASE("NUP rejects a TOC whose counts or offsets wrap", "[nup]") {

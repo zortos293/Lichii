@@ -69,6 +69,7 @@ class YuzuApplication : Application() {
 
         NativeLibrary.playTimeManagerInit()
         GpuDriverHelper.initializeDriverParameters()
+        GpuDriverHelper.installBundledDrivers()
         NativeInput.reloadInputDevices()
         NativeLibrary.logDeviceInfo()
         PowerStateUpdater.start()

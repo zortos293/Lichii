@@ -42,11 +42,14 @@ static RomMetadata CacheRomMetadata(const std::string& path) {
             entry.developer = control.first->GetDeveloperName();
             entry.version = control.first->GetVersionString();
         } else {
+            // Containers like NUP carry their control data themselves.
             FileSys::NACP nacp{};
-            entry.developer = loader->ReadControlData(nacp) == Loader::ResultStatus::Success
-                ? nacp.GetDeveloperName()
-                : "";
-            entry.version = "1.0.0";
+            const bool has_control = loader->ReadControlData(nacp) == Loader::ResultStatus::Success;
+            entry.developer = has_control ? nacp.GetDeveloperName() : "";
+            entry.version = has_control ? nacp.GetVersionString() : "";
+            if (entry.version.empty()) {
+                entry.version = "1.0.0";
+            }
         }
         if (loader->GetFileType() == Loader::FileType::NRO) {
             auto loader_nro = reinterpret_cast<Loader::AppLoader_NRO*>(loader.get());

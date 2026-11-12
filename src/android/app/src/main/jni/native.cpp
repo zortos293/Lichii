@@ -10,8 +10,10 @@
 #include <codecvt>
 #include <cstdio>
 #include <cstring>
+#include <fstream>
 #include <locale>
 #include <map>
+#include <optional>
 #include <set>
 #include <sstream>
 #include <span>
@@ -279,10 +281,56 @@ void EmulationSession::SetAppletId(int applet_id) {
         static_cast<Service::AM::AppletId>(m_applet_id));
 }
 
+// Applies EDEN_* NAME=VALUE lines from <config>/nx2_switches.txt, in the desktop build's format.
+// Read before the system is created and at every boot, so edits apply to the next game started; a
+// switch removed from the file gets back the value it had before the file first set it.
+static void LoadNx2SwitchFile() {
+    static std::map<std::string, std::optional<std::string>> original_values;
+    for (const auto& [name, value] : original_values) {
+        if (value) {
+            setenv(name.c_str(), value->c_str(), 1);
+        } else {
+            unsetenv(name.c_str());
+        }
+    }
+
+    const auto path = Common::FS::GetEdenPath(Common::FS::EdenPath::ConfigDir) / "nx2_switches.txt";
+    std::ifstream file{path};
+    constexpr const char* blank = " \t\r";
+    std::string line;
+    while (std::getline(file, line)) {
+        line.erase(0, line.find_first_not_of(blank));
+        line.erase(line.find_last_not_of(blank) + 1);
+        const auto equals = line.find('=');
+        if (line.empty() || line[0] == '#' || equals == std::string::npos) {
+            continue;
+        }
+        std::string name = line.substr(0, equals);
+        std::string value = line.substr(equals + 1);
+        name.erase(name.find_last_not_of(blank) + 1);
+        value.erase(0, value.find_first_not_of(blank));
+        if (value.size() >= 2 && value.front() == '"' && value.back() == '"') {
+            value = value.substr(1, value.size() - 2);
+        }
+        if (!name.starts_with("EDEN_")) {
+            continue;
+        }
+        if (!original_values.contains(name)) {
+            const char* previous = std::getenv(name.c_str());
+            original_values.emplace(name, previous ? std::optional<std::string>{previous}
+                                                   : std::nullopt);
+        }
+        setenv(name.c_str(), value.c_str(), 1);
+        LOG_INFO(Frontend, "nx2_switches.txt: {}={}", name, value);
+    }
+}
+
 Core::SystemResultStatus EmulationSession::InitializeEmulation(const std::string& filepath,
                                                                const std::size_t program_index,
                                                                const bool frontend_initiated) {
     std::scoped_lock lock(m_mutex);
+
+    LoadNx2SwitchFile();
 
     // Create the render window.
     m_window = std::make_unique<EmuWindow_Android>(m_native_window, m_vulkan_library);
@@ -986,8 +1034,9 @@ jint Java_org_yuzu_yuzu_1emu_NativeLibrary_getAppletCaptureHeight(JNIEnv* env, j
 
 void Java_org_yuzu_yuzu_1emu_NativeLibrary_initializeSystem(JNIEnv* env, jclass clazz,
                                                             jboolean reload) {
-    // Initialize the emulated system.
+    // Initialize the emulated system. The switches go first: guest memory reads them.
     if (!reload) {
+        LoadNx2SwitchFile();
         EmulationSession::GetInstance().System().Initialize();
     }
     EmulationSession::GetInstance().InitializeSystem(reload);

@@ -75,10 +75,13 @@ class CarouselRecyclerView @JvmOverloads constructor(
             }
         }
 
+    /// The console-style home row is horizontal too, but keeps flat, evenly spaced tiles.
+    var homeRow: Boolean = false
+
     private val isCarouselMode: Boolean
         get() {
             val lm = layoutManager as? LinearLayoutManager
-            return lm != null &&
+            return !homeRow && lm != null &&
                lm.orientation == RecyclerView.HORIZONTAL &&
                lm !is androidx.recyclerview.widget.GridLayoutManager
     }

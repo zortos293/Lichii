@@ -27,6 +27,7 @@ import org.yuzu.yuzu_emu.YuzuApplication
 import org.yuzu.yuzu_emu.databinding.CardGameListBinding
 import org.yuzu.yuzu_emu.databinding.CardGameGridBinding
 import org.yuzu.yuzu_emu.databinding.CardGameCarouselBinding
+import org.yuzu.yuzu_emu.databinding.CardGameHomeBinding
 import org.yuzu.yuzu_emu.model.Game
 import org.yuzu.yuzu_emu.model.GamesViewModel
 import org.yuzu.yuzu_emu.utils.GameIconUtils
@@ -48,6 +49,25 @@ class GameAdapter(private val activity: AppCompatActivity) :
         const val VIEW_TYPE_GRID_COMPACT = 1
         const val VIEW_TYPE_LIST = 2
         const val VIEW_TYPE_CAROUSEL = 3
+        const val VIEW_TYPE_HOME = 4
+    }
+
+    /// Selected game in the home row: a tap selects a game, a tap on the selected one starts it.
+    var homeSelected: Int = 0
+        private set
+    var onHomeSelectionChanged: ((position: Int, game: Game) -> Unit)? = null
+
+    fun selectHome(position: Int) {
+        if (position < 0 || position >= itemCount) {
+            return
+        }
+        val previous = homeSelected
+        homeSelected = position
+        if (previous != position && previous < itemCount) {
+            notifyItemChanged(previous)
+        }
+        notifyItemChanged(position)
+        onHomeSelectionChanged?.invoke(position, currentList[position])
     }
 
     private var viewType = 0
@@ -137,6 +157,12 @@ class GameAdapter(private val activity: AppCompatActivity) :
                 false
             )
 
+            VIEW_TYPE_HOME -> CardGameHomeBinding.inflate(
+                LayoutInflater.from(parent.context),
+                parent,
+                false
+            )
+
             else -> throw IllegalArgumentException("Invalid view type")
         }
         return GameViewHolder(binding, viewType)
@@ -152,6 +178,7 @@ class GameAdapter(private val activity: AppCompatActivity) :
                 VIEW_TYPE_LIST -> bindListView(model)
                 VIEW_TYPE_GRID -> bindGridView(model)
                 VIEW_TYPE_CAROUSEL -> bindCarouselView(model)
+                VIEW_TYPE_HOME -> bindHomeView(model)
                 VIEW_TYPE_GRID_COMPACT -> bindGridCompactView(model)
             }
         }
@@ -206,6 +233,43 @@ class GameAdapter(private val activity: AppCompatActivity) :
             // Reset layout params to XML defaults (same as normal grid)
             gridCompactBinding.root.layoutParams.width = ViewGroup.LayoutParams.MATCH_PARENT
             gridCompactBinding.root.layoutParams.height = ViewGroup.LayoutParams.WRAP_CONTENT
+        }
+
+        private fun bindHomeView(model: Game) {
+            val homeBinding = binding as CardGameHomeBinding
+            GameIconUtils.loadGameIcon(model, homeBinding.imageGameScreen)
+            homeBinding.imageGameScreen.contentDescription =
+                binding.root.context.getString(R.string.game_image_desc, model.title)
+
+            val position = bindingAdapterPosition
+            val selected = position == homeSelected
+            val context = homeBinding.cardGameHome.context
+            val ring = androidx.core.content.ContextCompat.getColor(context, R.color.home_accent)
+            homeBinding.cardGameHome.strokeColor =
+                if (selected) ring else android.graphics.Color.TRANSPARENT
+            // The selected cover gets a white frame inside the ring.
+            val frame = if (selected) (7 * context.resources.displayMetrics.density).toInt() else 0
+            homeBinding.cardGameHome.setContentPadding(frame, frame, frame, frame)
+            homeBinding.cardGameHome.setCardBackgroundColor(
+                if (selected) android.graphics.Color.WHITE
+                else androidx.core.content.ContextCompat.getColor(context, R.color.eden_card_background)
+            )
+
+            homeBinding.cardGameHome.setOnClickListener {
+                val current = bindingAdapterPosition
+                if (current == homeSelected) {
+                    onClick(model)
+                } else {
+                    selectHome(current)
+                }
+            }
+            homeBinding.cardGameHome.setOnLongClickListener { onLongClick(model) }
+            homeBinding.cardGameHome.setOnFocusChangeListener { _, hasFocus ->
+                val current = bindingAdapterPosition
+                if (hasFocus && current != homeSelected) {
+                    selectHome(current)
+                }
+            }
         }
 
         private fun bindCarouselView(model: Game) {

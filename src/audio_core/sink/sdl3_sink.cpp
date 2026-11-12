@@ -100,6 +100,15 @@ public:
             capture = true;
         }
 
+#ifdef __ANDROID__
+        // SDL waits for an answer to its RECORD_AUDIO request that only SDLActivity forwards, and
+        // the app doesn't declare the permission, so opening a recording device never returns.
+        if (capture) {
+            LOG_WARNING(Audio_Sink, "Audio input is not supported on Android");
+            return;
+        }
+#endif
+
         const SDL_AudioDeviceID audio_device =
             device_name.empty() ? (capture ? SDL_AUDIO_DEVICE_DEFAULT_RECORDING
                                            : SDL_AUDIO_DEVICE_DEFAULT_PLAYBACK)

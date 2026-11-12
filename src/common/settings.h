@@ -389,8 +389,13 @@ struct Values {
                                            true,
                                            true};
 
+    // Phones are GPU bound: ScaleForce and FXAA each add a full-screen pass every frame.
     SwitchableSetting<ScalingFilter> scaling_filter{linkage,
+#ifdef __ANDROID__
+                                                    ScalingFilter::Bilinear,
+#else
                                                     ScalingFilter::ScaleForce,
+#endif
                                                     "scaling_filter",
                                                     Category::Renderer,
                                                     Specialization::Default,
@@ -453,7 +458,11 @@ struct Values {
                                                       true};
 
     SwitchableSetting<AntiAliasing> anti_aliasing{linkage,
+#ifdef __ANDROID__
+                                                  AntiAliasing::None,
+#else
                                                   AntiAliasing::Fxaa,
+#endif
                                                   "anti_aliasing",
                                                   Category::Renderer,
                                                   Specialization::Default,

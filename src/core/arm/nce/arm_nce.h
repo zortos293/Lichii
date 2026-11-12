@@ -63,6 +63,7 @@ private:
     static void BreakFromRunCodeSignalHandler(int sig, void* info, void* raw_context);
     static void GuestAlignmentFaultSignalHandler(int sig, void* info, void* raw_context);
     static void GuestAccessFaultSignalHandler(int sig, void* info, void* raw_context);
+    static void GuestIllegalInstructionSignalHandler(int sig, void* info, void* raw_context);
 
     static void LockThreadParameters(void* tpidr);
     static void UnlockThreadParameters(void* tpidr);
@@ -76,6 +77,8 @@ private:
     static bool HandleGuestAccessFault(GuestContext* ctx, void* info, void* raw_context);
     static void HandleHostAlignmentFault(int sig, void* info, void* raw_context);
     static void HandleHostAccessFault(int sig, void* info, void* raw_context);
+    static bool HandleGuestIllegalInstruction(GuestContext* ctx, void* info, void* raw_context);
+    static void HandleHostIllegalInstruction(int sig, void* info, void* raw_context);
 
 public:
     Core::System& m_system;

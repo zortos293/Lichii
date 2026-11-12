@@ -78,6 +78,58 @@ static int memfd_create(const char* name, unsigned int flags) {
 }
 #endif
 
+#ifdef __ANDROID__
+#include <fstream>
+#include <string>
+#include <sys/statvfs.h>
+
+// Guest memory is backed by an unlinked file in the app's internal cache instead of a memfd.
+// The kernel can then write cold guest pages to storage and drop them, where a memfd can only go
+// to swap and the low memory killer ends the app once swap runs short (Pokemon Pokopia on an
+// 8 GB phone). EDEN_FILE_BACKED_MEMORY=0 keeps the memfd; a directory moves the file.
+//
+// The file is sparse: storage is taken only for the guest pages the kernel writes out, a few GB at
+// most. Reserving the whole guest size would need more free storage than most phones have, so the
+// file is used only while at least MinFreeStorage is free. A write-back that later finds the
+// storage full can still raise SIGBUS.
+static int OpenFileBackedMemory() {
+    constexpr u64 MinFreeStorage = 4ULL << 30;
+    const char* value = std::getenv("EDEN_FILE_BACKED_MEMORY");
+    if (value != nullptr && value[0] == '0') {
+        return -1;
+    }
+    std::string dir = value == nullptr || value[0] == '\0' ? "1" : value;
+    if (dir == "1") {
+        // Each Android user and work profile has its own data directory under /data/user/<id>.
+        std::ifstream cmdline{"/proc/self/cmdline"};
+        std::string package;
+        std::getline(cmdline, package, '\0');
+        dir = "/data/user/" + std::to_string(getuid() / 100000) + "/" + package + "/cache";
+    }
+    struct statvfs fs_stats{};
+    if (statvfs(dir.c_str(), &fs_stats) != 0) {
+        LOG_WARNING(Common_Memory, "Could not query {}: {}", dir, strerror(errno));
+        return -1;
+    }
+    const u64 free_bytes = u64(fs_stats.f_bavail) * fs_stats.f_frsize;
+    if (free_bytes < MinFreeStorage) {
+        LOG_WARNING(Common_Memory, "Only {} MiB free in {}, guest memory stays in a memfd",
+                    free_bytes >> 20, dir);
+        return -1;
+    }
+    const std::string path = dir + "/eden_guest_memory";
+    const int fd = open(path.c_str(), O_RDWR | O_CREAT | O_TRUNC | O_CLOEXEC, 0600);
+    if (fd < 0) {
+        LOG_WARNING(Common_Memory, "Could not create {}: {}", path, strerror(errno));
+        return -1;
+    }
+    unlink(path.c_str());
+    LOG_INFO(Common_Memory, "Guest memory is backed by a file in {} ({} MiB free)", dir,
+             free_bytes >> 20);
+    return fd;
+}
+#endif
+
 namespace Common {
 
 thread_local HostMemory::AllocationTestControl* HostMemory::allocation_test_control{};
@@ -639,7 +691,13 @@ public:
             unlink(template_path);
         }
 #else
-        fd = memfd_create("HostMemory", 0);
+        fd = -1;
+#ifdef __ANDROID__
+        fd = OpenFileBackedMemory();
+#endif
+        if (fd < 0) {
+            fd = memfd_create("HostMemory", 0);
+        }
 #endif
         bool use_anon = false;
         if (fd <= 0) {

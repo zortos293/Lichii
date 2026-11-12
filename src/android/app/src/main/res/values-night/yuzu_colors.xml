@@ -226,63 +226,63 @@
     <color name="yuzu_inversePrimary_gray">#B7B7B7</color>
     <color name="yuzu_surfaceTint_gray">#B7B7B7</color>
 
-    <!-- Eden Theme Colors -->
+    <!-- Lichii Theme Colors -->
 
     <!-- Synthwave/Vaporwave Primary Colors -->
-    <color name="eden_primary">#FF0080</color> <!-- Neon magenta -->
-    <color name="eden_primary_variant">#E6006B</color> <!-- Darker magenta -->
-    <color name="eden_secondary">#00FFFF</color> <!-- Electric cyan -->
-    <color name="eden_secondary_variant">#00E6E6</color> <!-- Darker cyan -->
+    <color name="eden_primary">#FF3D7F</color> <!-- Neon magenta -->
+    <color name="eden_primary_variant">#F00050</color> <!-- Darker magenta -->
+    <color name="eden_secondary">#A8CC00</color> <!-- Electric cyan -->
+    <color name="eden_secondary_variant">#78B400</color> <!-- Darker cyan -->
 
     <!-- Background Colors - Deep space black -->
-    <color name="eden_background">#000000</color> <!-- Pure black background -->
-    <color name="eden_surface">#0D0D0D</color> <!-- Card surface -->
-    <color name="eden_surface_variant">#1A1A1A</color> <!-- Elevated surface -->
+    <color name="eden_background">#160A0F</color> <!-- Pure black background -->
+    <color name="eden_surface">#22111A</color> <!-- Card surface -->
+    <color name="eden_surface_variant">#2E1822</color> <!-- Elevated surface -->
 
     <!-- Text Colors - High contrast for readability -->
-    <color name="eden_on_background">#FFFFFF</color> <!-- Pure white text -->
-    <color name="eden_on_surface">#FFFFFF</color> <!-- Pure white text -->
+    <color name="eden_on_background">#FFF1E8</color> <!-- Pure white text -->
+    <color name="eden_on_surface">#FFF1E8</color> <!-- Pure white text -->
     <color name="eden_on_primary">#FFFFFF</color> <!-- White on neon -->
-    <color name="eden_on_secondary">#000000</color> <!-- Black on cyan -->
+    <color name="eden_on_secondary">#160A0F</color> <!-- Black on cyan -->
 
     <!-- Synthwave Status Colors -->
-    <color name="eden_error">#FF0040</color> <!-- Neon red -->
-    <color name="eden_success">#00FF80</color> <!-- Neon green -->
-    <color name="eden_warning">#FFFF00</color> <!-- Neon yellow -->
-    <color name="eden_info">#0080FF</color> <!-- Electric blue -->
+    <color name="eden_error">#D3123F</color> <!-- Neon red -->
+    <color name="eden_success">#3C9000</color> <!-- Neon green -->
+    <color name="eden_warning">#E6A100</color> <!-- Neon yellow -->
+    <color name="eden_info">#1E88E5</color> <!-- Electric blue -->
 
     <!-- Synthwave Accent Colors -->
-    <color name="eden_accent_purple">#9D00FF</color> <!-- Electric purple -->
-    <color name="eden_accent_blue">#0080FF</color> <!-- Electric blue -->
-    <color name="eden_accent_orange">#FF8000</color> <!-- Neon orange -->
+    <color name="eden_accent_purple">#F04070</color> <!-- Electric purple -->
+    <color name="eden_accent_blue">#78B400</color> <!-- Electric blue -->
+    <color name="eden_accent_orange">#A8CC00</color> <!-- Neon orange -->
 
     <!-- Neon Glow Effects -->
-    <color name="eden_glow_pink">#80FF0080</color> <!-- Magenta glow -->
-    <color name="eden_glow_cyan">#8060D1F6</color> <!-- Cyan glow -->
-    <color name="eden_glow_orange">#80FF8000</color> <!-- Orange glow -->
+    <color name="eden_glow_pink">#80F00050</color> <!-- Magenta glow -->
+    <color name="eden_glow_cyan">#8078B400</color> <!-- Cyan glow -->
+    <color name="eden_glow_orange">#80A8CC00</color> <!-- Orange glow -->
 
     <!-- Neon Border Colors -->
-    <color name="eden_border">#7c757f</color> <!-- Subtle border -->
-    <color name="eden_border_light">#948b98</color> <!-- Lighter border -->
-    <color name="eden_border_gradient_start">#FF0080</color> <!-- Neon magenta -->
-    <color name="eden_border_gradient_end">#60D1F6</color> <!-- Electric cyan -->
+    <color name="eden_border">#6E4B55</color> <!-- Subtle border -->
+    <color name="eden_border_light">#8A6670</color> <!-- Lighter border -->
+    <color name="eden_border_gradient_start">#FF3D7F</color> <!-- Neon magenta -->
+    <color name="eden_border_gradient_end">#A8CC00</color> <!-- Electric cyan -->
 
     <!-- Overlay Colors -->
-    <color name="eden_overlay">#CC000000</color>
+    <color name="eden_overlay">#CC160A0F</color>
 
     <!-- Neon Button Colors -->
-    <color name="eden_button_primary_bg">#FF0080</color> <!-- Neon magenta -->
+    <color name="eden_button_primary_bg">#F00050</color> <!-- Neon magenta -->
     <color name="eden_button_secondary_bg">#00000000</color> <!-- Transparent -->
-    <color name="eden_button_secondary_border">#00FFFF</color> <!-- Electric cyan -->
+    <color name="eden_button_secondary_border">#A8CC00</color> <!-- Electric cyan -->
 
     <!-- Synthwave Card Colors -->
-    <color name="eden_card_background">#0D0D0D</color> <!-- Almost black -->
-    <color name="eden_card_background_elevated">#1A1A1A</color> <!-- Elevated black -->
+    <color name="eden_card_background">#22111A</color> <!-- Almost black -->
+    <color name="eden_card_background_elevated">#2E1822</color> <!-- Elevated black -->
 
     <!-- Transparent versions for gradients -->
     <color name="eden_transparent">#00000000</color>
-    <color name="eden_primary_transparent">#05FF0080</color>
-    <color name="eden_secondary_transparent">#0500FFFF</color>
+    <color name="eden_primary_transparent">#05F00050</color>
+    <color name="eden_secondary_transparent">#0578B400</color>
 
     <!-- Common Colors Across All Themes -->
     <color name="yuzu_transparent_black">#80000000</color>
@@ -294,4 +294,12 @@
     <color name="yuzu_shadow">#000000</color>
     <color name="yuzu_scrim">#000000</color>
 
+    <color name="home_shortcut_background">#FF3A3A40</color>
+    <color name="home_shortcut_folder">#FFFFB02E</color>
+    <color name="home_shortcut_filter">#FF6AAEFF</color>
+    <color name="home_shortcut_settings">#FFC9C3CC</color>
+    <color name="home_background">#FF2B2B2F</color>
+    <color name="home_divider">#FF4A4A50</color>
+    <color name="home_accent">#FF3FD0E0</color>
+    <color name="home_shortcut_options">#FFE8434F</color>
 </resources>

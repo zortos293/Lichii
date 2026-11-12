@@ -36,7 +36,12 @@ class NupContainer {
 public:
     static constexpr std::array<u8, 4> HeaderMagic{'N', 'U', 'P', 0x01};
     /// Memory budget for decoded zstd members.
+#ifdef __ANDROID__
+    // Phones have a few GB for the whole emulator; larger members spill to the cache directory.
+    static constexpr std::size_t DefaultCacheCap = 128 * 1024 * 1024;
+#else
     static constexpr std::size_t DefaultCacheCap = 512 * 1024 * 1024;
+#endif
 
     enum class PackageKind : u8 {
         Base = 0,

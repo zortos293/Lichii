@@ -133,6 +133,11 @@ void CoreTiming::Initialize(std::function<void()>&& on_thread_init_) {
     if (const char* stats = std::getenv("EDEN_NX2_HOSTTIMING_STATS")) {
         host_wait_stats = std::strtol(stats, nullptr, 10) != 0;
     }
+    // Experiment: EDEN_NX2_TIMER_WAKE_ALL=1 wakes the timer thread for every scheduled event, as
+    // before, for A/B runs against waking it only for a new earliest event.
+    if (const char* wake_all = std::getenv("EDEN_NX2_TIMER_WAKE_ALL")) {
+        timer_wake_all = std::strtol(wake_all, nullptr, 10) != 0;
+    }
     if (is_multicore) {
         timer_thread = std::jthread([this](std::stop_token stop_token) {
             Common::SetCurrentThreadName("HostTiming");
@@ -244,31 +249,42 @@ bool CoreTiming::HasPendingEvents() const {
 
 void CoreTiming::ScheduleEvent(std::chrono::nanoseconds ns_into_future,
                                const std::shared_ptr<EventType>& event_type, bool absolute_time) {
+    bool earliest;
     {
         std::scoped_lock scope{basic_lock};
         const auto next_time{absolute_time ? ns_into_future : GetGlobalTimeNs() + ns_into_future};
 
-        auto h{event_queue.emplace(Event{next_time.count(), event_fifo_id++, event_type, 0})};
+        const u64 fifo_order = event_fifo_id++;
+        auto h{event_queue.emplace(Event{next_time.count(), fifo_order, event_type, 0})};
         (*h).handle = h;
+        earliest = event_queue.top().fifo_order == fifo_order;
     }
 
-    event.Set();
+    // The timer thread waits for the earliest event; a later one changes nothing it waits for.
+    if (earliest || timer_wake_all) {
+        event.Set();
+    }
 }
 
 void CoreTiming::ScheduleLoopingEvent(std::chrono::nanoseconds start_time,
                                       std::chrono::nanoseconds resched_time,
                                       const std::shared_ptr<EventType>& event_type,
                                       bool absolute_time) {
+    bool earliest;
     {
         std::scoped_lock scope{basic_lock};
         const auto next_time{absolute_time ? start_time : GetGlobalTimeNs() + start_time};
 
+        const u64 fifo_order = event_fifo_id++;
         auto h{event_queue.emplace(
-            Event{next_time.count(), event_fifo_id++, event_type, resched_time.count()})};
+            Event{next_time.count(), fifo_order, event_type, resched_time.count()})};
         (*h).handle = h;
+        earliest = event_queue.top().fifo_order == fifo_order;
     }
 
-    event.Set();
+    if (earliest || timer_wake_all) {
+        event.Set();
+    }
 }
 
 void CoreTiming::UnscheduleEvent(const std::shared_ptr<EventType>& event_type,

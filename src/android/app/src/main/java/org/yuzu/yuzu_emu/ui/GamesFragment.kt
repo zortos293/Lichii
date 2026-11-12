@@ -66,7 +66,20 @@ class GamesFragment : Fragment() {
     companion object {
         private const val SEARCH_TEXT = "SearchText"
         private const val PREF_SORT_TYPE = "GamesSortType"
+        private const val PREF_HOME_VIEW_INTRODUCED = "HomeViewIntroduced"
+        private const val PREF_HOME_PROFILE_NAME = "HomeProfileName"
+        private const val PREF_HOME_MENU_ROTATION_LOCKED = "HomeMenuRotationLocked"
+        private const val HOME_PROFILE_PICTURE = "home_profile.png"
+        private const val HOME_PROFILE_PICTURE_SIZE = 256
     }
+
+    private var profileDialogPicture: android.widget.ImageView? = null
+    private val pickProfilePicture =
+        registerForActivityResult(ActivityResultContracts.PickVisualMedia()) { uri ->
+            if (uri != null) {
+                saveProfilePicture(uri)
+            }
+        }
 
     private val gamesViewModel: GamesViewModel by activityViewModels()
     private val homeViewModel: HomeViewModel by activityViewModels()
@@ -84,6 +97,15 @@ class GamesFragment : Fragment() {
         }
 
     private fun getCurrentViewType(): Int {
+        // The console-style home becomes the view in both orientations once; the choice the
+        // player makes after that is kept.
+        if (!preferences.getBoolean(PREF_HOME_VIEW_INTRODUCED, false)) {
+            preferences.edit {
+                putInt(CarouselRecyclerView.CAROUSEL_VIEW_TYPE_LANDSCAPE, GameAdapter.VIEW_TYPE_HOME)
+                putInt(CarouselRecyclerView.CAROUSEL_VIEW_TYPE_PORTRAIT, GameAdapter.VIEW_TYPE_HOME)
+                putBoolean(PREF_HOME_VIEW_INTRODUCED, true)
+            }
+        }
         val isLandscape = resources.configuration.orientation == Configuration.ORIENTATION_LANDSCAPE
         val key = if (isLandscape) CarouselRecyclerView.CAROUSEL_VIEW_TYPE_LANDSCAPE else CarouselRecyclerView.CAROUSEL_VIEW_TYPE_PORTRAIT
         val fallback = if (isLandscape) GameAdapter.VIEW_TYPE_CAROUSEL else GameAdapter.VIEW_TYPE_GRID
@@ -117,6 +139,14 @@ class GamesFragment : Fragment() {
         gameAdapter = GameAdapter(
             requireActivity() as AppCompatActivity
         )
+        gameAdapter.onHomeSelectionChanged = { position, game ->
+            if (_binding != null) {
+                binding.homeGameTitle.text = game.title.replace("[\\t\\n\\r]+".toRegex(), " ")
+                (binding.gridGames as? RecyclerView)?.smoothScrollToPosition(position)
+                binding.homeGameTitle.post { positionHomeTitle() }
+            }
+        }
+        setupHomeShortcuts()
 
         applyGridGamesBinding()
 
@@ -206,6 +236,7 @@ class GamesFragment : Fragment() {
             gameAdapter.setViewType(savedViewType)
             currentFilter = preferences.getInt(PREF_SORT_TYPE, View.NO_ID)
 
+            (this as? CarouselRecyclerView)?.homeRow = savedViewType == GameAdapter.VIEW_TYPE_HOME
             // Set the correct layout manager
             layoutManager = when (savedViewType) {
                 GameAdapter.VIEW_TYPE_GRID -> {
@@ -223,6 +254,9 @@ class GamesFragment : Fragment() {
                 GameAdapter.VIEW_TYPE_CAROUSEL -> {
                     LinearLayoutManager(context, RecyclerView.HORIZONTAL, false)
                 }
+                GameAdapter.VIEW_TYPE_HOME -> {
+                    LinearLayoutManager(context, RecyclerView.HORIZONTAL, false)
+                }
                 else -> throw IllegalArgumentException("Invalid view type: $savedViewType")
             }
             if (savedViewType != GameAdapter.VIEW_TYPE_CAROUSEL) {
@@ -230,6 +264,376 @@ class GamesFragment : Fragment() {
             }
             adapter = gameAdapter
             lastViewType = savedViewType
+            applyHomeMode(savedViewType == GameAdapter.VIEW_TYPE_HOME)
+        }
+    }
+
+    /// Shows or hides the console-style home around the game row: the selected game's title
+    /// above, round shortcuts below, and a row of square tiles in the middle of the screen.
+    private fun applyHomeMode(enabled: Boolean) {
+        val grid = binding.gridGames as? RecyclerView ?: return
+        binding.homeGameTitle.visibility = if (enabled) View.VISIBLE else View.GONE
+        binding.homeGameTitle.translationY = 0f
+        binding.homeAvatar.visibility = if (enabled) View.VISIBLE else View.GONE
+        binding.homeClock.visibility = if (enabled) View.VISIBLE else View.GONE
+        binding.title.visibility = if (enabled) View.GONE else View.VISIBLE
+        binding.homeBottomBar.root.visibility = if (enabled) View.VISIBLE else View.GONE
+        if (enabled) {
+            binding.root.setBackgroundResource(R.color.home_background)
+        } else {
+            binding.root.setBackgroundColor(
+                com.google.android.material.color.MaterialColors.getColor(
+                    binding.root,
+                    com.google.android.material.R.attr.colorSurface
+                )
+            )
+        }
+        binding.homeRotationButton.visibility = if (enabled) View.VISIBLE else View.GONE
+        if (enabled) {
+            loadHomeProfile()
+            updateRotationIcon()
+        } else {
+            binding.homeUserName.visibility = View.GONE
+        }
+        // The home shortcuts carry filter and settings; the header keeps the view switch.
+        binding.filterButton.visibility = if (enabled) View.GONE else View.VISIBLE
+        binding.settingsButton.visibility = if (enabled) View.GONE else View.VISIBLE
+        binding.homeShortcutsScroll.visibility = if (enabled) View.VISIBLE else View.GONE
+        // In landscape the search box sits in the header row and keeps its space there.
+        val searchInHeader = binding.frameSearch.parent === binding.header
+        binding.frameSearch.visibility = when {
+            !enabled -> View.VISIBLE
+            searchInHeader -> View.INVISIBLE
+            else -> View.GONE
+        }
+        if (enabled) {
+            binding.addDirectory.visibility = View.GONE
+            binding.launchQlaunch.visibility = View.GONE
+        } else {
+            updateButtonsVisibility()
+        }
+        grid.isVerticalScrollBarEnabled = !enabled
+        grid.isHorizontalScrollBarEnabled = false
+        val params = grid.layoutParams as android.widget.RelativeLayout.LayoutParams
+        if (enabled) {
+            params.addRule(android.widget.RelativeLayout.CENTER_VERTICAL)
+        } else {
+            params.removeRule(android.widget.RelativeLayout.CENTER_VERTICAL)
+            params.height = ViewGroup.LayoutParams.MATCH_PARENT
+            grid.updatePadding(left = 4, right = 4)
+        }
+        grid.layoutParams = params
+        if (enabled) {
+            val container = grid.parent as View
+            container.doOnPreDraw { sizeHomeRow(it) }
+            if (!homeRowLayoutListenerAdded) {
+                homeRowLayoutListenerAdded = true
+                // Rotation and window changes resize the row again.
+                container.addOnLayoutChangeListener { view, l, t, r, b, ol, ot, or, ob ->
+                    if (r - l != or - ol || b - t != ob - ot) {
+                        view.post { sizeHomeRow(view) }
+                    }
+                }
+            }
+            updateHomeTitle()
+            if (!homeTitleScrollListenerAdded) {
+                homeTitleScrollListenerAdded = true
+                grid.addOnScrollListener(object : RecyclerView.OnScrollListener() {
+                    override fun onScrolled(recyclerView: RecyclerView, dx: Int, dy: Int) {
+                        positionHomeTitle()
+                    }
+                })
+            }
+            grid.post { positionHomeTitle() }
+        } else {
+            binding.homeGameTitle.translationX = 0f
+        }
+    }
+
+    private var homeTitleScrollListenerAdded = false
+    private var homeRowLayoutListenerAdded = false
+
+    /// Square tiles: about 60% of the free height in portrait (96% in landscape, where it is
+    /// short), and at most a third of the width in portrait or 28% in landscape.
+    private fun sizeHomeRow(container: View) {
+        if (_binding == null || lastViewType != GameAdapter.VIEW_TYPE_HOME) {
+            return
+        }
+        val grid = binding.gridGames as? RecyclerView ?: return
+        val isLandscape =
+            resources.configuration.orientation == Configuration.ORIENTATION_LANDSCAPE
+        val heightShare = if (isLandscape) 96 else 60
+        val widthShare = if (isLandscape) 28 else 34
+        val size = minOf(
+            container.height * heightShare / 100,
+            container.width * widthShare / 100
+        )
+        if (size <= 0) {
+            return
+        }
+        val params = grid.layoutParams
+        if (params.height != size) {
+            params.height = size
+            grid.layoutParams = params
+            val edge = resources.getDimensionPixelSize(R.dimen.spacing_large)
+            grid.updatePadding(left = edge, right = edge, top = 0, bottom = 0)
+            gameAdapter.notifyDataSetChanged()
+        }
+        grid.post { positionHomeTitle() }
+    }
+
+    /// Keeps the selected game's name right above its cover, inside the screen.
+    private fun positionHomeTitle() {
+        if (_binding == null || lastViewType != GameAdapter.VIEW_TYPE_HOME) {
+            return
+        }
+        val grid = binding.gridGames as? RecyclerView ?: return
+        val title = binding.homeGameTitle
+        val tile = grid.findViewHolderForAdapterPosition(gameAdapter.homeSelected)
+            ?.itemView?.findViewById<View>(R.id.card_game_home) ?: return
+        val tileLocation = IntArray(2)
+        tile.getLocationInWindow(tileLocation)
+        val titleLocation = IntArray(2)
+        title.getLocationInWindow(titleLocation)
+        val titleBase = titleLocation[0] - title.translationX
+        val edge = resources.getDimensionPixelSize(R.dimen.spacing_large).toFloat()
+        val textWidth = title.paint.measureText(title.text.toString())
+        val maxLeft = binding.root.width - edge - textWidth
+        val target = tileLocation[0].toFloat().coerceAtMost(maxLeft).coerceAtLeast(edge)
+        title.translationX = target - titleBase
+        // Sit right on top of the cover, a few pixels above its edge.
+        val gap = 3 * resources.displayMetrics.density
+        val titleBottomBase = titleLocation[1] - title.translationY + title.height
+        title.translationY = maxOf(0f, tileLocation[1] - gap - titleBottomBase)
+    }
+
+    private fun updateHomeTitle() {
+        val games = gameAdapter.currentList
+        if (_binding == null || games.isEmpty()) {
+            return
+        }
+        val position = gameAdapter.homeSelected.coerceIn(0, games.size - 1)
+        if (position != gameAdapter.homeSelected) {
+            gameAdapter.selectHome(position)
+        } else {
+            binding.homeGameTitle.text = games[position].title.replace("[\\t\\n\\r]+".toRegex(), " ")
+            binding.homeGameTitle.post { positionHomeTitle() }
+        }
+    }
+
+    private fun profilePictureFile() = java.io.File(requireContext().filesDir, HOME_PROFILE_PICTURE)
+
+    private fun loadProfilePicture(target: android.widget.ImageView) {
+        val file = profilePictureFile()
+        val bitmap = if (file.exists()) android.graphics.BitmapFactory.decodeFile(file.path) else null
+        target.clipToOutline = true
+        if (bitmap != null) {
+            target.imageTintList = null
+            target.setImageBitmap(bitmap)
+        } else {
+            target.setImageResource(R.drawable.ic_account_circle)
+            target.imageTintList = androidx.core.content.ContextCompat.getColorStateList(
+                target.context,
+                R.color.home_accent
+            )
+        }
+    }
+
+    private fun loadHomeProfile() {
+        loadProfilePicture(binding.homeAvatar)
+        val name = preferences.getString(PREF_HOME_PROFILE_NAME, "").orEmpty()
+        binding.homeUserName.text = name
+        binding.homeUserName.visibility = if (name.isEmpty()) View.GONE else View.VISIBLE
+    }
+
+    /// Profile picture and user name for the home screen, kept on this phone only.
+    private fun showProfileDialog() {
+        val view = layoutInflater.inflate(R.layout.dialog_home_profile, null)
+        val picture = view.findViewById<android.widget.ImageView>(R.id.profile_picture)
+        val name = view.findViewById<android.widget.EditText>(R.id.profile_name)
+        loadProfilePicture(picture)
+        profileDialogPicture = picture
+        name.setText(preferences.getString(PREF_HOME_PROFILE_NAME, ""))
+        val pick = {
+            pickProfilePicture.launch(
+                androidx.activity.result.PickVisualMediaRequest(
+                    ActivityResultContracts.PickVisualMedia.ImageOnly
+                )
+            )
+        }
+        view.findViewById<View>(R.id.profile_pick_picture).setOnClickListener { pick() }
+        picture.setOnClickListener { pick() }
+        com.google.android.material.dialog.MaterialAlertDialogBuilder(requireContext())
+            .setTitle(R.string.home_profile)
+            .setView(view)
+            .setPositiveButton(R.string.home_profile_save) { _, _ ->
+                preferences.edit {
+                    putString(PREF_HOME_PROFILE_NAME, name.text.toString().trim())
+                }
+                if (_binding != null) {
+                    loadHomeProfile()
+                }
+            }
+            .setNegativeButton(android.R.string.cancel, null)
+            .setOnDismissListener { profileDialogPicture = null }
+            .show()
+    }
+
+    /// Stores the chosen picture as a small square PNG in the app's files.
+    private fun saveProfilePicture(uri: android.net.Uri) {
+        val context = requireContext()
+        val source = try {
+            context.contentResolver.openInputStream(uri)?.use {
+                android.graphics.BitmapFactory.decodeStream(it)
+            }
+        } catch (e: Exception) {
+            null
+        } ?: return
+        val side = minOf(source.width, source.height)
+        val square = android.graphics.Bitmap.createBitmap(
+            source,
+            (source.width - side) / 2,
+            (source.height - side) / 2,
+            side,
+            side
+        )
+        val scaled = android.graphics.Bitmap.createScaledBitmap(
+            square,
+            HOME_PROFILE_PICTURE_SIZE,
+            HOME_PROFILE_PICTURE_SIZE,
+            true
+        )
+        profilePictureFile().outputStream().use {
+            scaled.compress(android.graphics.Bitmap.CompressFormat.PNG, 100, it)
+        }
+        profileDialogPicture?.let { loadProfilePicture(it) }
+        if (_binding != null) {
+            loadHomeProfile()
+        }
+    }
+
+    /// The menu turns with the phone (whatever the system setting) or stays as it is.
+    private fun applyMenuRotation() {
+        if (!preferences.contains(PREF_HOME_MENU_ROTATION_LOCKED)) {
+            return
+        }
+        val locked = preferences.getBoolean(PREF_HOME_MENU_ROTATION_LOCKED, false)
+        requireActivity().requestedOrientation = if (locked) {
+            android.content.pm.ActivityInfo.SCREEN_ORIENTATION_LOCKED
+        } else {
+            android.content.pm.ActivityInfo.SCREEN_ORIENTATION_FULL_SENSOR
+        }
+    }
+
+    private fun toggleMenuRotation() {
+        val locked = !preferences.getBoolean(PREF_HOME_MENU_ROTATION_LOCKED, false)
+        preferences.edit { putBoolean(PREF_HOME_MENU_ROTATION_LOCKED, locked) }
+        applyMenuRotation()
+        updateRotationIcon()
+        Toast.makeText(
+            requireContext(),
+            if (locked) R.string.home_rotation_locked else R.string.home_rotation_auto,
+            Toast.LENGTH_SHORT
+        ).show()
+    }
+
+    private fun updateRotationIcon() {
+        val locked = preferences.getBoolean(PREF_HOME_MENU_ROTATION_LOCKED, false)
+        binding.homeRotationIcon.setImageResource(
+            if (locked) R.drawable.ic_lock else R.drawable.ic_screen_rotation
+        )
+        binding.homeRotationButton.contentDescription = getString(
+            if (locked) R.string.home_rotation_locked else R.string.home_rotation_auto
+        )
+    }
+
+    private fun isLandscapeHome(): Boolean =
+        resources.configuration.orientation == Configuration.ORIENTATION_LANDSCAPE
+
+    private fun startSelectedHomeGame() {
+        val grid = binding.gridGames as? RecyclerView ?: return
+        grid.findViewHolderForAdapterPosition(gameAdapter.homeSelected)
+            ?.itemView?.findViewById<View>(R.id.card_game_home)?.performClick()
+    }
+
+    private fun selectedHomeGame(): Game? =
+        gameAdapter.currentList.getOrNull(gameAdapter.homeSelected)
+
+    private fun setupHomeShortcuts() {
+        val row = binding.homeShortcuts
+        row.removeAllViews()
+        binding.homeBottomBar.homeStartHint.setOnClickListener { startSelectedHomeGame() }
+        binding.homeBottomBar.homeOptionsHint.setOnClickListener {
+            selectedHomeGame()?.let {
+                findNavController().navigate(
+                    HomeNavigationDirections.actionGlobalPerGamePropertiesFragment(it)
+                )
+            }
+        }
+        binding.homeAvatar.setOnClickListener { showProfileDialog() }
+        binding.homeUserName.setOnClickListener { showProfileDialog() }
+        binding.homeRotationButton.setOnClickListener { toggleMenuRotation() }
+
+        data class Shortcut(val icon: Int, val label: Int, val tint: Int, val action: (View) -> Unit)
+        val shortcuts = listOf(
+            Shortcut(R.drawable.ic_options, R.string.home_game_options, R.color.home_shortcut_options) {
+                selectedHomeGame()?.let {
+                    findNavController().navigate(
+                        HomeNavigationDirections.actionGlobalPerGamePropertiesFragment(it)
+                    )
+                }
+            },
+            Shortcut(R.drawable.ic_search, R.string.home_search, R.color.eden_secondary) {
+                val show = binding.frameSearch.visibility != View.VISIBLE
+                val hidden = if (binding.frameSearch.parent === binding.header) {
+                    View.INVISIBLE
+                } else {
+                    View.GONE
+                }
+                binding.frameSearch.visibility = if (show) View.VISIBLE else hidden
+                if (show) {
+                    focusSearch()
+                }
+            },
+            Shortcut(R.drawable.ic_folder_open, R.string.home_add_folder, R.color.home_shortcut_folder) {
+                getGamesDirectory.launch(Intent(Intent.ACTION_OPEN_DOCUMENT_TREE).data)
+            },
+            Shortcut(R.drawable.ic_filter, R.string.home_filter, R.color.home_shortcut_filter) {
+                showFilterMenu(it)
+            },
+            Shortcut(R.drawable.ic_settings, R.string.home_settings, R.color.home_shortcut_settings) {
+                navigateToSettings()
+            }
+        )
+        val inflater = LayoutInflater.from(requireContext())
+        for (shortcut in shortcuts) {
+            val item = inflater.inflate(R.layout.item_home_shortcut, row, false)
+            item.findViewById<android.widget.ImageView>(R.id.shortcut_icon).apply {
+                setImageResource(shortcut.icon)
+                imageTintList = androidx.core.content.ContextCompat.getColorStateList(
+                    requireContext(),
+                    shortcut.tint
+                )
+            }
+            item.findViewById<android.widget.TextView>(R.id.shortcut_label).apply {
+                setText(shortcut.label)
+                // Landscape has little height: the circles go without labels there.
+                visibility = if (isLandscapeHome()) View.GONE else View.VISIBLE
+            }
+            if (isLandscapeHome()) {
+                val button = item.findViewById<View>(R.id.shortcut_button)
+                val side = (50 * resources.displayMetrics.density).toInt()
+                button.layoutParams = button.layoutParams.apply {
+                    width = side
+                    height = side
+                }
+                (button as com.google.android.material.card.MaterialCardView).radius = side / 2f
+            }
+            item.findViewById<View>(R.id.shortcut_button).apply {
+                contentDescription = getString(shortcut.label)
+                setOnClickListener { shortcut.action(it) }
+            }
+            row.addView(item)
         }
     }
 
@@ -249,6 +653,7 @@ class GamesFragment : Fragment() {
 
     override fun onResume() {
         super.onResume()
+        applyMenuRotation()
         if (getCurrentViewType() == GameAdapter.VIEW_TYPE_CAROUSEL) {
             (binding.gridGames as? CarouselRecyclerView)?.setupCarousel(true)
             (binding.gridGames as? CarouselRecyclerView)?.restoreScrollState(gamesViewModel.lastScrollPosition)
@@ -286,6 +691,9 @@ class GamesFragment : Fragment() {
         adapter.submitList(games) {
             if (committedGameListSubmitGeneration < submitGeneration) {
                 committedGameListSubmitGeneration = submitGeneration
+            }
+            if (_binding != null && lastViewType == GameAdapter.VIEW_TYPE_HOME) {
+                updateHomeTitle()
             }
             schedulePostReloadListSettle()
         }
@@ -350,10 +758,19 @@ class GamesFragment : Fragment() {
             GameAdapter.VIEW_TYPE_GRID_COMPACT -> popup.menu.findItem(R.id.view_grid_compact).isChecked = true
             GameAdapter.VIEW_TYPE_GRID -> popup.menu.findItem(R.id.view_grid).isChecked = true
             GameAdapter.VIEW_TYPE_CAROUSEL -> popup.menu.findItem(R.id.view_carousel).isChecked = true
+            GameAdapter.VIEW_TYPE_HOME -> popup.menu.findItem(R.id.view_home).isChecked = true
         }
 
         popup.setOnMenuItemClickListener { item ->
             when (item.itemId) {
+                R.id.view_home -> {
+                    if (getCurrentViewType() == GameAdapter.VIEW_TYPE_CAROUSEL) onPause()
+                    setCurrentViewType(GameAdapter.VIEW_TYPE_HOME)
+                    applyGridGamesBinding()
+                    item.isChecked = true
+                    true
+                }
+
                 R.id.view_grid -> {
                     if (getCurrentViewType() == GameAdapter.VIEW_TYPE_CAROUSEL) onPause()
                     setCurrentViewType(GameAdapter.VIEW_TYPE_GRID)
@@ -407,6 +824,9 @@ class GamesFragment : Fragment() {
 
             R.id.filter_recently_added -> popup.menu.findItem(R.id.filter_recently_added).isChecked =
                 true
+
+            R.id.filter_switch2 -> popup.menu.findItem(R.id.filter_switch2).isChecked = true
+            R.id.filter_switch1 -> popup.menu.findItem(R.id.filter_switch1).isChecked = true
         }
 
         popup.setOnMenuItemClickListener { item ->
@@ -437,6 +857,8 @@ class GamesFragment : Fragment() {
                     addedTime > (System.currentTimeMillis() - 24 * 60 * 60 * 1000)
                 }.sortedByDescending { preferences.getLong(it.keyAddedToLibraryTime, 0L) }
             }
+            R.id.filter_switch2 -> baseList.filter { it.isSwitch2 }.sortedBy { it.title }
+            R.id.filter_switch1 -> baseList.filter { it.isSwitch1 }.sortedBy { it.title }
             else -> baseList
         }
 
@@ -513,6 +935,12 @@ class GamesFragment : Fragment() {
     }
 
     private fun updateButtonsVisibility() {
+        if (lastViewType == GameAdapter.VIEW_TYPE_HOME) {
+            // The home shortcuts replace the floating buttons.
+            binding.launchQlaunch.visibility = View.GONE
+            binding.addDirectory.visibility = View.GONE
+            return
+        }
         val showQLaunch = BooleanSetting.ENABLE_QLAUNCH_BUTTON.getBoolean()
         val showFolder = BooleanSetting.ENABLE_FOLDER_BUTTON.getBoolean()
         val isFirmwareAvailable = NativeLibrary.isFirmwareAvailable()
@@ -575,6 +1003,11 @@ class GamesFragment : Fragment() {
             mlpFab.bottomMargin = barInsets.bottom + fabPadding
             mlpFab.rightMargin = rightInset + fabPadding
             binding.addDirectory.layoutParams = mlpFab
+
+            val mlpShortcuts = binding.homeShortcutsScroll.layoutParams as ViewGroup.MarginLayoutParams
+            mlpShortcuts.bottomMargin =
+                barInsets.bottom + resources.getDimensionPixelSize(R.dimen.spacing_large)
+            binding.homeShortcutsScroll.layoutParams = mlpShortcuts
 
             binding.launchQlaunch?.let { qlaunchButton ->
                 val mlpQLaunch = qlaunchButton.layoutParams as ViewGroup.MarginLayoutParams

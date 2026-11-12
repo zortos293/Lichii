@@ -10,5 +10,11 @@
         <item
             android:id="@+id/filter_recently_added"
             android:title="@string/search_recently_added" />
+        <item
+            android:id="@+id/filter_switch2"
+            android:title="@string/filter_switch2_games" />
+        <item
+            android:id="@+id/filter_switch1"
+            android:title="@string/filter_switch1_games" />
     </group>
 </menu>

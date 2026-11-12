@@ -5,6 +5,8 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 
 #include "common/assert.h"
+#include "common/logging.h"
+#include "common/settings.h"
 #include "hid_core/frontend/emulated_console.h"
 #include "hid_core/frontend/emulated_controller.h"
 #include "hid_core/frontend/emulated_devices.h"
@@ -113,6 +115,9 @@ const EmulatedController* HIDCore::GetEmulatedControllerByIndex(std::size_t inde
 }
 
 void HIDCore::SetSupportedStyleTag(NpadStyleTag style_tag) {
+#ifdef __ANDROID__
+    const bool player_1_was_connected = player_1->IsConnected();
+#endif
     supported_style_tag.raw = style_tag.raw;
     player_1->SetSupportedNpadStyleTag(supported_style_tag);
     player_2->SetSupportedNpadStyleTag(supported_style_tag);
@@ -124,6 +129,19 @@ void HIDCore::SetSupportedStyleTag(NpadStyleTag style_tag) {
     player_8->SetSupportedNpadStyleTag(supported_style_tag);
     other->SetSupportedNpadStyleTag(supported_style_tag);
     handheld->SetSupportedNpadStyleTag(supported_style_tag);
+
+#ifdef __ANDROID__
+    // The touch overlay drives both Player 1 and Handheld. When a game drops Player 1's style
+    // (Pokemon Let's Go takes only Joy-Con, handheld and the Poke Ball Plus), play as handheld
+    // instead of leaving the game without a controller.
+    if (player_1_was_connected && !player_1->IsConnected() && supported_style_tag.handheld &&
+        !handheld->IsConnected() &&
+        Settings::values.use_docked_mode.GetValue() == Settings::ConsoleMode::Handheld) {
+        LOG_WARNING(Service_HID, "Player 1's controller is not supported, connecting handheld");
+        handheld->SetNpadStyleIndex(NpadStyleIndex::Handheld);
+        handheld->Connect();
+    }
+#endif
 }
 
 NpadStyleTag HIDCore::GetSupportedStyleTag() const {

@@ -1,0 +1,35 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- A game in the console-style home row: a square icon tile; the selected one gets a ring. -->
+<org.yuzu.yuzu_emu.views.SquareFrameLayout xmlns:android="http://schemas.android.com/apk/res/android"
+    xmlns:app="http://schemas.android.com/apk/res-auto"
+    android:id="@+id/home_tile_root"
+    android:layout_width="wrap_content"
+    android:layout_height="match_parent"
+    android:clipChildren="false"
+    android:clipToPadding="false"
+    android:padding="3dp">
+
+    <com.google.android.material.card.MaterialCardView
+        android:id="@+id/card_game_home"
+        android:layout_width="match_parent"
+        android:layout_height="match_parent"
+        android:layout_gravity="center"
+        android:clickable="true"
+        android:focusable="true"
+        app:cardBackgroundColor="@color/eden_card_background"
+        app:cardCornerRadius="6dp"
+        app:cardElevation="1dp"
+        app:rippleColor="@color/game_card_ripple"
+        app:strokeColor="@android:color/transparent"
+        app:strokeWidth="4dp">
+
+        <ImageView
+            android:id="@+id/image_game_screen"
+            android:layout_width="match_parent"
+            android:layout_height="match_parent"
+            android:contentDescription="@string/game_image_desc"
+            android:scaleType="centerCrop" />
+
+    </com.google.android.material.card.MaterialCardView>
+
+</org.yuzu.yuzu_emu.views.SquareFrameLayout>

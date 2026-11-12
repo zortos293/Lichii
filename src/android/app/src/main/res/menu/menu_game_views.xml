@@ -2,6 +2,9 @@
 <menu xmlns:android="http://schemas.android.com/apk/res/android">
     <group android:checkableBehavior="single">
         <item
+            android:id="@+id/view_home"
+            android:title="@string/view_home"/>
+        <item
             android:id="@+id/view_grid"
             android:title="@string/view_grid"/>
         <item

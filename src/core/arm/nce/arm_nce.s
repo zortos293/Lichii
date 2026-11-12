@@ -222,6 +222,47 @@ _ZN4Core6ArmNce29GuestAccessFaultSignalHandlerEiPvS1_:
     ldp     x29, x30, [sp], #0x20
     ret
 
+/* static void Core::ArmNce::GuestIllegalInstructionSignalHandler(int sig, void* info, void* raw_context) */
+.section    .text._ZN4Core6ArmNce36GuestIllegalInstructionSignalHandlerEiPvS1_, "ax", %progbits
+.global     _ZN4Core6ArmNce36GuestIllegalInstructionSignalHandlerEiPvS1_
+.type       _ZN4Core6ArmNce36GuestIllegalInstructionSignalHandlerEiPvS1_, %function
+_ZN4Core6ArmNce36GuestIllegalInstructionSignalHandlerEiPvS1_:
+    /* Check to see if we have the correct TLS magic. */
+    mrs     x8, tpidr_el0
+    ldr     w9, [x8, #(TpidrEl0TlsMagic)]
+
+    LOAD_IMMEDIATE_32(w10, TlsMagic)
+
+    cmp     w9, w10
+    b.eq    1f
+
+    /* Incorrect TLS magic, so this is a host fault. */
+    b       _ZN4Core6ArmNce28HandleHostIllegalInstructionEiPvS1_
+
+1:
+    stp     x29, x30, [sp, #-0x20]!
+    str     x19, [sp, #0x10]
+    mov     x29, sp
+
+    mov     x19, x8
+
+    /* Restore host tpidr_el0. */
+    ldr     x0, [x8, #(TpidrEl0NativeContext)]
+    ldr     x3, [x0, #(GuestContextHostContext + HostContextTpidrEl0)]
+    msr     tpidr_el0, x3
+
+    bl       _ZN4Core6ArmNce29HandleGuestIllegalInstructionEPNS_12GuestContextEPvS3_
+
+    /* If the handler returned false, we want to preserve the host tpidr_el0. */
+    cbz     x0, 2f
+
+    msr     tpidr_el0, x19
+
+2:
+    ldr     x19, [sp, #0x10]
+    ldp     x29, x30, [sp], #0x20
+    ret
+
 
 /* static void Core::ArmNce::LockThreadParameters(void* tpidr) */
 .section    .text._ZN4Core6ArmNce20LockThreadParametersEPv, "ax", %progbits

@@ -152,6 +152,7 @@ private:
         std::vector<Relocation> m_write_module_pc_relocations{};
         std::vector<Relocation> m_write_module_pc_relocations_pre{};
         std::vector<ModuleTextAddress> m_exclusives{};
+        std::vector<ModuleTextAddress> m_pointer_auth{};
     };
 
     oaknut::VectorCodeGenerator c;

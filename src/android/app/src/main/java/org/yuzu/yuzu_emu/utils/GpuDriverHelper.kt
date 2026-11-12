@@ -15,12 +15,15 @@ import java.io.IOException
 import org.yuzu.yuzu_emu.NativeLibrary
 import org.yuzu.yuzu_emu.YuzuApplication
 import org.yuzu.yuzu_emu.features.settings.model.StringSetting
+import androidx.preference.PreferenceManager
 import java.io.FileNotFoundException
 import java.util.zip.ZipException
 import java.util.zip.ZipFile
 
 object GpuDriverHelper {
     private const val META_JSON_FILENAME = "meta.json"
+    private const val BUNDLED_DRIVERS_ASSET_DIR = "gpu_drivers"
+    private const val PREF_BUNDLED_DRIVER_OFFERED = "bundled_gpu_driver_offered"
     private var fileRedirectionPath: String? = null
     var driverInstallationPath: String? = null
     internal var hookLibPath: String? = null
@@ -71,6 +74,59 @@ object GpuDriverHelper {
                 ?.distinct()
                 ?.toMutableList() ?: mutableListOf()
         return drivers
+    }
+
+    /**
+     * On Adreno devices, copies the driver zips shipped in the APK's assets/gpu_drivers into the
+     * driver storage, so they show in the driver manager without a download. The first one is
+     * selected once, the first time the app runs with it, unless a driver is already selected;
+     * choosing the system driver afterwards is kept.
+     */
+    fun installBundledDrivers() {
+        if (!isAdrenoGpu()) {
+            return
+        }
+        val assets = YuzuApplication.appContext.assets
+        val names = try {
+            assets.list(BUNDLED_DRIVERS_ASSET_DIR)?.filter { it.endsWith(".zip") }
+        } catch (e: IOException) {
+            null
+        }
+        if (names.isNullOrEmpty()) {
+            return
+        }
+
+        initializeDirectories()
+        var firstDriver: File? = null
+        for (name in names.sorted()) {
+            val target = File(driverStoragePath + name)
+            if (!isDriverZipInstalledByName(name)) {
+                try {
+                    assets.open("$BUNDLED_DRIVERS_ASSET_DIR/$name").use { input ->
+                        target.outputStream().use { input.copyTo(it) }
+                    }
+                } catch (e: IOException) {
+                    target.delete()
+                    continue
+                }
+            }
+            if (firstDriver == null) {
+                val metadata = getMetadataFromZip(target)
+                if (metadata.name != null && metadata.minApi <= Build.VERSION.SDK_INT) {
+                    firstDriver = target
+                }
+            }
+        }
+
+        val preferences = PreferenceManager.getDefaultSharedPreferences(YuzuApplication.appContext)
+        if (firstDriver == null || preferences.getBoolean(PREF_BUNDLED_DRIVER_OFFERED, false)) {
+            return
+        }
+        if (StringSetting.DRIVER_PATH.getString().isEmpty()) {
+            StringSetting.DRIVER_PATH.setString(firstDriver.path)
+            NativeConfig.saveGlobalConfig()
+        }
+        preferences.edit().putBoolean(PREF_BUNDLED_DRIVER_OFFERED, true).apply()
     }
 
     fun installDefaultDriver() {

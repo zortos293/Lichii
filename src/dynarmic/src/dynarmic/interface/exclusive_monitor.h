@@ -22,6 +22,59 @@ namespace Dynarmic {
 using VAddr = std::uint64_t;
 using Vector = std::array<std::uint64_t, 2>;
 
+#if defined(__cpp_lib_atomic_ref)
+template<typename T>
+using AtomicRef = std::atomic_ref<T>;
+#else
+// The libc++ of Android NDK 28 has no std::atomic_ref.
+template<typename T>
+class AtomicRef {
+public:
+    explicit AtomicRef(T& obj) : ptr{&obj} {}
+
+    T load(std::memory_order order) const {
+        return __atomic_load_n(ptr, Builtin(order));
+    }
+    void store(T value, std::memory_order order) const {
+        __atomic_store_n(ptr, value, Builtin(order));
+    }
+    bool compare_exchange_strong(T& expected, T desired, std::memory_order order) const {
+        return __atomic_compare_exchange_n(ptr, &expected, desired, false, Builtin(order),
+                                           Builtin(FailureOrder(order)));
+    }
+
+private:
+    static constexpr std::memory_order FailureOrder(std::memory_order order) {
+        switch (order) {
+        case std::memory_order_acq_rel:
+            return std::memory_order_acquire;
+        case std::memory_order_release:
+            return std::memory_order_relaxed;
+        default:
+            return order;
+        }
+    }
+    static constexpr int Builtin(std::memory_order order) {
+        switch (order) {
+        case std::memory_order_relaxed:
+            return __ATOMIC_RELAXED;
+        case std::memory_order_consume:
+            return __ATOMIC_CONSUME;
+        case std::memory_order_acquire:
+            return __ATOMIC_ACQUIRE;
+        case std::memory_order_release:
+            return __ATOMIC_RELEASE;
+        case std::memory_order_acq_rel:
+            return __ATOMIC_ACQ_REL;
+        default:
+            return __ATOMIC_SEQ_CST;
+        }
+    }
+
+    T* ptr;
+};
+#endif
+
 class ExclusiveMonitor {
 public:
     /// @param processor_count Maximum number of processors using this global
@@ -39,7 +92,7 @@ public:
         const VAddr masked_address = address & RESERVATION_GRANULE_MASK;
 
 #ifdef ARCHITECTURE_arm64
-        std::atomic_ref<VAddr>{reservations[processor_id].address}.store(masked_address, std::memory_order_release);
+        AtomicRef<VAddr>{reservations[processor_id].address}.store(masked_address, std::memory_order_release);
         const T value = op();
         std::memcpy(reservations[processor_id].value.data(), &value, sizeof(T));
 #else

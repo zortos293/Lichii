@@ -34,14 +34,14 @@ bool ExclusiveMonitor::CheckAndClear(std::size_t processor_id, VAddr address) {
     const VAddr masked_address = address & RESERVATION_GRANULE_MASK;
 
 #ifdef ARCHITECTURE_arm64
-    std::atomic_ref<VAddr> own{reservations[processor_id].address};
+    AtomicRef<VAddr> own{reservations[processor_id].address};
     VAddr expected = masked_address;
     if (own.load(std::memory_order_relaxed) != masked_address ||
         !own.compare_exchange_strong(expected, INVALID_EXCLUSIVE_ADDRESS, std::memory_order_acq_rel)) {
         return false;
     }
     for (Reservation& reservation : reservations) {
-        std::atomic_ref<VAddr> other{reservation.address};
+        AtomicRef<VAddr> other{reservation.address};
         if (other.load(std::memory_order_relaxed) == masked_address) {
             expected = masked_address;
             other.compare_exchange_strong(expected, INVALID_EXCLUSIVE_ADDRESS,
@@ -68,7 +68,7 @@ bool ExclusiveMonitor::CheckAndClear(std::size_t processor_id, VAddr address) {
 void ExclusiveMonitor::Clear() {
 #ifdef ARCHITECTURE_arm64
     for (Reservation& other : reservations) {
-        std::atomic_ref<VAddr>{other.address}.store(INVALID_EXCLUSIVE_ADDRESS, std::memory_order_release);
+        AtomicRef<VAddr>{other.address}.store(INVALID_EXCLUSIVE_ADDRESS, std::memory_order_release);
     }
 #else
     Lock();
@@ -81,7 +81,7 @@ void ExclusiveMonitor::Clear() {
 
 void ExclusiveMonitor::ClearProcessor(std::size_t processor_id) {
 #ifdef ARCHITECTURE_arm64
-    std::atomic_ref<VAddr>{reservations[processor_id].address}.store(INVALID_EXCLUSIVE_ADDRESS, std::memory_order_release);
+    AtomicRef<VAddr>{reservations[processor_id].address}.store(INVALID_EXCLUSIVE_ADDRESS, std::memory_order_release);
 #else
     Lock();
     reservations[processor_id].address = INVALID_EXCLUSIVE_ADDRESS;

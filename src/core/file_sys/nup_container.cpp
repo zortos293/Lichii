@@ -5,16 +5,19 @@
 
 #include <algorithm>
 #include <atomic>
+#include <chrono>
 #include <condition_variable>
 #include <cstddef>
 #include <cstring>
 #include <list>
 #include <map>
 #include <memory>
+#include <filesystem>
 #include <mutex>
 #include <random>
 #include <span>
 #include <string_view>
+#include <vector>
 #include <unordered_map>
 
 #include <fmt/format.h>
@@ -174,7 +177,7 @@ constexpr std::size_t MaxSpillDecoders = 2;
 struct NupMember {
     ~NupMember() {
         file.Close();
-        if (!path.empty()) {
+        if (!path.empty() && !kept) {
             std::error_code ec;
             std::filesystem::remove(path, ec);
         }
@@ -197,10 +200,13 @@ struct NupMember {
     // A member up to half the cache cap, decoded in place.
     std::unique_ptr<u8[]> data;
 
-    // A larger member, decoded into a temporary file.
+    // A larger member, decoded into a file in the spill directory named after its contents. A
+    // complete one (`done_path` exists) is kept and reused by later sessions.
     std::mutex file_mutex;
     std::filesystem::path path;
+    std::filesystem::path done_path;
     Common::FS::IOFile file;
+    bool kept{};
 };
 
 /// Members of one container, shared by all files opened from it. In-memory members are charged
@@ -291,16 +297,89 @@ struct NupDecompressCache {
 
 namespace {
 
+#ifdef __ANDROID__
+constexpr std::uintmax_t SpillDirCap = 2ULL * 1024 * 1024 * 1024;
+#else
+constexpr std::uintmax_t SpillDirCap = 8ULL * 1024 * 1024 * 1024;
+#endif
+// A member file without its .done marker this old was left by a session that ended mid-decode.
+constexpr auto AbandonedSpillAge = std::chrono::hours{1};
+
+/// Names a spilled member after its contents, so a later session can reuse the decoded file.
+/// Empty when the TOC carries no hash for the member: those members would all share one name,
+/// so they keep random temporary files instead.
+std::string SpillKey(const std::array<u8, 0x20>& sha256, u64 size) {
+    if (std::ranges::all_of(sha256, [](u8 byte) { return byte == 0; })) {
+        return {};
+    }
+    std::string key;
+    key.reserve(sha256.size() * 2 + 17);
+    for (const u8 byte : sha256) {
+        key += fmt::format("{:02x}", byte);
+    }
+    return key + fmt::format("-{:x}", size);
+}
+
+/// Removes partial files (random-named .tmp and per-decoder .part) and unmarked .bin files not
+/// written to for AbandonedSpillAge, then the least recently used complete ones while the
+/// directory is over SpillDirCap.
+void PruneSpillDir(const std::filesystem::path& dir) {
+    namespace fs = std::filesystem;
+    std::error_code ec;
+    struct Complete {
+        fs::file_time_type used;
+        fs::path bin;
+        fs::path done;
+        std::uintmax_t size;
+    };
+    std::vector<Complete> complete;
+    std::uintmax_t total = 0;
+    const auto now = fs::file_time_type::clock::now();
+    for (const auto& entry : fs::directory_iterator(dir, ec)) {
+        const auto& path = entry.path();
+        const auto extension = path.extension();
+        if (extension == ".tmp" || extension == ".part") {
+            // Partial files are written as they decode; one this old belongs to no live decoder.
+            if (now - entry.last_write_time(ec) > AbandonedSpillAge) {
+                fs::remove(path, ec);
+            }
+        } else if (extension == ".bin") {
+            auto done = path;
+            done.replace_extension(".done");
+            const auto size = entry.file_size(ec);
+            if (fs::exists(done, ec)) {
+                complete.push_back({fs::last_write_time(done, ec), path, done, size});
+                total += size;
+            } else if (now - entry.last_write_time(ec) > AbandonedSpillAge) {
+                fs::remove(path, ec);
+            }
+        }
+    }
+    if (total <= SpillDirCap) {
+        return;
+    }
+    std::ranges::sort(complete, {}, &Complete::used);
+    for (const auto& file : complete) {
+        if (total <= SpillDirCap) {
+            break;
+        }
+        fs::remove(file.done, ec);
+        fs::remove(file.bin, ec);
+        total -= file.size;
+    }
+}
+
 /// A member file whose extent is zstd-compressed, decoded from its start as reads need it and
 /// shared through the container's cache.
 class NupVfsFile final : public VfsFile {
 public:
     NupVfsFile(VirtualFile backing_, u64 extent_offset_, u64 extent_size_, u64 uncompressed_size_,
                std::string name_, std::shared_ptr<NupDecompressCache> cache_,
-               std::size_t cache_index_)
+               std::size_t cache_index_, std::string spill_key_)
         : backing(std::move(backing_)), extent_offset(extent_offset_), extent_size(extent_size_),
           uncompressed_size(uncompressed_size_), name(std::move(name_)), cache(std::move(cache_)),
-          cache_index(cache_index_), spilled(cache->Spills(uncompressed_size)) {}
+          cache_index(cache_index_), spill_key(std::move(spill_key_)),
+          spilled(cache->Spills(uncompressed_size)) {}
 
     std::string GetName() const override {
         return name;
@@ -413,11 +492,23 @@ private:
                     return fail("extent out of range");
                 }
                 if (spilled) {
-                    std::random_device random;
                     std::error_code ec;
                     std::filesystem::create_directories(cache->spill_dir, ec);
-                    member.path = cache->spill_dir / fmt::format("{:08x}{:08x}-{}.tmp", random(),
-                                                                 random(), cache_index);
+                    std::random_device random;
+                    if (spill_key.empty()) {
+                        member.path = cache->spill_dir / fmt::format("{:08x}{:08x}-{}.tmp",
+                                                                     random(), random(),
+                                                                     cache_index);
+                    } else {
+                        member.done_path = cache->spill_dir / (spill_key + ".done");
+                        if (ReuseSpill(member)) {
+                            return true;
+                        }
+                        // Decoded into a file of its own and published once complete, so two
+                        // decoders of the same member never write one file.
+                        member.path = cache->spill_dir / fmt::format("{}-{:08x}{:08x}.part",
+                                                                     spill_key, random(), random());
+                    }
                     member.file.Open(member.path, Common::FS::FileAccessMode::Write);
                     member.file.Close();
                     member.file.Open(member.path, Common::FS::FileAccessMode::ReadWrite);
@@ -503,8 +594,57 @@ private:
         if (member.produced != uncompressed_size || member.last_result != 0) {
             return fail("the data does not end at the file size");
         }
+        if (spilled && !member.done_path.empty()) {
+            PublishSpill(member);
+        }
         member.decoded.store(uncompressed_size, std::memory_order_release);
         finish();
+        return true;
+    }
+
+    /// Renames a completely decoded member's partial file to its .bin name and marks it complete
+    /// with its .done file, so later sessions reuse it. If the rename fails, for example because
+    /// another session holds a published copy open on Windows, the partial file serves this
+    /// container and is removed with it.
+    void PublishSpill(NupMember& member) const {
+        std::scoped_lock file_lock{member.file_mutex};
+        if (!member.file.Flush()) {
+            return;
+        }
+        auto bin_path = member.done_path;
+        bin_path.replace_extension(".bin");
+        member.file.Close();
+        std::error_code ec;
+        std::filesystem::rename(member.path, bin_path, ec);
+        if (!ec) {
+            member.path = std::move(bin_path);
+            member.kept =
+                Common::FS::IOFile{member.done_path, Common::FS::FileAccessMode::Write}.IsOpen();
+        }
+        member.file.Open(member.path, Common::FS::FileAccessMode::Read);
+    }
+
+    /// Opens the member's file decoded by an earlier session, if it is complete. Marks it used
+    /// so the spill directory's size cap removes it last.
+    bool ReuseSpill(NupMember& member) const {
+        std::error_code ec;
+        auto bin_path = member.done_path;
+        bin_path.replace_extension(".bin");
+        if (!std::filesystem::exists(member.done_path, ec) ||
+            std::filesystem::file_size(bin_path, ec) != uncompressed_size || ec) {
+            return false;
+        }
+        member.file.Open(bin_path, Common::FS::FileAccessMode::Read);
+        if (!member.file.IsOpen()) {
+            return false;
+        }
+        member.path = std::move(bin_path);
+        std::filesystem::last_write_time(member.done_path,
+                                         std::filesystem::file_time_type::clock::now(), ec);
+        member.kept = true;
+        member.consumed = extent_size;
+        member.produced = uncompressed_size;
+        member.decoded.store(uncompressed_size, std::memory_order_release);
         return true;
     }
 
@@ -515,6 +655,7 @@ private:
     std::string name;
     std::shared_ptr<NupDecompressCache> cache;
     std::size_t cache_index;
+    std::string spill_key;
     bool spilled;
 };
 
@@ -539,6 +680,7 @@ NupContainer::NupContainer(VirtualFile file_, std::size_t memory_cache_cap,
     if (file == nullptr) {
         return;
     }
+    PruneSpillDir(cache->spill_dir);
     if (Parse()) {
         status = Loader::ResultStatus::Success;
     } else if (status == Loader::ResultStatus::ErrorNullFile) {
@@ -889,7 +1031,8 @@ VirtualFile NupContainer::OpenFileAs(std::size_t file_index, const std::string& 
             static_cast<std::size_t>(node.extent_offset), name);
     }
     return std::make_shared<NupVfsFile>(file, node.extent_offset, node.extent_size, node.size,
-                                        name, cache, file_index);
+                                        name, cache, file_index,
+                                        SpillKey(node.sha256, node.size));
 }
 
 std::optional<bool> NupContainer::HasZstdMagic(std::size_t file_index) const {
@@ -1114,8 +1257,9 @@ Loader::ResultStatus NupContainer::VerifyIntegrity(
         } else if (node.codec == CodecRaw) {
             content = ReadExtentRaw(node);
         } else {
+            // No spill key: the check decodes the extent instead of reusing an earlier file.
             NupVfsFile view(file, node.extent_offset, node.extent_size, node.size, node.name,
-                            cache, i);
+                            cache, i, {});
             content = view.ReadAllBytes();
         }
         if (content.size() != node.size) {

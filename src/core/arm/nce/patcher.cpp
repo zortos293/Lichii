@@ -3,6 +3,9 @@
 
 #include <numeric>
 #include <bit>
+#include <optional>
+#include <sys/auxv.h>
+#include <asm/hwcap.h>
 #include "common/cpu_features.h"
 #include "common/alignment.h"
 #include "common/literals.h"
@@ -25,6 +28,57 @@ using NativeExecutionParameters = Kernel::KThread::NativeExecutionParameters;
 
 constexpr size_t MaxRelativeBranch = 128_MiB;
 constexpr u32 ModuleCodeIndex = 0x24 / sizeof(u32);
+
+namespace {
+
+bool HostHasPointerAuth() {
+    static const bool has_paca = (getauxval(AT_HWCAP) & HWCAP_PACA) != 0;
+    return has_paca;
+}
+
+// The plain form of a non-hint PAuth instruction, for hosts without FEAT_PAuth, where it would
+// raise SIGILL. Without PAC keys signing and authenticating leave pointers unchanged. LDRAA
+// offsets that LDR/LDUR can't encode are left to ArmNce's SIGILL handler.
+std::optional<u32> PlainPointerAuthForm(u32 inst) {
+    constexpr u32 Nop = 0xD503201F;
+    const u32 rd = inst & 0x1F;
+    const u32 rn = (inst >> 5) & 0x1F;
+
+    // PACIA, PACIB, PACDA, PACDB, AUTIA, AUTIB, AUTDA, AUTDB and their Z forms; XPACI, XPACD.
+    if ((inst & 0xFFFFC000) == 0xDAC10000 || (inst & 0xFFFFFBE0) == 0xDAC143E0) {
+        return Nop;
+    }
+    // PACGA -> MOV Xd, XZR.
+    if ((inst & 0xFFE0FC00) == 0x9AC03000) {
+        return 0xAA1F03E0 | rd;
+    }
+    // RETAA, RETAB -> RET.
+    if ((inst & 0xFFFFFBFF) == 0xD65F0BFF) {
+        return 0xD65F03C0;
+    }
+    // BRAA, BRAB, BLRAA, BLRAB and their Z forms -> BR, BLR.
+    if ((inst & 0xFEDFF800) == 0xD61F0800) {
+        const bool link = (inst >> 21) & 1;
+        return (link ? 0xD63F0000 : 0xD61F0000) | (rn << 5);
+    }
+    // LDRAA, LDRAB -> LDR (unsigned offset), LDUR, or LDR (pre-index).
+    if ((inst & 0xFF200400) == 0xF8200400) {
+        const u32 imm10 = (((inst >> 22) & 1) << 9) | ((inst >> 12) & 0x1FF);
+        const s32 offset = (static_cast<s32>(imm10 << 22) >> 22) * 8;
+        const bool writeback = (inst >> 11) & 1;
+        const u32 regs = (rn << 5) | rd;
+        if (!writeback && offset >= 0) {
+            return 0xF9400000 | (static_cast<u32>(offset / 8) << 10) | regs;
+        }
+        if (offset >= -256 && offset <= 255) {
+            const u32 imm9 = static_cast<u32>(offset) & 0x1FF;
+            return (writeback ? 0xF8400C00 : 0xF8400000) | (imm9 << 12) | regs;
+        }
+    }
+    return std::nullopt;
+}
+
+} // namespace
 
 Patcher::Patcher() : c(m_patch_instructions), c_pre(m_patch_instructions_pre) {
     // The first word of the patch section is always a branch to the first instruction of the
@@ -186,6 +240,10 @@ bool Patcher::PatchText(std::span<const u8> program_image, const Kernel::CodeSet
 
         if (auto exclusive = Exclusive{inst}; exclusive.Verify()) {
             curr_patch->m_exclusives.push_back(i);
+        }
+
+        if (!HostHasPointerAuth() && PlainPointerAuthForm(inst)) {
+            curr_patch->m_pointer_auth.push_back(i);
         }
     }
 
@@ -372,6 +430,14 @@ bool Patcher::RelocateAndCopy(Common::ProcessAddress load_base, const Kernel::Co
     for (const ModuleTextAddress i : patch.m_exclusives) {
         auto exclusive = Exclusive{text_words[i]};
         text_words[i] = exclusive.AsOrdered();
+    }
+
+    for (const ModuleTextAddress i : patch.m_pointer_auth) {
+        text_words[i] = *PlainPointerAuthForm(text_words[i]);
+    }
+    if (!patch.m_pointer_auth.empty()) {
+        LOG_INFO(Core_ARM, "Rewrote {} pointer authentication instructions for this host",
+                 patch.m_pointer_auth.size());
     }
 
     // Remove the patched module size from the total. This is done so total_program_size

@@ -45,6 +45,13 @@ class Game(
             }
         }
 
+    // Title ids start with 0x01 on Nintendo Switch and 0x04 on Nintendo Switch 2.
+    val isSwitch2: Boolean
+        get() = ((programId.toLongOrNull() ?: 0L) ushr 56) == 0x04L
+
+    val isSwitch1: Boolean
+        get() = ((programId.toLongOrNull() ?: 0L) ushr 56) == 0x01L
+
     val programIdHex: String
         get() {
             val programIdLong = programId.toLongOrNull() ?: 0L
@@ -100,7 +107,7 @@ class Game(
 
     companion object {
         val extensions: Set<String> = HashSet(
-            listOf("xci", "nsp", "nca", "nro", "nsz", "xcz")
+            listOf("xci", "nsp", "nca", "nro", "nsz", "xcz", "nup")
         )
     }
 }
