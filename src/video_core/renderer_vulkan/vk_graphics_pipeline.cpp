@@ -11,6 +11,8 @@
 #include <cstring>
 #include <iostream>
 #include <span>
+#include "video_core/render_trace.h"
+#include "video_core/batched_handle_reads.h"
 #include <vector>
 
 #include <boost/container/small_vector.hpp>
@@ -848,10 +850,15 @@ bool GraphicsPipeline::ConfigureImpl(bool is_indexed) {
         }
         if (resolve_in_full) {
             for (const auto& desc : info.texture_descriptors) {
+                VideoCommon::BatchedHandles::Cursor batch{
+                    *gpu_memory, desc, cbufs,
+                    Settings::values.experimental_texture_binding_optimizations.GetValue()};
                 for (u32 index = 0; index < desc.count; ++index) {
-                    const auto handle{VideoCommon::HandleIsStoragePointer(info, desc, index)
+                    const bool storage_pointer = VideoCommon::HandleIsStoragePointer(info, desc, index);
+                    const auto raw = storage_pointer ? std::optional<u32>{} : batch.Read(index);
+                    const auto handle{storage_pointer
                                           ? VideoCommon::NULL_TEXTURE_HANDLE
-                                          : read_handle(desc, index)};
+                                          : raw ? TexturePair(*raw, via_header_index) : read_handle(desc, index)};
                     views.push_back({handle.first});
 
                     VideoCommon::SamplerId sampler{texture_cache.GetSamplerId(handle.second, false)};
@@ -861,6 +868,9 @@ bool GraphicsPipeline::ConfigureImpl(bool is_indexed) {
                             {handle_addresses[handle_reads.size()],
                              via_header_index ? handle.first : handle.first | (handle.second << 20)});
                     }
+                }
+                if (batch.ValidationFailed()) {
+                    LOG_ERROR(Render_Vulkan, "Batched handle validation failed; using scalar reads");
                 }
             }
         }
@@ -1091,7 +1101,14 @@ bool GraphicsPipeline::ConfigureImpl(bool is_indexed) {
             Profile::Scope scope{Profile::Zone::PushDescriptors};
             const size_t first_entry = guest_descriptor_queue.UpdateCount();
             PushImageDescriptors(texture_cache, guest_descriptor_queue, stage_infos[stage],
-                                 rescaling, samplers_it, views_it);
+                                 rescaling, samplers_it, views_it,
+                                 Settings::values.experimental_texture_binding_optimizations.GetValue() &&
+                                         !VideoCommon::StableSampled::FailedValidation().load(
+                                             std::memory_order_relaxed) &&
+                                         num_textures >= 256 && !mesh_emulation &&
+                                         !VideoCommon::RenderTrace::Enabled()
+                                     ? &stable_sampled_chunks[stage]
+                                     : nullptr);
             if (captured_delta) {
                 KeepImageDescriptors(stage, first_entry);
             }

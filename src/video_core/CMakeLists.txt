@@ -312,6 +312,8 @@ add_library(video_core STATIC
     shader_cache_v2/records.h
     shader_environment.cpp
     shader_environment.h
+    stable_sampled_chunks.h
+    batched_handle_reads.h
     evicted_pointer_slots.h
     bounded_store.h
     shader_handle_program.h

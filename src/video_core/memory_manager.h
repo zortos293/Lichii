@@ -12,6 +12,7 @@
 #include <mutex>
 #include <optional>
 #include <source_location>
+#include <span>
 #include <vector>
 #include <boost/container/small_vector.hpp>
 
@@ -79,6 +80,13 @@ public:
 
     [[nodiscard]] u8* GetPointer(GPUVAddr addr);
     [[nodiscard]] const u8* GetPointer(GPUVAddr addr) const;
+
+    bool CanBatchHandleWords() const {
+        return native_tiling && page_size >= 4096;
+    }
+
+    /// Positive mapped one-page reads only; special and unmapped words stay scalar.
+    bool TryReadHandleWords(GPUVAddr addr, std::span<u32> words) const;
 
     template <typename T>
     [[nodiscard]] inline T* GetPointer(GPUVAddr addr) noexcept {

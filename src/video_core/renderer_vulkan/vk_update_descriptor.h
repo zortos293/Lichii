@@ -74,6 +74,11 @@ public:
         };
     }
 
+    void AddSampledImages(std::span<const VkDescriptorImageInfo> images) {
+        for (const auto& image : images)
+            *(payload_cursor++) = image;
+    }
+
     void AddImage(VkImageView image_view) {
         *(payload_cursor++) = VkDescriptorImageInfo{
             .sampler = VK_NULL_HANDLE,

@@ -18,6 +18,7 @@
 #include <fmt/format.h>
 
 #include "common/page_table.h"
+#include "common/scope_exit.h"
 #include "core/core.h"
 #include "core/device_memory.h"
 #include "core/hle/kernel/k_process.h"
@@ -441,6 +442,12 @@ void SetEnvironment(const char* name, const std::string& value) {
 
 TEST_CASE("Shader cache v2: compute environments take recorded programs with every check",
           "[video_core][shader_cache_v2]") {
+    VideoCore::Nx2Debug::BeginSession();
+    SCOPE_EXIT {
+        const auto rejected = VideoCore::Nx2Debug::RejectedHashes();
+        (void)VideoCore::Nx2Debug::SetRejected(rejected, false);
+        VideoCore::Nx2Debug::EndSession();
+    };
     std::vector<TestProgram> programs = TestPrograms();
     TestProgram& traps = programs[6];
     TestProgram& texture = programs[8];

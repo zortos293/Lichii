@@ -5,20 +5,20 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 
 #include <algorithm>
-#include <limits>
 #include <array>
 #include <atomic>
+#include <bit>
 #include <cstdlib>
+#include <limits>
+#include <memory>
+#include <numeric>
 #include <optional>
 #include <set>
 #include <span>
 #include <tuple>
-#include <memory>
 #include <utility>
 #include <vector>
 #include <boost/container/small_vector.hpp>
-#include <bit>
-#include <numeric>
 #include "common/alignment.h"
 #include "common/bit_util.h"
 #include "common/div_ceil.h"
@@ -26,6 +26,7 @@
 #include "common/settings.h"
 #include "shader_recompiler/byte_addressed_image.h"
 #include "shader_recompiler/exception.h"
+#include "video_core/stable_sampled_chunks.h"
 
 #include <atomic>
 #include "video_core/gpu_logging/gpu_logging.h"
@@ -4521,7 +4522,10 @@ ImageView::ImageView(TextureCacheRuntime& runtime, const VideoCommon::NullImageV
     }
 }
 
-ImageView::~ImageView() = default;
+ImageView::~ImageView() {
+    // Moved-from slots are erased before their numeric IDs can be reused.
+    VideoCommon::StableSampled::InvalidateResources();
+}
 
 VkImageView ImageView::DepthView() {
     if (!image_handle) {
@@ -4665,6 +4669,7 @@ bool CustomBorderColorBudget::TryAcquire(const Device& device, size_t count) {
 }
 
 void CustomBorderColorBudget::Release() noexcept {
+    VideoCommon::StableSampled::InvalidateResources();
     if (device_ptr != nullptr) {
         device_ptr->ReleaseCustomBorderColorSamplers(held);
     }
@@ -4811,6 +4816,7 @@ VkSampler Sampler::Find(const VariantKey& key) const noexcept {
 }
 
 VkSampler Sampler::Emplace(VariantKey key) {
+    VideoCommon::StableSampled::InvalidateResources();
     bool custom_border = has_custom_border_colors && !key.drop_custom_border;
     if (custom_border && !custom_border_color_budget.TryAcquire(*device_ptr, 1)) {
         static bool warned_budget = false;

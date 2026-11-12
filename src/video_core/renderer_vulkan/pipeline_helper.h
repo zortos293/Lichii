@@ -8,6 +8,8 @@
 
 #include <cstddef>
 #include <optional>
+#include "common/logging.h"
+#include "video_core/stable_sampled_chunks.h"
 
 #include <boost/container/small_vector.hpp>
 
@@ -392,17 +394,93 @@ public:
     std::array<f32, 4> words{};
 };
 
-inline void PushImageDescriptors(TextureCache& texture_cache,
-                                 GuestDescriptorQueue& guest_descriptor_queue,
-                                 const Shader::Info& info, RescalingPushConstant& rescaling,
-                                 const VideoCommon::SamplerId*& samplers,
-                                 const VideoCommon::ImageViewInOut*& views) {
+inline void PushImageDescriptors(
+    TextureCache& texture_cache, GuestDescriptorQueue& guest_descriptor_queue,
+    const Shader::Info& info, RescalingPushConstant& rescaling,
+    const VideoCommon::SamplerId*& samplers, const VideoCommon::ImageViewInOut*& views,
+    VideoCommon::StableSampled::ChunkCache<VkDescriptorImageInfo>* cache = nullptr) {
     const u32 num_texture_buffers = Shader::NumDescriptors(info.texture_buffer_descriptors);
     const u32 num_image_buffers = Shader::NumDescriptors(info.image_buffer_descriptors);
     views += num_texture_buffers;
     views += num_image_buffers;
+    namespace Stable = VideoCommon::StableSampled;
+    size_t chunk_count{}, texture_count{};
+    if (cache) {
+        for (const auto& desc : info.texture_descriptors) {
+            texture_count += desc.count;
+            if (desc.count >= Stable::ChunkSize)
+                chunk_count += (desc.count + Stable::ChunkSize - 1) / Stable::ChunkSize;
+        }
+        if (texture_count > Stable::MaxEntries || !cache->Ensure(chunk_count))
+            cache = nullptr;
+    }
+    size_t chunk_index{};
     for (const auto& desc : info.texture_descriptors) {
         bool is_rescaled{};
+        if (cache && desc.count >= Stable::ChunkSize) {
+            for (u32 base = 0; base < desc.count;
+                 base += static_cast<u32>(Stable::ChunkSize), ++chunk_index) {
+                const size_t count = (std::min)(size_t{desc.count - base}, Stable::ChunkSize);
+                std::array<Stable::U64, Stable::ChunkSize> keys;
+                for (size_t i = 0; i < count; ++i)
+                    keys[i] = (Stable::U64{views[i].id.Value()} << 32) | samplers[i].Value();
+                const auto epoch = Stable::Epoch();
+                const auto* hit =
+                    Stable::FailedValidation().load(std::memory_order_relaxed)
+                        ? nullptr
+                        : cache->Find(chunk_index, epoch, std::span{keys}.first(count));
+                std::array<VkDescriptorImageInfo, Stable::ChunkSize> resolved;
+                bool chunk_rescaled{};
+                // Scaling flags can change on a failed scale attempt without view recreation.
+                for (size_t i = 0; i < count; ++i) {
+                    auto& view = texture_cache.GetImageView(views[i].id);
+                    chunk_rescaled |= texture_cache.IsRescaling(view);
+                    if (!hit || Stable::Validate()) {
+                        auto handle = view.Handle(desc.type);
+                        if (handle == VK_NULL_HANDLE) {
+                            const auto null_handle =
+                                texture_cache.GetImageView(VideoCommon::NULL_IMAGE_VIEW_ID)
+                                    .Handle(desc.type);
+                            if (null_handle != VK_NULL_HANDLE)
+                                handle = null_handle;
+                        }
+                        resolved[i] = {
+                            texture_cache.GetSampler(samplers[i]).HandleFor(view, desc.is_depth),
+                            handle, VK_IMAGE_LAYOUT_GENERAL};
+                    }
+                }
+                bool mismatch = false;
+                if (hit && Stable::Validate()) {
+                    for (size_t i = 0; i < count; ++i) {
+                        const auto& a = resolved[i];
+                        const auto& b = hit->values[i];
+                        mismatch |= a.sampler != b.sampler || a.imageView != b.imageView ||
+                                    a.imageLayout != b.imageLayout;
+                    }
+                    if (mismatch) {
+                        Stable::FailedValidation().store(true, std::memory_order_relaxed);
+                        LOG_ERROR(Render_Vulkan, "Stable sampled chunk validation failed; "
+                                                 "disabling cache for this process");
+                        cache->Clear(chunk_index);
+                        hit = nullptr;
+                    }
+                }
+                if (hit) {
+                    guest_descriptor_queue.AddSampledImages(std::span{hit->values}.first(count));
+                } else {
+                    guest_descriptor_queue.AddSampledImages(std::span{resolved}.first(count));
+                    if (!Stable::FailedValidation().load(std::memory_order_relaxed) &&
+                        epoch == Stable::Epoch())
+                        cache->Store(chunk_index, epoch, std::span{keys}.first(count),
+                                     std::span{resolved}.first(count), chunk_rescaled);
+                }
+                is_rescaled |= chunk_rescaled;
+                views += count;
+                samplers += count;
+            }
+            rescaling.PushTexture(is_rescaled);
+            continue;
+        }
         for (u32 index = 0; index < desc.count; ++index) {
             const VideoCommon::ImageViewId image_view_id{(views++)->id};
             const VideoCommon::SamplerId sampler_id{*(samplers++)};

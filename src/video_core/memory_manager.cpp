@@ -535,6 +535,24 @@ void MemoryManager::ReadBlockUnsafe(GPUVAddr gpu_src_addr, void* dest_buffer, co
     ReadBlockImpl(gpu_src_addr, dest_buffer, size, VideoCommon::CacheType::None, true, caller);
 }
 
+bool MemoryManager::TryReadHandleWords(GPUVAddr addr, std::span<u32> words) const {
+    const size_t size = words.size_bytes();
+    if (!CanBatchHandleWords() || words.empty() || words.size() > 256 || (addr & 3) ||
+        (addr & 4095) + size > 4096 || !IsWithinGPUAddressRange(addr) ||
+        size > address_space_size - addr) {
+        return false;
+    }
+    const auto shim = native_syncpoint_shim.load(std::memory_order_acquire);
+    if (shim && (addr >= shim ? addr - shim < NumShimSyncpoints * sizeof(u32)
+                             : shim - addr < size)) {
+        return false;
+    }
+    const u8* const pointer = GetPointer(addr);
+    if (!pointer) return false;
+    std::memcpy(words.data(), pointer, size);
+    return true;
+}
+
 void MemoryManager::ReadWordsUnsafe(GPUVAddr gpu_src_addr, u32* dest, std::size_t count,
                                     std::source_location caller) const {
     const std::size_t size = count * sizeof(u32);
