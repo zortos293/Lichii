@@ -36,6 +36,9 @@ class QKeyEvent;
 class QMouseEvent;
 class QObject;
 class QResizeEvent;
+#if defined(__linux__) && !defined(__ANDROID__)
+class QScreen;
+#endif
 class QShowEvent;
 class QTouchEvent;
 class QWheelEvent;
@@ -72,7 +75,11 @@ public:
     std::unique_ptr<Core::Frontend::GraphicsContext> CreateSharedContext() const override;
 
     void BackupGeometry();
+#if defined(__linux__) && !defined(__ANDROID__)
+    void RestoreGeometry(QScreen* default_screen);
+#else
     void RestoreGeometry();
+#endif
     void restoreGeometry(const QByteArray& geometry_); // overridden
     QByteArray saveGeometry();                         // overridden
 

@@ -13,9 +13,14 @@
 #include <QPixmap>
 #include <QPropertyAnimation>
 #include <QPushButton>
+#if defined(__linux__) && !defined(__ANDROID__)
+#include <QSizePolicy>
+#endif
 #include <QStyleOption>
 #include "common/container/unordered_map.h"
+#if !defined(__linux__) || defined(__ANDROID__)
 #include "core/frontend/framebuffer_layout.h"
+#endif
 #include "core/loader/loader.h"
 #include "ui_loading_screen.h"
 #include "video_core/rasterizer_interface.h"
@@ -73,7 +78,12 @@ LoadingScreen::LoadingScreen(QWidget* parent)
     : QWidget(parent), ui(std::make_unique<Ui::LoadingScreen>()),
       previous_stage(VideoCore::LoadCallbackStage::Complete) {
     ui->setupUi(this);
+#if defined(__linux__) && !defined(__ANDROID__)
+    setMinimumSize(1, 1);
+    setSizePolicy(QSizePolicy::Ignored, QSizePolicy::Ignored);
+#else
     setMinimumSize(Layout::MinimumSize::Width, Layout::MinimumSize::Height);
+#endif
 
     // Create a fade out effect to hide this loading screen widget.
     // When fading opacity, it will fade to the parent widgets background color, which is why we

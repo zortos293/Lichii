@@ -43,6 +43,7 @@ add_executable(yuzu
     applets/qt_web_browser_scripts.h
     bootmanager.cpp
     bootmanager.h
+    separate_window_geometry.h
     configuration/configuration_shared.cpp
     configuration/configuration_shared.h
     configuration/configure.ui

@@ -1464,7 +1464,11 @@ void MainWindow::RestoreUIState() {
     ui->action_Single_Window_Mode->setChecked(UISettings::values.single_window_mode.GetValue());
     ToggleWindowMode();
 
+#if defined(__linux__) && !defined(__ANDROID__)
+    ui->action_Fullscreen->setChecked(false);
+#else
     ui->action_Fullscreen->setChecked(UISettings::values.fullscreen.GetValue());
+#endif
 
     ui->action_Enable_Overlay_Applet->setChecked(Settings::values.enable_overlay.GetValue());
 
@@ -2439,6 +2443,7 @@ void MainWindow::BootGame(const QString& filename, Service::AM::FrontendAppletPa
     emulation_running = true;
     if (ui->action_Fullscreen->isChecked()) {
         ShowFullscreen();
+#if !defined(__linux__) || defined(__ANDROID__)
     } else if (!(ui->action_Single_Window_Mode->isChecked() ? isMaximized()
                                                             : render_window->isMaximized())) {
         if (Settings::IsDockedMode()) {
@@ -2446,6 +2451,7 @@ void MainWindow::BootGame(const QString& filename, Service::AM::FrontendAppletPa
         } else {
             ResetWindowSize720();
         }
+#endif
     }
     OnStartGame();
 }
@@ -3758,12 +3764,22 @@ void MainWindow::ToggleWindowMode() {
 
     } else {
         // Render in a separate window...
+#if defined(__linux__) && !defined(__ANDROID__)
+        const bool was_embedded = render_window->parentWidget() != nullptr;
+#endif
         ui->horizontalLayout->removeWidget(render_window);
         render_window->setParent(nullptr);
         render_window->setFocusPolicy(Qt::NoFocus);
+#if defined(__linux__) && !defined(__ANDROID__)
+        if (was_embedded) {
+            render_window->RestoreGeometry(screen());
+        }
+#endif
         if (emulation_running) {
             render_window->setVisible(true);
+#if !defined(__linux__) || defined(__ANDROID__)
             render_window->RestoreGeometry();
+#endif
             game_list->show();
         }
     }
@@ -5492,7 +5508,11 @@ void MainWindow::UpdateStatusButtons() {
 
 // TODO(crueter): Use this for game list stuff
 void MainWindow::UpdateUISettings() {
+#if defined(__linux__) && !defined(__ANDROID__)
+    if (!emulation_running || !ui->action_Fullscreen->isChecked()) {
+#else
     if (!ui->action_Fullscreen->isChecked()) {
+#endif
         UISettings::values.geometry = saveGeometry();
         UISettings::values.renderwindow_geometry = render_window->saveGeometry();
     }
