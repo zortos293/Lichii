@@ -3037,18 +3037,62 @@ void BufferCache<P>::UpdateIndexBuffer() {
 
     const GPUVAddr gpu_addr_begin = index_buffer_ref.StartAddress();
     const GPUVAddr gpu_addr_end = index_buffer_ref.EndAddress();
-    const std::optional<DAddr> device_addr = gpu_memory->GpuToCpuAddress(gpu_addr_begin);
-    const u32 address_size = static_cast<u32>(gpu_addr_end - gpu_addr_begin);
     const u32 draw_size = (index_buffer_ref.count + index_buffer_ref.first) * u32(index_buffer_ref.FormatSizeInBytes());
+    // The draw macros mark the index buffer dirty on every draw, mostly with the same buffer and
+    // another count: the address and the buffer found are kept while the range, the GPU mappings
+    // and the buffers are, for any size up to the one the buffer was found for.
+    IndexBufferMemo& memo = index_buffer_memo;
+    const u64 map_serial = gpu_memory->MapSerial();
+    const u32 address_size = static_cast<u32>(gpu_addr_end - gpu_addr_begin);
     const u32 size = (std::min)(address_size, draw_size);
+    const bool memo_hit = memo.channel == channel_state && memo.memory == gpu_memory &&
+                          memo.begin == gpu_addr_begin && memo.end == gpu_addr_end &&
+                          memo.map_serial == map_serial && memo.deletions == buffer_deletions &&
+                          size != 0 && size <= memo.found_size &&
+                          !Settings::IsGPUFenceBehaviorAccurate(); // FindBuffer waits for writes
+    if (memo_hit && !Nx2Perf::Verify()) {
+        channel_state->index_buffer = Binding{
+            .device_addr = memo.device_addr,
+            .size = size,
+            .buffer_id = memo.buffer_id,
+        };
+        return;
+    }
+    const std::optional<DAddr> device_addr = gpu_memory->GpuToCpuAddress(gpu_addr_begin);
     if (size == 0 || !device_addr) {
         channel_state->index_buffer = NULL_BINDING;
         return;
     }
+    const BufferId buffer_id = FindBuffer(*device_addr, size, false);
     channel_state->index_buffer = Binding{
         .device_addr = *device_addr,
         .size = size,
-        .buffer_id = FindBuffer(*device_addr, size, false),
+        .buffer_id = buffer_id,
+    };
+    if (memo_hit) {
+        if (memo.device_addr != *device_addr || memo.buffer_id != buffer_id) {
+            static std::atomic<u32> reports{};
+            if (reports.fetch_add(1, std::memory_order_relaxed) < 16) {
+                LOG_ERROR(HW_GPU,
+                          "Nx2Perf index buffer memo mismatch: {:#x}+{:#x} kept {:#x} buffer {}, "
+                          "found {:#x} buffer {}",
+                          gpu_addr_begin, size, memo.device_addr, memo.buffer_id.index,
+                          *device_addr, buffer_id.index);
+            }
+        }
+        return;
+    }
+    // FindBuffer may have deleted buffers (joins): the deletion count is read after it.
+    memo = IndexBufferMemo{
+        .channel = channel_state,
+        .memory = gpu_memory,
+        .begin = gpu_addr_begin,
+        .end = gpu_addr_end,
+        .map_serial = map_serial,
+        .deletions = buffer_deletions,
+        .device_addr = *device_addr,
+        .found_size = size,
+        .buffer_id = buffer_id,
     };
 }
 
