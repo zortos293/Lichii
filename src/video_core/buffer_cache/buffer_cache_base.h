@@ -10,6 +10,7 @@
 #include <cstdlib>
 #include <array>
 #include <bit>
+#include <bitset>
 #include <chrono>
 #include <functional>
 #include <memory>
@@ -45,6 +46,7 @@
 #include "video_core/engines/kepler_compute.h"
 #include "video_core/engines/maxwell_3d.h"
 #include "video_core/memory_manager.h"
+#include "video_core/nx2.h"
 #include "video_core/nx2_download_trace.h"
 #include "video_core/nx2_async_readback.h"
 #include "video_core/nx2_fast_draw.h"
@@ -443,21 +445,23 @@ public:
     /// True when it recorded copies, which the GPU completes at `tick` (the caller submits).
     bool Nx2CopyListPages(u64 tick);
     enum class Nx2ListRead { Unknown, Copied, Synced, NeedsSync, Pending };
-    /// Front thread: Synced when guest memory holds the page `device_addr` lies in (flushed and
-    /// written by no GPU work since), else Copied with `out` filled from the copy of its last
-    /// write once the GPU is done with it. Unknown otherwise: the caller drains and flushes.
-    /// Pages draws write are only Synced or Unknown, and NeedsSync until `past_sync`: the
-    /// split's back ran the work before the last host-level wait (GpuSplit::WaitForSync).
-    /// With `pending_tick`, a copy the GPU has not finished returns Pending and sets the tick
-    /// instead of waiting for it.
+    /// Front thread: Synced when guest memory holds the bytes [device_addr, device_addr +
+    /// out.size()) of their page: no GPU work wrote them since the page was flushed, or the host
+    /// wrote them since. Else Copied with `out` filled once the GPU is done with the copy of the
+    /// page's last write: from the copy where GPU work wrote, from guest memory elsewhere once
+    /// the page was flushed. Unknown otherwise: the caller drains and flushes. Pages draws write
+    /// are only Synced or Unknown, and NeedsSync until `past_sync`: the split's back ran the work
+    /// before the last host-level wait (GpuSplit::WaitForSync). With `pending_tick`, a copy the
+    /// GPU has not finished returns Pending and sets the tick instead of waiting for it.
     Nx2ListRead Nx2ReadListCopy(DAddr device_addr, std::span<u8> out, bool past_sync,
                                 u64* pending_tick = nullptr);
     /// Front thread, the split drained: the command list page was flushed to guest memory.
     void Nx2NoteListSynced(DAddr page);
 
     void Nx2FlushListPages(std::span<const DAddr> pages);
-    /// CPU and inline writes: they reach guest memory, so a synced page stays synced, but its copy
-    /// no longer holds the page.
+    /// CPU, inline and copy engine writes of bytes guest memory holds: they reach guest memory,
+    /// so a synced page stays synced and the words they cover are guest memory's again, but the
+    /// page's copy no longer holds the page.
     void Nx2NoteListHostWrite(DAddr device_addr, u64 size);
 
     /// Return true when a CPU region is modified from the GPU
@@ -1112,8 +1116,9 @@ private:
 
     /// A command list page (Nx2CopyListPages): the GPU writes noted to it and the last copy.
     using Nx2Staging = decltype(std::declval<Runtime&>().DownloadStagingBuffer(size_t{}, true));
+    static constexpr size_t Nx2ListPageWords = (size_t{1} << Tegra::Nx2WrittenPageBits) / 4;
     struct Nx2ListPage {
-        u64 writes{};      ///< GPU writes noted to the page
+        u64 writes{};      ///< GPU and host writes noted to the page
         u64 copy_writes{}; ///< `writes` when the copy was made: the copy is current while equal
         u64 copy_tick{};   ///< GPU tick that completes the copy
         /// `writes` when the front last flushed the page: guest memory holds it while equal
@@ -1126,8 +1131,25 @@ private:
         /// the page's lists read guest memory once the back ran the work before the last such
         /// wait and no write came since the front flushed the page (Nx2ReadListCopy).
         bool draw_written{};
+        /// The page's 4-byte words GPU work wrote that guest memory does not hold: set by the GPU
+        /// writes noted to the page (the whole range a dispatch or copy may write), cleared for
+        /// the words the host writes whole and for every word once the front flushed the page.
+        /// Once it did (`flushed`), guest memory holds the other words, so a list on none of
+        /// these reads it directly. Before, GPU work may have written the page before it became
+        /// a command list page, unnoted.
+        std::bitset<Nx2ListPageWords> gpu_words;
+        bool flushed{};
         std::optional<Nx2Staging> copy;
     };
+    /// Sets (`set`) or clears the words of `entry.gpu_words` within [begin, end) bytes of its
+    /// page: every word the bytes touch when setting, only the words they cover when clearing.
+    static void Nx2MarkListWords(Nx2ListPage& entry, u64 begin, u64 end, bool set);
+    /// Whether GPU work wrote any word of [begin, end) bytes of the page guest memory lacks.
+    [[nodiscard]] static bool Nx2HasListWords(const Nx2ListPage& entry, u64 begin, u64 end);
+    /// Fills `out` with the page's bytes from `offset` (`device_addr`) on: the words of
+    /// `entry.gpu_words` from its copy, the others from guest memory.
+    void Nx2ReadListWords(const Nx2ListPage& entry, DAddr device_addr, u64 offset,
+                          std::span<u8> out);
     std::mutex nx2_list_mutex; ///< nx2_list_pages: the split's front reads the copies
     std::unordered_map<DAddr, Nx2ListPage> nx2_list_pages;
     /// Copies replaced while the GPU may still write them: freed once it is past their tick.

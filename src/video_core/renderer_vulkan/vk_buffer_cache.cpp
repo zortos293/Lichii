@@ -489,11 +489,17 @@ void BufferCacheRuntime::WaitSubmittedTick(u64 tick) {
     if (master.IsFree(tick)) {
         return;
     }
+    // The split's front waits for the GPU: the back runs meanwhile what the front sent, also the
+    // entries since the front's last publish, which it does not see yet (fewer than 256 words).
+    auto& split = VideoCommon::GpuSplit::Get();
+    const bool front = !VideoCommon::GpuSplit::OnBackThread() && split.Active();
+    if (front) {
+        split.Publish();
+    }
     // The copy's submission may be deferred (Scheduler::DeferFlush): the split's front asks the
     // back for it rather than waiting for the back's next submission. If the back has stopped,
     // nothing else uses the scheduler and Wait submits it.
-    if (!scheduler.IsSubmitted(tick) && VideoCommon::GpuSplit::Get().Active() &&
-        !VideoCommon::GpuSplit::OnBackThread()) {
+    if (!scheduler.IsSubmitted(tick) && front) {
         VideoCommon::Nx2Profile::Scope scope{VideoCommon::Nx2Profile::Zone::ListSubmitWait};
         if (!scheduler.WaitSubmitted(tick)) {
             scheduler.Wait(tick);

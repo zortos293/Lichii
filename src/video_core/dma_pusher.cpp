@@ -38,6 +38,22 @@ namespace Tegra {
 constexpr u32 MacroRegistersStart = 0xE00;
 constexpr u32 ComputeInline = 0x6D;
 
+namespace {
+
+/// The split's position after the last copy engine method that may write memory (the front's).
+u64 g_last_copy_writer{};
+
+/// Whether copy engine work sent so far may still be queued on the split's back. A new session
+/// starts the split's positions over: a position past the current one is from an older session.
+[[nodiscard]] bool CopyWritersPending(const VideoCommon::GpuSplit& split) {
+    if (g_last_copy_writer > split.Position()) {
+        g_last_copy_writer = 0;
+    }
+    return !split.Ran(g_last_copy_writer);
+}
+
+} // Anonymous namespace
+
 bool DmaPusher::IsMemoryWriter(const Engines::EngineInterface& engine, Engines::EngineTypes type,
                               u32 method) {
     if (type == Engines::EngineTypes::KeplerCompute) {
@@ -279,7 +295,16 @@ bool DmaPusher::Step() {
         // queued before it. The GPU fetches the list after that work only past a host-level wait
         // (NoteSync): later work is not ordered before the fetch, and the list does not wait for
         // it (nor for draws, which write memory too; draw-written lists wait for the last sync).
-        if (!gpu_written && VideoCommon::GpuSplit::Get().Active()) {
+        // Lists that begin between methods don't wait for compute work either: they are command
+        // buffers the CPU writes. The words GPU work writes for the front to fetch are the
+        // parameters of a method begun in the entry before (an indirect dispatch's or draw's,
+        // as in Ocarina of Time and title 1), which begin inside its data. An entry resumed after
+        // an acquire resumes after a puller method, which no parameter list holds. The copy
+        // engine can copy GPU-written words anywhere: while its work is queued, every list waits.
+        const bool command_entry = dma_state.method_count == 0;
+        const bool waits_for_writers =
+            !command_entry || CopyWritersPending(VideoCommon::GpuSplit::Get());
+        if (!gpu_written && VideoCommon::GpuSplit::Get().Active() && waits_for_writers) {
             VideoCommon::GpuSplit::Get().WaitForSyncedWriters();
             gpu_written =
                 IsGpuWrittenCommands(dma_state.dma_get, size_t{header.size} * sizeof(u32));
@@ -632,6 +657,9 @@ void DmaPusher::CallMethod(u32 argument) {
         SCOPE_EXIT {
             if (writer) {
                 split.NoteWriter();
+                if (engine_type == Engines::EngineTypes::MaxwellDMA) {
+                    g_last_copy_writer = split.Position();
+                }
             }
         };
         if (split.Active()) {
@@ -693,6 +721,9 @@ void DmaPusher::CallMultiMethod(const u32* base_start, u32 num_methods) {
         SCOPE_EXIT {
             if (writer) {
                 split.NoteWriter();
+                if (engine_type == Engines::EngineTypes::MaxwellDMA) {
+                    g_last_copy_writer = split.Position();
+                }
             }
         };
         if (split.Active()) {
@@ -808,9 +839,9 @@ bool DmaPusher::ReadGpuWrittenCommands(GPUVAddr address, u32 count, bool* pendin
     // them to host memory right after the dispatch or copy that writes them and submits. The
     // front then waits only for the back to run that work and for the GPU to finish the copy, not
     // for everything queued and a cache flush (FlushGpuWrittenCommands: ~400 GPU round trips a
-    // second in a Mario Kart World race, during which the back had nothing to do). Pages
-    // FlushGpuWrittenCommands flushed whole and no GPU work wrote since are read from guest
-    // memory.
+    // second in a Mario Kart World race, during which the back had nothing to do). Lists on words
+    // no GPU work wrote since FlushGpuWrittenCommands flushed the page, or the host wrote them,
+    // are read from guest memory and wait for no copy (BufferCache::Nx2ReadListCopy).
     if (!Tegra::g_nx2_ampere.load(std::memory_order_relaxed) || count == 0 ||
         rasterizer == nullptr) {
         return false;
@@ -827,13 +858,16 @@ bool DmaPusher::ReadGpuWrittenCommands(GPUVAddr address, u32 count, bool* pendin
     if (!written) {
         return false;
     }
+    // As for lists on pages no GPU work wrote (Step): the dispatch or copy that rewrites the
+    // list is ordered before the fetch only by a host-level wait between them, so the front waits
+    // for the work before the last one, not for compute and copy work sent after it.
     auto& split = VideoCommon::GpuSplit::Get();
     // Resuming after the copy's tick: the back ran the list's writer before the suspension
     // (this wait ran then), and waiting again would wait for the other channels' work queued
     // meanwhile too.
     const bool resumed = std::exchange(resumed_list_read, false);
     if (split.Active() && !resumed) {
-        split.WaitForWriters();
+        split.WaitForSyncedWriters(VideoCommon::DrainSite::ListCopies);
     }
     bool past_sync = !split.Active();
     using GpuWrittenList = VideoCore::RasterizerInterface::GpuWrittenList;
