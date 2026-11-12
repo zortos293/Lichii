@@ -54,17 +54,17 @@ TEST_CASE("Semaphore waiters latch on the writes that meet them", "[video_core][
     REQUIRE_FALSE(waiters.Latched(&mask));
 }
 
-TEST_CASE("Semaphore waiters refuse owners past the table and reuse freed slots",
+TEST_CASE("Semaphore waiters retain more than 64 owners and replace existing owners",
           "[video_core][nx2_waiters]") {
     Nx2SemaphoreWaiters waiters;
-    std::array<int, Nx2SemaphoreWaiters::MaxWaiters + 1> owners{};
-    for (size_t i = 0; i < Nx2SemaphoreWaiters::MaxWaiters; ++i) {
+    std::array<int, 141> owners{};
+    for (size_t i = 0; i + 1 < owners.size(); ++i) {
         REQUIRE(waiters.Add(&owners[i], 0x1000 + i * 4, 1, Nx2SemaphoreWaiters::AcquireGequal));
     }
     const int* const extra = &owners.back();
-    REQUIRE_FALSE(waiters.Add(extra, 0x8000, 1, Nx2SemaphoreWaiters::AcquireGequal));
+    REQUIRE(waiters.Add(extra, 0x8000, 1, Nx2SemaphoreWaiters::AcquireGequal));
     waiters.OnWrite(0x8000, 1);
-    REQUIRE_FALSE(waiters.Latched(extra));
+    REQUIRE(waiters.Latched(extra));
     // An owner already in the table moves to its new word.
     REQUIRE(waiters.Add(&owners[3], 0x9000, 2, Nx2SemaphoreWaiters::AcquireGequal));
     waiters.OnWrite(0x100c, 1);

@@ -29,6 +29,7 @@
 #include "video_core/dirty_flags.h"
 #include "video_core/nx2_fast_draw.h"
 #include "video_core/engines/kepler_compute.h"
+#include "video_core/gpu_wait_stats.h"
 #include "video_core/guest_memory.h"
 #include "video_core/host1x/gpu_device_memory_manager.h"
 #include "video_core/nx2.h"
@@ -61,6 +62,7 @@ using namespace Common::Literals;
 template <class P>
 TextureCache<P>::TextureCache(Runtime& runtime_, Tegra::MaxwellDeviceMemoryManager& device_memory_)
     : runtime{runtime_}, device_memory{device_memory_} {
+    Tegra::Texture::PrepareUnswizzleThreads();
     debug_stats = std::getenv("EDEN_NX2_TC_LOG") != nullptr &&
                   Common::Log::IsLevelEnabled(Common::Log::Class::HW_GPU, Common::Log::Level::Debug);
 
@@ -485,6 +487,16 @@ void TextureCache<P>::TickFrame() {
             total_used_memory -= (std::min)(total_used_memory, bytes);
         }
         total_used_memory -= (std::min)(total_used_memory, gpu_sentenced_bytes);
+        // Images the Vulkan recycler keeps are free memory to the collector: counted, a larger
+        // pool pushed it into high priority (more deletes and write-backs). With them past the
+        // critical memory, the pool gives back half of what it keeps each frame.
+        if constexpr (requires { runtime.GetRecycledImageMemory(); }) {
+            const u64 kept = runtime.GetRecycledImageMemory();
+            total_used_memory -= (std::min)(total_used_memory, kept);
+            if (kept != 0 && total_used_memory + kept >= critical_memory) {
+                runtime.ShrinkRecycledImages(kept / 2);
+            }
+        }
     }
     // EDEN_NX2_MEM_TRACE=1: every 2 s, what the cache holds next to what the process and the
     // driver report (memory climbs).
@@ -1329,6 +1341,7 @@ void TextureCache<P>::DownloadMemory(DAddr cpu_addr, size_t size) {
         auto copies = FullDownloadCopies(image.info);
         image.DownloadMemory(map, copies);
         pending_bytes += image.unswizzled_size_bytes;
+        GpuWaitStats::AddDownloadBytes(image.unswizzled_size_bytes);
         pending.push_back(Pending{image_id, map, std::move(copies)});
     }
     flush_pending();

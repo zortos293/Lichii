@@ -21,6 +21,7 @@
 #include "common/settings.h"
 #include "video_core/engines/maxwell_3d.h"
 #include "video_core/gpu.h"
+#include "video_core/gpu_split.h"
 #include "video_core/host1x/gpu_device_memory_manager.h"
 #include "video_core/memory_manager.h"
 #include "video_core/nx2.h"
@@ -173,6 +174,9 @@ struct QueryCacheBase<Traits>::QueryCacheBaseImpl {
     std::mutex flush_guard;
     std::deque<u64> flushes_pending;
     std::vector<QueryCacheBase<Traits>::QueryLocation> pending_unregister;
+    /// UnregisterPending's ids to free, by streamer, kept with their capacity.
+    std::array<std::vector<size_t>, static_cast<size_t>(QueryType::MaxQueryTypes)>
+        unregister_scratch;
 };
 
 template <typename Traits>
@@ -269,6 +273,12 @@ void QueryCacheBase<Traits>::CounterReport(GPUVAddr addr, QueryType counter_type
         return;
     }
     DAddr cpu_addr = *cpu_addr_opt;
+    if (VideoCommon::GpuSplit::WatchesSemaphore(cpu_addr)) [[unlikely]] {
+        LOG_INFO(HW_GPU,
+                 "Semaphore watch: report {:#x} to {:#x} (gpu {:#x}, as {}, type {}, flags {:#x}) on {}",
+                 payload, cpu_addr, addr, gpu_memory->GetID(), static_cast<u32>(counter_type),
+                 static_cast<u32>(flags), VideoCommon::GpuSplit::ThreadRole());
+    }
     const size_t new_query_id = streamer->WriteCounter(cpu_addr, has_timestamp, payload, subreport);
     auto* query = streamer->GetQuery(new_query_id);
     if (is_fence) {
@@ -283,19 +293,70 @@ void QueryCacheBase<Traits>::CounterReport(GPUVAddr addr, QueryType counter_type
     };
     u8* pointer = impl->device_memory.template GetPointer<u8>(cpu_addr);
     u8* pointer_timestamp = impl->device_memory.template GetPointer<u8>(cpu_addr + 8);
+    // A fence-flagged payload release writes a constant, so at low accuracy with Default fences
+    // it stays synchronized as before #337: its fence may be skipped and the query freed at once.
+    // Only reports of GPU counters wait for their fence to run.
+    const bool is_synced = is_fence && counter_type == QueryType::Payload &&
+                           (Settings::IsGPUFenceBehaviorDefault()
+                                ? !Settings::IsGPULevelHigh()
+                                : !Settings::IsGPUFenceBehaviorBalanced() &&
+                                      !Settings::IsGPUFenceBehaviorAccurate());
+    // The GPU thread split's back entry this report came in: the front counts the report in
+    // memory once its operation ran with a fence (GpuSplit::NoteFencedWrite). A synced release's
+    // operation doesn't run in fence order, so it must not count earlier reports as landed.
+    const std::optional<u64> split_entry =
+        is_synced ? std::nullopt : VideoCommon::GpuSplit::Get().BackEntry();
     const u64 report_size = has_timestamp ? 16 : 4;
     const bool immediate =
         !is_fence && !Settings::IsGPULevelHigh() && counter_type == QueryType::Payload;
-    // Written later: the buffer cache keeps GPU writes over it until then (NoteReportPending).
+    // Synced payload callbacks can run ahead of older fenced reports at the same address.
+    // They must not retire one of those reports from the buffer cache's ordered tracking.
     const bool report_noted =
-        !immediate && impl->rasterizer.NoteReportPending(cpu_addr, report_size);
-    std::function<void()> operation([this, streamer, query_base = query, query_location,
-                                     pointer, pointer_timestamp, cpu_addr, addr,
-                                     asid = gpu_memory->GetID(), counter_type, mirrored,
-                                     report_size, report_noted] {
+        !immediate && !is_synced && impl->rasterizer.NoteReportPending(cpu_addr, report_size);
+    // What the operation needs, small enough for std::function to hold without allocating: a
+    // report per draw (Ocarina of Time's occlusion counts) allocated one each.
+    struct ReportOp {
+        QueryBase* query;
+        DAddr cpu_addr;
+        GPUVAddr addr;
+        u64 split_entry; ///< ~0: none
+        QueryLocation location;
+        u8 counter_type;
+        u8 bits;
+        u16 asid;
+    };
+    static constexpr u8 OpSynced = 1;
+    static constexpr u8 OpMirrored = 2;
+    static constexpr u8 OpNoted = 4;
+    static constexpr u8 OpWide = 8;
+    const ReportOp report_op{
+        .query = query,
+        .cpu_addr = cpu_addr,
+        .addr = addr,
+        .split_entry = split_entry.value_or(~u64{0}),
+        .location = query_location,
+        .counter_type = static_cast<u8>(counter_type),
+        .bits = static_cast<u8>((is_synced ? OpSynced : 0) | (mirrored ? OpMirrored : 0) |
+                                (report_noted ? OpNoted : 0) | (has_timestamp ? OpWide : 0)),
+        .asid = static_cast<u16>(gpu_memory->GetID()),
+    };
+    const auto operation_body = [this, op = report_op] {
+        const bool is_synced = (op.bits & OpSynced) != 0;
+        const bool mirrored = (op.bits & OpMirrored) != 0;
+        const u64 report_size = (op.bits & OpWide) != 0 ? 16 : 4;
+        const DAddr cpu_addr = op.cpu_addr;
+        const GPUVAddr addr = op.addr;
+        const QueryType counter_type = static_cast<QueryType>(op.counter_type);
+        const QueryLocation query_location = op.location;
+        const size_t asid = op.asid;
+        QueryBase* const query_base = op.query;
+        auto* const streamer = impl->streamers[query_location.stream_id.Value()];
         SCOPE_EXIT {
-            if (report_noted) {
+            if ((op.bits & OpNoted) != 0) {
                 impl->rasterizer.FinishReport(cpu_addr, report_size);
+            }
+            if (op.split_entry != ~u64{0}) {
+                VideoCommon::GpuSplit::Get().NoteFencedWrite(op.split_entry);
             }
         };
         if (True(query_base->flags & QueryFlagBits::IsInvalidated)) {
@@ -306,7 +367,9 @@ void QueryCacheBase<Traits>::CounterReport(GPUVAddr addr, QueryType counter_type
                          trace, asid, addr, cpu_addr, static_cast<u32>(counter_type),
                          static_cast<u32>(query_base->flags));
             }
-            impl->pending_unregister.push_back(query_location);
+            if (!is_synced) {
+                impl->pending_unregister.push_back(query_location);
+            }
             return;
         }
         if (False(query_base->flags & QueryFlagBits::IsFinalValueSynced)) [[unlikely]] {
@@ -319,20 +382,28 @@ void QueryCacheBase<Traits>::CounterReport(GPUVAddr addr, QueryType counter_type
             }
             LOG_ERROR(HW_GPU,
                       "Query report value not synchronized. Consider increasing GPU accuracy.");
-            impl->pending_unregister.push_back(query_location);
+            if (!is_synced) {
+                impl->pending_unregister.push_back(query_location);
+            }
             return;
         }
         query_base->value += streamer->GetAmendValue();
         streamer->SetAccumulationValue(query_base->value);
         FinishReads(cpu_addr, True(query_base->flags & QueryFlagBits::HasTimestamp) ? 16 : 4);
+        u8* const pointer = impl->device_memory.template GetPointer<u8>(cpu_addr);
+        u8* const pointer_timestamp = impl->device_memory.template GetPointer<u8>(cpu_addr + 8);
         auto& shadow = Tegra::Nx2MirrorShadow::Get();
-        if (mirrored && shadow.Diverts(cpu_addr)) {
+        if (pointer == nullptr) [[unlikely]] {
+            // Unmapped since the report: nothing to write.
+        } else if (mirrored && shadow.Diverts(cpu_addr)) {
             u32 guest;
             std::memcpy(&guest, pointer, sizeof(guest));
             shadow.Set(cpu_addr, static_cast<u32>(query_base->value), guest);
         } else if (True(query_base->flags & QueryFlagBits::HasTimestamp)) {
             u64 timestamp = impl->gpu.GetTicks();
-            std::memcpy(pointer_timestamp, &timestamp, sizeof(timestamp));
+            if (pointer_timestamp != nullptr) {
+                std::memcpy(pointer_timestamp, &timestamp, sizeof(timestamp));
+            }
             std::memcpy(pointer, &query_base->value, sizeof(query_base->value));
         } else {
             u32 value = static_cast<u32>(query_base->value);
@@ -341,7 +412,15 @@ void QueryCacheBase<Traits>::CounterReport(GPUVAddr addr, QueryType counter_type
         if (!mirrored && counter_type == QueryType::Payload) {
             shadow.NoteDirectRelease(cpu_addr, addr);
         }
-        Tegra::Nx2SemaphoreWaiters::Get().OnWrite(cpu_addr, static_cast<u32>(query_base->value));
+        Tegra::Nx2SemaphoreWaiters::Get().OnWrite(
+            cpu_addr, static_cast<u32>(query_base->value),
+            counter_type == QueryType::Payload ? Tegra::Nx2SemaphoreWaiters::Source::PayloadRelease
+                                               : Tegra::Nx2SemaphoreWaiters::Source::QueryResult);
+        if (VideoCommon::GpuSplit::WatchesSemaphore(cpu_addr)) [[unlikely]] {
+            LOG_INFO(HW_GPU, "Semaphore watch: {:#x} written to {:#x} at its fence (mirrored {}) on {}",
+                     static_cast<u32>(query_base->value), cpu_addr, mirrored,
+                     VideoCommon::GpuSplit::ThreadRole());
+        }
         if (const u64 trace = QueryTrace::Sample(QueryTrace::Event::Write)) {
             const bool wide = True(query_base->flags & QueryFlagBits::HasTimestamp);
             LOG_INFO(HW_GPU,
@@ -351,12 +430,21 @@ void QueryCacheBase<Traits>::CounterReport(GPUVAddr addr, QueryType counter_type
                      wide ? query_base->value : static_cast<u32>(query_base->value),
                      static_cast<u32>(query_base->flags));
         }
-        impl->pending_unregister.push_back(query_location);
-    });
+        if (!is_synced) {
+            impl->pending_unregister.push_back(query_location);
+        }
+    };
+    static_assert(sizeof(operation_body) <= 48,
+                  "the report operation must fit std::function's own storage");
+    std::function<void()> operation(operation_body);
     if (is_fence) {
-        VideoCore::g_signaling_query_report_fence = true;
+        VideoCore::g_signaling_query_report_fence = !is_synced;
         impl->rasterizer.SignalFence(std::move(operation));
         VideoCore::g_signaling_query_report_fence = false;
+        if (is_synced) {
+            streamer->Free(new_query_id);
+            return;
+        }
     } else {
         if (immediate) {
             FinishReads(cpu_addr, has_timestamp ? 16 : 4);
@@ -376,7 +464,13 @@ void QueryCacheBase<Traits>::CounterReport(GPUVAddr addr, QueryType counter_type
             if (!mirrored) {
                 shadow.NoteDirectRelease(cpu_addr, addr);
             }
-            Tegra::Nx2SemaphoreWaiters::Get().OnWrite(cpu_addr, payload);
+            Tegra::Nx2SemaphoreWaiters::Get().OnWrite(
+                cpu_addr, payload, Tegra::Nx2SemaphoreWaiters::Source::PayloadRelease);
+            if (VideoCommon::GpuSplit::WatchesSemaphore(cpu_addr)) [[unlikely]] {
+                LOG_INFO(HW_GPU, "Semaphore watch: {:#x} written to {:#x} at once (mirrored {}, diverted {}) on {}",
+                         payload, cpu_addr, mirrored, mirrored && shadow.Diverts(cpu_addr),
+                         VideoCommon::GpuSplit::ThreadRole());
+            }
             if (const u64 trace = QueryTrace::Sample(QueryTrace::Event::Write)) {
                 LOG_INFO(HW_GPU,
                          "DKB_QUERY write n={} path=immediate as={} gpu={:#x} device={:#x} type={} "
@@ -413,27 +507,41 @@ void QueryCacheBase<Traits>::UnregisterPending() {
         return std::make_pair<u64, u32>(cur_addr >> Core::DEVICE_PAGEBITS,
                                         static_cast<u32>(cur_addr & Core::DEVICE_PAGEMASK));
     };
-    std::scoped_lock lock(cache_mutex);
-    for (QueryLocation loc : impl->pending_unregister) {
-        const auto [streamer_id, query_id] = loc.unpack();
-        auto* streamer = impl->streamers[streamer_id];
-        if (!streamer) [[unlikely]] {
-            continue;
-        }
-        auto* query = streamer->GetQuery(query_id);
-        auto [cont_addr, base] = gen_caching_indexing(query->guest_address);
-        auto it1 = cached_queries.find(cont_addr);
-        if (it1 != cached_queries.end()) {
-            auto it2 = it1->second.find(base);
-            if (it2 != it1->second.end()) {
-                if (it2->second.raw == loc.raw) {
-                    it1->second.erase(it2);
+    // The fencing thread runs this for every fence's reports while the GPU thread registers and
+    // builds new ones: the queries leave the cache under its lock, then each streamer frees its
+    // batch under its own lock once, instead of a streamer lock per query inside the cache's.
+    auto& freed = impl->unregister_scratch;
+    for (auto& ids : freed) {
+        ids.clear();
+    }
+    {
+        std::scoped_lock lock(cache_mutex);
+        for (QueryLocation loc : impl->pending_unregister) {
+            const auto [streamer_id, query_id] = loc.unpack();
+            auto* streamer = impl->streamers[streamer_id];
+            if (!streamer) [[unlikely]] {
+                continue;
+            }
+            auto* query = streamer->GetQuery(query_id);
+            auto [cont_addr, base] = gen_caching_indexing(query->guest_address);
+            auto it1 = cached_queries.find(cont_addr);
+            if (it1 != cached_queries.end()) {
+                auto it2 = it1->second.find(base);
+                if (it2 != it1->second.end()) {
+                    if (it2->second.raw == loc.raw) {
+                        it1->second.erase(it2);
+                    }
                 }
             }
+            freed[streamer_id].push_back(query_id);
         }
-        streamer->Free(query_id);
     }
     impl->pending_unregister.clear();
+    for (size_t streamer_id = 0; streamer_id < freed.size(); ++streamer_id) {
+        if (!freed[streamer_id].empty()) {
+            impl->streamers[streamer_id]->FreeMany(freed[streamer_id]);
+        }
+    }
 }
 
 template <typename Traits>
@@ -684,7 +792,7 @@ template <typename Traits>
 void QueryCacheBase<Traits>::FinishReads(DAddr address, size_t size) {
     // SemiFlushQueryDirty asks with cache_mutex held, which no holder of the buffer cache's lock
     // takes.
-    if (VideoCore::ReadDownloadsMayCover(address, size)) {
+    if (VideoCore::ReadDownloadsMayCover(address, size)) [[unlikely]] {
         if (VideoCore::ReadCheckWrites::Enabled()) {
             VideoCore::ReadCheckWrites::Note(address, size, "a query result");
         }

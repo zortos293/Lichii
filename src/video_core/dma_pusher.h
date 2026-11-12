@@ -110,6 +110,35 @@ inline CommandHeader BuildCommandHeader(BufferMethods method, u32 arg_count, Sub
     return result;
 }
 
+/// Keeps the blocks of the command lists' submit-time copies for reuse. The guest's submit
+/// thread allocated ~1000 a second, of up to hundreds of KiB, and the GPU thread freed them:
+/// in Ocarina of Time each free took the heap ~30 us of the GPU thread, and each allocation the
+/// submit thread almost as long.
+namespace CommandWordsPool {
+[[nodiscard]] void* Allocate(std::size_t bytes);
+void Deallocate(void* pointer, std::size_t bytes) noexcept;
+} // namespace CommandWordsPool
+
+template <typename T>
+struct CommandWordsAllocator {
+    using value_type = T;
+
+    CommandWordsAllocator() noexcept = default;
+    template <typename U>
+    CommandWordsAllocator(const CommandWordsAllocator<U>&) noexcept {}
+
+    [[nodiscard]] T* allocate(std::size_t count) {
+        return static_cast<T*>(CommandWordsPool::Allocate(count * sizeof(T)));
+    }
+    void deallocate(T* pointer, std::size_t count) noexcept {
+        CommandWordsPool::Deallocate(pointer, count * sizeof(T));
+    }
+    template <typename U>
+    bool operator==(const CommandWordsAllocator<U>&) const noexcept {
+        return true;
+    }
+};
+
 struct CommandList final {
     CommandList() = default;
     explicit CommandList(std::size_t size) : command_lists(size) {}
@@ -122,7 +151,7 @@ struct CommandList final {
     std::vector<u64> submit_hashes;
     /// The entries' words when they were submitted (NX2), each entry's at submitted_offsets[i]:
     /// executed instead of the memory, which the game may already be refilling for a later frame.
-    std::vector<CommandHeader> submitted_words;
+    std::vector<CommandHeader, CommandWordsAllocator<CommandHeader>> submitted_words;
     std::vector<u32> submitted_offsets;
     /// Entries (ascending) not copied when submitted, because a GPU map still queued covers them:
     /// DmaPusher::Push copies them after the map, and until then they read memory.
@@ -131,6 +160,9 @@ struct CommandList final {
     /// that waited behind one, reads memory instead: games write the commands it runs before they
     /// release the acquire.
     u64 snapshot_suspensions = 0;
+    /// The snapshot copier's job that copies the words again (DmaPusher::QueueSnapshotCopy), 0
+    /// for none: the GPU thread waits for it before it parses the list.
+    u64 copy_job = 0;
 };
 
 /// FNV-1a over pushbuffer words (EDEN_NX2_PB_CHECK).
@@ -182,6 +214,7 @@ public:
     void BindSubchannel(Engines::EngineInterface* engine, u32 subchannel_id, Engines::EngineTypes engine_type) {
         subchannels[subchannel_id] = engine;
         subchannel_type[subchannel_id] = engine_type;
+        engine->bound_type = engine_type;
     }
 
     void BindRasterizer(VideoCore::RasterizerInterface* rasterizer);
@@ -216,11 +249,29 @@ public:
     void RecordParsedEntry(const CommandListHeader& header, std::span<const CommandHeader> commands);
     /// Whether the entry lies on device pages the GPU has written (NX2).
     bool IsGpuWrittenCommands(GPUVAddr address, size_t size);
-    /// A copy engine method sent to the split's back: a launch that releases its semaphore tells
-    /// the front what it writes (GpuSplit::NoteSemaphoreWrite).
-    void NoteDmaSemaphore(u32 method, u32 argument);
-    /// Copies the list's words from memory again, as of suspension count `now`.
-    void RefreshSnapshot(CommandList& list, u64 now);
+    /// EDEN_NX2_DRAIN_CHECK: checks an entry on pages no GPU work had written against the compute
+    /// and copy work it did not wait for (Nx2DrainCheck).
+    void CheckUnwaitedWriters(GPUVAddr address, size_t size);
+    /// TEST (EDEN_NX2_GPU_PROFILE): the entry about to be parsed waited `ns` for the compute and
+    /// copy work before the last sync; counted by the method its words continue, logged every
+    /// 10 s.
+    void NoteListWriterWait(bool command_entry, bool gpu_written, u64 ns, u32 words);
+    /// Keeps the front's copy of the copy and inline-to-memory engines' registers, with the split
+    /// and without.
+    void ShadowEngineMethod(Engines::EngineTypes type, u32 method, u32 argument);
+    /// An engine method was just sent to the split's back, as it is: places what a copy launch or
+    /// an inline-to-memory upload writes (GpuSplit::NoteWrite), and tells what a launch releases
+    /// (GpuSplit::NoteSemaphoreWrite).
+    void NoteEngineWrites(Engines::EngineTypes type, u32 method);
+    /// Copies the list's words from memory again, as of suspension count `now`, from entry
+    /// `first_entry` on (the entries before it ran already).
+    void RefreshSnapshot(CommandList& list, u64 now, size_t first_entry = 0);
+    /// RefreshSnapshot on the snapshot copier's thread. False when its queue is full (the caller
+    /// copies).
+    bool QueueSnapshotCopy(CommandList& list, u64 now, size_t first_entry);
+    /// Waits until the snapshot copier copied everything queued (before work that may change the
+    /// GPU's mappings, and before a channel goes away).
+    static void WaitForSnapshotCopies();
     /// Copies the list's deferred entries (CommandList::deferred_entries) from memory.
     void RefreshDeferredEntries(CommandList& list);
 
@@ -238,6 +289,14 @@ public:
     /// flushes and reads guest memory. With `pending`, a copy the GPU has not finished sets
     /// `*pending` and pending_list_tick instead of waiting (the result is false then).
     bool ReadGpuWrittenCommands(GPUVAddr address, u32 count, bool* pending = nullptr);
+    /// A GPU-written list that is all the parameters of the compute macro call about to start,
+    /// on the split with macros on its front: if the call only moves the words where the back can
+    /// take them over (Nx2ListIndirect), puts their placeholders in command_headers instead of
+    /// reading them. The back copies the words at the list's place on the host GPU.
+    bool TakeGpuWrittenListWords(const CommandListHeader& header);
+    /// EDEN_NX2_LIST_VERIFY: reads the list ReadGpuWrittenCommands just read again as before
+    /// (Nx2ListStats) and leaves the words read last in command_headers.
+    void VerifyGpuWrittenCommands(GPUVAddr address, u32 count);
     /// Brings command list words the GPU wrote (still only in host buffers) to guest memory.
     bool FlushGpuWrittenCommands(GPUVAddr address, size_t size);
 
@@ -303,8 +362,13 @@ public:
 
     std::array<Engines::EngineInterface*, max_subchannels> subchannels{};
     std::array<Engines::EngineTypes, max_subchannels> subchannel_type;
-    /// The copy engine's semaphore address (high, low) and payload as sent (NoteDmaSemaphore).
-    std::array<u32, 3> dma_semaphore{};
+    /// The registers of the channel's copy engine (MaxwellDMA::RegisterCount) and its
+    /// inline-to-memory engine (KeplerMemory::Regs::NUM_REGS), as the methods sent left them
+    /// (ShadowEngineMethod): where the back's copies and uploads write.
+    static constexpr size_t DmaRegisterCount = 0x800;
+    static constexpr size_t InlineToMemoryRegisterCount = 0x7f;
+    std::array<u32, DmaRegisterCount> dma_registers{};
+    std::array<u32, InlineToMemoryRegisterCount> inline_to_memory_registers{};
 
     Engines::Puller puller;
     std::mutex sync_mutex;
