@@ -195,6 +195,9 @@ static FileSys::VirtualFile VfsDirectoryCreateFileWrapper(const FileSys::Virtual
 
 #include <SDL3/SDL.h>
 
+#include <chrono>
+#include <cstdlib>
+#include <thread>
 #include <boost/container/flat_set.hpp>
 
 // Platform stuff //
@@ -342,7 +345,7 @@ constexpr int default_mouse_hide_timeout = 2500;
 constexpr int default_input_update_timeout = 1;
 constexpr int EmuThreadStopTimeoutMs = 10'000;
 // A teardown that keeps making progress (Common::ShutdownProgress) is waited for this long at
-// most before its thread is terminated.
+// most before Lichii gives up on it and exits.
 constexpr qint64 MaxEmuThreadShutdownMs = 180'000;
 
 constexpr size_t CopyBufferSize = 1_MiB;
@@ -2604,9 +2607,8 @@ bool MainWindow::EmulationShutdownProgressing() {
 }
 
 void MainWindow::OnEmulationStopTimeout() {
-    // Terminating the thread mid-teardown can leave a lock it holds (the heap's, the driver's)
-    // taken for good, which froze the whole app. While the teardown still moves (pipeline caches
-    // written, pipelines destroyed), it gets another timeout.
+    // While the teardown still moves (pipeline caches written, pipelines destroyed), it gets
+    // another timeout. A stalled teardown ends the process (see ExitIfEmulationThreadStuck).
     if (QtCommon::emu_thread && QtCommon::emu_thread->isRunning() &&
         EmulationShutdownProgressing()) {
         LOG_INFO(Frontend, "Emulation thread still shutting down after {} ms, waiting",
@@ -2614,20 +2616,44 @@ void MainWindow::OnEmulationStopTimeout() {
         emu_terminate_timer.start(EmuThreadStopTimeoutMs);
         return;
     }
-    TerminateEmulationThread();
+    ExitIfEmulationThreadStuck();
     OnEmulationStopped();
 }
 
-void MainWindow::TerminateEmulationThread() {
-    if (QtCommon::emu_thread && QtCommon::emu_thread->isRunning()) {
-        LOG_ERROR(Frontend, "Emulation thread failed to stop, terminating it");
-        // On Windows terminate() emits finished with the thread's mutex held, and
-        // OnEmulationStopped calls isRunning(), which takes it. Both callers run it afterwards.
-        disconnect(QtCommon::emu_thread.get(), &QThread::finished, this,
-                   &MainWindow::OnEmulationStopped);
-        QtCommon::emu_thread->terminate();
-        QtCommon::emu_thread->wait();
+/// Ends the process at once: no destructors, no atexit handlers, no flush of C streams.
+[[noreturn]] static void EndProcessNow(int exit_code) {
+#ifdef _WIN32
+    TerminateProcess(GetCurrentProcess(), static_cast<UINT>(exit_code));
+#endif
+    std::_Exit(exit_code);
+}
+
+/// Called when the stop wait is over. Returns if the emulation thread has stopped. If it still
+/// runs, saves the settings and ends the process with all threads alive, so the program closes
+/// from Stop as well as from the window close. Terminating the thread instead can orphan a lock
+/// it holds (the process heap's, a driver's), after which every allocation in the process hangs.
+void MainWindow::ExitIfEmulationThreadStuck() {
+    if (!QtCommon::emu_thread || !QtCommon::emu_thread->isRunning()) {
+        return;
     }
+    // The stuck thread can hold a lock that the save needs. The save gets this long.
+    std::thread([] {
+        std::this_thread::sleep_for(std::chrono::seconds(5));
+        EndProcessNow(1);
+    }).detach();
+    LOG_ERROR(Frontend,
+              "Emulation thread failed to stop after {} ms (shutdown progress {}); saving "
+              "settings and exiting",
+              emu_force_stop_clock.elapsed(), Common::ShutdownProgress());
+    play_time_manager->Stop();
+    UpdateUISettings();
+    game_list->SaveInterfaceLayout();
+    UISettings::SaveWindowState();
+    hotkey_registry.SaveHotkeys();
+    config->SaveAllValues();
+    LOG_INFO(Frontend, "Settings saved; exiting without emulation cleanup");
+    Common::Log::Stop();
+    EndProcessNow(0);
 }
 
 void MainWindow::OnEmulationStopped() {
@@ -2755,7 +2781,7 @@ void MainWindow::ShutdownGame() {
         } while (QtCommon::emu_thread && QtCommon::emu_thread->isRunning() &&
                  EmulationShutdownProgressing());
     }
-    TerminateEmulationThread();
+    ExitIfEmulationThreadStuck();
     OnEmulationStopped();
 }
 
