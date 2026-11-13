@@ -15,6 +15,7 @@ depends=(
   'openssl'
   'qt6-base'
   'qt6-charts'
+  'qt6-svg'
   'sdl3'
   'vulkan-icd-loader'
 )
@@ -30,6 +31,7 @@ makedepends=(
   'opus'
   'qt6-base'
   'qt6-charts'
+  'qt6-svg'
   'spirv-headers'
   'spirv-tools'
   'vulkan-headers'

@@ -1,0 +1,8 @@
+[Icon Theme]
+Name=lichii_modern
+Comment=Lichii Modern
+Inherits=lichii
+Directories=16x16
+
+[16x16]
+Size=16

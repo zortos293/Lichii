@@ -6,15 +6,19 @@
 
 #pragma once
 
+#include <algorithm>
 #include <array>
 #include <map>
 #include <string>
 #include <string_view>
 #include <utility>
 
+#include <QByteArrayView>
+#include <QCache>
 #include <QCoreApplication>
 #include <QFileInfo>
 #include <QImage>
+#include <QMutex>
 #include <QObject>
 #include <QPainter>
 #include <QPainterPath>
@@ -47,7 +51,7 @@ Q_DECLARE_METATYPE(GameListItemType);
  * @return QPixmap default icon
  */
 static bool IsLichiiTheme() {
-    return UISettings::values.theme == "lichii";
+    return UISettings::IsLichiiTheme();
 }
 
 static QPixmap GetDefaultIcon(u32 size) {
@@ -136,6 +140,51 @@ public:
     static constexpr int FullPathRole = SortRole + 2;
     static constexpr int ProgramIdRole = SortRole + 3;
     static constexpr int FileTypeRole = SortRole + 4;
+    static constexpr int HasIconRole = SortRole + 5;
+    static constexpr int CardIconRole = SortRole + 6;
+    /// Play time in seconds (qulonglong).
+    static constexpr int PlayTimeSecondsRole = SortRole + 7;
+    /// Readable play time without a label, or "Never Played".
+    static constexpr int PlayTimeTextRole = SortRole + 8;
+    /// Version of the applied update ("1.4.3"), empty when only the base game is present.
+    static constexpr int UpdateVersionRole = SortRole + 9;
+
+    /// Bounded, shared store for card-sized artwork: decode and scale each game's artwork once
+    /// and keep at most MaxCost bytes resident instead of decoding it into every item.
+    class CardArtCache {
+    public:
+        static QPixmap Lookup(const QString& key) {
+            const QMutexLocker lock{&Mutex()};
+            if (auto* cached = Cache().object(key)) {
+                return *cached;
+            }
+            return {};
+        }
+
+        static void Insert(const QString& key, const QPixmap& pixmap) {
+            if (pixmap.isNull()) {
+                return;
+            }
+            const QMutexLocker lock{&Mutex()};
+            Cache().insert(key, new QPixmap(pixmap),
+                           static_cast<int>(std::min<qint64>(
+                               qint64(pixmap.width()) * pixmap.height() * pixmap.depth() / 8,
+                               MaxCost)));
+        }
+
+    private:
+        static QCache<QString, QPixmap>& Cache() {
+            static QCache<QString, QPixmap> cache{MaxCost};
+            return cache;
+        }
+
+        static QMutex& Mutex() {
+            static QMutex mutex;
+            return mutex;
+        }
+
+        static constexpr int MaxCost = 32 * 1024 * 1024;
+    };
 
     GameListItemPath() = default;
     GameListItemPath(const QString& game_path, const std::vector<u8>& picture_data,
@@ -147,22 +196,30 @@ public:
         setData(qulonglong(program_id), ProgramIdRole);
         setData(game_type, FileTypeRole);
 
+        const QString play_time_text =
+            play_time > 0
+                ? QString::fromStdString(PlayTime::PlayTimeManager::GetReadablePlayTime(play_time))
+                : QObject::tr("Never Played");
         const auto readable_play_time =
-            play_time > 0 ? QObject::tr("Play Time: %1")
-                                .arg(QString::fromStdString(
-                                    PlayTime::PlayTimeManager::GetReadablePlayTime(play_time)))
-                          : QObject::tr("Never Played");
+            play_time > 0 ? QObject::tr("Play Time: %1").arg(play_time_text) : play_time_text;
 
-        const auto enabled_update = [patch_versions]() -> QString {
+        const QString update_version = [&patch_versions]() -> QString {
             const QStringList lines = patch_versions.split(QLatin1Char('\n'));
             const QRegularExpression regex{QStringLiteral(R"(^Update \(([0-9\.]+)\))")};
             for (const QString& line : std::as_const(lines)) {
                 const auto match = regex.match(line);
                 if (match.hasMatch() && match.hasCaptured(1))
-                    return QObject::tr("Version: %1").arg(match.captured(1));
+                    return match.captured(1);
             }
-            return QObject::tr("Version: 1.0.0");
+            return {};
         }();
+        const auto enabled_update =
+            update_version.isEmpty() ? QObject::tr("Version: 1.0.0")
+                                     : QObject::tr("Version: %1").arg(update_version);
+
+        setData(qulonglong(play_time), PlayTimeSecondsRole);
+        setData(play_time_text, PlayTimeTextRole);
+        setData(update_version, UpdateVersionRole);
 
         const auto tooltip = QStringLiteral("%1\n%2").arg(readable_play_time, enabled_update);
 
@@ -171,12 +228,37 @@ public:
         const u32 size = UISettings::CurrentGameIconSize().GetValue();
 
         QPixmap picture;
-        if (!picture.loadFromData(picture_data.data(), static_cast<u32>(picture_data.size()))) {
+        const bool has_icon =
+            picture.loadFromData(picture_data.data(), static_cast<u32>(picture_data.size()));
+        if (!has_icon) {
             picture = GetDefaultIcon(size);
+        }
+        // Decode and scale the card artwork once, then share it through the bounded cache; the
+        // item itself stores a cheap copy-on-write reference.
+        const auto icon_hash = qHash(QByteArrayView{
+            reinterpret_cast<const char*>(picture_data.data()),
+            static_cast<qsizetype>(picture_data.size())});
+        const QString card_cache_key =
+            QStringLiteral("%1|%2|%3")
+                .arg(qulonglong(program_id))
+                .arg(game_path)
+                .arg(static_cast<qulonglong>(icon_hash));
+        QPixmap card_picture = has_icon ? CardArtCache::Lookup(card_cache_key) : QPixmap{};
+        if (has_icon && card_picture.isNull()) {
+            const u32 card_target = std::max<u32>(size, u32{384});
+            if (std::max(picture.width(), picture.height()) > static_cast<int>(card_target)) {
+                card_picture = picture.scaled(card_target, card_target, Qt::KeepAspectRatio,
+                                              Qt::SmoothTransformation);
+            } else {
+                card_picture = picture;
+            }
+            CardArtCache::Insert(card_cache_key, card_picture);
         }
         picture = picture.scaled(size, size, Qt::IgnoreAspectRatio, Qt::SmoothTransformation);
 
         setData(RoundedIcon(picture), Qt::DecorationRole);
+        setData(has_icon, HasIconRole);
+        setData(card_picture, CardIconRole);
     }
 
     int type() const override {

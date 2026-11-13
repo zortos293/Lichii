@@ -8,6 +8,7 @@
 #include <QCheckBox>
 #include <QScreen>
 #include <QScrollArea>
+#include "qt_common/config/uisettings.h"
 #include "lichii/configuration/configuration_shared.h"
 
 namespace ConfigurationShared {
@@ -17,8 +18,8 @@ QIcon PageIcon(const QString& name) {
     if (name.isEmpty()) {
         return icon;
     }
-    const QString normal = QStringLiteral(":/lichii/icons/%1.png").arg(name);
-    const QString active = QStringLiteral(":/lichii/icons/%1_active.png").arg(name);
+    const QString normal = QStringLiteral(":/%1/icons/%2.png").arg(QLatin1String(UISettings::LichiiIconFolder()), name);
+    const QString active = QStringLiteral(":/%1/icons/%2_active.png").arg(QLatin1String(UISettings::LichiiIconFolder()), name);
     icon.addFile(normal, {}, QIcon::Normal, QIcon::Off);
     icon.addFile(active, {}, QIcon::Normal, QIcon::On);
     icon.addFile(active, {}, QIcon::Selected, QIcon::Off);

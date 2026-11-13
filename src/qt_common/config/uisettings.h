@@ -41,6 +41,17 @@ namespace UISettings {
 
 bool IsDarkTheme();
 
+/// Lichii Dark and Lichii Modern, which builds on it, share the Lichii palette and icons.
+/// RIS is a recolored Lichii Dark, so it counts as a Lichii theme too.
+bool IsLichiiTheme();
+
+/// RIS (PantACRO4life): Lichii Dark in the RIS colors, with its own recolored icons.
+bool IsRisTheme();
+
+/// Resource folder of the Lichii style icons for the current theme: "ris" or "lichii".
+/// Paths are ":/<folder>/icons/<name>.png".
+const char* LichiiIconFolder();
+
 struct ContextualShortcut {
     std::string keyseq;
     std::string controller_keyseq;
@@ -62,11 +73,18 @@ enum class Theme {
     MidnightBlue,
     MidnightBlueColorful,
     LichiiDark,
+    LichiiModern,
+    Ris,
+};
+
+enum class GameLibraryStyle : u8 {
+    Classic,
+    Modern,
 };
 
 static constexpr Theme default_theme{Theme::LichiiDark};
 
-using Themes = std::array<std::pair<const char*, const char*>, 7>;
+using Themes = std::array<std::pair<const char*, const char*>, 9>;
 extern const Themes themes;
 
 struct GameDir {
@@ -216,8 +234,21 @@ struct Values {
     Setting<u32, true> folder_icon_size{linkage, 48, 8, 512, "folder_icon_size", Category::UiGameList};
     Setting<u8> row_1_text_id{linkage, 3, "row_1_text_id", Category::UiGameList};
     Setting<u8> row_2_text_id{linkage, 2, "row_2_text_id", Category::UiGameList};
-    Setting<Settings::GameListMode> game_list_mode{linkage, Settings::GameListMode::TreeView, "game_list_mode", Category::UiGameList};
+    Setting<Settings::GameListMode> game_list_mode{linkage, Settings::GameListMode::GridView, "game_list_mode", Category::UiGameList};
+    /// Long game names on the cards: two lines cut with "...", or one line where the selected
+    /// card's name scrolls (View > Game Info > Scroll Long Names).
+    Setting<Settings::GameNameOverflow> game_name_overflow{linkage, Settings::GameNameOverflow::Ellipsis, "game_name_overflow", Category::UiGameList};
+    Setting<u8> game_library_style{linkage, static_cast<u8>(GameLibraryStyle::Modern),
+                                   "game_library_style", Category::UiGameList};
+    Setting<bool> has_selected_game_library_style{linkage, false,
+                                                  "has_selected_game_library_style",
+                                                  Category::UiGameList};
     Setting<bool> show_game_name{linkage, true, "show_game_name", Category::UiGameList};
+    /// Id of the library style (lichii/game/styles) shown in place of the Modern grid; empty keeps
+    /// the Modern grid. Only used while game_list_mode is the grid view.
+    Setting<std::string> library_layout{linkage, {}, "library_layout", Category::UiGameList};
+    /// Info panel of the library styles (play time, update version).
+    Setting<bool> show_library_info{linkage, true, "show_library_info", Category::UiGameList};
 
     std::atomic_bool is_game_list_reload_pending{false};
     Setting<bool> cache_game_list{linkage, true, "cache_game_list", Category::UiGameList};

@@ -65,8 +65,6 @@ public:
 
     QFileSystemWatcher* GetWatcher() const;
 
-    void SetFlat(bool flat);
-
 signals:
     void ShowList(bool show);
     void PopulatingCompleted(const QStringList& watch_list);
@@ -81,7 +79,6 @@ private:
     void Repopulate();
     void StopWorker();
 
-    bool m_flat = false;
     bool scan_enabled = true;
 
     std::shared_ptr<FileSys::VfsFilesystem> vfs;

@@ -12,7 +12,7 @@ if (LICHII_USE_BUNDLED_QT AND LINUX)
     set(CMAKE_BUILD_RPATH "${CMAKE_BINARY_DIR}/bin/lib/")
 endif()
 
-find_package(Qt6 REQUIRED COMPONENTS Widgets)
+find_package(Qt6 REQUIRED COMPONENTS Svg Widgets)
 
 if(LICHII_TESTS)
     add_subdirectory(../tests/qt_compatibility ${CMAKE_BINARY_DIR}/qt_compatibility_tests)
@@ -176,6 +176,9 @@ add_executable(lichii
     hotkeys.h
     install_dialog.cpp
     install_dialog.h
+    classic_loading_screen.cpp
+    classic_loading_screen.h
+    classic_loading_screen.ui
     loading_screen.cpp
     loading_screen.h
     loading_screen.ui
@@ -256,6 +259,27 @@ add_executable(lichii
     updater/update_dialog.h updater/update_dialog.cpp updater/update_dialog.ui
     game/common.h
     game/carousel.h game/carousel.cpp
+)
+
+# Library styles (alternative game library layouts). The framework files come first; then one line
+# per style, sorted by style id. A new style adds its own line in sorted order and nothing else.
+target_sources(lichii PRIVATE
+    game/styles/library_style_filter.cpp game/styles/library_style_filter.h
+    game/styles/library_style_registry.h
+    game/styles/library_style_view.cpp game/styles/library_style_view.h
+    game/styles/style_helpers.cpp game/styles/style_helpers.h
+
+    # --- styles: begin (sorted by id, one line each) ---
+    game/styles/box_shelf_style.cpp game/styles/box_shelf_style.h
+    game/styles/canvas_style.cpp game/styles/canvas_style.h
+    game/styles/carousel_style.cpp game/styles/carousel_style.h
+    game/styles/cartridges_style.cpp game/styles/cartridges_style.h
+    game/styles/channel_grid_style.cpp game/styles/channel_grid_style.h
+    game/styles/dense_grid_style.cpp game/styles/dense_grid_style.h
+    game/styles/dual_pane_style.cpp game/styles/dual_pane_style.h
+    game/styles/home_row_style.cpp game/styles/home_row_style.h
+    game/styles/ris_style.cpp game/styles/ris_style.h
+    # --- styles: end ---
 )
 
 set_target_properties(lichii PROPERTIES OUTPUT_NAME "lichii")
@@ -426,7 +450,7 @@ endif()
 
 target_link_libraries(lichii PRIVATE nlohmann_json::nlohmann_json)
 target_link_libraries(lichii PRIVATE common core input_common frontend_common network video_core qt_common)
-target_link_libraries(lichii PRIVATE Boost::headers Qt6::Widgets Qt6::Concurrent Qt6::Network)
+target_link_libraries(lichii PRIVATE Boost::headers Qt6::Svg Qt6::Widgets Qt6::Concurrent Qt6::Network)
 # Unpacks NVIDIA's files from the Streamline release (nvidia_dlss_panel.cpp).
 target_link_libraries(lichii PRIVATE ZLIB::ZLIB)
 if (WIN32)

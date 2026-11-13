@@ -1,0 +1,8 @@
+[Icon Theme]
+Name=ris
+Comment=RIS (PantACRO4life)
+Inherits=lichii
+Directories=16x16
+
+[16x16]
+Size=16

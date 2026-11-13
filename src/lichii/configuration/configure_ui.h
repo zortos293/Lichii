@@ -32,6 +32,7 @@ private slots:
 
 signals:
     void LanguageChanged(const QString& locale);
+    void GameLibraryStyleChanged(bool modern);
 
 private:
     void RequestGameListUpdate();
