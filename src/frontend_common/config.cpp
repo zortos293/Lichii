@@ -5,6 +5,8 @@
 
 #include <algorithm>
 #include <array>
+#include <cerrno>
+#include <cstdio>
 #include <filesystem>
 #include "common/fs/fs.h"
 #include "common/fs/path_util.h"
@@ -16,7 +18,10 @@
 #include "frontend_common/profile_import.h"
 
 #ifdef _WIN32
+#include <io.h>
 #include "common/string_util.h"
+#else
+#include <unistd.h>
 #endif
 
 #include <boost/algorithm/string/replace.hpp>
@@ -78,24 +83,60 @@ void Config::WriteToIni() const {
         break;
     }
     LOG_INFO(Config, "Writing {} configuration to: {}", config_type, config_loc);
-    FILE* fp = nullptr;
-#ifdef _WIN32
-    fp = _wfopen(Common::UTF8ToUTF16W(config_loc).data(), L"wb");
-#else
-    fp = fopen(config_loc.c_str(), "wb");
-#endif
 
+    // The config is written to a temporary file beside it, which replaces it only after a complete
+    // write: a process that ends during the save keeps the old config. A config behind a symlink
+    // is written at the link's target, and a config that exists but can't be written is kept.
+    std::error_code error;
+    std::filesystem::path target{FS::ToU8String(config_loc)};
+    for (int links = 0; links < 40 && std::filesystem::is_symlink(target, error); ++links) {
+        const std::filesystem::path link = std::filesystem::read_symlink(target, error);
+        if (error) {
+            break;
+        }
+        target = link.is_absolute() ? link : target.parent_path() / link;
+    }
+#ifdef _WIN32
+    const bool writable = _waccess(target.c_str(), 2) == 0;
+#else
+    const bool writable = access(target.c_str(), W_OK) == 0;
+#endif
+    if (!writable && errno != ENOENT) {
+        LOG_ERROR(Frontend, "Config file could not be saved: it can't be written");
+        return;
+    }
+    std::filesystem::path temporary = target;
+    temporary += ".tmp";
+
+#ifdef _WIN32
+    FILE* const fp = _wfopen(temporary.c_str(), L"wb");
+#else
+    FILE* const fp = std::fopen(temporary.c_str(), "wb");
+#endif
     if (fp == nullptr) {
         LOG_ERROR(Frontend, "Config file could not be saved!");
         return;
     }
 
     CSimpleIniA::FileWriter writer(fp);
-    const SI_Error rc = config->Save(writer, false);
-    if (rc < 0) {
+    // FileWriter ignores fputs errors, so the stream's error flag is checked too
+    const bool written = config->Save(writer, false) >= 0 && !std::ferror(fp);
+    const bool closed = std::fclose(fp) == 0;
+    if (!written || !closed) {
         LOG_ERROR(Frontend, "Config file could not be saved!");
+        std::filesystem::remove(temporary, error);
+        return;
     }
-    fclose(fp);
+    const auto status = std::filesystem::status(target, error);
+    if (!error && std::filesystem::exists(status)) {
+        std::filesystem::permissions(temporary, status.permissions(), error);
+    }
+    // Replaces the target if it exists (MoveFileExW with MOVEFILE_REPLACE_EXISTING on Windows)
+    std::filesystem::rename(temporary, target, error);
+    if (error) {
+        LOG_ERROR(Frontend, "Config file could not be saved: {}", error.message());
+        std::filesystem::remove(temporary, error);
+    }
 }
 
 void Config::SetUpIni() {
