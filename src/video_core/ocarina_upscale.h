@@ -27,6 +27,18 @@ constexpr OcarinaUpscaleBackend SelectOcarinaUpscaler(bool fsr_enabled, bool dls
                                         : OcarinaUpscaleBackend::Native;
 }
 
+constexpr const char* OcarinaBackendName(OcarinaUpscaleBackend backend) {
+    switch (backend) {
+    case OcarinaUpscaleBackend::Native:
+        return "the game's upscale";
+    case OcarinaUpscaleBackend::Fsr:
+        return "FSR";
+    case OcarinaUpscaleBackend::Dlss:
+        return "NVIDIA DLSS";
+    }
+    return "";
+}
+
 /// Texture LOD bias added to Ocarina's mipmapped samplers while FSR upscales. AMD recommends
 /// log2(render / output) - 1: -1.58 for docked 1440p -> 4K.
 constexpr float OcarinaFsrLodBias(OcarinaUpscaleBackend backend) {

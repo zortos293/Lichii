@@ -5310,6 +5310,22 @@ void MainWindow::UpdateStatusBar() {
 
     const auto dlss = QtCommon::system->GPU().Renderer().GetDlssStatus();
     dlss_status_text.clear();
+    // Once DLSS ran, say in the log when an update finds no new evaluation and the status hides it.
+    if (dlss.evaluations != 0) {
+        const auto now = std::chrono::steady_clock::now();
+        if (dlss.evaluations == dlss_evaluations) {
+            if (const auto start =
+                    dlss_status_log.Fallback(dlss.evaluations, now, "no evaluation")) {
+                LOG_INFO(Frontend,
+                         "NVIDIA DLSS: no evaluation since the last status update, the status "
+                         "hides it ({} more stretches since the last line)",
+                         start->unlogged);
+            }
+        } else if (const auto end = dlss_status_log.Replaced(dlss.evaluations, now)) {
+            LOG_INFO(Frontend, "NVIDIA DLSS evaluates again, after {:.1f} s without an evaluation",
+                     end->seconds);
+        }
+    }
     if (dlss.evaluations > dlss_evaluations) {
         const auto mode_text = [this](Settings::NvidiaDlssQuality mode) {
             return ConfigurationShared::TranslateMapText(

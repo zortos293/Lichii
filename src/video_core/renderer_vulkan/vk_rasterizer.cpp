@@ -3323,12 +3323,22 @@ void RasterizerVulkan::TrackOcarinaCamera() {
         return;
     }
 
+    const auto miss = [this](u32 rank, const char* reason, std::array<f32, 4> values) {
+        if (oot_camera_miss.frame != render_trace_frame || rank >= oot_camera_miss.rank) {
+            oot_camera_miss = {render_trace_frame, rank, reason, values};
+        }
+    };
+    bool camera_bound = false;
     buffer_cache.ForEachBoundBuffer(false, [&](u32 stage, bool storage, u32 index, bool,
                                                 const auto& binding, u32 bound_size,
                                                 const auto*, u32) {
         std::array<f32, 0x230 / sizeof(f32)> camera;
-        if (stage != 0 || storage || index != 3 || bound_size < sizeof(camera) ||
-            buffer_cache.IsRegionGpuModified(binding.device_addr, sizeof(camera))) {
+        if (stage != 0 || storage || index != 3 || bound_size < sizeof(camera)) {
+            return;
+        }
+        camera_bound = true;
+        if (buffer_cache.IsRegionGpuModified(binding.device_addr, sizeof(camera))) {
+            miss(2, "no scene camera this frame: the camera buffer is GPU-written", {});
             return;
         }
         device_memory.ReadBlockUnsafe(binding.device_addr, camera.data(), sizeof(camera));
@@ -3336,10 +3346,13 @@ void RasterizerVulkan::TrackOcarinaCamera() {
         constexpr size_t projection_wz = 0xa8 / sizeof(f32);
         const f32 scene_width = camera[extent_offset];
         const f32 scene_height = camera[extent_offset + 1];
-        if (camera[projection_wz] != -1.0f || camera[projection_wz + 1] != 0.0f ||
-            !(scene_width >= 640.0f) || !(scene_height >= 360.0f) ||
+        const std::array<f32, 4> extents{scene_width, scene_height,
+                                         static_cast<f32>(color.size.width),
+                                         static_cast<f32>(color.size.height)};
+        if (!(scene_width >= 640.0f) || !(scene_height >= 360.0f) ||
             scene_width > static_cast<f32>(color.size.width) ||
             scene_height > static_cast<f32>(color.size.height)) {
+            miss(3, "no scene camera this frame: the camera's extent isn't the target's", extents);
             return;
         }
         // The camera's extent is the scene's. The images are that size, or up to 15 pixels
@@ -3351,6 +3364,12 @@ void RasterizerVulkan::TrackOcarinaCamera() {
             static_cast<f32>(scene.height) != scene_height ||
             color.size.width - scene.width >= 16 || color.size.height - scene.height >= 16 ||
             (padded && oot_backend != VideoCommon::OcarinaUpscaleBackend::Dlss)) {
+            miss(3, "no scene camera this frame: the camera's extent isn't the target's", extents);
+            return;
+        }
+        if (camera[projection_wz] != -1.0f || camera[projection_wz + 1] != 0.0f) {
+            miss(4, "no scene camera this frame: not a perspective projection",
+                 {camera[projection_wz], camera[projection_wz + 1]});
             return;
         }
         const std::span values{camera};
@@ -3361,6 +3380,9 @@ void RasterizerVulkan::TrackOcarinaCamera() {
         std::copy_n(values.begin() + 0x30 / sizeof(f32), 16, oot_motion.current.begin());
         std::copy_n(values.begin() + 0x180 / sizeof(f32), 16, oot_motion.previous.begin());
     });
+    if (!camera_bound) {
+        miss(1, "no scene camera this frame: no camera buffer bound", {});
+    }
 }
 
 namespace {
@@ -3545,20 +3567,33 @@ bool RasterizerVulkan::TryOcarinaUpscale(const ComputePipeline& pipeline, bool r
         }
         return false;
     }
-    // Logs why the game's own upscale draws, when the reason changes and every 120th repeat.
-    const auto fail = [this](const char* reason) {
-        if (reason != oot_fallback_reason || ++oot_fallback_repeats % 120 == 0) {
-            LOG_INFO(Render_Vulkan, "Ocarina temporal: the game's upscale draws frame {} ({})",
-                     render_trace_frame, reason);
-        }
-        if (reason != oot_fallback_reason) {
-            oot_fallback_reason = reason;
-            oot_fallback_repeats = 0;
+    // Logs why the game's own upscale draws (VideoCommon::UpscalerFallbackLog).
+    const auto fail = [this](const char* reason, std::string detail = {}) {
+        if (const auto start = oot_fallback_log.Fallback(render_trace_frame,
+                                                         std::chrono::steady_clock::now(), reason)) {
+            LOG_INFO(Render_Vulkan,
+                     "Ocarina temporal: the game's upscale draws from frame {} ({}{}){}",
+                     start->frame, reason, detail,
+                     start->unlogged == 0
+                         ? std::string{}
+                         : fmt::format(", {} more stretches since the last line", start->unlogged));
         }
         return false;
     };
     if (oot_camera_sample_frame != render_trace_frame) {
-        return fail("no scene camera this frame");
+        const auto& miss = oot_camera_miss;
+        if (miss.frame != render_trace_frame) {
+            return fail("no scene camera this frame: no scene-sized B10G11R11 draw with depth");
+        }
+        switch (miss.rank) {
+        case 3:
+            return fail(miss.reason, fmt::format(", {}x{} for a {}x{} target", miss.values[0],
+                                                 miss.values[1], miss.values[2], miss.values[3]));
+        case 4:
+            return fail(miss.reason, fmt::format(", ({}, {})", miss.values[0], miss.values[1]));
+        default:
+            return fail(miss.reason);
+        }
     }
     if (oot_motion.depth_frame != render_trace_frame) {
         return fail("no scene depth this frame");
@@ -3676,7 +3711,14 @@ bool RasterizerVulkan::TryOcarinaUpscale(const ComputePipeline& pipeline, bool r
         // and 8 for native AA.
         const f32 ratio = static_cast<f32>(output_extent.width) / static_cast<f32>(extent.width);
         oot_jitter_phases = std::max(1U, static_cast<u32>(8.0f * ratio * ratio));
-        oot_fallback_reason = nullptr;
+        if (const auto end =
+                oot_fallback_log.Replaced(render_trace_frame, std::chrono::steady_clock::now())) {
+            LOG_INFO(Render_Vulkan,
+                     "Ocarina temporal: {} replaces the game's upscale again from frame {}, after "
+                     "{} frames ({:.1f} s)",
+                     VideoCommon::OcarinaBackendName(*oot_backend), render_trace_frame, end->frames,
+                     end->seconds);
+        }
         return true;
     } catch (const vk::Exception& error) {
         LOG_WARNING(Render_Vulkan, "Ocarina temporal upscaling unavailable: {}", error.what());
@@ -4096,23 +4138,52 @@ std::optional<FramebufferTextureInfo> RasterizerVulkan::AccelerateDisplay(
     info.scaled_width = scaled ? resolution.ScaleUp(info.width) : info.width;
     info.scaled_height = scaled ? resolution.ScaleUp(info.height) : info.height;
     info.anti_aliased = oot_dlss_frame == render_trace_frame && !oot_live_dlss->EvaluationFailed();
-    if (oot_4k_scene_frame == render_trace_frame && info.image &&
-        info.image == oot_4k_guest_present && info.image_view &&
-        info.width == 2560 && info.height == 1440 && !scaled &&
-        image_view->format == VideoCore::Surface::PixelFormat::A8B8G8R8_UNORM &&
-        !oot_live_dlss->EvaluationFailed() && !frame_dump.Capturing()) {
-        try {
-            oot_live_dlss->Composite4k(info.image_view, render_trace_frame);
-            info.image = oot_live_dlss->CompositedImage();
-            info.image_view = oot_live_dlss->CompositedView();
-            info.scaled_width = 3840;
-            info.scaled_height = 2160;
-            info.already_upscaled = true;
-        } catch (const vk::Exception& error) {
-            LOG_WARNING(Render_Vulkan, "Ocarina temporal 4K presentation unavailable: {}", error.what());
-            oot_live_failed = true;
-            texture_cache_runtime.ocarina_fsr_failed = true; // samplers drop the FSR LOD bias
+    if (!oot_4k_scene_frame || oot_live_failed || oot_live_dlss->EvaluationFailed()) {
+        return info;
+    }
+    // Why this frame shows the game's 1440p image instead of the 4K one, for the log.
+    const char* const miss =
+        *oot_4k_scene_frame != render_trace_frame ? "the 4K scene is from another frame"
+        : !info.image || info.image != oot_4k_guest_present || !info.image_view
+            ? "not the game's final image"
+        : info.width != 2560 || info.height != 1440 || scaled ||
+                image_view->format != VideoCore::Surface::PixelFormat::A8B8G8R8_UNORM
+            ? "unexpected presented image"
+        : frame_dump.Capturing() ? "frame dump"
+                                 : nullptr;
+    const auto now = std::chrono::steady_clock::now();
+    if (miss) {
+        if (const auto start = oot_4k_present_log.Fallback(render_trace_frame, now, miss)) {
+            LOG_INFO(Render_Vulkan,
+                     "Ocarina temporal: from frame {} the game's 1440p image is presented, not the "
+                     "4K {} image ({}; 4K scene frame {}){}",
+                     start->frame, VideoCommon::OcarinaBackendName(*oot_backend), miss,
+                     *oot_4k_scene_frame,
+                     start->unlogged == 0
+                         ? std::string{}
+                         : fmt::format(", {} more stretches since the last line", start->unlogged));
         }
+        return info;
+    }
+    try {
+        oot_live_dlss->Composite4k(info.image_view, render_trace_frame);
+        info.image = oot_live_dlss->CompositedImage();
+        info.image_view = oot_live_dlss->CompositedView();
+        info.scaled_width = 3840;
+        info.scaled_height = 2160;
+        info.already_upscaled = true;
+    } catch (const vk::Exception& error) {
+        LOG_WARNING(Render_Vulkan, "Ocarina temporal 4K presentation unavailable: {}", error.what());
+        oot_live_failed = true;
+        texture_cache_runtime.ocarina_fsr_failed = true; // samplers drop the FSR LOD bias
+        return info;
+    }
+    if (const auto end = oot_4k_present_log.Replaced(render_trace_frame, now)) {
+        LOG_INFO(Render_Vulkan,
+                 "Ocarina temporal: the 4K {} image is presented again from frame {}, after {} "
+                 "frames ({:.1f} s)",
+                 VideoCommon::OcarinaBackendName(*oot_backend), render_trace_frame, end->frames,
+                 end->seconds);
     }
     return info;
 }

@@ -28,6 +28,7 @@
 #include "qt_common/config/qt_config.h"
 #include "qt_common/qt_common.h"
 #include "qt_common/util/game.h"
+#include "video_core/upscaler_fallback_log.h"
 #include "lichii/compatibility_report.h"
 #include "lichii/hotkeys.h"
 #include "lichii/user_data_migration.h"
@@ -578,6 +579,7 @@ private:
     u64 frame_gen_frames = 0;
     u64 dlss_evaluations = 0;
     QString dlss_status_text;
+    VideoCommon::UpscalerFallbackLog dlss_status_log;
     bool frame_gen_generating = false;
     double frame_gen_fps = 0.0;
     QElapsedTimer frame_gen_fps_timer;

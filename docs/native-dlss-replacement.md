@@ -126,8 +126,15 @@ the game keeps its own pass whenever DLSS is off, unavailable or fails to start.
   and the Max Resolution 1440p-to-4K presentation composition are shared with #606.
 - FXAA and SMAA are skipped on frames either temporal backend drew.
 - Any unexpected input, a busy frame slot, a rescaled image (resolution scale other than 1x) or
-  a failed evaluation leaves the game's pass to run. The log names the reason as
-  `Ocarina temporal: the game's upscale draws frame N (reason)`.
+  a failed evaluation leaves the game's pass to run. The log names the reason when such a
+  stretch of frames starts, as `Ocarina temporal: the game's upscale draws from frame N (reason)`;
+  "no scene camera this frame" says which camera check failed. When the replacement draws
+  again it logs `Ocarina temporal: <backend> replaces the game's upscale again from frame N,
+  after M frames (S s)`. Frames that present the game's 1440p image instead of the 4K one log
+  `the game's 1440p image is presented, not the 4K ... image (reason)` and a matching `presented
+  again` line, and the status bar logs when it hides the DLSS mode for lack of a new
+  evaluation. Each of these logs at most one line a second: a stretch that starts sooner is logged from
+  its first frame once a second has passed, and shorter ones are counted in the next line.
   `EDEN_NX2_DLSS_CONTRACT_TRACE=1` logs every FSR evaluation and scheduler writeback;
   otherwise periodic evaluation/writeback messages avoid a per-frame logging cost.
 
