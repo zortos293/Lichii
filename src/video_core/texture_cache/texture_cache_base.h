@@ -354,6 +354,10 @@ public:
         return render_targets;
     }
 
+    [[nodiscard]] Runtime& GetRuntime() noexcept {
+        return runtime;
+    }
+
     /// Images created, deleted and created from overlapping ones (joins), invalidations of every
     /// channel's TIC tables, and TIC or TSC tables moved, since the last call.
     struct Churn {
