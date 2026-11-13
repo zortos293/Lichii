@@ -99,8 +99,9 @@ struct DriverStamp {
 };
 
 /// The title's list of cached graphics pipelines an earlier precache built
-/// (<shader dir>/<title id>/precache-graphics.bin).
-std::filesystem::path PrecachedPipelinesPath(u64 title_id);
+/// (<shader dir>/<title id>/precache-graphics.bin). Builds with shader libraries emit other
+/// SPIR-V, so they keep their own list (precache-graphics-libraries.bin).
+std::filesystem::path PrecachedPipelinesPath(u64 title_id, bool libraries);
 
 /// The pipeline key hashes in `file`, empty when there is none or it was written for another
 /// driver, device or cache version.

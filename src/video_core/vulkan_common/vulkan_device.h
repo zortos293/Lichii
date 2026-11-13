@@ -396,6 +396,15 @@ public:
                id != VK_DRIVER_ID_MESA_RADV;
     }
 
+    /// Whether pipelines linked from graphics pipeline libraries without link time optimization
+    /// draw correctly. On AMD's Windows driver such links draw white fringes around alpha blended
+    /// effects (clouds, particles and glows in a test title, RX 7800 XT), while optimized links
+    /// and monolithic pipelines from the same SPIR-V do not, so libraries are linked optimized
+    /// there. Every other driver links fast.
+    bool CanFastLinkGraphicsLibraries() const {
+        return GetDriverID() != VK_DRIVER_ID_AMD_PROPRIETARY;
+    }
+
     /// Whether a pipeline cache can be read while pipelines build into it, as Vulkan allows. Intel's
     /// Windows driver crashes in vkGetPipelineCacheData when a build is running.
     bool CanReadPipelineCacheDuringBuilds() const {
@@ -732,6 +741,13 @@ FN_MAX_LIMIT_LIST
     /// Returns the largest patch size (control points, and TCS output vertices) a pipeline allows.
     u32 GetMaxTessellationPatchSize() const {
         return properties.properties.limits.maxTessellationPatchSize;
+    }
+
+    /// Graphics pipelines are linked from per-stage libraries: the use_graphics_pipeline_library
+    /// setting is on and the device has VK_EXT_graphics_pipeline_library
+    /// with fast linking.
+    bool IsExtGraphicsPipelineLibrarySupported() const {
+        return graphics_pipeline_library_enabled;
     }
 
     /// Returns true if the device supports task and mesh shaders (VK_EXT_mesh_shader).
@@ -1377,6 +1393,7 @@ private:
         VkPhysicalDeviceSubgroupSizeControlProperties subgroup_size_control{};
         VkPhysicalDeviceTransformFeedbackPropertiesEXT transform_feedback{};
         VkPhysicalDeviceMaintenance5PropertiesKHR maintenance5{};
+        VkPhysicalDeviceGraphicsPipelineLibraryPropertiesEXT graphics_pipeline_library{};
         VkPhysicalDevicePipelineBinaryPropertiesKHR pipeline_binary{};
         VkPhysicalDeviceDepthStencilResolveProperties depth_stencil_resolve{};
         VkPhysicalDeviceCustomBorderColorPropertiesEXT custom_border_color{};
@@ -1389,6 +1406,12 @@ private:
     Extensions extensions{};
     Features features{};
     Properties properties{};
+
+    /// Shader libraries setting: kept out of the extension tables so a run without the setting
+    /// creates the device exactly as before.
+    bool graphics_pipeline_library_requested{};
+    VkPhysicalDeviceGraphicsPipelineLibraryFeaturesEXT graphics_pipeline_library_features{};
+    bool graphics_pipeline_library_enabled{};
 
     VkPhysicalDeviceFeatures2 features2{};
     VkPhysicalDeviceFaultFeaturesEXT device_fault_features{};
