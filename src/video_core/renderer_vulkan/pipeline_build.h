@@ -66,6 +66,23 @@ private:
     std::atomic_bool logged{};
 };
 
+// Shader cache v2: bytes a graphics driver compile is taken to hold for the scheduler's budget.
+// EGLA-80 measured ~100 MiB of commit per compile in flight (24 at once held ~2.5 GB more than
+// idle).
+inline constexpr u64 DriverCompileBytes = u64{96} << 20;
+
+// A native task/mesh pipeline takes several GB in the driver's compiler and 150-180 s on Mesa's
+// Intel driver (ANV 26.2, Arc B580): after a SPIR-V change Ocarina of Time's ~40 cached ones were
+// built at once, up to 25 in flight, and the process passed 77 GB. With this estimate the budget
+// holds Soon and Background builds of them back to a few at a time.
+inline constexpr u64 NativeMeshDriverCompileBytes = u64{3} << 30;
+
+/// The driver stage's estimate for a graphics pipeline. A mesh pipeline emulated through compute
+/// is an ordinary compile.
+constexpr u64 GraphicsDriverBytes(bool native_mesh) {
+    return native_mesh ? NativeMeshDriverCompileBytes : DriverCompileBytes;
+}
+
 /// Where a pipeline is built. Without jobs it is built in its constructor.
 struct PipelineBuildQueue {
     /// A Soon job of this scheduler, whose CPU stage is the pipeline's deferred SPIR-V emission if

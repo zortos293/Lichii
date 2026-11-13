@@ -28,7 +28,8 @@ class ScheduledPrebuild {
 
 public:
     /// Translates a pipeline on a CPU worker, unbuilt (null when it doesn't translate). Its
-    /// Build() runs on a driver worker, and it is dropped when it Failed().
+    /// Build() runs on a driver worker, and it is dropped when it Failed(). Its
+    /// DriverBuildBytes() is what the driver stage holds for the budget.
     using Translate = Common::UniqueFunction<std::unique_ptr<Pipeline>>;
 
     ScheduledPrebuild(VideoCommon::ShaderJobScheduler& jobs_, u64 capture_limit_)
@@ -71,6 +72,7 @@ public:
                     if (!pipeline) {
                         return {};
                     }
+                    context.SetDriverBytes(pipeline->DriverBuildBytes());
                     return [this, entry, pipeline = std::move(pipeline)]() mutable {
                         pipeline->Build();
                         if (pipeline->Failed()) {

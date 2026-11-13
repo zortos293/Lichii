@@ -203,7 +203,8 @@ private:
 
     /// Where CreateGraphicsPipeline and CreateComputePipeline build; `cpu_bytes` estimates the
     /// IR a deferred emission holds
-    [[nodiscard]] PipelineBuildQueue BuildQueue(bool build_in_parallel, u64 cpu_bytes = 0);
+    [[nodiscard]] PipelineBuildQueue BuildQueue(bool build_in_parallel, u64 cpu_bytes = 0,
+                                                bool native_mesh = false);
 
     /// Whether the device can build a cached graphics pipeline of this key: its dynamic state
     /// and provoking vertex must match the device's
@@ -247,7 +248,8 @@ private:
         u64 graphics_hash{}; ///< The cached graphics pipeline it builds, 0 for a compute program
         /// Translates the pipeline and returns its build, which is true when it built (the job's
         /// CPU and driver stages)
-        Common::UniqueFunction<Common::UniqueFunction<bool>> translate;
+        Common::UniqueFunction<Common::UniqueFunction<bool>, VideoCommon::ShaderJobContext&>
+            translate;
         u64 cpu_bytes{};
     };
 

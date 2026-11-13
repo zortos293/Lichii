@@ -197,6 +197,11 @@ public:
         return mesh_emulation.has_value();
     }
 
+    /// What its driver compile is taken to hold for the shader job budget.
+    [[nodiscard]] u64 DriverBuildBytes() const noexcept {
+        return GraphicsDriverBytes(IsMeshPipeline() && !IsEmulatedMesh());
+    }
+
     /// Output bytes the emulation needs for one mesh workgroup.
     [[nodiscard]] u64 MeshEmulationBlockBytes() const noexcept {
         return mesh_emulation ? u64{mesh_emulation->block_words} * 4 : 0;

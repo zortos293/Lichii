@@ -739,6 +739,9 @@ struct TestPipeline {
     bool Failed() const {
         return fails;
     }
+    u64 DriverBuildBytes() const {
+        return 0;
+    }
 
     std::atomic<int>& builds;
     bool fails;
@@ -871,4 +874,112 @@ TEST_CASE("A pipeline build job is dropped while queued and run by a waiting dra
     owned.Build();
     REQUIRE(owned.IsBuilt());
     REQUIRE(builds == 3);
+}
+
+namespace {
+/// A pipeline whose driver compile holds `bytes` for the budget, counting the compiles in flight.
+struct HeavyPipeline {
+    struct Counters {
+        std::atomic<int> active{};
+        std::atomic<int> peak{};
+        std::atomic<int> built{};
+    };
+
+    HeavyPipeline(Counters& counters_, u64 bytes_, Gate* gate_ = nullptr)
+        : counters{counters_}, bytes{bytes_}, gate{gate_} {}
+
+    void Build() {
+        const int now = ++counters.active;
+        int peak = counters.peak.load();
+        while (now > peak && !counters.peak.compare_exchange_weak(peak, now)) {
+        }
+        if (gate) {
+            gate->Wait();
+        } else {
+            std::this_thread::sleep_for(20ms);
+        }
+        --counters.active;
+        ++counters.built;
+    }
+    bool Failed() const {
+        return false;
+    }
+    u64 DriverBuildBytes() const {
+        return bytes;
+    }
+
+    Counters& counters;
+    u64 bytes;
+    Gate* gate;
+};
+using HeavyPrebuild = Vulkan::ScheduledPrebuild<int, HeavyPipeline>;
+} // namespace
+
+TEST_CASE("Driver bytes of a native task/mesh pipeline are far above an ordinary compile",
+          "[video_core][shader_jobs]") {
+    using Vulkan::GraphicsDriverBytes;
+    REQUIRE(GraphicsDriverBytes(false) == Vulkan::DriverCompileBytes);
+    REQUIRE(GraphicsDriverBytes(true) == Vulkan::NativeMeshDriverCompileBytes);
+    REQUIRE(GraphicsDriverBytes(true) >= u64{3} << 30);
+    REQUIRE(GraphicsDriverBytes(true) >= 32 * GraphicsDriverBytes(false));
+}
+
+TEST_CASE("Background prebuilds hold their driver stages to the budget by the reported bytes",
+          "[video_core][shader_jobs]") {
+    // Four driver workers and an estimate of 1 per driver stage, but each CPU stage reports 80
+    // for a budget of 100: only one driver stage may run at a time.
+    ShaderJobScheduler scheduler{Config(4, 4, 100)};
+    HeavyPipeline::Counters counters;
+    HeavyPrebuild prebuild{scheduler, 1 << 20};
+    for (int key = 0; key < 8; ++key) {
+        REQUIRE(prebuild.Add(
+            key, 1, 0, 1, [&counters] { return std::make_unique<HeavyPipeline>(counters, 80); }));
+    }
+    prebuild.Batch().Wait();
+    REQUIRE(counters.built == 8);
+    REQUIRE(counters.peak == 1);
+}
+
+TEST_CASE("Light driver stages still run side by side", "[video_core][shader_jobs]") {
+    ShaderJobScheduler scheduler{Config(4, 4, 100)};
+    HeavyPipeline::Counters counters;
+    Gate gate;
+    HeavyPrebuild prebuild{scheduler, 1 << 20};
+    for (int key = 0; key < 4; ++key) {
+        REQUIRE(prebuild.Add(key, 1, 0, 1, [&counters, &gate] {
+            return std::make_unique<HeavyPipeline>(counters, 10, &gate);
+        }));
+    }
+    while (counters.active != 4) {
+        std::this_thread::sleep_for(1ms);
+    }
+    gate.Open();
+    prebuild.Batch().Wait();
+    REQUIRE(counters.peak == 4);
+}
+
+TEST_CASE("A draw waiting for a heavy prebuild builds it past the budget",
+          "[video_core][shader_jobs]") {
+    ShaderJobScheduler scheduler{Config(2, 2, 100)};
+    HeavyPipeline::Counters counters;
+    Gate gate;
+    HeavyPrebuild prebuild{scheduler, 1 << 20};
+    REQUIRE(prebuild.Add(0, 1, 0, 1,
+                         [&] { return std::make_unique<HeavyPipeline>(counters, 80, &gate); }));
+    while (counters.active != 1) {
+        std::this_thread::sleep_for(1ms);
+    }
+    // The second one is held back by the first: 80 + 80 > 100.
+    REQUIRE(
+        prebuild.Add(1, 1, 0, 1, [&] { return std::make_unique<HeavyPipeline>(counters, 80); }));
+    std::this_thread::sleep_for(50ms);
+    REQUIRE(counters.active == 1);
+    // A draw needs it now: it builds at once, with the first still running.
+    const auto pipeline = prebuild.Take(1);
+    REQUIRE(pipeline != nullptr);
+    REQUIRE(counters.built == 1);
+    gate.Open();
+    prebuild.Batch().Wait();
+    REQUIRE(counters.built == 2);
+    REQUIRE(counters.peak == 2);
 }
