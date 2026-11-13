@@ -245,6 +245,7 @@ private:
     /// One build of the shader precache: a pipeline built and destroyed
     struct PrecacheJob {
         u64 graphics_hash{}; ///< The cached graphics pipeline it builds, 0 for a compute program
+        u64 journal_id{};    ///< The key's hash, as the driver build journal names the build
         /// Translates the pipeline and returns its build, which is true when it built (the job's
         /// CPU and driver stages)
         Common::UniqueFunction<Common::UniqueFunction<bool>> translate;
@@ -279,6 +280,9 @@ private:
     /// IR of the pipelines whose job emits their SPIR-V
     QueuedIrBudget queued_ir{VideoCommon::DefaultShaderJobBudget()};
     std::optional<ScheduledPrebuild<GraphicsPipelineCacheKey, GraphicsPipeline>> scheduled_prebuild;
+    /// The driver stages of the boot load, the precache and the background prebuild; builds it
+    /// lists a driver crash ended earlier are left out
+    std::optional<DriverBuildJournal> build_journal;
 
     GraphicsPipelineCacheKey graphics_key{};
     GraphicsPipeline* current_pipeline{};

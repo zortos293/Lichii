@@ -3,6 +3,8 @@
 #include <atomic>
 #include <chrono>
 #include <condition_variable>
+#include <filesystem>
+#include <fstream>
 #include <future>
 #include <memory>
 #include <mutex>
@@ -20,6 +22,7 @@
 #include <catch2/catch_test_macros.hpp>
 
 #include "video_core/renderer_vulkan/pipeline_build.h"
+#include "video_core/renderer_vulkan/precache_journal.h"
 #include "video_core/renderer_vulkan/vk_pipeline_cache_prebuild.h"
 #include "video_core/shader_jobs.h"
 
@@ -871,4 +874,57 @@ TEST_CASE("A pipeline build job is dropped while queued and run by a waiting dra
     owned.Build();
     REQUIRE(owned.IsBuilt());
     REQUIRE(builds == 3);
+}
+
+namespace {
+/// The ids the journal's in-flight file holds while a build runs.
+struct JournalProbePipeline {
+    JournalProbePipeline(std::filesystem::path inflight_, std::vector<u64>& seen_)
+        : inflight{std::move(inflight_)}, seen{seen_} {}
+
+    void Build() {
+        std::ifstream in(inflight, std::ios::binary);
+        std::string stamp;
+        std::getline(in, stamp);
+        u64 id{};
+        while (in.read(reinterpret_cast<char*>(&id), sizeof(id))) {
+            if (id != Vulkan::PrecacheJournal::Idle) {
+                seen.push_back(id);
+            }
+        }
+    }
+    bool Failed() const {
+        return false;
+    }
+
+    std::filesystem::path inflight;
+    std::vector<u64>& seen;
+};
+} // namespace
+
+TEST_CASE("A prebuild records its driver stage in the journal",
+          "[video_core][shader_jobs][precache]") {
+    const auto dir = std::filesystem::temp_directory_path() /
+                     ("prebuild-journal-" + std::to_string(std::random_device{}()));
+    std::filesystem::create_directories(dir);
+    const auto base = dir / "driver-builds";
+    std::vector<u64> seen;
+    {
+        ShaderJobScheduler scheduler{Config(1, 1)};
+        Vulkan::DriverBuildJournal journal{base, "driver 1", 2, "pipeline"};
+        Vulkan::ScheduledPrebuild<int, JournalProbePipeline> prebuild{scheduler, 100};
+        REQUIRE(prebuild.Add(
+            1, 1, 0, 0,
+            [&] {
+                return std::make_unique<JournalProbePipeline>(base.string() + ".inflight", seen);
+            },
+            &journal, 4242));
+        prebuild.Batch().Wait();
+    }
+    REQUIRE(seen == std::vector<u64>{4242});
+    // It ended: nothing is left for the next start.
+    Vulkan::DriverBuildJournal next{base, "driver 1", 2, "pipeline"};
+    REQUIRE(next.PoisonedCount() == 0);
+    std::error_code ec;
+    std::filesystem::remove_all(dir, ec);
 }

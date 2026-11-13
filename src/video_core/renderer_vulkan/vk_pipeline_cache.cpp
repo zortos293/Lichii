@@ -44,6 +44,7 @@
 #include "video_core/engines/maxwell_3d.h"
 #include "video_core/gpu_logging/gpu_logging.h"
 #include "video_core/memory_manager.h"
+#include "video_core/nx2_fast_draw.h"
 #include "video_core/nx2_perf.h"
 #include "video_core/nx2_profile.h"
 #include "video_core/nx2_stutter_trace.h"
@@ -56,6 +57,7 @@
 #include "video_core/renderer_vulkan/pipeline_helper.h"
 #include "video_core/renderer_vulkan/pipeline_shader_emission.h"
 #include "video_core/renderer_vulkan/pipeline_statistics.h"
+#include "video_core/renderer_vulkan/precache_journal.h"
 #include "video_core/renderer_vulkan/vertex_repack.h"
 #include "video_core/renderer_vulkan/vk_compute_pipeline.h"
 #include "video_core/renderer_vulkan/vk_cooperative_hmma_test.h"
@@ -70,7 +72,6 @@
 #include "video_core/shader_cache.h"
 #include "video_core/shader_cache_v2/cache_file.h"
 #include "video_core/shader_cache_v2/records.h"
-#include "video_core/nx2_fast_draw.h"
 #include "video_core/shader_environment.h"
 #include "video_core/shader_notify.h"
 #include "video_core/shader_warm/shader_warm_builder.h"
@@ -1185,6 +1186,15 @@ void PipelineCache::LoadDiskResources(u64 title_id, std::stop_token stop_loading
         LOG_WARNING(Common_Filesystem, "Couldn't create {}",
                     Common::FS::PathToUTF8String(boot_marker));
     }
+    // A kill or driver crash in a build of the boot load, precache or prebuild leaves its id in
+    // this file; the id is skipped from the next start on, until the driver changes.
+    // GetTotalPipelineWorkers() covers the driver workers; the rest are threads that run a
+    // promoted job's driver stage.
+    build_journal.emplace(base_dir / "driver-builds",
+                          DriverBuildStamp(device.GetDriverID(), device.GetDriverVersion(),
+                                           device.GetVendorID(), device.GetDeviceID(),
+                                           CACHE_VERSION, CacheV2::FormatVersion),
+                          GetTotalPipelineWorkers() + 4, "pipeline");
     LoadPipelinesV2(title_id, std::move(log_v2), stop_loading, callback, load_begin, precache,
                     std::move(precached_pipelines), build_at_boot);
     if (boot_lock.Held()) {
@@ -1495,6 +1505,9 @@ void PipelineCache::LoadPipelinesV2(u64 title_id,
             ++skipped_pipelines;
             continue;
         }
+        if (build_journal->Skip(hash)) {
+            continue;
+        }
         const bool used = used_pipelines.empty() ? queued_graphics < MaxPipelinesWithoutUsedList
                                                  : used_pipelines.contains(hash);
         const bool spare = !used && build_all && queued_spare < spare_pipelines;
@@ -1512,8 +1525,9 @@ void PipelineCache::LoadPipelinesV2(u64 title_id,
             precache_capture_bytes += bytes;
             precache_graphics.push_back({
                 .graphics_hash = hash,
-                .translate = [this, key = *key, payload = std::move(payload)]()
-                    -> Common::UniqueFunction<bool> {
+                .journal_id = hash,
+                .translate = [this, key = *key,
+                              payload = std::move(payload)]() -> Common::UniqueFunction<bool> {
                     bool incomplete{};
                     auto pipeline = TranslateCachedGraphics(payload, key, nullptr, incomplete);
                     if (!pipeline) {
@@ -1533,6 +1547,9 @@ void PipelineCache::LoadPipelinesV2(u64 title_id,
     }
 
     for (auto& [key, indices] : compute_keys) {
+        if (build_journal->Skip(key.Hash())) {
+            continue;
+        }
         ++state.total;
         u64 bytes = 0;
         for (const size_t index : indices) {
@@ -1590,7 +1607,10 @@ void PipelineCache::LoadPipelinesV2(u64 title_id,
                         return {};
                     }
                     return [this, &state, &built_one, key, entry = std::move(entry)]() mutable {
-                        entry.pipeline->Build();
+                        {
+                            const DriverBuildJournal::Scope recorded{&*build_journal, key.Hash()};
+                            entry.pipeline->Build();
+                        }
                         std::scoped_lock driver_lock{state.mutex};
                         compute_cache.emplace(key, std::move(entry));
                         built_one();
@@ -1632,7 +1652,10 @@ void PipelineCache::LoadPipelinesV2(u64 title_id,
                     }
                     return [this, &state, &built_one, key,
                             pipeline = std::move(pipeline)]() mutable {
-                        pipeline->Build();
+                        {
+                            const DriverBuildJournal::Scope recorded{&*build_journal, key.Hash()};
+                            pipeline->Build();
+                        }
                         std::scoped_lock lock{state.mutex};
                         graphics_cache.emplace(key, std::move(pipeline));
                         built_one();
@@ -1657,7 +1680,8 @@ void PipelineCache::LoadPipelinesV2(u64 title_id,
                     } catch (const std::ios_base::failure&) {
                         return std::unique_ptr<GraphicsPipeline>{};
                     }
-                });
+                },
+                &*build_journal, record.key.Hash());
             deferred_pipelines += added ? 1 : 0;
         }
         prebuild.clear();
@@ -1671,6 +1695,12 @@ void PipelineCache::LoadPipelinesV2(u64 title_id,
         LOG_INFO(Render_Vulkan,
                  "Unused graphics pipelines are destroyed only past {} built{}", kept_pipelines,
                  build_all ? "; all cached ones are built at boot up to that" : "");
+    }
+    if (build_journal->Skipped() != 0) {
+        LOG_INFO(Render_Vulkan,
+                 "Shader cache v2: {} cached pipelines left out of the boot load, precache and "
+                 "prebuild: a driver crash ended an earlier one on them (they build when drawn)",
+                 build_journal->Skipped());
     }
     if (skipped_pipelines != 0) {
         LOG_INFO(Render_Vulkan,
@@ -1805,11 +1835,12 @@ void PipelineCache::PrecacheShaders(u64 title_id, std::vector<PrecacheJob> jobs,
                 file.read(reinterpret_cast<char*>(&key), sizeof(key));
                 ++file_entries;
                 // Programs already in the disk cache were built above; leave them out.
-                if (compute_cache.contains(key)) {
+                if (compute_cache.contains(key) || build_journal->Skip(key.Hash())) {
                     continue;
                 }
                 const u64 cpu_bytes = TranslationBytes(env.MemorySize());
                 jobs.push_back({
+                    .journal_id = key.Hash(),
                     .translate = [this, key,
                                   env = std::move(env)]() mutable -> Common::UniqueFunction<bool> {
                         static const GuessMissing guess{};
@@ -1860,9 +1891,10 @@ void PipelineCache::PrecacheShaders(u64 title_id, std::vector<PrecacheJob> jobs,
                     .priority = VideoCommon::ShaderJobPriority::Background,
                     .cpu_bytes = jobs[index].cpu_bytes,
                     .driver_bytes = DriverCompileBytes,
-                    .cpu = [&built, &done, index, translate = std::move(jobs[index].translate)](
+                    .cpu = [&built, &done, index, id = jobs[index].journal_id, this,
+                            translate = std::move(jobs[index].translate)](
                                VideoCommon::ShaderJobContext& context) mutable
-                    -> VideoCommon::ShaderDriverStage {
+                        -> VideoCommon::ShaderDriverStage {
                         Common::UniqueFunction<bool> build;
                         if (!context.StopRequested()) {
                             try {
@@ -1876,14 +1908,16 @@ void PipelineCache::PrecacheShaders(u64 title_id, std::vector<PrecacheJob> jobs,
                             done.fetch_add(1);
                             return {};
                         }
-                        return [&built, &done, index, build = std::move(build)]() mutable {
-                            try {
-                                built[index] = build();
-                            } catch (const std::exception& e) {
-                                LOG_DEBUG(Render_Vulkan, "Shader precache: {}", e.what());
-                            }
-                            done.fetch_add(1);
-                        };
+                        return
+                            [&built, &done, index, id, this, build = std::move(build)]() mutable {
+                                try {
+                                    const DriverBuildJournal::Scope recorded{&*build_journal, id};
+                                    built[index] = build();
+                                } catch (const std::exception& e) {
+                                    LOG_DEBUG(Render_Vulkan, "Shader precache: {}", e.what());
+                                }
+                                done.fetch_add(1);
+                            };
                     },
                 },
                 &batch);

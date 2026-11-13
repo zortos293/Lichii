@@ -12,6 +12,7 @@
 
 #include "common/unique_function.h"
 #include "video_core/renderer_vulkan/pipeline_build.h"
+#include "video_core/renderer_vulkan/precache_journal.h"
 #include "video_core/shader_jobs.h"
 
 namespace Vulkan {
@@ -42,9 +43,10 @@ public:
     ScheduledPrebuild& operator=(const ScheduledPrebuild&) = delete;
 
     /// Submits the build of a pipeline whose translation holds `capture_bytes` until it runs,
-    /// unless one of its key is queued or the captures queued would pass the limit
+    /// unless one of its key is queued or the captures queued would pass the limit. Its build is
+    /// recorded in `journal` under `journal_id` when there is one.
     bool Add(const Key& key, u64 capture_bytes, u64 cpu_bytes, u64 driver_bytes,
-             Translate translate) {
+             Translate translate, DriverBuildJournal* journal = nullptr, u64 journal_id = 0) {
         std::scoped_lock lock{mutex};
         if (stopped || entries.contains(key) || capture_bytes > capture_limit - captured_bytes) {
             return false;
@@ -56,9 +58,10 @@ public:
                 .priority = VideoCommon::ShaderJobPriority::Background,
                 .cpu_bytes = cpu_bytes,
                 .driver_bytes = driver_bytes,
-                .cpu = [this, entry, capture_bytes, translate = std::move(translate)](
-                           VideoCommon::ShaderJobContext& context) mutable
-                -> VideoCommon::ShaderDriverStage {
+                .cpu = [this, entry, capture_bytes, journal, journal_id,
+                        translate =
+                            std::move(translate)](VideoCommon::ShaderJobContext& context) mutable
+                    -> VideoCommon::ShaderDriverStage {
                     if (context.StopRequested()) {
                         return {};
                     }
@@ -71,8 +74,12 @@ public:
                     if (!pipeline) {
                         return {};
                     }
-                    return [this, entry, pipeline = std::move(pipeline)]() mutable {
-                        pipeline->Build();
+                    return [this, entry, journal, journal_id,
+                            pipeline = std::move(pipeline)]() mutable {
+                        {
+                            const DriverBuildJournal::Scope recorded{journal, journal_id};
+                            pipeline->Build();
+                        }
                         if (pipeline->Failed()) {
                             return;
                         }
