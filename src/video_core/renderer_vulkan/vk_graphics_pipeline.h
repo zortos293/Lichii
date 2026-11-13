@@ -409,7 +409,12 @@ private:
     bool ConfigureDraw(const RescalingPushConstant& rescaling,
                        const RenderAreaPushConstant& render_are);
 
-    void MakePipeline(VkRenderPass render_pass);
+    struct PipelineStates;
+
+    /// The fixed-function create state of the pipeline.
+    void FillStates(PipelineStates& states) const;
+
+    vk::Pipeline MakePipeline(VkRenderPass render_pass);
 
     void Validate();
 

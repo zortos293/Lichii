@@ -655,7 +655,7 @@ GraphicsPipeline::GraphicsPipeline(
             }
             const VkRenderPass render_pass{render_pass_cache.Get(MakeRenderPassKey(key.state, device))};
             Validate();
-            MakePipeline(render_pass);
+            pipeline = MakePipeline(render_pass);
         } catch (const Shader::Exception& exception) {
             LOG_ERROR(Render_Vulkan, "Graphics pipeline {:016x}: {}", key.Hash(), exception.what());
             throw;
@@ -1708,75 +1708,42 @@ bool GraphicsPipeline::ConfigureDraw(const RescalingPushConstant& rescaling,
     return true;
 }
 
-void GraphicsPipeline::MakePipeline(VkRenderPass render_pass) {
-    if (IsMeshPipeline() && !device.IsExtMeshShaderSupported() && !mesh_emulation) {
-        return;
-    }
-    if (mesh_emulation) {
-        // The mesh program (stage 0, or mesh_stage after a task program in stage 0) is built as
-        // a compute shader, and so is the task program; the draw uses the vertex shader that
-        // reads the mesh program's output.
-        // Votes, ballots and shuffles span the guest's 32-thread warp, which a driver may split
-        // in compute shaders too (RDNA runs them wave64).
-        const VkPipelineShaderStageRequiredSubgroupSizeCreateInfoEXT compute_subgroup_size_ci{
-            .sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_REQUIRED_SUBGROUP_SIZE_CREATE_INFO_EXT,
-            .pNext = nullptr,
-            .requiredSubgroupSize = GuestWarpSize,
-        };
-        // Their binaries are stored under the graphics key, one key per program
-        const auto make_compute = [&](VkShaderModule module, VkPipelineLayout layout,
-                                      const Shader::Info* info, u64 program) {
-            const bool uses_warp_ops{info && (info->uses_subgroup_vote ||
-                                              info->uses_subgroup_invocation_id ||
-                                              info->uses_subgroup_shuffles ||
-                                              info->uses_subgroup_mask ||
-                                              info->uses_quad_shuffles || info->uses_fswzadd)};
-            const bool force_warp_size{uses_warp_ops && device.IsExtSubgroupSizeControlSupported() &&
-                                       device.IsGuestWarpSizeSupported(VK_SHADER_STAGE_COMPUTE_BIT)};
-            const VkComputePipelineCreateInfo compute_ci{
-                .sType = VK_STRUCTURE_TYPE_COMPUTE_PIPELINE_CREATE_INFO,
-                .pNext = nullptr,
-                .flags = 0,
-                .stage{
-                    .sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO,
-                    .pNext = force_warp_size ? &compute_subgroup_size_ci : nullptr,
-                    .flags = 0,
-                    .stage = VK_SHADER_STAGE_COMPUTE_BIT,
-                    .module = module,
-                    .pName = "main",
-                    .pSpecializationInfo = nullptr,
-                },
-                .layout = layout,
-                .basePipelineHandle = nullptr,
-                .basePipelineIndex = 0,
-            };
-            return binaries ? binaries->CreateComputePipeline(
-                                  compute_ci, *pipeline_cache,
-                                  GraphicsRecordKey(key) ^ (program * 0x9e3779b97f4a7c15ULL))
-                            : device.GetLogical().CreateComputePipeline(compute_ci,
-                                                                        *pipeline_cache);
-        };
-        mesh_vertex_module = BuildShader(device, mesh_emulation->vertex_spirv);
-        mesh_compute_pipeline = make_compute(*spv_modules[mesh_emulation->mesh_stage],
-                                             *pipeline_layout,
-                                             &stage_infos[mesh_emulation->mesh_stage], 1);
-        if (mesh_emulation->has_task) {
-            task_compute_pipeline =
-                make_compute(*spv_modules[0], *pipeline_layout, &stage_infos[0], 2);
-            distribution_module = BuildShader(device, mesh_emulation->distribution_spirv);
-            distribution_pipeline =
-                make_compute(*distribution_module, *distribution_layout, nullptr, 3);
-        }
-    }
+struct GraphicsPipeline::PipelineStates {
     FixedPipelineState::DynamicState dynamic{};
+    static_vector<VkVertexInputBindingDescription, 32> vertex_bindings;
+    static_vector<VkVertexInputBindingDivisorDescriptionEXT, 32> vertex_binding_divisors;
+    static_vector<VkVertexInputAttributeDescription, 32> vertex_attributes;
+    VkPipelineVertexInputStateCreateInfo vertex_input_ci{};
+    VkPipelineVertexInputDivisorStateCreateInfoEXT input_divisor_ci{};
+    VkPipelineInputAssemblyStateCreateInfo input_assembly_ci{};
+    VkPipelineTessellationStateCreateInfo tessellation_ci{};
+    std::array<VkViewportSwizzleNV, Maxwell::NumViewports> swizzles{};
+    VkPipelineViewportSwizzleStateCreateInfoNV swizzle_ci{};
+    VkPipelineViewportDepthClipControlCreateInfoEXT ndc_info{};
+    VkPipelineViewportStateCreateInfo viewport_ci{};
+    VkPipelineRasterizationStateCreateInfo rasterization_ci{};
+    VkPipelineRasterizationLineStateCreateInfoEXT line_state{};
+    VkPipelineRasterizationConservativeStateCreateInfoEXT conservative_raster{};
+    VkPipelineRasterizationProvokingVertexStateCreateInfoEXT provoking_vertex{};
+    VkPipelineMultisampleStateCreateInfo multisample_ci{};
+    VkPipelineDepthStencilStateCreateInfo depth_stencil_ci{};
+    static_vector<VkPipelineColorBlendAttachmentState, Maxwell::NumRenderTargets> cb_attachments;
+    VkPipelineColorBlendStateCreateInfo color_blend_ci{};
+    static_vector<VkDynamicState, 34> dynamic_states;
+    VkPipelineDynamicStateCreateInfo dynamic_state_ci{};
+    bool is_mesh{};
+};
+
+void GraphicsPipeline::FillStates(PipelineStates& s) const {
+    FixedPipelineState::DynamicState& dynamic = s.dynamic;
     if (!key.state.extended_dynamic_state) {
         dynamic = key.state.dynamic_state;
     } else {
         dynamic.raw1 = key.state.dynamic_state.raw1;
     }
-    static_vector<VkVertexInputBindingDescription, 32> vertex_bindings;
-    static_vector<VkVertexInputBindingDivisorDescriptionEXT, 32> vertex_binding_divisors;
-    static_vector<VkVertexInputAttributeDescription, 32> vertex_attributes;
+    auto& vertex_bindings = s.vertex_bindings;
+    auto& vertex_binding_divisors = s.vertex_binding_divisors;
+    auto& vertex_attributes = s.vertex_attributes;
     if (!key.state.dynamic_vertex_input) {
         const size_t num_vertex_arrays = (std::min)(
             Maxwell::NumVertexArrays, static_cast<size_t>(device.GetMaxVertexInputBindings()));
@@ -1811,7 +1778,7 @@ void GraphicsPipeline::MakePipeline(VkRenderPass render_pass) {
     }
     ASSERT(vertex_attributes.size() <= device.GetMaxVertexInputAttributes());
 
-    VkPipelineVertexInputStateCreateInfo vertex_input_ci{
+    s.vertex_input_ci = {
         .sType = VK_STRUCTURE_TYPE_PIPELINE_VERTEX_INPUT_STATE_CREATE_INFO,
         .pNext = nullptr,
         .flags = 0,
@@ -1820,14 +1787,14 @@ void GraphicsPipeline::MakePipeline(VkRenderPass render_pass) {
         .vertexAttributeDescriptionCount = static_cast<u32>(vertex_attributes.size()),
         .pVertexAttributeDescriptions = vertex_attributes.data(),
     };
-    const VkPipelineVertexInputDivisorStateCreateInfoEXT input_divisor_ci{
+    s.input_divisor_ci = {
         .sType = VK_STRUCTURE_TYPE_PIPELINE_VERTEX_INPUT_DIVISOR_STATE_CREATE_INFO_EXT,
         .pNext = nullptr,
         .vertexBindingDivisorCount = static_cast<u32>(vertex_binding_divisors.size()),
         .pVertexBindingDivisors = vertex_binding_divisors.data(),
     };
     if (!vertex_binding_divisors.empty()) {
-        vertex_input_ci.pNext = &input_divisor_ci;
+        s.vertex_input_ci.pNext = &s.input_divisor_ci;
     }
     const bool has_tess_stages = spv_modules[1] || spv_modules[2];
     auto input_assembly_topology = MaxwellToVK::PrimitiveTopology(device, key.state.topology);
@@ -1845,7 +1812,7 @@ void GraphicsPipeline::MakePipeline(VkRenderPass render_pass) {
             input_assembly_topology = VK_PRIMITIVE_TOPOLOGY_PATCH_LIST;
         }
     }
-    const VkPipelineInputAssemblyStateCreateInfo input_assembly_ci{
+    s.input_assembly_ci = {
         .sType = VK_STRUCTURE_TYPE_PIPELINE_INPUT_ASSEMBLY_STATE_CREATE_INFO,
         .pNext = nullptr,
         .flags = 0,
@@ -1862,29 +1829,28 @@ void GraphicsPipeline::MakePipeline(VkRenderPass render_pass) {
             ? VK_TRUE
             : VK_FALSE),
     };
-    const VkPipelineTessellationStateCreateInfo tessellation_ci{
+    s.tessellation_ci = {
         .sType = VK_STRUCTURE_TYPE_PIPELINE_TESSELLATION_STATE_CREATE_INFO,
         .pNext = nullptr,
         .flags = 0,
         .patchControlPoints = std::min(key.state.patch_control_points_minus_one.Value() + 1,
                                        device.GetMaxTessellationPatchSize()),
     };
-    std::array<VkViewportSwizzleNV, Maxwell::NumViewports> swizzles;
-    std::ranges::transform(key.state.viewport_swizzles, swizzles.begin(), UnpackViewportSwizzle);
-    VkPipelineViewportSwizzleStateCreateInfoNV swizzle_ci{
+    std::ranges::transform(key.state.viewport_swizzles, s.swizzles.begin(), UnpackViewportSwizzle);
+    s.swizzle_ci = {
         .sType = VK_STRUCTURE_TYPE_PIPELINE_VIEWPORT_SWIZZLE_STATE_CREATE_INFO_NV,
         .pNext = nullptr,
         .flags = 0,
         .viewportCount = Maxwell::NumViewports,
-        .pViewportSwizzles = swizzles.data(),
+        .pViewportSwizzles = s.swizzles.data(),
     };
-    VkPipelineViewportDepthClipControlCreateInfoEXT ndc_info{
+    s.ndc_info = {
         .sType = VK_STRUCTURE_TYPE_PIPELINE_VIEWPORT_DEPTH_CLIP_CONTROL_CREATE_INFO_EXT,
         .pNext = nullptr,
         .negativeOneToOne = key.state.ndc_minus_one_to_one.Value() != 0 ? VK_TRUE : VK_FALSE,
     };
     const u32 num_viewports = std::min<u32>(device.GetMaxViewports(), Maxwell::NumViewports);
-    VkPipelineViewportStateCreateInfo viewport_ci{
+    s.viewport_ci = {
         .sType = VK_STRUCTURE_TYPE_PIPELINE_VIEWPORT_STATE_CREATE_INFO,
         .pNext = nullptr,
         .flags = 0,
@@ -1894,12 +1860,12 @@ void GraphicsPipeline::MakePipeline(VkRenderPass render_pass) {
         .pScissors = nullptr,
     };
     if (device.IsNvViewportSwizzleSupported()) {
-        swizzle_ci.pNext = std::exchange(viewport_ci.pNext, &swizzle_ci);
+        s.swizzle_ci.pNext = std::exchange(s.viewport_ci.pNext, &s.swizzle_ci);
     }
     if (device.IsExtDepthClipControlSupported()) {
-        ndc_info.pNext = std::exchange(viewport_ci.pNext, &ndc_info);
+        s.ndc_info.pNext = std::exchange(s.viewport_ci.pNext, &s.ndc_info);
     }
-    VkPipelineRasterizationStateCreateInfo rasterization_ci{
+    s.rasterization_ci = {
         .sType = VK_STRUCTURE_TYPE_PIPELINE_RASTERIZATION_STATE_CREATE_INFO,
         .pNext = nullptr,
         .flags = 0,
@@ -1923,7 +1889,7 @@ void GraphicsPipeline::MakePipeline(VkRenderPass render_pass) {
         device.IsExtLineRasterizationSupported() && device.SupportsSmoothLines();
     const bool stippled_lines_supported =
         device.IsExtLineRasterizationSupported() && device.SupportsStippledRectangularLines();
-    VkPipelineRasterizationLineStateCreateInfoEXT line_state{
+    s.line_state = {
         .sType = VK_STRUCTURE_TYPE_PIPELINE_RASTERIZATION_LINE_STATE_CREATE_INFO_EXT,
         .pNext = nullptr,
         .lineRasterizationMode = key.state.smooth_lines != 0 && smooth_lines_supported
@@ -1934,7 +1900,7 @@ void GraphicsPipeline::MakePipeline(VkRenderPass render_pass) {
         .lineStippleFactor = key.state.line_stipple_factor,
         .lineStipplePattern = static_cast<uint16_t>(key.state.line_stipple_pattern),
     };
-    VkPipelineRasterizationConservativeStateCreateInfoEXT conservative_raster{
+    s.conservative_raster = {
         .sType = VK_STRUCTURE_TYPE_PIPELINE_RASTERIZATION_CONSERVATIVE_STATE_CREATE_INFO_EXT,
         .pNext = nullptr,
         .flags = 0,
@@ -1952,25 +1918,26 @@ void GraphicsPipeline::MakePipeline(VkRenderPass render_pass) {
                                             : VK_PROVOKING_VERTEX_MODE_FIRST_VERTEX_EXT)
             : (supports_provoking_first_mode ? VK_PROVOKING_VERTEX_MODE_FIRST_VERTEX_EXT
                                              : VK_PROVOKING_VERTEX_MODE_LAST_VERTEX_EXT);
-    VkPipelineRasterizationProvokingVertexStateCreateInfoEXT provoking_vertex{
+    s.provoking_vertex = {
         .sType = VK_STRUCTURE_TYPE_PIPELINE_RASTERIZATION_PROVOKING_VERTEX_STATE_CREATE_INFO_EXT,
         .pNext = nullptr,
         .provokingVertexMode = provoking_vertex_mode,
     };
 
     if (IsLine(input_assembly_topology) && device.IsExtLineRasterizationSupported()) {
-        line_state.pNext = std::exchange(rasterization_ci.pNext, &line_state);
+        s.line_state.pNext = std::exchange(s.rasterization_ci.pNext, &s.line_state);
     }
     if (device.IsExtConservativeRasterizationSupported()) {
-        conservative_raster.pNext = std::exchange(rasterization_ci.pNext, &conservative_raster);
+        s.conservative_raster.pNext =
+            std::exchange(s.rasterization_ci.pNext, &s.conservative_raster);
     }
     if (device.IsExtProvokingVertexSupported()) {
-        provoking_vertex.pNext = std::exchange(rasterization_ci.pNext, &provoking_vertex);
+        s.provoking_vertex.pNext = std::exchange(s.rasterization_ci.pNext, &s.provoking_vertex);
     }
 
     const bool supports_alpha_output = fragment_has_color0_output;
     const bool alpha_to_one_supported = device.SupportsAlphaToOne();
-    const VkPipelineMultisampleStateCreateInfo multisample_ci{
+    s.multisample_ci = {
         .sType = VK_STRUCTURE_TYPE_PIPELINE_MULTISAMPLE_STATE_CREATE_INFO,
         .pNext = nullptr,
         .flags = 0,
@@ -1983,7 +1950,7 @@ void GraphicsPipeline::MakePipeline(VkRenderPass render_pass) {
         .alphaToOneEnable = supports_alpha_output && alpha_to_one_supported &&
                            key.state.alpha_to_one_enabled != 0 ? VK_TRUE : VK_FALSE,
     };
-    const VkPipelineDepthStencilStateCreateInfo depth_stencil_ci{
+    s.depth_stencil_ci = {
         .sType = VK_STRUCTURE_TYPE_PIPELINE_DEPTH_STENCIL_STATE_CREATE_INFO,
         .pNext = nullptr,
         .flags = 0,
@@ -2002,7 +1969,7 @@ void GraphicsPipeline::MakePipeline(VkRenderPass render_pass) {
     if (dynamic.depth_bounds_enable && !device.IsDepthBoundsSupported()) {
         LOG_WARNING(Render_Vulkan, "Depth bounds is enabled but not supported");
     }
-    static_vector<VkPipelineColorBlendAttachmentState, Maxwell::NumRenderTargets> cb_attachments;
+    auto& cb_attachments = s.cb_attachments;
     const size_t num_attachments{NumAttachments(key.state)};
     for (size_t index = 0; index < num_attachments; ++index) {
         static constexpr std::array mask_table{
@@ -2029,7 +1996,7 @@ void GraphicsPipeline::MakePipeline(VkRenderPass render_pass) {
             .colorWriteMask = write_mask,
         });
     }
-    const VkPipelineColorBlendStateCreateInfo color_blend_ci{
+    s.color_blend_ci = {
         .sType = VK_STRUCTURE_TYPE_PIPELINE_COLOR_BLEND_STATE_CREATE_INFO,
         .pNext = nullptr,
         .flags = 0,
@@ -2039,13 +2006,14 @@ void GraphicsPipeline::MakePipeline(VkRenderPass render_pass) {
         .pAttachments = cb_attachments.data(),
         .blendConstants = {}
     };
-    static_vector<VkDynamicState, 34> dynamic_states{
+    auto& dynamic_states = s.dynamic_states;
+    dynamic_states.assign({
         VK_DYNAMIC_STATE_VIEWPORT,           VK_DYNAMIC_STATE_SCISSOR,
         VK_DYNAMIC_STATE_DEPTH_BIAS,         VK_DYNAMIC_STATE_BLEND_CONSTANTS,
         VK_DYNAMIC_STATE_DEPTH_BOUNDS,       VK_DYNAMIC_STATE_STENCIL_COMPARE_MASK,
         VK_DYNAMIC_STATE_STENCIL_WRITE_MASK, VK_DYNAMIC_STATE_STENCIL_REFERENCE,
         VK_DYNAMIC_STATE_LINE_WIDTH,
-    };
+    });
     if (key.state.extended_dynamic_state) {
         static constexpr std::array extended{
             VK_DYNAMIC_STATE_CULL_MODE_EXT,
@@ -2127,6 +2095,7 @@ void GraphicsPipeline::MakePipeline(VkRenderPass render_pass) {
     }
 
     const bool is_mesh{IsMeshPipeline()};
+    s.is_mesh = is_mesh;
     if (is_mesh) {
         // Mesh pipelines have no vertex input or input assembly.
         dynamic_states.erase(std::remove_if(dynamic_states.begin(), dynamic_states.end(),
@@ -2139,13 +2108,80 @@ void GraphicsPipeline::MakePipeline(VkRenderPass render_pass) {
                                             }),
                              dynamic_states.end());
     }
-    const VkPipelineDynamicStateCreateInfo dynamic_state_ci{
+    s.dynamic_state_ci = {
         .sType = VK_STRUCTURE_TYPE_PIPELINE_DYNAMIC_STATE_CREATE_INFO,
         .pNext = nullptr,
         .flags = 0,
         .dynamicStateCount = static_cast<u32>(dynamic_states.size()),
         .pDynamicStates = dynamic_states.data(),
     };
+}
+
+/// Builds the monolithic pipeline from every stage module. Null for a mesh pipeline on a device
+/// without mesh shaders.
+vk::Pipeline GraphicsPipeline::MakePipeline(VkRenderPass render_pass) {
+    if (IsMeshPipeline() && !device.IsExtMeshShaderSupported() && !mesh_emulation) {
+        return {};
+    }
+    if (mesh_emulation) {
+        // The mesh program (stage 0, or mesh_stage after a task program in stage 0) is built as
+        // a compute shader, and so is the task program; the draw uses the vertex shader that
+        // reads the mesh program's output.
+        // Votes, ballots and shuffles span the guest's 32-thread warp, which a driver may split
+        // in compute shaders too (RDNA runs them wave64).
+        const VkPipelineShaderStageRequiredSubgroupSizeCreateInfoEXT compute_subgroup_size_ci{
+            .sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_REQUIRED_SUBGROUP_SIZE_CREATE_INFO_EXT,
+            .pNext = nullptr,
+            .requiredSubgroupSize = GuestWarpSize,
+        };
+        // Their binaries are stored under the graphics key, one key per program
+        const auto make_compute = [&](VkShaderModule module, VkPipelineLayout layout,
+                                      const Shader::Info* info, u64 program) {
+            const bool uses_warp_ops{info && (info->uses_subgroup_vote ||
+                                              info->uses_subgroup_invocation_id ||
+                                              info->uses_subgroup_shuffles ||
+                                              info->uses_subgroup_mask ||
+                                              info->uses_quad_shuffles || info->uses_fswzadd)};
+            const bool force_warp_size{uses_warp_ops && device.IsExtSubgroupSizeControlSupported() &&
+                                       device.IsGuestWarpSizeSupported(VK_SHADER_STAGE_COMPUTE_BIT)};
+            const VkComputePipelineCreateInfo compute_ci{
+                .sType = VK_STRUCTURE_TYPE_COMPUTE_PIPELINE_CREATE_INFO,
+                .pNext = nullptr,
+                .flags = 0,
+                .stage{
+                    .sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO,
+                    .pNext = force_warp_size ? &compute_subgroup_size_ci : nullptr,
+                    .flags = 0,
+                    .stage = VK_SHADER_STAGE_COMPUTE_BIT,
+                    .module = module,
+                    .pName = "main",
+                    .pSpecializationInfo = nullptr,
+                },
+                .layout = layout,
+                .basePipelineHandle = nullptr,
+                .basePipelineIndex = 0,
+            };
+            return binaries ? binaries->CreateComputePipeline(
+                                  compute_ci, *pipeline_cache,
+                                  GraphicsRecordKey(key) ^ (program * 0x9e3779b97f4a7c15ULL))
+                            : device.GetLogical().CreateComputePipeline(compute_ci,
+                                                                        *pipeline_cache);
+        };
+        mesh_vertex_module = BuildShader(device, mesh_emulation->vertex_spirv);
+        mesh_compute_pipeline = make_compute(*spv_modules[mesh_emulation->mesh_stage],
+                                             *pipeline_layout,
+                                             &stage_infos[mesh_emulation->mesh_stage], 1);
+        if (mesh_emulation->has_task) {
+            task_compute_pipeline =
+                make_compute(*spv_modules[0], *pipeline_layout, &stage_infos[0], 2);
+            distribution_module = BuildShader(device, mesh_emulation->distribution_spirv);
+            distribution_pipeline =
+                make_compute(*distribution_module, *distribution_layout, nullptr, 3);
+        }
+    }
+    PipelineStates states;
+    FillStates(states);
+    const bool is_mesh{states.is_mesh};
     const VkPipelineShaderStageRequiredSubgroupSizeCreateInfoEXT subgroup_size_ci{
         .sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_REQUIRED_SUBGROUP_SIZE_CREATE_INFO_EXT,
         .pNext = nullptr,
@@ -2219,26 +2255,27 @@ void GraphicsPipeline::MakePipeline(VkRenderPass render_pass) {
         .pStages = shader_stages.data(),
         .pVertexInputState = mesh_emulation ? &emulation_vertex_input
                              : is_mesh      ? nullptr
-                                            : &vertex_input_ci,
+                                            : &states.vertex_input_ci,
         .pInputAssemblyState = mesh_emulation ? &emulation_input_assembly
                                : is_mesh      ? nullptr
-                                              : &input_assembly_ci,
-        .pTessellationState = is_mesh ? nullptr : &tessellation_ci,
-        .pViewportState = &viewport_ci,
-        .pRasterizationState = &rasterization_ci,
-        .pMultisampleState = &multisample_ci,
-        .pDepthStencilState = &depth_stencil_ci,
-        .pColorBlendState = &color_blend_ci,
-        .pDynamicState = &dynamic_state_ci,
+                                              : &states.input_assembly_ci,
+        .pTessellationState = is_mesh ? nullptr : &states.tessellation_ci,
+        .pViewportState = &states.viewport_ci,
+        .pRasterizationState = &states.rasterization_ci,
+        .pMultisampleState = &states.multisample_ci,
+        .pDepthStencilState = &states.depth_stencil_ci,
+        .pColorBlendState = &states.color_blend_ci,
+        .pDynamicState = &states.dynamic_state_ci,
         .layout = *pipeline_layout,
         .renderPass = render_pass,
         .subpass = 0,
         .basePipelineHandle = nullptr,
         .basePipelineIndex = 0,
     };
-    pipeline = binaries ? binaries->CreateGraphicsPipeline(pipeline_ci, *pipeline_cache,
-                                                           GraphicsRecordKey(key))
-                        : device.GetLogical().CreateGraphicsPipeline(pipeline_ci, *pipeline_cache);
+    vk::Pipeline created =
+        binaries ? binaries->CreateGraphicsPipeline(pipeline_ci, *pipeline_cache,
+                                                    GraphicsRecordKey(key))
+                 : device.GetLogical().CreateGraphicsPipeline(pipeline_ci, *pipeline_cache);
     TracePipelineBuild("END", "graphics", key.Hash(), key.unique_hashes, unoptimized,
                        std::chrono::duration<double, std::milli>(
                            std::chrono::steady_clock::now() - trace_begin)
@@ -2249,10 +2286,11 @@ void GraphicsPipeline::MakePipeline(VkRenderPass render_pass) {
         const std::string pipeline_info = fmt::format(
             "GraphicsPipeline created: stages={}, attachments={}",
             shader_stages.size(),
-            color_blend_ci.attachmentCount
+            states.color_blend_ci.attachmentCount
         );
         GPU::Logging::GPULogger::GetInstance().LogPipelineStateChange(pipeline_info);
     }
+    return created;
 }
 
 void GraphicsPipeline::Validate() {
