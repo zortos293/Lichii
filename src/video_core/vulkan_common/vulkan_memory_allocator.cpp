@@ -252,6 +252,18 @@ VkResult MemoryAllocator::AllocateImage(const VkImageCreateInfo &ci, bool dedica
             .priority = 0.f,
     };
 
+    // An image of the same create info released before is taken from the recycler instead
+    // (vk::ImageRecycler).
+    const u64 recycle_key = vk::ImageRecycler::KeyOf(ci, dedicated);
+    if (VkImage kept{}; recycle_key != 0) {
+        VmaAllocation kept_allocation{};
+        if (vk::ImageRecycler::Take(recycle_key, allocator, kept, kept_allocation)) {
+            image = vk::Image(kept, ci.usage, *device.GetLogical(), allocator, kept_allocation,
+                              device.GetDispatchLoader());
+            image.SetRecycleKey(recycle_key);
+            return VK_SUCCESS;
+        }
+    }
     VkImage handle{};
     VmaAllocation allocation{};
     VmaAllocationInfo alloc_info{};
@@ -333,6 +345,12 @@ VkResult MemoryAllocator::AllocateImage(const VkImageCreateInfo &ci, bool dedica
 
     image = vk::Image(handle, ci.usage, *device.GetLogical(), allocator, allocation,
                       device.GetDispatchLoader());
+    // Images placed in host memory under memory pressure are freed rather than kept.
+    if (recycle_key != 0 && alloc_info.memoryType < properties.memoryTypeCount &&
+        (properties.memoryTypes[alloc_info.memoryType].propertyFlags &
+         VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT) != 0) {
+        image.SetRecycleKey(recycle_key);
+    }
     return VK_SUCCESS;
 }
 
