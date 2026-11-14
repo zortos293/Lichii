@@ -402,7 +402,8 @@ Id CasLoop(EmitContext& ctx, Operation operation, Id array_pointer, Id element_p
         ctx.TypePointer(spv::StorageClass::Function, ctx.U32[1]), spv::StorageClass::Function)};
     const Id word_pointer{is_struct ? ctx.OpAccessChain(element_pointer, base, zero, index)
                                     : ctx.OpAccessChain(element_pointer, base, index)};
-    ctx.OpStore(expected_var, ctx.OpLoad(ctx.U32[1], word_pointer));
+    ctx.OpStore(expected_var, is_shared ? ctx.LoadShared(ctx.U32[1], word_pointer)
+                                        : ctx.OpLoad(ctx.U32[1], word_pointer));
     ctx.OpBranch(loop_header);
     ctx.AddLabel(loop_header);
 
@@ -471,11 +472,12 @@ void VectorTypes::Define(Sirit::Module& sirit_ctx, Id base_type, std::string_vie
 }
 
 EmitContext::EmitContext(const Profile& profile_, const RuntimeInfo& runtime_info_,
-                         IR::Program& program, Bindings& bindings)
+                         IR::Program& program, Bindings& bindings, bool vulkan_memory_model_)
     : Sirit::Module(profile_.supported_spirv), profile{profile_}, runtime_info{runtime_info_},
       requires_coherent_global_memory{program.info.requires_coherent_global_memory},
       requires_coherent_image_memory{program.info.requires_coherent_image_memory},
-      stage{program.stage}, texture_rescaling_index{bindings.texture_scaling_index},
+      vulkan_memory_model{vulkan_memory_model_}, stage{program.stage},
+      texture_rescaling_index{bindings.texture_scaling_index},
       image_rescaling_index{bindings.image_scaling_index} {
     const bool is_unified{profile.unified_descriptor_binding};
     u32& uniform_binding{is_unified ? bindings.unified : bindings.uniform_buffer};
@@ -543,6 +545,37 @@ Id EmitContext::BitOffset16(const IR::Value& offset) {
         return Const(((offset.U32() / 2) % 2) * 16);
     }
     return OpBitwiseAnd(U32[1], OpShiftLeftLogical(U32[1], Def(offset), Const(3u)), Const(16u));
+}
+
+Id EmitContext::LoadShared(Id result_type, Id pointer) {
+    if (!vulkan_memory_model) {
+        return OpLoad(result_type, pointer);
+    }
+    const auto access{SharedMemoryAccess(spv::MemoryAccessMask::MakePointerVisible)};
+    return OpLoad(result_type, pointer, std::span<const Sirit::MemoryAccessLiteral>(access));
+}
+
+void EmitContext::StoreShared(Id pointer, Id object) {
+    if (!vulkan_memory_model) {
+        OpStore(pointer, object);
+        return;
+    }
+    const auto access{SharedMemoryAccess(spv::MemoryAccessMask::MakePointerAvailable)};
+    OpStore(pointer, object, std::span<const Sirit::MemoryAccessLiteral>(access));
+}
+
+std::array<Sirit::MemoryAccessLiteral, 2> EmitContext::SharedMemoryAccess(
+    spv::MemoryAccessMask availability) {
+    return {availability | spv::MemoryAccessMask::NonPrivatePointer,
+            Const(static_cast<u32>(spv::Scope::Workgroup)).value};
+}
+
+Id EmitContext::BarrierSemantics(spv::MemorySemanticsMask semantics) {
+    if (vulkan_memory_model) {
+        semantics = semantics | spv::MemorySemanticsMask::MakeAvailable |
+                    spv::MemorySemanticsMask::MakeVisible;
+    }
+    return Const(static_cast<u32>(semantics));
 }
 
 void EmitContext::DefineCommonTypes(const Info& info) {
@@ -682,7 +715,7 @@ void EmitContext::DefineSharedMemory(const IR::Program& program) {
         const Id bit_offset{OpBitwiseAnd(U32[1], shift_offset, Const(mask))};
         const Id count{Const(size)};
         const Id word_pointer{OpAccessChain(shared_u32, shared_memory_u32, word_offset)};
-        OpStore(expected_var, OpLoad(U32[1], word_pointer));
+        OpStore(expected_var, LoadShared(U32[1], word_pointer));
         OpBranch(loop_header);
 
         AddLabel(loop_header);

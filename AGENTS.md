@@ -30,6 +30,7 @@ Users report game bugs with Lichii logs (`eden_log.txt`, `eden_log.txt.old`). Ea
 | 0400245021D2C000 | Yoshi and the Mysterious Book |
 | 0400DDB020648000 | Cyberpunk 2077: Ultimate Edition |
 | 0100606026F12000 | Final Fantasy Resonance |
+| 0100EA80032EA000 | New Super Mario Bros. U Deluxe (Switch 1) |
 | 010019A01E2F2000 | Metroid Prime 4: Beyond - Nintendo Switch 2 Edition |
 | 0100152000022000 | Mario Kart 8 Deluxe (Switch 1) |
 | 040032B023CA4000 | Orbitals |

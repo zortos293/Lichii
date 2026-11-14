@@ -949,6 +949,10 @@ struct Values {
                                            "enable_dualsense_haptics", Category::Controls};
     Setting<bool> rumble_frequency_mapping{linkage, false, "rumble_frequency_mapping",
                                            Category::Controls};
+    // Percent of each side's light rumble also played on the trigger motors, where a controller
+    // has them; 0 is off
+    Setting<u8, true> trigger_rumble_strength{linkage, 0, 0, 100, "trigger_rumble_strength",
+                                              Category::Controls};
 
     SwitchableSetting<bool> motion_enabled{linkage, true, "motion_enabled", Category::Controls};
     Setting<std::string> udp_input_servers{linkage, "127.0.0.1:26760", "udp_input_servers",

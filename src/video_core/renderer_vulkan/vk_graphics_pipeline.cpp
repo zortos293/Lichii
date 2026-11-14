@@ -990,6 +990,14 @@ bool GraphicsPipeline::ConfigureImpl(bool is_indexed) {
                                      Spec::has_images);
         if (memo_hit && verify_memo) {
             texture_cache.LogPrepares(nullptr, false);
+            // The dry memo pass skipped PrepareImage, and guest memory can change while the
+            // full resolve runs: drop the memo hit when preparing deleted images or the inputs
+            // moved since ResolveMemoizedTextures.
+            if (!texture_cache.TextureMemoStillHolds(
+                    texture_memo, std::span(handle_addresses.data(), handle_addresses.size()))) {
+                texture_memo.valid = false;
+                memo_hit = false;
+            }
         }
     }
     if (use_memo) {
@@ -1480,7 +1488,11 @@ bool GraphicsPipeline::ConfigureDraw(const RescalingPushConstant& rescaling,
         // triangles the draw then reads; both use the descriptor set committed here.
         scheduler.RequestOutsideRenderPassOperationContext();
         if (!IsBuilt()) {
-            scheduler.Record([this](vk::CommandBuffer) { build->Wait(!worker_only_build); });
+            scheduler.Record([this](vk::CommandBuffer) {
+                const VideoCommon::Nx2Profile::Scope scope{
+                    VideoCommon::Nx2Profile::Zone::PipelineWait};
+                build->Wait(!worker_only_build);
+            });
         }
         scheduler.Record([this, descriptor_data, groups = mesh_groups, capacity = mesh_capacity,
                           task_buffers = mesh_task_buffers,

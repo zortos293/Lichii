@@ -652,6 +652,8 @@ Id EmitDPdyCoarse(EmitContext& ctx, Id op_a);
 Id EmitTensorMulAdd(EmitContext& ctx, IR::Inst* inst, Id a, Id b, Id c);
 void DefineSoftwareMatrixFunctions(EmitContext& ctx, const IR::Program& program);
 void PatchCooperativeHmma(std::vector<u32>& code, const CooperativeHmmaTypes& types);
+/// Whether a program's K=16 HMMA runs on 16x8x16 cooperative matrices.
+bool UsesCooperativeHmma(const Profile& profile, const IR::Program& program);
 /// Appends the shared memory of the 16x16x16 HMMA path to a program that runs it, and returns the
 /// word where it starts.
 std::optional<u32> ReserveCooperativeHmmaScratch(const Profile& profile, IR::Program& program);
