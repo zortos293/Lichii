@@ -164,8 +164,9 @@ void LogSettings() {
     std::deque<std::string> settings_list;
     for (auto& [category, settings] : values.linkage.by_category) {
         for (const auto& setting : settings) {
-            // Hide the token secret, for security reasons.
-            if (setting->Id() != values.eden_token.Id()) {
+            // Hide the token secret and the friend codes, for security reasons.
+            if (setting->Id() != values.eden_token.Id() &&
+                setting->Id() != values.online_friends.Id()) {
                 auto const is_default = setting->ToString() == setting->DefaultToString();
                 auto const name = fmt::format(
                     "{:c}{:c} {}.{}",

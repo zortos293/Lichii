@@ -4,6 +4,7 @@
 #include <algorithm>
 #include <cctype>
 #include <charconv>
+#include <cstdlib>
 #include <filesystem>
 #include <fstream>
 #include <memory>
@@ -93,6 +94,7 @@ std::vector<u8> ReadCa(const std::string& path) {
 
 struct Config {
     std::vector<std::string> hosts;
+    std::string server_text;
     std::optional<SockAddrIn> server;
     bool loopback_only{};
     std::vector<u8> test_ca;
@@ -115,12 +117,46 @@ std::string AddressToString(const SockAddrIn& address) {
                        address.ip[3], address.portno);
 }
 
+struct Values {
+    bool enabled{};
+    std::string hosts;
+    std::string server;
+    std::string ca;
+    bool loopback_only{};
+};
+
+// The settings, or the environment while EDEN_NX2_ONLINE_SERVER is set (local_redirect.h). Set
+// but empty, it turns the redirect off rather than falling back to the settings.
+Values ReadValues() {
+    const auto env = [](const char* name) {
+        const char* value = std::getenv(name);
+        return std::string{value != nullptr ? value : ""};
+    };
+    if (std::getenv("EDEN_NX2_ONLINE_SERVER") != nullptr) {
+        std::string server = env("EDEN_NX2_ONLINE_SERVER");
+        return {
+            .enabled = !server.empty(),
+            .hosts = env("EDEN_NX2_ONLINE_HOSTS"),
+            .server = std::move(server),
+            .ca = env("EDEN_NX2_ONLINE_CA"),
+            .loopback_only = env("EDEN_NX2_LOOPBACK_ONLY") == "1",
+        };
+    }
+    return {
+        .enabled = Settings::values.online_service_redirect.GetValue(),
+        .hosts = Settings::values.online_redirect_hosts.GetValue(),
+        .server = Settings::values.online_redirect_server.GetValue(),
+        .ca = Settings::values.online_redirect_ca.GetValue(),
+        .loopback_only = Settings::values.online_redirect_loopback_only.GetValue(),
+    };
+}
+
 } // Anonymous namespace
 
 void Configure() {
     auto config = std::make_shared<Config>();
-    if (Settings::values.online_service_redirect.GetValue()) {
-        std::string_view rest{Settings::values.online_redirect_hosts.GetValue()};
+    if (const Values values = ReadValues(); values.enabled) {
+        std::string_view rest{values.hosts};
         while (!rest.empty()) {
             const size_t comma = rest.find(',');
             std::string host = Normalize(rest.substr(0, comma));
@@ -129,16 +165,18 @@ void Configure() {
             }
             rest = comma == std::string_view::npos ? std::string_view{} : rest.substr(comma + 1);
         }
-        if (const auto& text = Settings::values.online_redirect_server.GetValue(); !text.empty()) {
-            config->server = ParseServer(text);
-            if (!config->server) {
+        if (!values.server.empty()) {
+            config->server = ParseServer(values.server);
+            if (config->server) {
+                config->server_text = values.server;
+            } else {
                 LOG_WARNING(Network, "Host redirect: server address {} is not <ip>:<port>; ignored",
-                            text);
+                            values.server);
             }
         }
-        config->loopback_only = Settings::values.online_redirect_loopback_only.GetValue();
-        if (const auto& path = Settings::values.online_redirect_ca.GetValue(); !path.empty()) {
-            config->test_ca = ReadCa(path);
+        config->loopback_only = values.loopback_only;
+        if (!values.ca.empty()) {
+            config->test_ca = ReadCa(values.ca);
         }
         LOG_INFO(Network,
                  "Host redirect on: {} (and subdomains) -> 127.0.0.1; TCP 127.0.0.1:443 -> {}; "
@@ -207,6 +245,10 @@ bool LoopbackOnly() {
 
 std::vector<u8> TestCa() {
     return Get()->test_ca;
+}
+
+std::string Server() {
+    return Get()->server_text;
 }
 
 } // namespace Network::LocalRedirect

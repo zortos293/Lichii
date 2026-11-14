@@ -25,6 +25,10 @@
 /// names: titles that verify with the system store's lists can't be told apart by host name.
 /// Loopback only covers the guest's host sockets (BSD sockets, direct LAN play), not the traffic a
 /// multiplayer room relays.
+///
+/// While EDEN_NX2_ONLINE_SERVER is set, the environment replaces these settings: EDEN_NX2_ONLINE_
+/// SERVER, _HOSTS, _CA and EDEN_NX2_LOOPBACK_ONLY=1. Launchers that start the emulator with their
+/// own servers set them (playDB-CNT, for The Duskbloods network test).
 namespace Network::LocalRedirect {
 
 /// Reads the settings (and the CA file) for the game that is starting, and logs the mapping when
@@ -50,5 +54,9 @@ void Configure();
 
 /// The extra CA certificate (DER), empty when unset or unreadable.
 [[nodiscard]] std::vector<u8> TestCa();
+
+/// The server address as configured (<ip>:<port>) while the redirect sends connections to one,
+/// else empty. Private servers keep a profile for each (core/hle/service/sockets/online_profile.h).
+[[nodiscard]] std::string Server();
 
 } // namespace Network::LocalRedirect
