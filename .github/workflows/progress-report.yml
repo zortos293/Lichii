@@ -1,0 +1,45 @@
+name: progress-report
+
+on:
+  pull_request:
+    branches: [nx2]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: progress-report-${{ github.event.pull_request.number || github.sha }}
+  cancel-in-progress: true
+
+jobs:
+  report:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - name: Check out source
+        uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09
+        with:
+          fetch-depth: 2
+          persist-credentials: false
+
+      - name: Measure the base and head trees
+        env:
+          PR: ${{ github.event.pull_request.number }}
+        run: |
+          out="$RUNNER_TEMP/out" report="$RUNNER_TEMP/report"
+          git worktree add --detach "$RUNNER_TEMP/base" HEAD^1
+          python3 tools/progress.py --root "$RUNNER_TEMP/base" "$out/base"
+          python3 tools/progress.py "$out/head"
+          mkdir "$report"
+          echo "$PR" > "$report/pr"
+          body=$(python3 tools/progress.py --compare "$out/base/progress.json" "$out/head/progress.json")
+          if [ -n "$body" ]; then
+            printf '### Progress report (%s -> %s)\n\n%s\n' "$(git rev-parse --short HEAD^1)" "$(git rev-parse --short HEAD)" "$body" > "$report/report.md"
+            cat "$report/report.md" >> "$GITHUB_STEP_SUMMARY"
+          fi
+
+      - name: Upload the report
+        uses: actions/upload-artifact@v7
+        with:
+          name: progress-report
+          path: ${{ runner.temp }}/report

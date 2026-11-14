@@ -15,6 +15,8 @@ Tools for Eden and other subprojects. When adding new scripts please use `#!/bin
 ## Scripts
 
 - `generate_converters.py`: Generates converters for given formats of textures (C++ helper).
+- `progress.py`: Counts the IPC commands bound to a handler and the shader IR opcodes with a working SPIR-V emitter, then writes `progress.json`, the badges and the Pages site. Runs in CI; see `.github/workflows/progress-pages.yml`.
+- `progress_history.py`: Measures the same counts for the most recent first-parent commits on `nx2` (60 by default, `--limit` to change) and writes `history.html`. Caches per-commit counts so a Pages run only measures new commits.
 - `svc_generator.py`: Generates the files `src/core/hle/kernel/svc.cpp` and `src/core/hle/kernel/svc.h` based off prototypes.
 - `shellcheck.sh`: Ensure POSIX compliance (and syntax sanity) for all tools in this directory and subdirectories.
 - `llvmpipe-run.sh`: Sets environment variables needed to run any command (or Eden) with llvmpipe.

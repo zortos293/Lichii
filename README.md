@@ -52,6 +52,16 @@ When [reporting an issue](https://github.com/zortos293/Eglantine/issues), includ
 
 Do not upload game files, keys, firmware or private account information.
 
+## Status
+
+[![services](https://zortos293.github.io/Lichii/badge-services.svg)](https://zortos293.github.io/Lichii/progress.html) [![shaders](https://zortos293.github.io/Lichii/badge-shaders.svg)](https://zortos293.github.io/Lichii/progress.html)
+
+[![progress map](https://zortos293.github.io/Lichii/progress.svg)](https://zortos293.github.io/Lichii/progress.html)
+
+[Progress history](https://zortos293.github.io/Lichii/history.html) - the 60 most recent first-parent commits on `nx2`.
+
+<sub>* IPC commands: share of the commands declared in the `FunctionInfo` tables of [src/core/hle/service](src/core/hle/service) that the emulator answers. A command bound to a `Stub*` helper answers the call but returns a placeholder rather than emulating it, so stubs count here and are also shown in their own column. The declared total grows as more services are described.</sub>
+
 ## Building and contributing
 
 See the [build guide](docs/Build.md), [user documentation](docs/user/README.md) and [coding guidelines](docs/Coding.md). Some inherited documentation and internal build target names still use upstream names. The GUI build target is `lichii`; its output is `lichii.exe` on Windows and `lichii` on other desktop platforms.

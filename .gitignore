@@ -21,6 +21,9 @@ log.txt
 src/common/scm_rev.cpp
 dist/english_plurals/generated_en.ts
 
+# Generated progress site
+/site/
+
 # Project/editor files
 *.swp
 .idea/

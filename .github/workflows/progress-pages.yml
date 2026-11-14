@@ -1,0 +1,67 @@
+name: Progress pages
+
+on:
+  push:
+    branches: [nx2]
+    paths:
+      - src/core/hle/service/**
+      - src/shader_recompiler/**
+      - tools/progress.py
+      - tools/progress_history.py
+      - .github/workflows/progress-pages.yml
+  workflow_dispatch:
+  schedule:
+    - cron: '17 4 * * 1'
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+concurrency:
+  group: progress-pages
+  cancel-in-progress: false
+
+jobs:
+  deploy:
+    if: ${{ !github.event.repository.fork }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - name: Check out source
+        uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Restore the per-commit history cache
+        uses: actions/cache/restore@caa296126883cff596d87d8935842f9db880ef25
+        with:
+          path: .cache/progress-history.json
+          key: progress-history-${{ github.run_id }}
+          restore-keys: progress-history-
+
+      - name: Measure the tree
+        run: python3 tools/progress.py site --compatibility-url https://lichii.zortos.me/api/summary
+
+      - name: Measure the history
+        run: python3 tools/progress_history.py site --cache .cache/progress-history.json
+
+      - name: Save the per-commit history cache
+        if: always()
+        uses: actions/cache/save@caa296126883cff596d87d8935842f9db880ef25
+        with:
+          path: .cache/progress-history.json
+          key: progress-history-${{ github.run_id }}
+
+      - name: Upload the site
+        uses: actions/upload-pages-artifact@v5
+        with:
+          path: site
+
+      - name: Deploy to Pages
+        id: deployment
+        uses: actions/deploy-pages@v5

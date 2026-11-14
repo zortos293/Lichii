@@ -1,0 +1,52 @@
+name: progress-comment
+
+on:
+  workflow_run:
+    workflows: [progress-report]
+    types: [completed]
+
+permissions:
+  actions: read
+  pull-requests: write
+
+jobs:
+  comment:
+    if: github.event.workflow_run.conclusion == 'success'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    concurrency:
+      group: progress-comment-${{ github.event.workflow_run.head_repository.full_name }}-${{ github.event.workflow_run.head_branch }}
+      cancel-in-progress: false
+    steps:
+      - name: Download the report
+        uses: actions/download-artifact@v7
+        with:
+          name: progress-report
+          run-id: ${{ github.event.workflow_run.id }}
+          github-token: ${{ github.token }}
+
+      - name: Publish the report
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          RUN_SHA: ${{ github.event.workflow_run.head_sha }}
+          RUN_REF: ${{ github.event.workflow_run.head_branch }}
+          RUN_REPO: ${{ github.event.workflow_run.head_repository.full_name }}
+        run: |
+          pr=$(cat pr)
+          [[ $pr =~ ^[0-9]+$ ]] || exit 1
+          identity=$(gh pr view "$pr" --json headRefOid,headRefName,headRepositoryOwner,headRepository --jq '[.headRefOid, .headRefName, .headRepositoryOwner.login + "/" + .headRepository.name] | @tsv') || identity=""
+          [ "$identity" = "$(printf '%s\t%s\t%s' "$RUN_SHA" "$RUN_REF" "$RUN_REPO")" ] || exit 0
+          marker='<!-- progress-report -->'
+          id=$(gh api "repos/$GH_REPO/issues/$pr/comments" --paginate \
+            --jq ".[] | select(.user.login == \"github-actions[bot]\" and (.body | startswith(\"$marker\"))) | .id" | head -n1)
+          if [ -f report.md ]; then
+            printf '%s\n%s' "$marker" "$(cat report.md)" > body.md
+            if [ -n "$id" ]; then
+              gh api -X PATCH "repos/$GH_REPO/issues/comments/$id" -F body=@body.md > /dev/null
+            else
+              gh pr comment "$pr" --body-file body.md
+            fi
+          elif [ -n "$id" ]; then
+            gh api -X DELETE "repos/$GH_REPO/issues/comments/$id"
+          fi
