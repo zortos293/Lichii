@@ -221,6 +221,8 @@ struct XessUpscaler::Impl {
         if (!api || !context || failed.load(std::memory_order_acquire)) {
             return;
         }
+        const bool reset_history =
+            history_reset_pending.exchange(false, std::memory_order_acq_rel);
         constexpr VkAccessFlags WRITES = VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT |
                                          VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT |
                                          VK_ACCESS_SHADER_WRITE_BIT | VK_ACCESS_TRANSFER_WRITE_BIT;
@@ -244,7 +246,7 @@ struct XessUpscaler::Impl {
                         : VK_IMAGE_LAYOUT_UNDEFINED,
                     VK_IMAGE_LAYOUT_GENERAL),
         };
-        scheduler.Record([this, api, inputs, to_read](vk::CommandBuffer cmdbuf) {
+        scheduler.Record([this, api, inputs, to_read, reset_history](vk::CommandBuffer cmdbuf) {
             cmdbuf.PipelineBarrier(VK_PIPELINE_STAGE_ALL_COMMANDS_BIT,
                                    VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, 0, {}, {}, to_read);
             const VkExtent2D color_size = inputs.render_size;
@@ -262,7 +264,7 @@ struct XessUpscaler::Impl {
             params.jitterOffsetX = inputs.jitter[0];
             params.jitterOffsetY = inputs.jitter[1];
             params.exposureScale = 1.0f;
-            params.resetHistory = inputs.reset || first_execution;
+            params.resetHistory = inputs.reset || first_execution || reset_history;
             params.inputWidth = color_size.width;
             params.inputHeight = color_size.height;
             const xess_result_t result = api->execute(context, *cmdbuf, &params);
@@ -325,6 +327,7 @@ struct XessUpscaler::Impl {
     xess_2d_t minimum_input{};
     xess_2d_t maximum_input{};
     bool first_execution{true};
+    std::atomic<bool> history_reset_pending{};
     std::atomic<bool> output_initialized{};
 #endif
 };
@@ -376,10 +379,12 @@ bool XessUpscaler::Upscale(const Inputs& inputs) {
     if (!state.output_image) {
         state.CreateOutput(inputs.output_size);
     }
-    if (state.ready.load(std::memory_order_acquire) && !state.SupportsInput(inputs.render_size)) {
+    const bool ready = state.ready.load(std::memory_order_acquire);
+    if (ready && !state.SupportsInput(inputs.render_size)) {
+        state.history_reset_pending.store(true, std::memory_order_release);
         return false;
     }
-    if (!state.ready.load(std::memory_order_acquire)) {
+    if (!ready) {
         if (!state.initialization_scheduled.exchange(true, std::memory_order_acq_rel)) {
             state.scheduler.Record([&state, input_size = inputs.render_size,
                                     output_size = inputs.output_size](vk::CommandBuffer) {
