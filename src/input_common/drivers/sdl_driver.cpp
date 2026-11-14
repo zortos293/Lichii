@@ -665,6 +665,24 @@ void SDLDriver::InitJoystick(SDL_JoystickID joystick_id) {
 
     if (SDL_IsGamepad(joystick_id)) {
         sdl_gamecontroller = SDL_OpenGamepad(joystick_id);
+        // SDL reports a gamepad even when its HIDAPI driver could not be opened
+        // (e.g. /dev/hidrawN is not readable by the current user, which happens
+        // for BLE controllers because uhid devices get no uaccess ACL). In that
+        // state SDL keeps the device listed but it will never deliver input,
+        // silently. Detect this and tell the user how to fix it.
+        if (sdl_gamecontroller && SDL_GetGamepadSerial(sdl_gamecontroller) == nullptr) {
+            LOG_WARNING(
+                Input,
+                "Gamepad '{}' is detected but SDL could not read it (raw HID device not "
+                "accessible to this user - common for Bluetooth controllers via uhid, "
+                "where uaccess is not applied). The device will not deliver any input. "
+                "Fix with a udev rule, e.g. create /etc/udev/rules.d/99-<name>-hidraw.rules "
+                "containing: KERNEL==\"hidraw*\", ATTRS{{id/vendor}}==\"{:04x}\", MODE=\"0666\" "
+                "(then reload with: udevadm control --reload-rules && udevadm trigger). "
+                "See also https://bugzilla.kernel.org/show_bug.cgi?id=222266",
+                SDL_GetGamepadName(sdl_gamecontroller),
+                SDL_GetJoystickVendor(SDL_GetGamepadJoystick(sdl_gamecontroller)));
+        }
     }
 
     if (!sdl_joystick) {
