@@ -5,7 +5,9 @@
 
 #pragma once
 
+#include <atomic>
 #include <map>
+#include <memory>
 #include <mutex>
 #include <optional>
 #include <string_view>
@@ -25,6 +27,25 @@ struct FileReference : public Common::IntrusiveListBaseNode<FileReference> {
 
 class RealVfsFile;
 class RealVfsDirectory;
+
+// Mutable state shared by a RealVfsFilesystem and every file it hands out.
+// Files hold a shared_ptr to this block rather than relying on the lifetime
+// of the filesystem object, so a file that outlives its filesystem (teardown
+// ordering, e.g. Lichii #1673) never dereferences a destroyed filesystem.
+// The block lives until the last file referencing it is gone.
+struct RealVfsSharedState {
+    using ReferenceListType = Common::IntrusiveListBaseTraits<FileReference>::ListType;
+
+    std::map<std::string, std::weak_ptr<VfsFile>, std::less<>> cache;
+    ReferenceListType open_references;
+    ReferenceListType closed_references;
+    std::mutex list_lock;
+    size_t num_open_files{};
+    // Flipped to false by ~RealVfsFilesystem. While false, no new list/cache
+    // mutations are made; the block itself stays valid as long as any file
+    // holds it, so outstanding files can still destroy themselves safely.
+    std::atomic_bool alive{true};
+};
 
 class RealVfsFilesystem : public VfsFilesystem {
 public:
@@ -48,20 +69,15 @@ public:
     bool DeleteDirectory(std::string_view path) override;
 
 private:
-    using ReferenceListType = Common::IntrusiveListBaseTraits<FileReference>::ListType;
-    std::map<std::string, std::weak_ptr<VfsFile>, std::less<>> cache;
-    ReferenceListType open_references;
-    ReferenceListType closed_references;
-    std::mutex list_lock;
-    size_t num_open_files{};
-    // TODO: Workaround for improper dtor() ordering on clang + FreeBSD
-    bool in_dtor = false;
+    std::shared_ptr<RealVfsSharedState> state = std::make_shared<RealVfsSharedState>();
 
 private:
     friend class RealVfsFile;
-    std::unique_lock<std::mutex> RefreshReference(const std::string& path, OpenMode perms,
-                                                  FileReference& reference);
-    void DropReference(std::unique_ptr<FileReference>&& reference, const std::string& path);
+    static std::unique_lock<std::mutex> RefreshReference(RealVfsSharedState& state,
+                                                         const std::string& path, OpenMode perms,
+                                                         FileReference& reference);
+    static void DropReference(RealVfsSharedState& state,
+                              std::unique_ptr<FileReference>&& reference, const std::string& path);
 
 private:
     friend class RealVfsDirectory;
@@ -69,9 +85,9 @@ private:
                                   OpenMode perms = OpenMode::Read);
 
 private:
-    void EvictSingleReferenceLocked();
-    void InsertReferenceIntoListLocked(FileReference& reference);
-    void RemoveReferenceFromListLocked(FileReference& reference);
+    static void EvictSingleReferenceLocked(RealVfsSharedState& state);
+    static void InsertReferenceIntoListLocked(RealVfsSharedState& state, FileReference& reference);
+    static void RemoveReferenceFromListLocked(RealVfsSharedState& state, FileReference& reference);
 };
 
 // An implementation of VfsFile that represents a file on the user's computer.
@@ -80,9 +96,9 @@ class RealVfsFile : public VfsFile {
     friend class RealVfsFilesystem;
 
 public:
-    RealVfsFile(RealVfsFilesystem& base, std::unique_ptr<FileReference> reference,
-                const std::string& path, OpenMode perms = OpenMode::Read,
-                std::optional<u64> size = {});
+    RealVfsFile(RealVfsFilesystem& base, std::shared_ptr<RealVfsSharedState> state,
+                std::unique_ptr<FileReference> reference, const std::string& path,
+                OpenMode perms = OpenMode::Read, std::optional<u64> size = {});
     ~RealVfsFile() override;
 
     std::string GetName() const override;
@@ -98,6 +114,7 @@ public:
 private:
 
     RealVfsFilesystem& base;
+    std::shared_ptr<RealVfsSharedState> state;
     std::unique_ptr<FileReference> reference;
     // Only the path: a loose RomFS keeps one of these per file (title 1: 206k).
     std::string path;

@@ -85,7 +85,11 @@ constexpr FS::FileAccessMode ModeFlagsToFileAccessMode(OpenMode mode) {
 
 RealVfsFilesystem::RealVfsFilesystem() : VfsFilesystem(nullptr) {}
 RealVfsFilesystem::~RealVfsFilesystem() {
-    in_dtor = true;
+    // Files outliving this object only touch the shared state block, which
+    // stays valid until the last file referencing it is gone. Mark the
+    // filesystem as gone so outstanding files stop mutating the reference
+    // lists and cache during teardown (see Lichii #1673).
+    state->alive.store(false);
 }
 
 std::string RealVfsFilesystem::GetName() const {
@@ -115,9 +119,9 @@ VfsEntryType RealVfsFilesystem::GetEntryType(std::string_view path_) const {
 VirtualFile RealVfsFilesystem::OpenFileFromEntry(std::string_view path_, std::optional<u64> size,
                                                  OpenMode perms) {
     const auto path = FS::SanitizePath(path_, FS::DirectorySeparator::PlatformDefault);
-    std::scoped_lock lk{list_lock};
+    std::scoped_lock lk{state->list_lock};
 
-    if (auto it = cache.find(path); it != cache.end()) {
+    if (auto it = state->cache.find(path); it != state->cache.end()) {
         if (auto file = it->second.lock(); file) {
             return file;
         }
@@ -128,10 +132,11 @@ VirtualFile RealVfsFilesystem::OpenFileFromEntry(std::string_view path_, std::op
     }
 
     auto reference = std::make_unique<FileReference>();
-    this->InsertReferenceIntoListLocked(*reference);
+    this->InsertReferenceIntoListLocked(*state, *reference);
 
-    auto file = std::make_shared<RealVfsFile>(*this, std::move(reference), path, perms, size);
-    cache[path] = file;
+    auto file =
+        std::make_shared<RealVfsFile>(*this, state, std::move(reference), path, perms, size);
+    state->cache[path] = file;
 
     return file;
 }
@@ -143,8 +148,8 @@ VirtualFile RealVfsFilesystem::OpenFile(std::string_view path_, OpenMode perms) 
 VirtualFile RealVfsFilesystem::CreateFile(std::string_view path_, OpenMode perms) {
     const auto path = FS::SanitizePath(path_, FS::DirectorySeparator::PlatformDefault);
     {
-        std::scoped_lock lk{list_lock};
-        cache.erase(path);
+        std::scoped_lock lk{state->list_lock};
+        state->cache.erase(path);
     }
 
     // Current usages of CreateFile expect to delete the contents of an existing file.
@@ -176,9 +181,9 @@ VirtualFile RealVfsFilesystem::MoveFile(std::string_view old_path_, std::string_
     const auto old_path = FS::SanitizePath(old_path_, FS::DirectorySeparator::PlatformDefault);
     const auto new_path = FS::SanitizePath(new_path_, FS::DirectorySeparator::PlatformDefault);
     {
-        std::scoped_lock lk{list_lock};
-        cache.erase(old_path);
-        cache.erase(new_path);
+        std::scoped_lock lk{state->list_lock};
+        state->cache.erase(old_path);
+        state->cache.erase(new_path);
     }
     if (!FS::RenameFile(old_path, new_path)) {
         return nullptr;
@@ -189,8 +194,8 @@ VirtualFile RealVfsFilesystem::MoveFile(std::string_view old_path_, std::string_
 bool RealVfsFilesystem::DeleteFile(std::string_view path_) {
     const auto path = FS::SanitizePath(path_, FS::DirectorySeparator::PlatformDefault);
     {
-        std::scoped_lock lk{list_lock};
-        cache.erase(path);
+        std::scoped_lock lk{state->list_lock};
+        state->cache.erase(path);
     }
     return FS::RemoveFile(path);
 }
@@ -230,94 +235,108 @@ bool RealVfsFilesystem::DeleteDirectory(std::string_view path_) {
     return FS::RemoveDirRecursively(path);
 }
 
-std::unique_lock<std::mutex> RealVfsFilesystem::RefreshReference(const std::string& path,
+std::unique_lock<std::mutex> RealVfsFilesystem::RefreshReference(RealVfsSharedState& state,
+                                                                 const std::string& path,
                                                                  OpenMode perms,
                                                                  FileReference& reference) {
-    std::unique_lock lk{list_lock};
+    std::unique_lock lk{state.list_lock};
+
+    // The owning filesystem is gone: leave the reference lists untouched.
+    // The caller still owns `reference` and may keep using an already-open
+    // handle, but nothing is reopened or re-linked after teardown.
+    if (!state.alive.load()) {
+        return lk;
+    }
 
     // Temporarily remove from list.
-    this->RemoveReferenceFromListLocked(reference);
+    RemoveReferenceFromListLocked(state, reference);
 
     // Restore file if needed.
     if (!reference.file) {
-        this->EvictSingleReferenceLocked();
+        EvictSingleReferenceLocked(state);
 
         reference.file =
             FS::FileOpen(path, ModeFlagsToFileAccessMode(perms), FS::FileType::BinaryFile);
         if (reference.file) {
-            num_open_files++;
+            state.num_open_files++;
         }
     }
 
     // Reinsert into list.
-    this->InsertReferenceIntoListLocked(reference);
+    InsertReferenceIntoListLocked(state, reference);
 
     return lk;
 }
 
-void RealVfsFilesystem::DropReference(std::unique_ptr<FileReference>&& reference,
+void RealVfsFilesystem::DropReference(RealVfsSharedState& state,
+                                      std::unique_ptr<FileReference>&& reference,
                                       const std::string& path) {
-    if (in_dtor)
-        return;
-
-    std::scoped_lock lk{list_lock};
+    // Safe to run after the owning filesystem is gone: all of the state this
+    // touches lives in the shared block, which outlives every file using it.
+    std::scoped_lock lk{state.list_lock};
 
     // Remove from list.
-    this->RemoveReferenceFromListLocked(*reference);
+    RemoveReferenceFromListLocked(state, *reference);
 
     // Forget the path, unless it was opened again since this file's last reference went away.
-    if (const auto it = cache.find(path); it != cache.end() && it->second.expired()) {
-        cache.erase(it);
+    if (const auto it = state.cache.find(path); it != state.cache.end() && it->second.expired()) {
+        state.cache.erase(it);
     }
 
     // Close the file.
     if (reference->file) {
         reference->file.reset();
-        num_open_files--;
+        state.num_open_files--;
     }
 }
 
-void RealVfsFilesystem::EvictSingleReferenceLocked() {
-    if (num_open_files < MaxOpenFiles() || open_references.empty()) {
+void RealVfsFilesystem::EvictSingleReferenceLocked(RealVfsSharedState& state) {
+    if (state.num_open_files < MaxOpenFiles() || state.open_references.empty()) {
         return;
     }
 
     // Get and remove from list.
-    auto& reference = open_references.back();
-    this->RemoveReferenceFromListLocked(reference);
+    auto& reference = state.open_references.back();
+    RemoveReferenceFromListLocked(state, reference);
 
     // Close the file.
     if (reference.file) {
         reference.file.reset();
-        num_open_files--;
+        state.num_open_files--;
     }
 
     // Reinsert into closed list.
-    this->InsertReferenceIntoListLocked(reference);
+    InsertReferenceIntoListLocked(state, reference);
 }
 
-void RealVfsFilesystem::InsertReferenceIntoListLocked(FileReference& reference) {
+void RealVfsFilesystem::InsertReferenceIntoListLocked(RealVfsSharedState& state,
+                                                      FileReference& reference) {
     if (reference.file) {
-        open_references.push_front(reference);
+        state.open_references.push_front(reference);
     } else {
-        closed_references.push_front(reference);
+        state.closed_references.push_front(reference);
     }
 }
 
-void RealVfsFilesystem::RemoveReferenceFromListLocked(FileReference& reference) {
+void RealVfsFilesystem::RemoveReferenceFromListLocked(RealVfsSharedState& state,
+                                                      FileReference& reference) {
     if (reference.file) {
-        open_references.erase(open_references.iterator_to(reference));
+        state.open_references.erase(state.open_references.iterator_to(reference));
     } else {
-        closed_references.erase(closed_references.iterator_to(reference));
+        state.closed_references.erase(state.closed_references.iterator_to(reference));
     }
 }
 
-RealVfsFile::RealVfsFile(RealVfsFilesystem& base_, std::unique_ptr<FileReference> reference_,
-                         const std::string& path_, OpenMode perms_, std::optional<u64> size_)
-    : base(base_), reference(std::move(reference_)), path(path_), size(size_), perms(perms_) {}
+RealVfsFile::RealVfsFile(RealVfsFilesystem& base_, std::shared_ptr<RealVfsSharedState> state_,
+                         std::unique_ptr<FileReference> reference_, const std::string& path_,
+                         OpenMode perms_, std::optional<u64> size_)
+    : base(base_), state(std::move(state_)), reference(std::move(reference_)), path(path_),
+      size(size_), perms(perms_) {}
 
 RealVfsFile::~RealVfsFile() {
-    base.DropReference(std::move(reference), path);
+    // Goes through the shared state block, not the filesystem object: the
+    // filesystem may already be gone (teardown ordering).
+    RealVfsFilesystem::DropReference(*state, std::move(reference), path);
 }
 
 std::string RealVfsFile::GetName() const {
@@ -340,17 +359,24 @@ std::size_t RealVfsFile::GetSize() const {
     if (size) {
         return *size;
     }
-    auto lk = base.RefreshReference(path, perms, *reference);
+    auto lk = RealVfsFilesystem::RefreshReference(*state, path, perms, *reference);
     return reference->file ? reference->file->GetSize() : 0;
 }
 
 bool RealVfsFile::Resize(std::size_t new_size) {
     size.reset();
-    auto lk = base.RefreshReference(path, perms, *reference);
+    auto lk = RealVfsFilesystem::RefreshReference(*state, path, perms, *reference);
     return reference->file ? reference->file->SetSize(new_size) : false;
 }
 
 VirtualDir RealVfsFile::GetContainingDirectory() const {
+    // Ordered teardown is safe: a dead filesystem is never touched.
+    // Residual: if the filesystem is destroyed *concurrently* between this
+    // check and the call, the race on `base` remains (pre-existing); the
+    // filesystem object must not be destroyed while in active use.
+    if (!state->alive.load()) {
+        return nullptr;
+    }
     return base.OpenDirectory(FS::GetParentPath(path), perms);
 }
 
@@ -363,7 +389,7 @@ bool RealVfsFile::IsReadable() const {
 }
 
 std::size_t RealVfsFile::Read(u8* data, std::size_t length, std::size_t offset) const {
-    auto lk = base.RefreshReference(path, perms, *reference);
+    auto lk = RealVfsFilesystem::RefreshReference(*state, path, perms, *reference);
     if (!reference->file || !reference->file->Seek(static_cast<s64>(offset))) {
         return 0;
     }
@@ -372,7 +398,7 @@ std::size_t RealVfsFile::Read(u8* data, std::size_t length, std::size_t offset) 
 
 std::size_t RealVfsFile::Write(const u8* data, std::size_t length, std::size_t offset) {
     size.reset();
-    auto lk = base.RefreshReference(path, perms, *reference);
+    auto lk = RealVfsFilesystem::RefreshReference(*state, path, perms, *reference);
     if (!reference->file || !reference->file->Seek(static_cast<s64>(offset))) {
         return 0;
     }
@@ -380,6 +406,13 @@ std::size_t RealVfsFile::Write(const u8* data, std::size_t length, std::size_t o
 }
 
 bool RealVfsFile::Rename(std::string_view name) {
+    // Ordered teardown is safe: a dead filesystem is never touched.
+    // Residual: if the filesystem is destroyed *concurrently* between this
+    // check and the call, the race on `base` remains (pre-existing); the
+    // filesystem object must not be destroyed while in active use.
+    if (!state->alive.load()) {
+        return false;
+    }
     return base.MoveFile(path, FS::GetParentPath(path) + '/' + std::string(name)) != nullptr;
 }
 
