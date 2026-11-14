@@ -491,7 +491,7 @@ struct Values {
                                       Specialization::Default, true, false};
 
     SwitchableSetting<FrameGenType> frame_gen_type{linkage,
-                                                   FrameGenType::Fsr3,
+                                                   FrameGenType::OpticalFlow,
                                                    "frame_gen_type",
                                                    Category::Renderer,
                                                    Specialization::Default,

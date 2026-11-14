@@ -5609,12 +5609,12 @@ void MainWindow::UpdateFrameGenButton() {
 
     const Settings::FrameGenType selected_type = Settings::values.frame_gen_type.GetValue();
     // Once a game runs, NVIDIA DLSS Frame Generation that isn't this session's generator gives
-    // way to FSR3.
+    // way to Lichii Optical Flow.
     const bool dlssg_fallback = selected_type == Settings::FrameGenType::NvidiaDlssG &&
                                 emulation_running &&
                                 frame_gen_state == VideoCore::FrameGenState::Running;
     const Settings::FrameGenType shown_type =
-        dlssg_fallback ? Settings::FrameGenType::Fsr3 : selected_type;
+        dlssg_fallback ? Settings::FrameGenType::OpticalFlow : selected_type;
     const QString& type_text =
         ConfigurationShared::frame_gen_type_texts_map.find(shown_type)->second;
     const QString type = shown_type == Settings::FrameGenType::NvidiaDlssG
@@ -5651,7 +5651,7 @@ void MainWindow::UpdateFrameGenButton() {
         break;
     case VideoCore::FrameGenState::UnsupportedGpu:
         unavailable = tr("This GPU lacks Vulkan features LSFG needs (Vulkan memory model and null "
-                         "descriptors). The Optical Flow type may still work.");
+                         "descriptors). Lichii Optical Flow Frame Generation may still work.");
         break;
     case VideoCore::FrameGenState::UnsupportedSurface:
         unavailable = tr("This GPU can't write to the window's swapchain format from a shader, so "
@@ -5675,7 +5675,7 @@ void MainWindow::UpdateFrameGenButton() {
 
     const QString fallback =
         dlssg_fallback ? tr(" NVIDIA DLSS Frame Generation can't run for this game or setup, so "
-                            "FSR3 runs instead; the log says why.")
+                            "Lichii Optical Flow Frame Generation runs instead; the log says why.")
                        : QString();
     if (frame_gen_generating) {
         frame_gen_status_button->setText(mode);
