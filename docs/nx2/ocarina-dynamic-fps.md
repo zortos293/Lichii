@@ -94,14 +94,13 @@ the original step as a floor, caps long frames, and smooths changes. Actual
 gameplay speed and the runtime value of that frame-rate field still require
 live validation.
 
-In Lichii, `CoreTiming::GetClockTicks` scales the counter for CPU Boost and
-Overclock, while Dynarmic's advertised counter frequency stays unchanged.
-Boost uses a 1.7 multiplier and Overclock uses 2. Enabling core-speed
-synchronization can further divide the counter by the configured speed limit.
-Those settings alter the elapsed seconds this routine calculates. CPU Clock
-Normal and an unscaled counter are prerequisites for evaluating its timing;
-the Add-On does not change global clock behavior or automatically override
-the user's settings. Correct gameplay speed with the Add-On is unverified.
+For Switch 1 titles, `CoreTiming::GetClockTicks` scales the counter for CPU
+Boost (1.7x) and Overclock (2x). It no longer does so for Switch 2 titles,
+whose SDK converts ticks with a fixed 31.25 MHz: the scaled counter made this
+routine, and every other tick-based time, run 1.7x fast on Boost (#317).
+Enabling core-speed synchronization still divides the counter by the
+configured speed limit, which alters the elapsed seconds this routine
+calculates. Correct gameplay speed with the Add-On is unverified.
 
 ## FPS Unlock: sound manager at 60 Hz
 

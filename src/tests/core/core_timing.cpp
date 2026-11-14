@@ -11,6 +11,7 @@
 #include <optional>
 #include <string>
 
+#include "common/settings.h"
 #include "core/core.h"
 #include "core/core_timing.h"
 
@@ -143,4 +144,30 @@ TEST_CASE("CoreTiming[BasicOrderNoPausing]", "[core]") {
     printf("HostTimer No Pausing Scheduling Time: %.3f %.6f\n", micro, mili);
     printf("HostTimer No Pausing Timer Time: %.3f %.6f\n", timer_time / 1000.f,
            timer_time / 1000000.f);
+}
+
+TEST_CASE("CoreTiming[ClockTicksCpuClock]", "[core]") {
+    Settings::values.sync_core_speed.SetValue(false);
+    Settings::values.use_custom_cpu_ticks.SetValue(false);
+
+    Core::Timing::CoreTiming core_timing;
+    core_timing.SetMulticore(false);
+    core_timing.AddTicks(1'000'000);
+
+    const auto ticks_with = [&](Settings::CpuClock clock, bool switch2) {
+        Settings::values.cpu_clock.SetValue(clock);
+        Settings::SetCurrentProgramIsSwitch2(switch2);
+        return core_timing.GetClockTicks();
+    };
+
+    const u64 normal = ticks_with(Settings::CpuClock::Normal, false);
+    REQUIRE(ticks_with(Settings::CpuClock::Boost, false) == normal * 1734 / 1020);
+    REQUIRE(ticks_with(Settings::CpuClock::Overclock, false) == normal * 2040 / 1020);
+
+    const u64 normal_switch2 = ticks_with(Settings::CpuClock::Normal, true);
+    REQUIRE(ticks_with(Settings::CpuClock::Boost, true) == normal_switch2);
+    REQUIRE(ticks_with(Settings::CpuClock::Overclock, true) == normal_switch2);
+
+    Settings::values.cpu_clock.SetValue(Settings::CpuClock::Normal);
+    Settings::SetCurrentProgramIsSwitch2(false);
 }
