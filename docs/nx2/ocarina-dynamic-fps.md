@@ -142,6 +142,13 @@ module offsets.
 | `0x3293410` | Ocarina playback tick | Truncating a step below one stalls playback. | Advance by accumulated whole ticks. |
 | `0x2F53268` | Step rate manager countdown | `max(round(step), 1)` per frame runs fast above 60 fps. | Decrement by accumulated whole ticks. |
 | `0x53F914` | Ambient wave phase | Counting frames makes the phase run fast above 60 fps. | Accumulate the raw step instead of adding one. |
+| `0x3296B08` | Scarecrow's Song recording, a note or gap held | `trunc(step)` is often 0 at 60 fps and always above it: lengths come out short or zero. | Advance by accumulated whole ticks. |
+| `0x32926C8` | Scarecrow's Song recording, the last note | The same cut leaves the eighth note with no length; the song stops after its first note (#1730). | Advance by accumulated whole ticks. |
+
+The last-note hook adds to the elapsed counter at `+0x265FC` of the ocarina manager. Hookshot
+keys the recording and the playback tick to that same counter, so they share one remainder slot. The recording's second
+cut at `0x3296DA4` (added to `w12`) is left alone. Hookshot found both sites (`f_832b6840`
+and `f_832b2690` in its `nx2/oot_patches.py` `WHOLE_SITES`, GPL-3.0); the stubs here are our own.
 
 The helper takes the counter address in `x13` and step in `s0`, returning ticks
 in `w13`. Each of 16 slots retains a fractional remainder. A new or evicted
@@ -149,8 +156,8 @@ slot returns `max(trunc(step), 1)`; reused addresses inherit the stored fraction
 More than 16 interleaved counters can therefore fall back to that minimum.
 
 The stubs occupy `0x3C46900` (40 bytes), `0x3C46928` (40 bytes), `0x3C46950`
-(48 bytes), and `0x3C46A00` (60 bytes); the 128-byte helper starts at
-`0x3C46980`. All are guarded zero-filled executable padding. The hitstop hook
+(48 bytes), `0x3C46A00` (60 bytes), `0x3C46AB0` and `0x3C46AD8` (40 bytes each); the
+128-byte helper starts at `0x3C46980`. All are guarded zero-filled executable padding. The hitstop hook
 validates all 44 original bytes through `0x2F53294`, including the instructions
 the stub skips. Any changed hook, cave, state byte, or user mod in a record
 skips the entire FPS Unlock patch transactionally.
