@@ -130,6 +130,12 @@ public:
 
     virtual void Dump(u64 pipeline_hash, u64 shader_hash) = 0;
 
+    /// Disk cache environments: forgets that a read lacked a recorded value.
+    virtual void ForgetLackedReads() {}
+
+    /// Whether translation read instructions outside the program's cached (hashed) code.
+    [[nodiscard]] virtual bool ReadUnboundInstructions() const { return false; }
+
     [[nodiscard]] const ProgramHeader& SPH() const noexcept {
         return sph;
     }

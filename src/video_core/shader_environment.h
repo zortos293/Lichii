@@ -67,6 +67,10 @@ public:
 
     [[nodiscard]] std::vector<u64> MappedStoragePointerKeys() const override;
 
+    [[nodiscard]] bool ReadUnboundInstructions() const override {
+        return has_unbound_instructions;
+    }
+
     /// Answers the classification of these keys (see MappedStoragePointerKeys) as storage buffer
     /// pointers, whatever the slots hold now; called before the program is translated
     void KeepStoragePointers(std::span<const u64> keys);
@@ -313,6 +317,10 @@ public:
     [[nodiscard]] bool LacksRecordedValue(u32 read_properties) const noexcept {
         return lacks_recorded_value &&
                (!recorded_read_properties || *recorded_read_properties == read_properties);
+    }
+
+    void ForgetLackedReads() override {
+        lacks_recorded_value = false;
     }
 
 private:

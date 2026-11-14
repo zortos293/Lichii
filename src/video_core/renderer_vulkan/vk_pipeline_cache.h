@@ -16,6 +16,7 @@
 #include <memory>
 #include <mutex>
 #include <optional>
+#include <span>
 #include <string>
 #include <type_traits>
 #include "common/container/unordered_map.h"
@@ -37,6 +38,7 @@
 #include "video_core/renderer_vulkan/vk_compute_pipeline.h"
 #include "video_core/renderer_vulkan/vk_graphics_pipeline.h"
 #include "video_core/renderer_vulkan/vk_pipeline_cache_prebuild.h"
+#include "video_core/renderer_vulkan/vk_shader_reuse.h"
 #include "video_core/renderer_vulkan/vk_texture_cache.h"
 #include "video_core/shader_cache.h"
 #include "video_core/shader_cache_v2/cache.h"
@@ -186,6 +188,11 @@ private:
     /// Releases the pools' contents and keeps a few for later builds
     void ReturnPools(std::shared_ptr<ShaderPools> pools);
 
+    /// Shaders of an earlier graphics pipeline that fit `envs` (vk_shader_reuse.h), or null.
+    [[nodiscard]] std::shared_ptr<const ReusableShaders> FindReusableShaders(
+        const ShaderTranslationKey& key, std::span<Shader::Environment* const> envs,
+        u64 pipeline_hash);
+
     [[nodiscard]] bool StaleNullPointerSlot(const ComputePipelineCacheEntry& entry) const;
 
     /// Translates the current compute program, binding the pointers in keep_pointers whatever
@@ -273,6 +280,7 @@ private:
     VideoCore::ShaderNotify& shader_notify;
     bool use_asynchronous_shaders{};
     bool use_vulkan_pipeline_cache{};
+    const bool use_shader_reuse;
     /// The pipelines' builds, the prebuild and the precache. Declared before the pipelines, whose
     /// builds it runs.
     std::optional<VideoCommon::ShaderJobScheduler> shader_jobs;
@@ -310,6 +318,7 @@ private:
     ShaderPools main_pools;
     std::mutex spare_pools_mutex;
     std::vector<std::shared_ptr<ShaderPools>> spare_pools;
+    ShaderReuseCache shader_reuse;
 
     Shader::Profile profile;
     Shader::HostTranslateInfo host_info;
