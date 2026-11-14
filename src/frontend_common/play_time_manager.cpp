@@ -97,8 +97,8 @@ std::optional<std::filesystem::path> GetCurrentUserPlayTimePath() {
                       Common::FS::PathToUTF8String(temporary));
             return false;
         }
-        written = file.WriteSpan<PlayTimeElement>(elements) == elements.size() && file.Flush() &&
-                  file.Close();
+        written = file.WriteSpan<PlayTimeElement>(elements) == elements.size() &&
+                  file.Commit() && file.Close();
     }
     std::error_code error;
     if (!written) {
@@ -125,7 +125,7 @@ PlayTimeManager::PlayTimeManager() : running_program_id() {
 }
 
 PlayTimeManager::~PlayTimeManager() {
-    std::scoped_lock lock{database_mutex};
+    std::scoped_lock lock{save_mutex};
     Save();
 }
 
@@ -159,14 +159,22 @@ void PlayTimeManager::AutoTimestamp(std::stop_token stop_token) {
     while (!stop_token.stop_requested()) {
         Common::StoppableTimedWait(stop_token, 30s);
 
-        std::scoped_lock lock{database_mutex};
-        database[running_program_id] += GetDuration();
+        std::scoped_lock lock{save_mutex};
+        {
+            std::scoped_lock database_lock{database_mutex};
+            database[running_program_id] += GetDuration();
+        }
         Save();
     }
 }
 
 void PlayTimeManager::Save() {
-    if (!WritePlayTimeFile(database)) {
+    PlayTimeDatabase snapshot;
+    {
+        std::scoped_lock lock{database_mutex};
+        snapshot = database;
+    }
+    if (!WritePlayTimeFile(snapshot)) {
         LOG_ERROR(Frontend, "Failed to update play time database!");
     }
 }
@@ -182,14 +190,20 @@ u64 PlayTimeManager::GetPlayTime(u64 program_id) const {
 }
 
 void PlayTimeManager::SetPlayTime(u64 program_id, u64 play_time) {
-    std::scoped_lock lock{database_mutex};
-    database[program_id] = play_time;
+    std::scoped_lock lock{save_mutex};
+    {
+        std::scoped_lock database_lock{database_mutex};
+        database[program_id] = play_time;
+    }
     Save();
 }
 
 void PlayTimeManager::ResetProgramPlayTime(u64 program_id) {
-    std::scoped_lock lock{database_mutex};
-    database.erase(program_id);
+    std::scoped_lock lock{save_mutex};
+    {
+        std::scoped_lock database_lock{database_mutex};
+        database.erase(program_id);
+    }
     Save();
 }
 
