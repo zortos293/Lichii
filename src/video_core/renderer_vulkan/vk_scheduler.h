@@ -222,7 +222,7 @@ public:
             FlushUploads();
         }
         ++record_serial;
-        if (Common::DkbFrameTrace::Enabled()) [[unlikely]] {
+        if (Common::DkbFrameTrace::Enabled()) {
             RecordSiteMarker(location);
         }
         if (chunk->Record(command)) {
