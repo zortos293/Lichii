@@ -39,6 +39,7 @@
 #include "video_core/vulkan_common/vk_enum_string_helper.h"
 #include "video_core/vulkan_common/vulkan_debug_callback.h"
 #include "video_core/vulkan_common/vulkan_device.h"
+#include "video_core/vulkan_common/xess_runtime.h"
 #include "video_core/vulkan_common/vulkan_instance.h"
 #include "video_core/vulkan_common/vulkan_library.h"
 #include "video_core/vulkan_common/vulkan_memory_allocator.h"
@@ -171,7 +172,7 @@ try
     // Create raw Vulkan instance first
     , instance(CreateInstance(*library,
                             dld,
-                            VK_API_VERSION_1_1,
+                            XeSS::RequiredInstanceApiVersion(),
                             render_window.GetWindowInfo().type,
                             Settings::values.renderer_debug.GetValue()))
     // Create debug messenger if debug is enabled

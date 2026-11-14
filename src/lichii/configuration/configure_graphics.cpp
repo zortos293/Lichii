@@ -224,6 +224,7 @@ void ConfigureGraphics::Setup(const ConfigurationShared::Builder& builder) {
     QCheckBox* frame_gen_checkbox = nullptr;
     QComboBox* frame_gen_type_combobox = nullptr;
     QCheckBox* nvidia_dlss_checkbox = nullptr;
+    QCheckBox* ocarina_xess_checkbox = nullptr;
 #ifdef EGLANTINE_STREAMLINE
     NvidiaDlssPanel* nvidia_dlss_panel = nullptr;
 #endif
@@ -245,6 +246,12 @@ void ConfigureGraphics::Setup(const ConfigurationShared::Builder& builder) {
 #if !defined(_WIN32) && !defined(__linux__)
         // FSR 4 runs through AMD's runtime on Windows and the fsr4-vk port on Linux.
         if (setting->Id() == Settings::values.amd_fsr4.Id()) {
+            continue;
+        }
+#endif
+#ifndef _WIN32
+        if (setting->Id() == Settings::values.ocarina_xess.Id() ||
+            setting->Id() == Settings::values.xess_quality.Id()) {
             continue;
         }
 #endif
@@ -281,6 +288,10 @@ void ConfigureGraphics::Setup(const ConfigurationShared::Builder& builder) {
                                      setting->Id() == Settings::values.nvidia_dlss_preset.Id())) {
             widget->setVisible(nvidia_dlss_checkbox->isChecked());
             connect(nvidia_dlss_checkbox, &QCheckBox::toggled, widget, &QWidget::setVisible);
+        }
+        if (ocarina_xess_checkbox && setting->Id() == Settings::values.xess_quality.Id()) {
+            widget->setVisible(ocarina_xess_checkbox->isChecked());
+            connect(ocarina_xess_checkbox, &QCheckBox::toggled, widget, &QWidget::setVisible);
         }
 
         if (setting->Id() == Settings::values.hdr_mode.Id() ||
@@ -380,6 +391,16 @@ void ConfigureGraphics::Setup(const ConfigurationShared::Builder& builder) {
             group_layout->addWidget(nvidia_dlss_panel);
             hold_graphics.emplace(setting->Id(), group);
 #endif
+        } else if (setting->Id() == Settings::values.ocarina_xess.Id()) {
+            ocarina_xess_checkbox = widget->checkbox;
+            ocarina_xess_group = new QWidget(this);
+            QVBoxLayout* group_layout = new QVBoxLayout(ocarina_xess_group);
+            group_layout->setContentsMargins(0, 0, 0, 0);
+            group_layout->setSpacing(2);
+            group_layout->addWidget(widget);
+            hold_graphics.emplace(setting->Id(), ocarina_xess_group);
+        } else if (setting->Id() == Settings::values.xess_quality.Id()) {
+            ocarina_xess_group->layout()->addWidget(widget);
         } else if (setting->Id() == Settings::values.amd_fsr4.Id()) {
             // AMD's files and a download button under the checkbox, shown for GPUs FSR 4 runs on.
             amd_fsr4_group = new QWidget(this);
@@ -600,6 +621,9 @@ void ConfigureGraphics::UpdateAPILayout() {
     vulkan_device_widget->setVisible(is_vulkan);
     for (auto* widget : hdr_widgets) {
         widget->setVisible(is_vulkan);
+    }
+    if (ocarina_xess_group) {
+        ocarina_xess_group->setVisible(is_vulkan);
     }
     if (is_vulkan && int(vulkan_device) < vulkan_device_combobox->count()) {
         vulkan_device_combobox->setCurrentIndex(vulkan_device);

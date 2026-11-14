@@ -33,6 +33,7 @@
 #include "video_core/vulkan_common/vma.h"
 #include "video_core/vulkan_common/vulkan_device.h"
 #include "video_core/vulkan_common/vulkan_wrapper.h"
+#include "video_core/vulkan_common/xess_runtime.h"
 #include "video_core/gpu_logging/gpu_logging.h"
 #include "video_core/shader_cache_v2/cache.h"
 #ifdef EGLANTINE_STREAMLINE
@@ -48,10 +49,10 @@ namespace Vulkan {
 using namespace Common::Literals;
 namespace {
 // Matches Mesa's boolean parsing of its environment options.
-bool EnvFlagSet(const char* name) {
+bool EnvFlagSet(const char* name, bool default_value = false) {
     const char* value = std::getenv(name);
     if (value == nullptr) {
-        return false;
+        return default_value;
     }
     const std::string_view v{value};
     for (const std::string_view truthy : {"1", "true", "t", "yes", "y"}) {
@@ -61,7 +62,14 @@ bool EnvFlagSet(const char* name) {
             return true;
         }
     }
-    return false;
+    for (const std::string_view falsy : {"0", "false", "f", "no", "n", "off"}) {
+        if (std::ranges::equal(v, falsy, [](char a, char b) {
+                return std::tolower(static_cast<unsigned char>(a)) == b;
+            })) {
+            return false;
+        }
+    }
+    return default_value;
 }
 
 namespace Alternatives {
@@ -564,7 +572,7 @@ Device::Device(VkInstance instance_, vk::PhysicalDevice physical_, VkSurfaceKHR 
 
     // GetSuitability has already configured the linked list of features for us.
     // Reuse it here.
-    const void* first_next = &features2;
+    const void* first_next = xess_features_chain_head ? xess_features_chain_head : &features2;
 
     VkDeviceDiagnosticsConfigCreateInfoNV diagnostics_nv{};
     const bool use_diagnostics_nv = Settings::values.enable_nsight_aftermath && extensions.device_diagnostics_config;
@@ -573,7 +581,7 @@ Device::Device(VkInstance instance_, vk::PhysicalDevice physical_, VkSurfaceKHR 
 
         diagnostics_nv = {
             .sType = VK_STRUCTURE_TYPE_DEVICE_DIAGNOSTICS_CONFIG_CREATE_INFO_NV,
-            .pNext = &features2,
+            .pNext = first_next,
             .flags = VK_DEVICE_DIAGNOSTICS_CONFIG_ENABLE_SHADER_DEBUG_INFO_BIT_NV |
                      VK_DEVICE_DIAGNOSTICS_CONFIG_ENABLE_RESOURCE_TRACKING_BIT_NV |
                      VK_DEVICE_DIAGNOSTICS_CONFIG_ENABLE_AUTOMATIC_CHECKPOINTS_BIT_NV,
@@ -741,10 +749,26 @@ Device::Device(VkInstance instance_, vk::PhysicalDevice physical_, VkSurfaceKHR 
         }
     }
 
-    if (features.shader_float16_int8.shaderFloat16 && is_intel_windows) {
-        // Intel's compiler crashes when using fp16 on Astral Chain, disable it for the time being.
-        LOG_WARNING(Render_Vulkan, "Intel has broken float16 math");
+    // Intel's Astral Chain FP16 compiler failure is retained for non-discrete devices. Discrete
+    // Arc was tested on the same Windows driver family; keep an environment override for A/B.
+    const bool is_intel_discrete =
+        is_intel_windows &&
+        properties.properties.deviceType == VK_PHYSICAL_DEVICE_TYPE_DISCRETE_GPU;
+    const bool enable_intel_discrete_fp16 =
+        is_intel_discrete && EnvFlagSet("EDEN_NX2_INTEL_DISCRETE_FP16", true);
+    if (features.shader_float16_int8.shaderFloat16 && is_intel_windows &&
+        !enable_intel_discrete_fp16) {
+        LOG_WARNING(Render_Vulkan,
+                    is_intel_discrete ? "Intel discrete FP16 disabled by EDEN_NX2_INTEL_DISCRETE_FP16"
+                                      : "Intel non-discrete GPU FP16 disabled for the Astral Chain workaround");
         features.shader_float16_int8.shaderFloat16 = false;
+    }
+    if (features.shader_float16_int8.shaderFloat16 && enable_intel_discrete_fp16) {
+        LOG_INFO(Render_Vulkan,
+                 "Intel discrete GPU {} (vendor {:#06x}, device {:#06x}): enabling advertised "
+                 "FP16 arithmetic; set EDEN_NX2_INTEL_DISCRETE_FP16=0 to disable",
+                 properties.properties.deviceName, properties.properties.vendorID,
+                 properties.properties.deviceID);
     }
 
     has_broken_compute =
@@ -1397,6 +1421,19 @@ bool Device::GetSuitability(bool requires_swapchain) {
         supported_extensions.insert(property.extensionName);
     }
 
+    std::vector<std::string> xess_device_extensions;
+    bool xess_requirements_available = XeSS::IsAvailable();
+    if (xess_requirements_available) {
+        xess_device_extensions = XeSS::DeviceExtensions(instance, *physical);
+        const auto supported = [&](const std::string& name) {
+            return supported_extensions.contains(name);
+        };
+        if (!std::ranges::all_of(xess_device_extensions, supported)) {
+            xess_requirements_available = false;
+            XeSS::Disable("the selected Vulkan device lacks a required device extension");
+        }
+    }
+
     // Generate list of extensions to load.
     loaded_extensions.clear();
 
@@ -1420,7 +1457,6 @@ bool Device::GetSuitability(bool requires_swapchain) {
 
     FOR_EACH_VK_FEATURE_EXT(FEATURE_EXTENSION);
     FOR_EACH_VK_EXTENSION(EXTENSION);
-
     extensions.depth_stencil_resolve =
         extensions.depth_stencil_resolve &&
         (instance_version >= VK_API_VERSION_1_2 || extensions.create_renderpass2);
@@ -1556,6 +1592,20 @@ bool Device::GetSuitability(bool requires_swapchain) {
 
     // Perform the feature test.
     physical.GetFeatures2(features2);
+
+    if (xess_requirements_available) {
+        void* feature_chain = &features2;
+        if (XeSS::EnableRequiredDeviceFeatures(instance, *physical, &feature_chain)) {
+            xess_features_chain_head = feature_chain;
+            loaded_extensions.insert(xess_device_extensions.begin(), xess_device_extensions.end());
+            xess_supported = true;
+            LOG_INFO(Render_Vulkan, "XeSS-SR Vulkan requirements enabled on {}",
+                     properties.properties.deviceName);
+        } else {
+            xess_requirements_available = false;
+            XeSS::Disable("the selected Vulkan device lacks required features");
+        }
+    }
 
     if (has_device_fault_extension) {
         loaded_extensions.insert(VK_EXT_DEVICE_FAULT_EXTENSION_NAME);
