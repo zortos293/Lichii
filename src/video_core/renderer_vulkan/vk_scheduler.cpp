@@ -790,6 +790,12 @@ void Scheduler::TraceSite(vk::CommandBuffer cmdbuf, const char* file, u32 line) 
     if (!trace_gpu_recording || !trace_site_pool || trace_site_count == TraceMaxSites) {
         return;
     }
+    // The last query marks where commands stop having markers (file nullptr), so the site
+    // before it keeps only its own time.
+    if (trace_site_count + 1 == TraceMaxSites) {
+        file = nullptr;
+        line = 0;
+    }
     trace_site_items[trace_site_count] = {file, line, trace_gpu_count};
     cmdbuf.WriteTimestamp(VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT, *trace_site_pool,
                           trace_site_count);
@@ -860,10 +866,7 @@ void Scheduler::ReportSiteTimes(const std::vector<u64>& submission_begin,
         const u64 end = next_in_submission ? results[i + 1].timestamp
                                            : submission_end[site.submission];
         const double ms = to_ms(results[i].timestamp, end);
-        // Once the pool is full, later commands of this submission have no marker: their time
-        // is reported apart instead of being charged to the last site.
-        const bool untraced_tail = !next_in_submission && count == TraceMaxSites && i + 1 == count;
-        add(untraced_tail ? SiteKey{"(after the marker limit)", 0} : site_key(site), ms);
+        add(site.file == nullptr ? SiteKey{"(after the marker limit)", 0} : site_key(site), ms);
         total_ms += ms;
     }
     std::vector<std::pair<SiteKey, Totals>> sorted(by_site.begin(), by_site.end());
