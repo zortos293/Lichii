@@ -2509,7 +2509,7 @@ std::unique_ptr<GraphicsPipeline> PipelineCache::RebuildGraphicsPipeline(KeptGra
     auto pipeline = std::make_unique<GraphicsPipeline>(
         scheduler, buffer_cache, texture_cache, vulkan_pipeline_cache, pipeline_binaries.get(),
         &shader_notify, device, descriptor_pool, guest_descriptor_queue, descriptor_buffer_ring,
-        BuildQueue(true, bytes), nullptr, render_pass_cache, graphics_key,
+        draw_templates, BuildQueue(true, bytes), nullptr, render_pass_cache, graphics_key,
         std::array<std::vector<u32>, Maxwell::MaxShaderStage>{}, infos, std::move(emit),
         std::move(kept.mesh_emulation));
     pipeline->SetMappedPointers(std::move(kept.mapped_pointers));
@@ -2987,8 +2987,8 @@ std::unique_ptr<GraphicsPipeline> PipelineCache::CreateGraphicsPipeline(
     auto pipeline = std::make_unique<GraphicsPipeline>(
         scheduler, buffer_cache, texture_cache, vulkan_pipeline_cache, pipeline_binaries.get(),
         &shader_notify, device, descriptor_pool, guest_descriptor_queue, descriptor_buffer_ring,
-        BuildQueue(build_in_parallel, defer_emission ? deferred_ir_bytes : 0), statistics,
-        render_pass_cache, key, std::move(stage_spirv), infos, std::move(emit_stages),
+        draw_templates, BuildQueue(build_in_parallel, defer_emission ? deferred_ir_bytes : 0),
+        statistics, render_pass_cache, key, std::move(stage_spirv), infos, std::move(emit_stages),
         std::move(mesh_emulation));
     pipeline->SetMappedPointers(std::move(mapped_pointers));
     return pipeline;

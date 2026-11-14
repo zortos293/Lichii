@@ -850,6 +850,12 @@ public:
 
     [[nodiscard]] VkSampler HandleFor(const ImageView& image_view, bool is_depth);
 
+    /// HandleFor can pick another variant for the same view later: the Ocarina FSR LOD bias
+    /// follows the image's GPU writes and the console mode.
+    [[nodiscard]] bool HasChangingVariants() const noexcept {
+        return added_lod_bias != 0.0f;
+    }
+
     /// The guest descriptor and the host state built from it, for EDEN_NX2_FRAME_DUMP_SAMPLED.
     [[nodiscard]] const Tegra::Texture::TSCEntry& Descriptor() const noexcept {
         return descriptor;

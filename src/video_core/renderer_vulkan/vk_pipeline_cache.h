@@ -267,6 +267,8 @@ private:
     DescriptorPool& descriptor_pool;
     GuestDescriptorQueue& guest_descriptor_queue;
     DescriptorBufferRing& descriptor_buffer_ring;
+    /// 8192 templates: a frame's distinct textured draws, Donkey Kong Bananza's included.
+    DrawTemplates draw_templates{2048};
     RenderPassCache& render_pass_cache;
     BufferCache& buffer_cache;
     TextureCache& texture_cache;

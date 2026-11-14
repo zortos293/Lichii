@@ -1006,6 +1006,98 @@ void TextureCache<P>::MemoizeTextures(SampledTextureMemo& memo,
 }
 
 template <class P>
+DrawTemplateContext TextureCache<P>::GraphicsTextureContext(u64 owner) const noexcept {
+    const auto& image_table = channel_state->graphics_image_table;
+    const auto& sampler_table = channel_state->graphics_sampler_table;
+    return {
+        .owner = owner,
+        .memory = reinterpret_cast<uintptr_t>(gpu_memory),
+        .image_table = reinterpret_cast<uintptr_t>(&image_table),
+        .tic_address = image_table.current_gpu_addr,
+        .tsc_address = sampler_table.current_gpu_addr,
+        .tic_limit = image_table.current_limit,
+        .tsc_limit = sampler_table.current_limit,
+        .via_header_index =
+            maxwell3d->regs.sampler_binding ==
+                    Tegra::Engines::Maxwell3D::Regs::SamplerBinding::ViaHeaderBinding
+                ? 1U
+                : 0U,
+        .native_tiling = gpu_memory->UsesNativeTiling() ? 1U : 0U,
+    };
+}
+
+template <class P>
+bool TextureCache<P>::KeepTemplateTextures(std::span<const TextureHandleRead> reads,
+                                           std::span<const ImageViewInOut> views,
+                                           std::span<const SamplerId> samplers,
+                                           std::vector<DrawTemplateTexture>& textures) {
+    textures.clear();
+    const auto& image_table = channel_state->graphics_image_table;
+    const auto& sampler_table = channel_state->graphics_sampler_table;
+    if (image_table.invalidated || sampler_table.invalidated || reads.size() != views.size() ||
+        reads.size() != samplers.size()) {
+        return false;
+    }
+    const bool via_header_index = maxwell3d->regs.sampler_binding ==
+                                  Tegra::Engines::Maxwell3D::Regs::SamplerBinding::ViaHeaderBinding;
+    const bool native_tiling = gpu_memory->UsesNativeTiling();
+    const auto host_of = [&](GPUVAddr address, size_t size) -> const u8* {
+        if ((address & Core::Memory::YUZU_PAGEMASK) + size > Core::Memory::YUZU_PAGESIZE) {
+            return nullptr;
+        }
+        return gpu_memory->GetPointer(address);
+    };
+    // VisitImageView gives the null view for a descriptor that names no mapped image, or one the
+    // cache could not make (kept in image_views), and both stay null while its bytes and the
+    // mappings do. An image that failed to allocate is not kept there: a later read makes it.
+    const auto null_view_holds = [&](const TICEntry& tic) {
+        if (!IsValidEntry(*gpu_memory, tic)) {
+            return true;
+        }
+        const auto it = channel_state->image_views.find(tic);
+        return it != channel_state->image_views.end() && it->second == NULL_IMAGE_VIEW_ID;
+    };
+    for (size_t i = 0; i < reads.size(); ++i) {
+        const auto [view_index, sampler_index] =
+            Tegra::Texture::TexturePair(reads[i].raw, via_header_index);
+        const u32 tic_index = Tegra::Texture::TextureHeaderIndex(
+            view_index, image_table.current_limit, native_tiling);
+        if (!views[i].id || !samplers[i] || tic_index > image_table.current_limit ||
+            sampler_index > sampler_table.current_limit ||
+            (views[i].id == NULL_IMAGE_VIEW_ID &&
+             !null_view_holds(image_table.descriptors[tic_index]))) {
+            return false;
+        }
+        const DrawTemplateTexture& texture = textures.emplace_back(DrawTemplateTexture{
+            .tic_host = host_of(image_table.current_gpu_addr + tic_index * sizeof(TICEntry),
+                                sizeof(TICEntry)),
+            .tsc_host = host_of(sampler_table.current_gpu_addr + sampler_index * sizeof(TSCEntry),
+                                sizeof(TSCEntry)),
+            .tic = image_table.descriptors[tic_index],
+            .tsc = sampler_table.descriptors[sampler_index],
+            .view = views[i].id,
+            .view_generation = ImageViewGeneration(views[i].id),
+            .sampler = samplers[i],
+        });
+        if (texture.tic_host == nullptr || texture.tsc_host == nullptr ||
+            std::memcmp(texture.tic_host, &texture.tic, sizeof(texture.tic)) != 0 ||
+            std::memcmp(texture.tsc_host, &texture.tsc, sizeof(texture.tsc)) != 0) {
+            return false;
+        }
+    }
+    return true;
+}
+
+template <class P>
+bool TextureCache<P>::PrepareTemplateViews(std::span<const ImageViewInOut> views) {
+    has_deleted_images = false;
+    for (const ImageViewInOut& view : views) {
+        PrepareImageView(view.id, false, false);
+    }
+    return !has_deleted_images;
+}
+
+template <class P>
 void TextureCache<P>::CheckFeedbackLoop(std::span<const ImageViewInOut> views) {
     if (!Settings::values.barrier_feedback_loops.GetValue()) {
         return;
@@ -2902,6 +2994,7 @@ void TextureCache<P>::InvalidateScale(Image& image) {
     for (const ImageViewId image_view_id : image_view_ids) {
         sentenced_image_view.Push(std::move(slot_image_views[image_view_id]));
         slot_image_views.erase(image_view_id);
+        BumpImageViewGeneration(image_view_id);
     }
     image.image_view_ids.clear();
     image.image_view_infos.clear();
@@ -4352,6 +4445,7 @@ void TextureCache<P>::DeleteImage(ImageId image_id, bool immediate_delete) {
             sentenced_image_view.Push(std::move(slot_image_views[image_view_id]));
         }
         slot_image_views.erase(image_view_id);
+        BumpImageViewGeneration(image_view_id);
     }
     const bool retained = RetainPendingImageDownloads(image_id, slot_images[image_id],
                                                        uncommitted_downloads, committed_downloads);

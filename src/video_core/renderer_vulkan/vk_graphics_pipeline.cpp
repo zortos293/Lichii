@@ -10,6 +10,7 @@
 #include <cstring>
 #include <iostream>
 #include <span>
+#include <unordered_set>
 #include <vector>
 
 #include <boost/container/small_vector.hpp>
@@ -369,6 +370,73 @@ void ReportTextureMemo() {
                  hits, misses, g_memo_mismatches.load(std::memory_order_relaxed));
     }
 }
+
+// EDEN_NX2_DRAW_TEMPLATE_VERIFY=1, read once: draws a draw template holds for are resolved in
+// full and compared with it.
+const bool draw_template_verify = [] {
+    const char* const value = std::getenv("EDEN_NX2_DRAW_TEMPLATE_VERIFY");
+    return value != nullptr && value[0] == '1';
+}();
+
+// Draw templates on the drawing thread, logged every 10 s with EDEN_NX2_GPU_PROFILE or the
+// verify env.
+struct DrawTemplateStats {
+    u64 memo_hits{}; ///< Memo-eligible draws the texture memo resolved, before any lookup
+    u64 hits{};      ///< Templates found and valid; with verify, these are resolved in full
+    u64 misses{};
+    u64 kept{};
+    u64 not_kept{}; ///< Changing sampler variants, too many textures or descriptors not keepable
+    std::array<u64, static_cast<size_t>(VideoCommon::DrawTemplateCheck::Count)> rejected{};
+    /// Misses against the pipeline's last template: none yet, other tables or sampler binding,
+    /// other handle words; and misses whose key was kept before (evicted or rejected since)
+    std::array<u64, 4> miss_kinds{};
+    u64 prepare_deleted{};
+    u64 verified{};
+    std::array<u64, 4> mismatches{}; ///< Views, samplers, descriptors, rescaling words
+    u64 mismatched_draws{};
+    u64 total_mismatched_draws{};
+    std::chrono::steady_clock::time_point next_report{};
+} draw_template_stats;
+
+/// Every key a template was kept for, for DrawTemplateStats::miss_kinds (verify or profile only).
+std::unordered_set<u64> kept_template_keys;
+
+void ReportDrawTemplates() {
+    DrawTemplateStats& stats = draw_template_stats;
+    if (((stats.hits + stats.misses) & 1023) != 0 ||
+        (!VideoCommon::Nx2Profile::Enabled() && !draw_template_verify)) {
+        return;
+    }
+    const auto now = std::chrono::steady_clock::now();
+    if (now < stats.next_report) {
+        return;
+    }
+    if (stats.next_report != std::chrono::steady_clock::time_point{}) {
+        using Check = VideoCommon::DrawTemplateCheck;
+        const auto rejected = [&](Check check) {
+            return stats.rejected[static_cast<size_t>(check)];
+        };
+        LOG_INFO(Render_Vulkan,
+                 "Draw templates in 10 s: {} texture memo hits, {} hits, {} misses ({} first of "
+                 "their pipeline, {} other tables, {} other handle words, {} kept before), {} "
+                 "kept, {} not keepable; rejected: {} host memory, {} scale, {} view deleted, {} "
+                 "descriptor bytes, {} prepare deleted images",
+                 stats.memo_hits, stats.hits, stats.misses, stats.miss_kinds[0],
+                 stats.miss_kinds[1], stats.miss_kinds[2], stats.miss_kinds[3], stats.kept,
+                 stats.not_kept, rejected(Check::HostMemory), rejected(Check::Scale),
+                 rejected(Check::ViewDeleted), rejected(Check::Descriptors), stats.prepare_deleted);
+        if (draw_template_verify) {
+            LOG_INFO(Render_Vulkan,
+                     "Draw template verify in 10 s: {} checked, {} mismatched: {} views, {} "
+                     "samplers, {} descriptors, {} rescaling words ({} mismatched in total)",
+                     stats.verified, stats.mismatched_draws, stats.mismatches[0],
+                     stats.mismatches[1], stats.mismatches[2], stats.mismatches[3],
+                     stats.total_mismatched_draws);
+        }
+    }
+    stats = {.total_mismatched_draws = stats.total_mismatched_draws,
+             .next_report = now + std::chrono::seconds{10}};
+}
 } // Anonymous namespace
 
 std::chrono::nanoseconds GraphicsPipeline::TakeHoldTime() noexcept {
@@ -387,7 +455,7 @@ GraphicsPipeline::GraphicsPipeline(
     VideoCore::ShaderNotify* shader_notify,
     const Device& device_, DescriptorPool& descriptor_pool,
     GuestDescriptorQueue& guest_descriptor_queue_, DescriptorBufferRing& descriptor_buffer_ring_,
-    const PipelineBuildQueue& build_queue,
+    DrawTemplates& draw_templates_, const PipelineBuildQueue& build_queue,
     PipelineStatistics* pipeline_statistics, RenderPassCache& render_pass_cache,
     const GraphicsPipelineCacheKey& key_, std::array<std::vector<u32>, NUM_STAGES> stages,
     const std::array<const Shader::Info*, NUM_STAGES>& infos,
@@ -396,7 +464,8 @@ GraphicsPipeline::GraphicsPipeline(
     : key{key_}, device{device_}, texture_cache{texture_cache_}, buffer_cache{buffer_cache_},
       pipeline_cache(pipeline_cache_), binaries{binaries_}, scheduler{scheduler_},
       guest_descriptor_queue{guest_descriptor_queue_},
-      descriptor_buffer_ring{descriptor_buffer_ring_}, spirv{std::move(stages)},
+      descriptor_buffer_ring{descriptor_buffer_ring_}, draw_templates{draw_templates_},
+      template_owner{draw_templates_.NewOwner()}, spirv{std::move(stages)},
       worker_only_build{build_queue.jobs && static_cast<bool>(emit_stages)},
       mesh_emulation{std::move(mesh_emulation_)} {
     if (shader_notify) {
@@ -813,6 +882,12 @@ bool GraphicsPipeline::ConfigureImpl(bool is_indexed) {
         }
     }
     const bool resolve_in_full{!memo_hit || verify_memo};
+    // On a memo miss the textures may come from a template an earlier draw kept, also in an
+    // earlier frame. Its key is read below: the handle words. EDEN_NX2_FAST_DRAW_VERIFY compares
+    // delta draws with a full resolve, so it gets one.
+    const bool use_template{use_memo && !memo_hit && !verify_memo && !verify_delta &&
+                            !IsMeshPipeline()};
+    boost::container::small_vector<u32, 32> sampler_indices;
 
     const auto config_stage{[&](size_t stage) LAMBDA_FORCEINLINE {
         const Shader::Info& info{stage_infos[stage]};
@@ -941,9 +1016,7 @@ bool GraphicsPipeline::ConfigureImpl(bool is_indexed) {
                                           ? VideoCommon::NULL_TEXTURE_HANDLE
                                           : read_handle(desc, index)};
                     views.push_back({handle.first});
-
-                    VideoCommon::SamplerId sampler{texture_cache.GetSamplerId(handle.second, false)};
-                    samplers.push_back(sampler);
+                    sampler_indices.push_back(handle.second);
                     if (use_memo) {
                         handle_reads.push_back(
                             {handle_addresses[handle_reads.size()],
@@ -979,9 +1052,70 @@ bool GraphicsPipeline::ConfigureImpl(bool is_indexed) {
             config_stage(4);
         }
     }
+    DrawTemplate* draw_template{};
+    VideoCommon::DrawTemplateContext template_context{};
+    boost::container::small_vector<u32, 32> template_handles;
+    u64 template_hash{};
+    bool template_hit{};
+    bool keep_template{};
+    if (use_template) {
+        Profile::Scope scope{Profile::Zone::ReadHandles};
+        for (const VideoCommon::TextureHandleRead& read : handle_reads) {
+            template_handles.push_back(read.raw);
+        }
+        template_context = texture_cache.GraphicsTextureContext(template_owner);
+        template_hash = VideoCommon::HashDrawTemplate(template_context, template_handles);
+        draw_template = draw_templates.Find(template_context, template_handles, template_hash);
+        if (draw_template) {
+            const VideoCommon::DrawTemplateCheck check =
+                draw_template->Check(gpu_memory->HostPointerSerial(), texture_cache.ScaleEpoch(),
+                                     [this](VideoCommon::ImageViewId id) {
+                                         return texture_cache.ImageViewGeneration(id);
+                                     });
+            if (check != VideoCommon::DrawTemplateCheck::Hit) {
+                ++draw_template_stats.rejected[static_cast<size_t>(check)];
+                DrawTemplates::Erase(*draw_template);
+                draw_template = nullptr;
+            }
+        }
+        template_hit = draw_template != nullptr && !draw_template_verify;
+        if (template_hit) {
+            for (size_t i = 0; i < views.size(); ++i) {
+                views[i].id = draw_template->textures[i].view;
+                samplers.push_back(draw_template->textures[i].sampler);
+            }
+            if (!texture_cache.PrepareTemplateViews(std::span(views.data(), views.size()))) {
+                ++draw_template_stats.prepare_deleted;
+                DrawTemplates::Erase(*draw_template);
+                draw_template = nullptr;
+                template_hit = false;
+                samplers.clear();
+            }
+        }
+        keep_template = template_recorder.Note(draw_template != nullptr);
+        if (draw_template) {
+            ++draw_template_stats.hits;
+        } else {
+            ++draw_template_stats.misses;
+            if (draw_template_verify || Profile::Enabled()) {
+                const u64 context_hash = VideoCommon::HashDrawTemplate(template_context, {});
+                const size_t kind = last_template_context == 0              ? 0
+                                    : last_template_context != context_hash ? 1
+                                                                            : 2;
+                ++draw_template_stats.miss_kinds[kind];
+                draw_template_stats.miss_kinds[3] += kept_template_keys.contains(template_hash);
+            }
+        }
+    }
+    if (resolve_in_full && !template_hit) {
+        Profile::Scope scope{Profile::Zone::ReadHandles};
+        for (const u32 index : sampler_indices) {
+            samplers.push_back(texture_cache.GetSamplerId(index, false));
+        }
+    }
     ASSERT(views.size() == num_image_elements);
     ASSERT(samplers.size() == num_textures);
-    if (resolve_in_full) {
+    if (resolve_in_full && !template_hit) {
         Profile::Scope scope{Profile::Zone::FillImageViews};
         if (memo_hit && verify_memo) {
             texture_cache.LogPrepares(&full_prepared, false);
@@ -1013,6 +1147,7 @@ bool GraphicsPipeline::ConfigureImpl(bool is_indexed) {
         } else {
             texture_memo.misses = 0;
             Count(g_memo_hits);
+            ++draw_template_stats.memo_hits;
         }
         if (memo_hit && verify_memo) {
             // Bindings alone miss what the paths do to the images (#904 prepared the null one).
@@ -1181,6 +1316,7 @@ bool GraphicsPipeline::ConfigureImpl(bool is_indexed) {
     RenderAreaPushConstant render_area;
     const VideoCommon::SamplerId* samplers_it{samplers.data()};
     const VideoCommon::ImageViewInOut* views_it{views.data()};
+    std::array<std::pair<u32, u32>, NUM_STAGES> template_ranges{};
     const auto prepare_stage{[&](size_t stage) LAMBDA_FORCEINLINE {
         {
             Profile::Scope scope{Profile::Zone::BindStageBuffers};
@@ -1189,8 +1325,17 @@ bool GraphicsPipeline::ConfigureImpl(bool is_indexed) {
         {
             Profile::Scope scope{Profile::Zone::PushDescriptors};
             const size_t first_entry = guest_descriptor_queue.UpdateCount();
-            PushImageDescriptors(texture_cache, guest_descriptor_queue, stage_infos[stage],
-                                 rescaling, samplers_it, views_it);
+            if (template_hit) {
+                const auto [first, count] = draw_template->ranges[stage];
+                guest_descriptor_queue.AddEntries(
+                    {draw_template->descriptors.data() + first, count});
+            } else {
+                PushImageDescriptors(texture_cache, guest_descriptor_queue, stage_infos[stage],
+                                     rescaling, samplers_it, views_it);
+            }
+            template_ranges[stage] = {
+                static_cast<u32>(first_entry),
+                static_cast<u32>(guest_descriptor_queue.UpdateCount() - first_entry)};
             if (captured_delta) {
                 KeepImageDescriptors(stage, first_entry);
             }
@@ -1219,6 +1364,16 @@ bool GraphicsPipeline::ConfigureImpl(bool is_indexed) {
     }
     if constexpr (Spec::enabled_stages[4]) {
         prepare_stage(4);
+    }
+    if (template_hit) {
+        rescaling.Assign(draw_template->rescaling);
+    } else if (keep_template) {
+        KeepDrawTemplate(draw_template, template_context, template_handles, template_hash,
+                         handle_reads, std::span(views.data(), views.size()),
+                         std::span(samplers.data(), samplers.size()), template_ranges, rescaling);
+    }
+    if (use_template) {
+        ReportDrawTemplates();
     }
     if (captured_delta) {
         kept_rescaling = rescaling.Data();
@@ -1430,6 +1585,90 @@ bool GraphicsPipeline::ConfigureDelta(bool is_indexed) {
     }
     Profile::Scope scope{Profile::Zone::ConfigureDraw};
     return ConfigureDraw(rescaling, render_area);
+}
+
+void GraphicsPipeline::KeepDrawTemplate(DrawTemplate* verified,
+                                        const VideoCommon::DrawTemplateContext& context,
+                                        std::span<const u32> handles, u64 hash,
+                                        std::span<const VideoCommon::TextureHandleRead> reads,
+                                        std::span<const VideoCommon::ImageViewInOut> views,
+                                        std::span<const VideoCommon::SamplerId> samplers,
+                                        const std::array<std::pair<u32, u32>, NUM_STAGES>& ranges,
+                                        const RescalingPushConstant& rescaling) {
+    DrawTemplateStats& stats = draw_template_stats;
+    const DescriptorUpdateEntry* const entries = guest_descriptor_queue.UpdateData();
+    if (verified) {
+        const auto same_image = [](const DescriptorUpdateEntry& lhs,
+                                   const DescriptorUpdateEntry& rhs) {
+            return lhs.image.sampler == rhs.image.sampler &&
+                   lhs.image.imageView == rhs.image.imageView &&
+                   lhs.image.imageLayout == rhs.image.imageLayout;
+        };
+        const auto& textures = verified->textures;
+        bool descriptors_differ = false;
+        for (size_t stage = 0; stage < NUM_STAGES && !descriptors_differ; ++stage) {
+            const auto [first, count] = verified->ranges[stage];
+            const DescriptorUpdateEntry* const resolved = entries + ranges[stage].first;
+            descriptors_differ = count != ranges[stage].second ||
+                                 !std::equal(resolved, resolved + count,
+                                             verified->descriptors.data() + first, same_image);
+        }
+        const std::array<bool, 4> differ{
+            !std::ranges::equal(
+                views, textures,
+                [](const auto& view, const auto& texture) { return view.id == texture.view; }),
+            !std::ranges::equal(samplers, textures,
+                                [](const auto& sampler, const auto& texture) {
+                                    return sampler == texture.sampler;
+                                }),
+            descriptors_differ,
+            rescaling.Data() != verified->rescaling,
+        };
+        ++stats.verified;
+        if (std::ranges::find(differ, true) != differ.end()) {
+            ++stats.mismatched_draws;
+            if (stats.total_mismatched_draws++ < 16) {
+                LOG_ERROR(Render_Vulkan,
+                          "Draw template verify: pipeline {:016x} resolved other {}{}{}{}than "
+                          "its template",
+                          key.Hash(), differ[0] ? "views " : "", differ[1] ? "samplers " : "",
+                          differ[2] ? "descriptors " : "", differ[3] ? "rescaling words " : "");
+            }
+        }
+        for (size_t field = 0; field < differ.size(); ++field) {
+            stats.mismatches[field] += differ[field] ? 1 : 0;
+        }
+    }
+    constexpr size_t max_textures = 32;
+    if (views.size() > max_textures || std::ranges::any_of(samplers, [&](auto id) {
+            return texture_cache.GetSampler(id).HasChangingVariants();
+        })) {
+        ++stats.not_kept;
+        return;
+    }
+    DrawTemplate& kept = draw_templates.Insert(context, handles, hash);
+    if (!texture_cache.KeepTemplateTextures(reads, views, samplers, kept.textures)) {
+        DrawTemplates::Erase(kept);
+        ++stats.not_kept;
+        return;
+    }
+    kept.descriptors.clear();
+    for (size_t stage = 0; stage < NUM_STAGES; ++stage) {
+        const auto [first, count] = ranges[stage];
+        kept.ranges[stage] = {static_cast<u32>(kept.descriptors.size()), count};
+        kept.descriptors.insert(kept.descriptors.end(), entries + first, entries + first + count);
+    }
+    kept.rescaling = rescaling.Data();
+    kept.host_serial = gpu_memory->HostPointerSerial();
+    kept.scale_epoch = texture_cache.ScaleEpoch();
+    ++stats.kept;
+    if (draw_template_verify || VideoCommon::Nx2Profile::Enabled()) {
+        last_template_context = VideoCommon::HashDrawTemplate(context, {});
+        if (kept_template_keys.size() >= (size_t{1} << 22)) {
+            kept_template_keys.clear();
+        }
+        kept_template_keys.insert(hash);
+    }
 }
 
 void GraphicsPipeline::KeepImageDescriptors(size_t stage, size_t first_entry) {

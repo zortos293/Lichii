@@ -42,6 +42,7 @@
 #include "video_core/game_dlss_status.h"
 #include "video_core/surface.h"
 #include "video_core/texture_cache/descriptor_table.h"
+#include "video_core/texture_cache/draw_template.h"
 #include "video_core/texture_cache/image_base.h"
 #include "video_core/texture_cache/image_info.h"
 #include "video_core/texture_cache/image_view_base.h"
@@ -322,6 +323,26 @@ public:
     /// Keeps what FillImageViews and GetSamplerId resolved the draw's textures from.
     void MemoizeTextures(SampledTextureMemo& memo, std::span<const TextureHandleRead> reads,
                          std::span<const ImageViewInOut> views, std::span<const SamplerId> samplers);
+
+    /// What besides its handle words selects the textures a graphics draw samples now.
+    [[nodiscard]] DrawTemplateContext GraphicsTextureContext(u64 owner) const noexcept;
+
+    /// The texture and sampler descriptors the draw's textures were resolved from, for a draw
+    /// template; false when one can't be kept, as for MemoizeTextures.
+    [[nodiscard]] bool KeepTemplateTextures(std::span<const TextureHandleRead> reads,
+                                            std::span<const ImageViewInOut> views,
+                                            std::span<const SamplerId> samplers,
+                                            std::vector<DrawTemplateTexture>& textures);
+
+    /// Prepares the images of the views a draw template gave, as resolving them would; false
+    /// when that deleted images and the views have to be resolved again.
+    [[nodiscard]] bool PrepareTemplateViews(std::span<const ImageViewInOut> views);
+
+    /// Bumped each time the slot's view is deleted: a kept id names the same view while its
+    /// generation holds.
+    [[nodiscard]] u32 ImageViewGeneration(ImageViewId id) const noexcept {
+        return id.index < image_view_generations.size() ? image_view_generations[id.index] : 0;
+    }
 
     /// Handle feedback loops during draws.
     void CheckFeedbackLoop(std::span<const ImageViewInOut> views);
@@ -703,7 +724,15 @@ private:
     /// The CPU address an image at gpu_addr is keyed by: its backing, or a fixed stand-in.
     [[nodiscard]] std::optional<DAddr> ImageCpuAddress(GPUVAddr gpu_addr, size_t size) const;
 
+    void BumpImageViewGeneration(ImageViewId id) {
+        if (id.index >= image_view_generations.size()) {
+            image_view_generations.resize(id.index + 1);
+        }
+        ++image_view_generations[id.index];
+    }
+
     bool has_deleted_images = false;
+    std::vector<u32> image_view_generations; ///< ImageViewGeneration
     std::vector<ImageId>* prepare_log{}; ///< LogPrepares
     bool prepare_log_dry{};
     /// True while a clear binds its render targets (UpdateRenderTargets(true)), so JoinImages can
