@@ -8,6 +8,10 @@
 #include <vector>
 #include "core/crypto/ncz_cache.h"
 
+#ifdef __ANDROID__
+#include "common/fs/path_util.h"
+#endif
+
 #ifdef _WIN32
 #include <fcntl.h>
 #include <io.h>
@@ -23,11 +27,16 @@
 namespace Core::Crypto {
 
 NczCache::NczCache() {
+#ifdef __ANDROID__
+    // Android sets no temporary directory variable, and the fallback isn't writable by apps.
+    const auto directory = Common::FS::GetEdenPath(Common::FS::EdenPath::CacheDir);
+#else
     std::error_code ec;
     const auto directory = std::filesystem::temp_directory_path(ec);
     if (ec) {
         return;
     }
+#endif
 #ifdef _WIN32
     PSECURITY_DESCRIPTOR descriptor{};
     if (!ConvertStringSecurityDescriptorToSecurityDescriptorW(L"D:P(A;;GA;;;OW)", SDDL_REVISION_1,
