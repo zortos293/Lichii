@@ -1428,7 +1428,8 @@ bool Device::GetSuitability(bool requires_swapchain) {
     std::vector<std::string> xess_device_extensions;
     bool xess_requirements_available = XeSS::IsAvailable();
     if (xess_requirements_available) {
-        xess_device_extensions = XeSS::DeviceExtensions(instance, *physical);
+        xess_device_extensions =
+            XeSS::DeviceExtensions(instance, static_cast<VkPhysicalDevice>(physical));
         const auto supported = [&](const std::string& name) {
             return supported_extensions.contains(name);
         };
@@ -1611,7 +1612,8 @@ bool Device::GetSuitability(bool requires_swapchain) {
 
     if (xess_requirements_available) {
         void* feature_chain = &features2;
-        if (XeSS::EnableRequiredDeviceFeatures(instance, *physical, &feature_chain)) {
+        if (XeSS::EnableRequiredDeviceFeatures(instance, static_cast<VkPhysicalDevice>(physical),
+                                               &feature_chain)) {
             xess_features_chain_head = feature_chain;
             loaded_extensions.insert(xess_device_extensions.begin(), xess_device_extensions.end());
             xess_supported = true;
