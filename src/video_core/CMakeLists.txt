@@ -374,6 +374,8 @@ add_library(video_core STATIC
     texture_cache/types.h
     texture_cache/util.cpp
     texture_cache/util.h
+    texture_cache/writeback_ranges.h
+    texture_cache/writeback_switches.h
     textures/astc.h
     textures/astc.cpp
     textures/bcn.cpp
