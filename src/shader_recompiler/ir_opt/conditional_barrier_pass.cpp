@@ -69,8 +69,14 @@ public:
     // way at every branch that could split it around one. Each such branch first counts its
     // condition into a shared word; a barrier runs as an execution barrier while that count stays
     // a multiple of the workgroup size, and keeps only its memory ordering once a branch split the
-    // workgroup. Returns false when a branch has no block to count its condition in.
-    bool VoteBarriers() {
+    // workgroup. Returns false when a branch has no block to count its condition in, or when the
+    // word does not fit in shared memory (a SPIR-V explicit layout rounds it up to 16 bytes).
+    bool VoteBarriers(u32 max_shared_memory_size) {
+        const u32 offset{Common::AlignUp(program.shared_memory_size, 4U)};
+        if (max_shared_memory_size != 0 &&
+            Common::AlignUp(offset + 4, 16U) > max_shared_memory_size) {
+            return false;
+        }
         FindVotes();
         const auto& syntax_list{program.syntax_list};
         for (size_t index = 0; index < syntax_list.size(); ++index) {
@@ -78,7 +84,7 @@ public:
                 return false;
             }
         }
-        vote_offset = Common::AlignUp(program.shared_memory_size, 4U);
+        vote_offset = offset;
         program.shared_memory_size = vote_offset + 4;
         workgroup_size = program.workgroup_size[0] * program.workgroup_size[1] *
                          program.workgroup_size[2];
@@ -101,83 +107,101 @@ private:
         bool divergent;
     };
 
-    // The branches whose way decides whether some invocations skip a barrier the others run: an
-    // if around a barrier, a return or a break out of a loop with a barrier, and the breaks and
-    // repeats of such a loop.
+    // The divergent branches whose way decides whether some invocations skip a barrier: an if
+    // around a barrier, a return or a break out of a loop with a barrier, and the breaks and
+    // repeats of such a loop. A vote waits for the workgroup as a barrier does, so the constructs
+    // around one need votes too, until no new vote is found.
     void FindVotes() {
         const auto& syntax_list{program.syntax_list};
         std::vector<bool> has_barrier(syntax_list.size());
+        votes.assign(syntax_list.size(), false);
         std::vector<size_t> stack;
-        for (size_t index = 0; index < syntax_list.size(); ++index) {
-            const IR::AbstractSyntaxNode& node{syntax_list[index]};
-            switch (node.type) {
-            case NodeType::Block:
-                if (std::ranges::any_of(node.data.block->Instructions(), [](const IR::Inst& inst) {
-                        return inst.GetOpcode() == IR::Opcode::Barrier;
-                    })) {
+        bool changed{true};
+        const auto vote{[&](size_t index, const IR::U1& cond) {
+            if (!votes[index] && IsDivergent(cond)) {
+                votes[index] = true;
+                changed = true;
+            }
+        }};
+        const auto vote_ifs{[&] {
+            for (const size_t construct : stack) {
+                if (syntax_list[construct].type == NodeType::If) {
+                    vote(construct, syntax_list[construct].data.if_node.cond);
+                }
+            }
+        }};
+        while (changed) {
+            changed = false;
+            stack.clear();
+            for (size_t index = 0; index < syntax_list.size(); ++index) {
+                const IR::AbstractSyntaxNode& node{syntax_list[index]};
+                const bool waits{
+                    votes[index] ||
+                    (node.type == NodeType::Block &&
+                     std::ranges::any_of(node.data.block->Instructions(), [](const IR::Inst& inst) {
+                         return inst.GetOpcode() == IR::Opcode::Barrier;
+                     }))};
+                if (waits) {
                     for (const size_t construct : stack) {
                         has_barrier[construct] = true;
                     }
                 }
-                break;
-            case NodeType::If:
-            case NodeType::Loop:
-                stack.push_back(index);
-                break;
-            case NodeType::EndIf:
-            case NodeType::Repeat:
-                stack.pop_back();
-                break;
-            default:
-                break;
-            }
-        }
-        votes.assign(syntax_list.size(), false);
-        const auto mark_ifs{[&] {
-            for (const size_t construct : stack) {
-                if (syntax_list[construct].type == NodeType::If) {
-                    votes[construct] = true;
+                switch (node.type) {
+                case NodeType::If:
+                case NodeType::Loop:
+                    stack.push_back(index);
+                    break;
+                case NodeType::EndIf:
+                case NodeType::Repeat:
+                    stack.pop_back();
+                    break;
+                default:
+                    break;
                 }
             }
-        }};
-        for (size_t index = 0; index < syntax_list.size(); ++index) {
-            const IR::AbstractSyntaxNode& node{syntax_list[index]};
-            switch (node.type) {
-            case NodeType::If:
-                votes[index] = has_barrier[index];
-                stack.push_back(index);
-                break;
-            case NodeType::Loop:
-                stack.push_back(index);
-                break;
-            case NodeType::EndIf:
-                stack.pop_back();
-                break;
-            case NodeType::Repeat:
-                votes[index] = has_barrier[stack.back()];
-                stack.pop_back();
-                break;
-            case NodeType::Return:
-                mark_ifs();
-                break;
-            case NodeType::Break: {
-                const auto loop{std::ranges::find_if(stack.rbegin(), stack.rend(), [&](size_t c) {
-                    return syntax_list[c].type == NodeType::Loop;
-                })};
-                if (loop != stack.rend() && has_barrier[*loop]) {
-                    votes[index] = true;
-                    mark_ifs();
+            for (size_t index = 0; index < syntax_list.size(); ++index) {
+                const IR::AbstractSyntaxNode& node{syntax_list[index]};
+                switch (node.type) {
+                case NodeType::If:
+                    if (has_barrier[index]) {
+                        vote(index, node.data.if_node.cond);
+                    }
+                    stack.push_back(index);
+                    break;
+                case NodeType::Loop:
+                    stack.push_back(index);
+                    break;
+                case NodeType::EndIf:
+                    stack.pop_back();
+                    break;
+                case NodeType::Repeat:
+                    if (has_barrier[stack.back()]) {
+                        vote(index, node.data.repeat.cond);
+                    }
+                    stack.pop_back();
+                    break;
+                case NodeType::Return:
+                    vote_ifs();
+                    break;
+                case NodeType::Break: {
+                    const auto loop{std::ranges::find_if(stack.rbegin(), stack.rend(), [&](size_t c) {
+                        return syntax_list[c].type == NodeType::Loop;
+                    })};
+                    if (loop != stack.rend() && has_barrier[*loop]) {
+                        vote(index, node.data.break_node.cond);
+                        vote_ifs();
+                    }
+                    break;
                 }
-                break;
-            }
-            default:
-                break;
+                default:
+                    break;
+                }
             }
         }
     }
 
     void Vote(size_t index, const IR::U1& cond) {
-        if (!votes[index] || !IsDivergent(cond)) {
+        if (!votes[index]) {
             return;
         }
         program.syntax_list[index - 1].data.block->AppendNewInst(
@@ -343,12 +367,12 @@ private:
 // around such barriers and wait at them while the workgroup stays together; elsewhere barriers
 // under divergent control flow keep their memory ordering without the execution barrier. The rest
 // stay as they are.
-void ConditionalBarrierPass(IR::Program& program) {
+void ConditionalBarrierPass(IR::Program& program, u32 max_shared_memory_size) {
     Divergence divergence{program};
     if (!divergence.HasDivergentBarrier()) {
         return;
     }
-    if (program.stage == Stage::Compute && divergence.VoteBarriers()) {
+    if (program.stage == Stage::Compute && divergence.VoteBarriers(max_shared_memory_size)) {
         return;
     }
     divergence.DemoteBarriers();
