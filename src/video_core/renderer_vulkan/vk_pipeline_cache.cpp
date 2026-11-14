@@ -7,6 +7,7 @@
 #include <array>
 #include <atomic>
 #include <bit>
+#include <charconv>
 #include <chrono>
 #include <cstddef>
 #include <cstdlib>
@@ -102,7 +103,17 @@ using VideoCommon::GuessMissing;
 using VideoCommon::GraphicsEnvironment;
 
 constexpr u32 CACHE_VERSION = VideoCommon::VulkanPipelineCacheVersion;
-constexpr size_t VULKAN_CACHE_FLUSH_PIPELINES = 128;
+const size_t VULKAN_CACHE_FLUSH_PIPELINES = []() -> size_t {
+    if (const char* env = std::getenv("EDEN_NX2_VULKAN_CACHE_FLUSH")) {
+        const std::string_view text{env};
+        size_t value = 0;
+        const auto [end, ec] = std::from_chars(text.data(), text.data() + text.size(), value);
+        if (ec == std::errc{} && end == text.data() + text.size() && value > 0) {
+            return value;
+        }
+    }
+    return 128;
+}();
 constexpr size_t VULKAN_CACHE_FLUSH_MIN_SECONDS = 30;
 constexpr auto& VULKAN_CACHE_MAGIC_NUMBER = VideoCommon::VulkanDriverPipelineCacheMagic;
 
