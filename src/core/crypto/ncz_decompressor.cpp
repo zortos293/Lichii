@@ -263,6 +263,8 @@ private:
 constexpr std::size_t SolidMemoryLimit = 512ULL * 1024 * 1024;
 constexpr int SolidWindowLogMax = 27; // 128 MiB, sufficient for ordinary nsz compression.
 std::atomic<std::size_t> solid_memory_used{};
+// Size of the last allocation the budget refused on this thread, for the failure's log line.
+thread_local std::size_t solid_refused_size{};
 
 struct alignas(std::max_align_t) SolidAllocation {
     std::size_t size;
@@ -276,6 +278,7 @@ void* AllocateSolid(void*, std::size_t size) {
     auto used = solid_memory_used.load(std::memory_order_relaxed);
     do {
         if (total > SolidMemoryLimit - used) {
+            solid_refused_size = total;
             return nullptr;
         }
     } while (!solid_memory_used.compare_exchange_weak(used, used + total));
@@ -347,6 +350,7 @@ public:
                  u64 payload_start_, u64 size_, std::unique_ptr<NczCache> backing)
         : name{std::move(name_)}, source{std::move(source_)}, sections{std::move(sections_)},
           nca_size{size_}, read_pos{payload_start_} {
+        solid_refused_size = 0;
         const auto raw_header = source->ReadBytes(HeaderSize, 0);
         cache = backing ? std::move(backing) : std::make_unique<NczCache>();
         if (raw_header.size() != HeaderSize || !cache->IsOpen() || !cache->Write(raw_header, 0)) {
@@ -397,7 +401,18 @@ private:
     }
 
     bool Fail(const char* reason) const {
-        LOG_ERROR(Crypto, "Solid NCZ: {}", reason);
+        if (solid_refused_size != 0) {
+            // Each open solid reader keeps its decoder until it reaches the end, so a few large
+            // ones can hold the whole budget (ZOR-286).
+            LOG_ERROR(Crypto,
+                      "Solid NCZ {}: {}: the decoder memory budget is used up ({} KiB refused, {} "
+                      "of {} MiB held by open solid readers)",
+                      name, reason, solid_refused_size >> 10, solid_memory_used.load() >> 20,
+                      SolidMemoryLimit >> 20);
+            solid_refused_size = 0;
+        } else {
+            LOG_ERROR(Crypto, "Solid NCZ {}: {}", name, reason);
+        }
         failed = true;
         ReleaseDecoder();
         cache.reset();
@@ -449,6 +464,7 @@ private:
     }
 
     bool DecodeTo(u64 needed) const {
+        solid_refused_size = 0;
         if (stream == nullptr) {
             input.reset(static_cast<u8*>(AllocateSolid(nullptr, Chunk)));
             output.reset(static_cast<u8*>(AllocateSolid(nullptr, Chunk)));
