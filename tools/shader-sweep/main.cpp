@@ -1481,7 +1481,10 @@ int main(int argc, char** argv) {
             throw std::runtime_error("Invalid input format");
         if (!override_out.empty() && SameFile(output, override_out))
             throw std::runtime_error("--override-out must not name the output file");
-        for (const auto& target : {output, override_out}) {
+        auto override_partial = override_out;
+        if (!override_out.empty())
+            override_partial += ".partial";
+        for (const auto& target : {output, override_out, override_partial}) {
             if (target.empty())
                 continue;
             for (const auto& path : {input, environment, pipeline_key}) {

@@ -124,7 +124,7 @@ def main():
             try:
                 read_override(record)
             except (ValueError, struct.error, OSError):
-                record.unlink()
+                record.unlink(missing_ok=True)
         if not record.exists():
             # A hung or unstartable sweep counts as a failed program instead of stopping the run.
             try:
