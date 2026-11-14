@@ -56,7 +56,7 @@ std::vector<std::vector<u32>> Instructions(const std::vector<u32>& code, u32 opc
 
 // A compute program whose atomic address comes from global memory, so the storage buffer pass
 // tracks the load but not the atomic.
-std::vector<u32> EmitUntrackedAtomic(IR::Opcode opcode) {
+std::vector<u32> EmitUntrackedAtomic(IR::Opcode opcode, bool select) {
     ObjectPool<IR::Inst> pool;
     IR::Block block{pool};
     IR::IREmitter ir{block};
@@ -97,12 +97,13 @@ std::vector<u32> EmitUntrackedAtomic(IR::Opcode opcode) {
     profile.support_descriptor_aliasing = true;
     profile.unified_descriptor_binding = true;
     profile.min_ssbo_alignment = 16;
+    profile.select_global_memory_buffer = select;
     return Backend::SPIRV::EmitSPIRV(profile, program);
 }
 
 // A compute program with two tracked pointers in constant buffer 0 and, through the pointer loaded
 // from the first one, untracked accesses of every width, an atomic and a compare-exchange.
-std::vector<u32> EmitUntrackedAccesses(bool native, u32 min_ssbo_alignment) {
+std::vector<u32> EmitUntrackedAccesses(bool native, u32 min_ssbo_alignment, bool select) {
     ObjectPool<IR::Inst> pool;
     IR::Block block{pool};
     IR::IREmitter ir{block};
@@ -152,6 +153,7 @@ std::vector<u32> EmitUntrackedAccesses(bool native, u32 min_ssbo_alignment) {
     profile.support_descriptor_aliasing = true;
     profile.unified_descriptor_binding = true;
     profile.min_ssbo_alignment = min_ssbo_alignment;
+    profile.select_global_memory_buffer = select;
     return Backend::SPIRV::EmitSPIRV(profile, program);
 }
 } // namespace
@@ -168,7 +170,7 @@ TEST_CASE("Global memory helpers branch per buffer and return only from their la
         for (const u32 alignment : {16U, 4U}) {
             CAPTURE(native, alignment);
             std::vector<u32> code;
-            REQUIRE_NOTHROW(code = EmitUntrackedAccesses(native, alignment));
+            REQUIRE_NOTHROW(code = EmitUntrackedAccesses(native, alignment, false));
             const auto entry_points = Instructions(code, OpEntryPoint);
             REQUIRE(entry_points.size() == 1);
             const u32 main_id = entry_points[0][1];
@@ -201,6 +203,116 @@ TEST_CASE("Global memory helpers branch per buffer and return only from their la
     }
 }
 
+TEST_CASE("Global memory helpers with variable pointers select the buffer and branch only for writes",
+          "[shader_recompiler][global_memory]") {
+    constexpr u32 OpCapability = 17;
+    constexpr u32 OpTypePointer = 32;
+    constexpr u32 OpEntryPoint = 15;
+    constexpr u32 OpFunction = 54;
+    constexpr u32 OpFunctionEnd = 56;
+    constexpr u32 OpFunctionCall = 57;
+    constexpr u32 OpStore = 62;
+    constexpr u32 OpDecorate = 71;
+    constexpr u32 OpSelect = 169;
+    constexpr u32 OpAtomicExchange = 229;
+    constexpr u32 OpAtomicXor = 242;
+    constexpr u32 OpSelectionMerge = 247;
+    constexpr u32 OpBranchConditional = 250;
+    constexpr u32 OpSwitch = 251;
+    constexpr u32 OpReturn = 253;
+    constexpr u32 OpReturnValue = 254;
+    constexpr u32 VariablePointersStorageBuffer = 4441;
+    constexpr u32 ShaderNonUniform = 5301;
+    constexpr u32 NonUniform = 5300;
+    for (const bool native : {true, false}) {
+        for (const u32 alignment : {16U, 4U}) {
+            CAPTURE(native, alignment);
+            std::vector<u32> code;
+            REQUIRE_NOTHROW(code = EmitUntrackedAccesses(native, alignment, true));
+            const auto has_capability = [&](u32 capability) {
+                return std::ranges::any_of(Instructions(code, OpCapability),
+                                           [&](const auto& ops) { return ops[0] == capability; });
+            };
+            CHECK(has_capability(VariablePointersStorageBuffer));
+            CHECK(has_capability(ShaderNonUniform));
+            CHECK(Instructions(code, OpSwitch).empty());
+
+            std::vector<u32> pointer_types;
+            for (const auto& ops : Instructions(code, OpTypePointer)) {
+                pointer_types.push_back(ops[0]);
+            }
+            std::vector<u32> non_uniform;
+            for (const auto& ops : Instructions(code, OpDecorate)) {
+                if (ops[1] == NonUniform) {
+                    non_uniform.push_back(ops[0]);
+                }
+            }
+            const auto is_non_uniform = [&](u32 id) {
+                return std::ranges::find(non_uniform, id) != non_uniform.end();
+            };
+            size_t selected_pointers{};
+            for (const auto& ops : Instructions(code, OpSelect)) {
+                if (std::ranges::find(pointer_types, ops[0]) != pointer_types.end()) {
+                    ++selected_pointers;
+                }
+            }
+            CHECK(selected_pointers > 0);
+
+            const u32 main_id = Instructions(code, OpEntryPoint)[0][1];
+            size_t loads{};
+            size_t writes{};
+            u32 function_id{};
+            u32 branches{};
+            u32 merges{};
+            u32 returns{};
+            u32 last_select{};
+            bool writes_before_branch{};
+            bool writes_memory{};
+            for (size_t i = 5; i < code.size();) {
+                const u32 count = code[i] >> 16;
+                const u32 opcode = code[i] & 0xffff;
+                REQUIRE(count > 0);
+                if (opcode == OpFunction) {
+                    function_id = code[i + 2];
+                    branches = merges = returns = 0;
+                    last_select = 0;
+                    writes_before_branch = writes_memory = false;
+                } else if (opcode == OpSelect &&
+                           std::ranges::find(pointer_types, code[i + 1]) != pointer_types.end()) {
+                    last_select = code[i + 2];
+                } else if (opcode == OpBranchConditional) {
+                    ++branches;
+                } else if (opcode == OpSelectionMerge) {
+                    ++merges;
+                } else if (opcode == OpReturn || opcode == OpReturnValue) {
+                    ++returns;
+                } else if (opcode == OpStore || opcode == OpFunctionCall ||
+                           (opcode >= OpAtomicExchange && opcode <= OpAtomicXor)) {
+                    writes_memory = true;
+                    writes_before_branch |= branches == 0;
+                } else if (opcode == OpFunctionEnd && function_id != main_id) {
+                    CAPTURE(function_id);
+                    CHECK(returns == 1);
+                    CHECK(merges == branches);
+                    CHECK(last_select != 0);
+                    CHECK(is_non_uniform(last_select));
+                    if (writes_memory) {
+                        ++writes;
+                        CHECK(branches == 1);
+                        CHECK_FALSE(writes_before_branch);
+                    } else {
+                        ++loads;
+                        CHECK(branches == 0);
+                    }
+                }
+                i += count;
+            }
+            CHECK(loads == 3);
+            CHECK(writes >= 5);
+        }
+    }
+}
+
 TEST_CASE("Untracked 32-bit global atomics route to their storage buffer",
           "[shader_recompiler][global_memory]") {
     constexpr u32 OpFunctionCall = 57;
@@ -221,11 +333,13 @@ TEST_CASE("Untracked 32-bit global atomics route to their storage buffer",
         {IR::Opcode::GlobalAtomicDec32, OpAtomicCompareExchange},
         {IR::Opcode::GlobalAtomicAddF32, OpAtomicCompareExchange},
     }};
-    for (const auto& [opcode, atomic] : cases) {
-        CAPTURE(static_cast<u32>(opcode));
-        std::vector<u32> code;
-        REQUIRE_NOTHROW(code = EmitUntrackedAtomic(opcode));
-        CHECK_FALSE(Instructions(code, atomic).empty());
-        CHECK_FALSE(Instructions(code, OpFunctionCall).empty());
+    for (const bool select : {false, true}) {
+        for (const auto& [opcode, atomic] : cases) {
+            CAPTURE(select, static_cast<u32>(opcode));
+            std::vector<u32> code;
+            REQUIRE_NOTHROW(code = EmitUntrackedAtomic(opcode, select));
+            CHECK_FALSE(Instructions(code, atomic).empty());
+            CHECK_FALSE(Instructions(code, OpFunctionCall).empty());
+        }
     }
 }

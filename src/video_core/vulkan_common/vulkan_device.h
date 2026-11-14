@@ -513,6 +513,12 @@ FN_MAX_LIMIT_LIST
         return features.descriptor_indexing.shaderStorageTexelBufferArrayNonUniformIndexing;
     }
 
+    /// Returns true if storage buffer pointers can be chosen per invocation and decorated NonUniform.
+    bool IsNonUniformStorageBufferPointerSupported() const {
+        return features.variable_pointer.variablePointersStorageBuffer &&
+               (instance_version >= VK_API_VERSION_1_2 || extensions.descriptor_indexing);
+    }
+
     /// Returns true if the device supports float64 natively.
     bool IsFloat64Supported() const {
         return features.features.shaderFloat64;
