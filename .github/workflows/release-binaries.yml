@@ -71,6 +71,11 @@ jobs:
     needs: prepare-release
     runs-on: ${{ matrix.runner }}
     env:
+      # Lets CMake, curl and PowerShell authenticate GitHub release-asset
+      # downloads (CPM checksums, LLVM, sccache, linuxdeploy AppImages).
+      # Authenticated requests do not hit the rate limits behind
+      # "timeout for some unauthenticated users" incidents.
+      GITHUB_TOKEN: ${{ github.token }}
       CCACHE_DIR: ${{ github.workspace }}/.ccache
       CCACHE_MAXSIZE: 3000M
       CCACHE_COMPILERCHECK: content
@@ -118,7 +123,7 @@ jobs:
             autoconf cmake g++ gcc git glslang-tools libglu1-mesa-dev \
             libpulse-dev libtool libudev-dev libxkbcommon-x11-0 \
             mesa-common-dev nasm ninja-build qt6-base-private-dev \
-            qt6-charts-dev qt6-tools-dev libavfilter-dev libavcodec-dev \
+            qt6-charts-dev qt6-svg-dev qt6-tools-dev libavfilter-dev libavcodec-dev \
             libswscale-dev pkg-config zlib1g-dev libva-dev libvdpau-dev \
             spirv-tools spirv-headers libusb-1.0-0-dev \
             libboost-dev libboost-fiber-dev libboost-context-dev \
@@ -229,7 +234,18 @@ jobs:
         shell: pwsh
         run: |
           $zip = Join-Path $env:RUNNER_TEMP 'sccache.zip'
-          Invoke-WebRequest -OutFile $zip https://github.com/mozilla/sccache/releases/download/v0.19.0/sccache-v0.19.0-x86_64-pc-windows-msvc.zip
+          $url = 'https://github.com/mozilla/sccache/releases/download/v0.19.0/sccache-v0.19.0-x86_64-pc-windows-msvc.zip'
+          $headers = @{ }
+          if ($env:GITHUB_TOKEN) { $headers.Authorization = "token $env:GITHUB_TOKEN" }
+          for ($attempt = 1; $attempt -le 5; $attempt++) {
+            try {
+              Invoke-WebRequest -OutFile $zip -Uri $url -TimeoutSec 60 -Headers $headers
+              break
+            } catch {
+              if ($attempt -eq 5) { throw }
+              Start-Sleep -Seconds ([Math]::Min(5 * $attempt, 20))
+            }
+          }
           Expand-Archive $zip -DestinationPath (Join-Path $env:RUNNER_TEMP 'sccache')
           $bin = (Get-ChildItem -Recurse -Filter sccache.exe (Join-Path $env:RUNNER_TEMP 'sccache')).DirectoryName
           $bin | Out-File -Append -Encoding utf8 $env:GITHUB_PATH
@@ -375,6 +391,7 @@ jobs:
           key: ${{ steps.cpm-cache.outputs.cache-primary-key }}
 
       - name: Build
+        id: build
         shell: bash
         run: |
           if command -v ccache > /dev/null; then ccache --zero-stats; else sccache --zero-stats; fi
@@ -384,7 +401,7 @@ jobs:
           if command -v ccache > /dev/null; then ccache --show-stats; else sccache --show-stats; fi
 
       - name: Stop sccache on Windows
-        if: always() && startsWith(matrix.platform, 'windows') && steps.compiler-cache.outcome == 'success'
+        if: always() && startsWith(matrix.platform, 'windows') && steps.compiler-cache.outcome == 'success' && steps.build.outcome != 'skipped'
         shell: pwsh
         run: sccache --stop-server
 
@@ -438,9 +455,21 @@ jobs:
           tools="$RUNNER_TEMP/linuxdeploy"
           mkdir -p "$tools"
           arch=$(uname -m)   # aarch64 or x86_64
-          curl -fsSL -o "$tools/linuxdeploy-$arch.AppImage" \
+          # netrc keeps the token out of sight and stops curl from replaying
+          # credentials to the redirect host (a presigned asset URL).
+          netrc="$RUNNER_TEMP/curl.netrc"
+          netrc_args=()
+          if [ -n "$GITHUB_TOKEN" ]; then
+            umask 077
+            printf 'machine github.com login oauth2 password %s\n' "$GITHUB_TOKEN" > "$netrc"
+            netrc_args=(--netrc-file "$netrc")
+          fi
+          umask 022
+          curl -fsSL "${netrc_args[@]}" --retry 8 --retry-all-errors --retry-delay 5 --retry-max-time 300 \
+            --connect-timeout 30 --max-time 120 -o "$tools/linuxdeploy-$arch.AppImage" \
           https://github.com/linuxdeploy/linuxdeploy/releases/download/continuous/linuxdeploy-$arch.AppImage
-          curl -fsSL -o "$tools/linuxdeploy-plugin-qt-$arch.AppImage" \
+          curl -fsSL "${netrc_args[@]}" --retry 8 --retry-all-errors --retry-delay 5 --retry-max-time 300 \
+            --connect-timeout 30 --max-time 120 -o "$tools/linuxdeploy-plugin-qt-$arch.AppImage" \
           https://github.com/linuxdeploy/linuxdeploy-plugin-qt/releases/download/continuous/linuxdeploy-plugin-qt-$arch.AppImage
           chmod +x "$tools"/*.AppImage
           # The desktop file names its icon io.github.zortos293.lichii.
@@ -465,6 +494,7 @@ jobs:
             cp -r "$RUNNER_TEMP/fsr4-vk/licenses/fsr4-vk" AppDir/usr/share/licenses/
             fsr4_library=(--library "$RUNNER_TEMP/fsr4-vk/$fsr4")
           fi
+          chmod -R a+rX,go-w AppDir
           "$tools/linuxdeploy-$arch.AppImage" --appdir AppDir \
             --executable build/release/bin/lichii \
             --executable build/release/bin/eden-cli \

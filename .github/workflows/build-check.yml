@@ -63,7 +63,7 @@ jobs:
             autoconf gcc-13 g++-13 git glslang-tools libglu1-mesa-dev \
             libpulse-dev libtool libudev-dev libxkbcommon-x11-0 \
             mesa-common-dev nasm ninja-build qt6-base-private-dev \
-            qt6-charts-dev qt6-tools-dev libavfilter-dev libavcodec-dev \
+            qt6-charts-dev qt6-svg-dev qt6-tools-dev libavfilter-dev libavcodec-dev \
             libswscale-dev pkg-config zlib1g-dev libva-dev libvdpau-dev \
             spirv-tools spirv-headers libusb-1.0-0-dev \
             libboost-dev libboost-fiber-dev libboost-context-dev \

@@ -77,6 +77,8 @@ ConfigureDialog::ConfigureDialog(QWidget* parent, HotkeyRegistry& registry_,
     Settings::SetConfiguringGlobal(true);
 
     ui->setupUi(this);
+    SetModernStyleEnabled(UISettings::values.game_library_style.GetValue() ==
+                          static_cast<u8>(UISettings::GameLibraryStyle::Modern));
 
     ui->tabWidget->addTab(applets_tab.get(), tr("Applets"));
     ui->tabWidget->addTab(audio_tab.get(), tr("Audio"));
@@ -131,7 +133,10 @@ ConfigureDialog::ConfigureDialog(QWidget* parent, HotkeyRegistry& registry_,
 
     PopulateSelectionList();
 
-    connect(ui->tabWidget, &QTabWidget::currentChanged, this, [this](int index) {
+    
+    connect(ui_tab.get(), &ConfigureUi::GameLibraryStyleChanged, this,
+            &ConfigureDialog::SetModernStyleEnabled);
+connect(ui->tabWidget, &QTabWidget::currentChanged, this, [this](int index) {
         if (index != -1) {
             debug_tab_tab->SetCurrentIndex(0);
         }
@@ -277,6 +282,23 @@ void ConfigureDialog::RetranslateUI() {
 void ConfigureDialog::HandleApplyButtonClicked() {
     UISettings::values.configuration_applied = true;
     ApplyConfiguration();
+}
+
+void ConfigureDialog::SetModernStyleEnabled(bool enabled) {
+    if (property("modernLibrary").toBool() == enabled) {
+        return;
+    }
+
+    setProperty("modernLibrary", enabled);
+    const auto repolish = [](QWidget* widget) {
+        widget->style()->unpolish(widget);
+        widget->style()->polish(widget);
+        widget->update();
+    };
+    repolish(this);
+    for (auto* widget : findChildren<QWidget*>()) {
+        repolish(widget);
+    }
 }
 
 Q_DECLARE_METATYPE(QList<QWidget*>);

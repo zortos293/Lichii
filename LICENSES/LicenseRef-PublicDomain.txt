@@ -1,0 +1,10 @@
+This file was generated from template `license-template.txt` source text.
+
+License text for works marked with LicenseRef-PublicDomain in .reuse/dep5.
+
+The covered content (Nintendo Switch 2 logo, Wikimedia Commons:
+https://commons.wikimedia.org/wiki/File:Nintendo_Switch_2_logo.svg) carries no
+copyright in the source jurisdiction: Wikimedia Commons classifies it as
+"PD-ineligible", i.e. below the threshold of originality.
+
+Trademark laws may apply regardless of the absence of copyright.

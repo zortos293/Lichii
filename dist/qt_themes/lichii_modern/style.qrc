@@ -1,0 +1,14 @@
+<!--
+SPDX-FileCopyrightText: Copyright 2026 Lichii Project
+SPDX-License-Identifier: GPL-3.0-or-later
+-->
+
+<!-- Lichii Modern reuses the Lichii Dark stylesheet and icons; style.qss only adds to them. -->
+<RCC>
+    <qresource prefix="icons/lichii_modern">
+        <file alias="index.theme">index.theme</file>
+    </qresource>
+    <qresource prefix="lichii_modern">
+        <file>style.qss</file>
+    </qresource>
+</RCC>

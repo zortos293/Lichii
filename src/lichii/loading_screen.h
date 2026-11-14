@@ -7,6 +7,8 @@
 
 #include <chrono>
 #include <memory>
+#include <vector>
+#include <QPoint>
 #include <QString>
 #include <QWidget>
 #include <QtGlobal>
@@ -30,8 +32,11 @@ enum class LoadCallbackStage;
 class QBuffer;
 class QByteArray;
 class QGraphicsOpacityEffect;
+class QHideEvent;
 class QMovie;
 class QPropertyAnimation;
+class QVariantAnimation;
+class QShowEvent;
 class QPushButton;
 
 class LoadingScreen : public QWidget {
@@ -42,9 +47,25 @@ public:
 
     ~LoadingScreen();
 
+    /// A copy of the artwork and title read from the application loader.
+    struct Snapshot {
+        std::vector<u8> icon;
+        std::vector<u8> banner;
+        QString title;
+    };
+
     /// Call before showing the loading screen to load the widgets with the logo and banner for the
     /// currently loaded application.
-    void Prepare(Loader::AppLoader& loader);
+    Snapshot Prepare(Loader::AppLoader& loader);
+
+    /// Reuses an already captured snapshot without accessing the application loader.
+    void Prepare(const Snapshot& snapshot);
+
+    /// Reads the loader's icon, banner and title into a Snapshot.
+    static Snapshot SnapshotLoader(Loader::AppLoader& loader);
+
+    /// Shows the closing screen from a snapshot captured before emulation starts.
+    void PrepareClosing(const Snapshot& snapshot);
 
     /// After the loading screen is hidden, the owner of this class can call this to clean up any
     /// used resources such as the logo and banner.
@@ -55,6 +76,9 @@ public:
 
     /// Hides the LoadingScreen with a fade out effect
     void OnLoadComplete();
+
+    void showEvent(QShowEvent* event) override;
+    void hideEvent(QHideEvent* event) override;
 
     // In order to use a custom widget with a stylesheet, you need to override the paintEvent
     // See https://wiki.qt.io/How_to_Change_the_Background_Color_of_QWidget
@@ -67,6 +91,12 @@ signals:
     void Hidden();
 
 private:
+    /// Resets header, stage and value widgets before Prepare or PrepareClosing.
+    void ResetDisplay();
+    /// Applies the game icon, banner and title from a Snapshot. Without an icon it shows the same
+    /// default art as the game library.
+    void ApplyArtwork(const Snapshot& snapshot);
+
 #ifndef LICHII_QT_MOVIE_MISSING
     std::unique_ptr<QMovie> animation;
     std::unique_ptr<QBuffer> backing_buf;
@@ -79,10 +109,14 @@ private:
     QGraphicsOpacityEffect* opacity_effect = nullptr;
     QPushButton* skip_button = nullptr;
     std::unique_ptr<QPropertyAnimation> fadeout_animation;
+    std::unique_ptr<QVariantAnimation> logo_float_animation;
 
     // Definitions for the differences in text and styling for each stage
     ::Common::unordered_map<VideoCore::LoadCallbackStage, const char*> progressbar_style;
     ::Common::unordered_map<VideoCore::LoadCallbackStage, QString> stage_translations;
+
+    QString game_title;
+    bool closing_screen = false;
 
     // newly generated shaders are added to the end of the file, so when loading and compiling
     // shaders, it will start quickly but end slow if new shaders were added since previous launch.

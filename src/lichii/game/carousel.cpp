@@ -10,11 +10,13 @@
 GameCarousel::GameCarousel(QWidget* parent) : QListView{parent} {
     m_gameCard = new GameCard(this);
     setItemDelegate(m_gameCard);
+    setObjectName(QStringLiteral("gameCarouselView"));
 
     setViewMode(QListView::IconMode);
     setMovement(QListView::Static);
     setUniformItemSizes(true);
     setSelectionMode(QAbstractItemView::SingleSelection);
+    setMouseTracking(true);
 
     setVerticalScrollMode(QAbstractItemView::ScrollPerPixel);
     setHorizontalScrollMode(QAbstractItemView::ScrollPerPixel);
@@ -24,11 +26,17 @@ GameCarousel::GameCarousel(QWidget* parent) : QListView{parent} {
     setEditTriggers(QAbstractItemView::NoEditTriggers);
     setContextMenuPolicy(Qt::CustomContextMenu);
 
-    setSpacing(10);
+    setSpacing(12);
     setWordWrap(true);
     setTextElideMode(Qt::ElideRight);
     setFlow(QListView::LeftToRight);
     setWrapping(false);
+    setStyleSheet(QStringLiteral(
+        "QListView {"
+        "  border: none;"
+        "  outline: none;"
+        "  padding: 8px 10px 12px 10px;"
+        "}"));
 }
 
 void GameCarousel::SetModel(GameListModel* model) {
@@ -53,38 +61,23 @@ void GameCarousel::ApplyFilter(const QString& edit_filter_text, GameListModel* m
 }
 
 void GameCarousel::UpdateIconSize() {
-    const u32 icon_size = UISettings::values.game_cover_size.GetValue();
+    const bool show_game_name = UISettings::values.show_game_name.GetValue();
+    const u32 display_icon_size = Lichii::CardIconDisplaySize(show_game_name);
 
     int heightMargin = 0;
     int widthMargin = 80;
 
     // TODO(crueter): get rid of this nonsense
-    if (UISettings::values.show_game_name) {
-        switch (icon_size) {
-        case 128:
-        case 160:
-            heightMargin = 65;
-            break;
-        case 0:
-            widthMargin = 120;
-            heightMargin = 120;
-            break;
-        case 44:
-        case 64:
-            heightMargin = 77;
-            break;
-        case 32:
-        case 256:
-            heightMargin = 81;
-            break;
-        }
+    if (show_game_name) {
+        widthMargin = 110;
+        heightMargin = 155;
     } else {
         widthMargin = 24;
         heightMargin = 24;
     }
 
-    const int min_item_width = icon_size + widthMargin;
-    const int min_item_height = icon_size + heightMargin;
+    const int min_item_width = display_icon_size + widthMargin;
+    const int min_item_height = display_icon_size + heightMargin;
     const int grid_height = std::max(min_item_height, viewport()->height());
 
     QSize content_size(min_item_width, min_item_height);

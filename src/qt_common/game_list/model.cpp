@@ -96,9 +96,13 @@ void GameListModel::AddEntry(const QList<QStandardItem*>& entry_items, GameListD
 }
 
 void GameListModel::DonePopulating(const QStringList& watch_list) {
-    emit ShowList(!IsEmpty());
-
-    if (!m_flat) {
+    if (m_flat) {
+        invisibleRootItem()->appendRow(new GameListAddDir());
+        emit ShowList(true);
+    } else {
+        const bool has_games = !IsEmpty();
+        emit ShowList(has_games ||
+                      UISettings::values.game_list_mode.GetValue() == Settings::GameListMode::GridView);
         invisibleRootItem()->appendRow(new GameListAddDir());
         invisibleRootItem()->insertRow(0, new GameListFavorites());
 
@@ -147,10 +151,19 @@ bool GameListModel::IsEmpty() const {
              type == GameListItemType::SysNandDir)) {
             invisibleRootItem()->removeRow(child->row());
             i--;
+            continue;
+        }
+
+        if (type == GameListItemType::Favorites || type == GameListItemType::AddDir) {
+            continue;
+        }
+
+        if (type == GameListItemType::Game || child->hasChildren()) {
+            return false;
         }
     }
 
-    return !invisibleRootItem()->hasChildren();
+    return true;
 }
 
 void GameListModel::ToggleFavorite(u64 program_id) {

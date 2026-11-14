@@ -155,6 +155,8 @@ private:
     void ValidateEntry(const QModelIndex& item);
 
     void ToggleFavorite(u64 program_id);
+    void ReturnToGameDirectories();
+    void UpdateFolderNavigation();
 
     void PopupContextMenu(const QPoint& menu_location);
     void AddGamePopup(QMenu& context_menu, u64 program_id, const std::string& path);
@@ -186,6 +188,9 @@ private:
     GameCarousel* carousel_view = nullptr;
     GameListModel* item_model = nullptr;
     Settings::GameListMode game_list_mode;
+    QWidget* folder_navigation = nullptr;
+    QPushButton* folder_back_button = nullptr;
+    QLabel* folder_title_label = nullptr;
 
     ControllerNavigation* controller_navigation = nullptr;
 
@@ -198,7 +203,10 @@ private:
     Core::System& system;
 
     bool m_isTreeMode = true;
+    bool m_isFlat = false;
     bool m_populating = false;
+    int grid_root_dir_index_to_restore = -1;
+    bool suppress_grid_double_click = false;
     bool nup_conversion_running{};
     bool nx_tool_running{};
     u64 reportable_program_id{};

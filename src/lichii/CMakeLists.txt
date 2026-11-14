@@ -176,6 +176,9 @@ add_executable(lichii
     hotkeys.h
     install_dialog.cpp
     install_dialog.h
+    classic_loading_screen.cpp
+    classic_loading_screen.h
+    classic_loading_screen.ui
     loading_screen.cpp
     loading_screen.h
     loading_screen.ui
@@ -239,6 +242,7 @@ add_executable(lichii
     recommended_settings_dialog.h recommended_settings_dialog.cpp
     whats_new_dialog.h whats_new_dialog.cpp
     bug_report_dialog.h bug_report_dialog.cpp
+    first_run_setup_dialog.h first_run_setup_dialog.cpp
     migration_worker.h migration_worker.cpp
     libqt_common.h libqt_common.cpp
 
