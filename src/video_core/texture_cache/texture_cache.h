@@ -162,6 +162,19 @@ void TextureCache<P>::RunGarbageCollector(bool out_of_memory) {
         ticks_to_destroy =
             EvictionAge(mode_age, min_age, total_used_memory, retention_limit, out_of_memory);
         num_iterations = aggressive_mode ? 40 : (high_priority_mode ? 20 : 10);
+        // Past the critical memory, 40 images a frame is not enough where the game makes more:
+        // breaking pots in Ocarina of Time's Hyrule Castle makes ~55 a frame (25 384x384 shadow
+        // maps and the frame's targets, at addresses that move every frame), none of which
+        // replaces an older one (bad overlaps). The cache grew ~15 images a frame, 4 GiB in two
+        // seconds, until the device heap was full and the driver crashed on the next image.
+        // So delete more the further past it, and sooner after an image's last use.
+        if (aggressive_mode && total_used_memory > critical_memory) {
+            const u64 over = total_used_memory - critical_memory;
+            num_iterations += static_cast<size_t>((std::min)(over / 2_MiB, u64{1024}));
+            if (over >= 1_GiB) {
+                ticks_to_destroy = (std::max)(min_age, u64{3});
+            }
+        }
     };
     const auto CanEvict = [this, &high_priority_mode, &aggressive_mode,
                            &evict_old_costly](ImageId image_id, bool* out_must_download = nullptr) {
