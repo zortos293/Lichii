@@ -411,7 +411,8 @@ IR::Program TranslateProgram(ObjectPool<IR::Inst>& inst_pool, ObjectPool<IR::Blo
     program.blocks = GenerateBlocks(program.syntax_list);
     program.post_order_blocks = PostOrder(program.syntax_list.front());
     program.stage = env.ShaderStage();
-    program.local_memory_size = env.LocalMemorySize();
+    program.local_memory_size = env.LocalArraySize();
+    program.is_native = env.IsNativeProgram();
     switch (program.stage) {
     case Stage::TessellationControl: {
         const ProgramHeader& sph{env.SPH()};
@@ -521,6 +522,10 @@ IR::Program TranslateProgram(ObjectPool<IR::Inst>& inst_pool, ObjectPool<IR::Blo
         Optimization::VerificationPass(program);
     }
     Optimization::CollectShaderInfoPass(env, program);
+    if (!program.info.uses_local_memory) {
+        // The stack region (Environment::LocalArraySize) only for programs that use local memory.
+        program.local_memory_size = env.LocalMemorySize();
+    }
     // Adreno's proprietary driver culls 8x8 low-resolution-Z tiles with stale data in Ocarina
     // (checkerboard holes in depth, sky showing through near geometry and water). Writing
     // FragDepth = FragCoord.z from every fragment shader makes the driver turn LRZ off.
@@ -571,6 +576,7 @@ IR::Program MergeDualVertexPrograms(IR::Program& vertex_a, IR::Program& vertex_b
         result.post_order_blocks.push_back(block);
     }
     result.stage = Stage::VertexB;
+    result.is_native = vertex_b.is_native;
     result.info = vertex_a.info;
     result.local_memory_size = (std::max)(vertex_a.local_memory_size, vertex_b.local_memory_size);
     result.info.loads.mask |= vertex_b.info.loads.mask;

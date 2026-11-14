@@ -28,6 +28,7 @@
 #include "common/common_types.h"
 #include "common/spin_recursive_mutex.h"
 #include "common/hash.h"
+#include "common/settings.h"
 #include "common/literals.h"
 #include "common/lru_cache.h"
 #include <ranges>
@@ -383,6 +384,37 @@ public:
     };
     Churn TakeChurn() noexcept {
         return std::exchange(churn, {});
+    }
+
+    /// The guest memory [gpu_addr, +size) of colour target `index` when a clear of `area` (host
+    /// pixels, from the origin) covers all of it: a single-level, single-layer 2D image whose
+    /// view starts at its base. nullopt otherwise.
+    [[nodiscard]] std::optional<std::pair<GPUVAddr, u64>> CoveredColorTarget(size_t index,
+                                                                             u32 area_width,
+                                                                             u32 area_height) {
+        const ImageViewId view_id = render_targets.color_buffer_ids[index];
+        if (!view_id) {
+            return std::nullopt;
+        }
+        const ImageView& view = slot_image_views[view_id];
+        if (!view.image_id || view.range.base.layer != 0 || view.range.base.level != 0) {
+            return std::nullopt;
+        }
+        const Image& image = slot_images[view.image_id];
+        if (image.info.type != ImageType::e2D || image.info.resources.levels != 1 ||
+            image.info.resources.layers != 1) {
+            return std::nullopt;
+        }
+        u32 width = image.info.size.width;
+        u32 height = image.info.size.height;
+        if (True(image.flags & ImageFlagBits::Rescaled)) {
+            width = Settings::values.resolution_info.ScaleUp(width);
+            height = Settings::values.resolution_info.ScaleUp(height);
+        }
+        if (area_width < width || area_height < height) {
+            return std::nullopt;
+        }
+        return std::pair{image.gpu_addr, image.guest_size_bytes};
     }
 
     /// Mark images in a range as modified from the CPU

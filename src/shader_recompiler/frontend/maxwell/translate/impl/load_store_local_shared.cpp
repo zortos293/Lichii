@@ -44,6 +44,52 @@ std::pair<IR::U32, IR::U32> WordOffset(TranslatorVisitor& v, u64 insn) {
     }
 }
 
+/// Where a native program's local access at `offset` (bytes in the 16 MiB window) lands in its
+/// local array (Environment::LocalArraySize): the declared memory after the stack region, the
+/// upper half of the window (the stack, which grows down from its top) onto the stack region.
+/// Accesses outside the declared memory and the stack region are out of bounds, also a stack
+/// deeper than the region: mapping it onto the region would alias the declared memory.
+struct NativeLocal {
+    IR::U32 word;   ///< Word index in the local array (the spare word when out of bounds)
+    IR::U32 offset; ///< Byte offset in the local array, for sub-word accesses
+    IR::U1 in_bounds;
+};
+
+NativeLocal MapNativeLocal(TranslatorVisitor& v, const IR::U32& window_offset) {
+    constexpr u32 stack_half = Environment::LOCAL_WINDOW_BYTES / 2;
+    constexpr u32 stack_bottom = Environment::LOCAL_WINDOW_BYTES - Environment::NATIVE_STACK_BYTES;
+    constexpr u32 stack_base = Environment::NATIVE_STACK_BASE;
+    constexpr u32 declared_base = Environment::NATIVE_DECLARED_BASE;
+    constexpr u32 spare_word = 0;
+    const u32 declared = v.env.LocalMemorySize();
+    if (window_offset.IsImmediate()) {
+        const u32 value = window_offset.U32();
+        const bool stack = value >= stack_half;
+        const bool in_bounds =
+            stack ? value >= stack_bottom && value < Environment::LOCAL_WINDOW_BYTES
+                  : value < declared;
+        const u32 offset = stack ? value - stack_bottom + stack_base : value + declared_base;
+        return {v.ir.Imm32(in_bounds ? offset / 4 : spare_word), v.ir.Imm32(offset),
+                v.ir.Imm1(in_bounds)};
+    }
+    const IR::U1 stack{v.ir.IGreaterThanEqual(window_offset, v.ir.Imm32(stack_half), false)};
+    const IR::U1 in_stack{v.ir.LogicalAnd(
+        v.ir.IGreaterThanEqual(window_offset, v.ir.Imm32(stack_bottom), false),
+        v.ir.ILessThan(window_offset, v.ir.Imm32(Environment::LOCAL_WINDOW_BYTES), false))};
+    const IR::U1 in_declared{v.ir.ILessThan(window_offset, v.ir.Imm32(declared), false)};
+    const IR::U1 in_bounds{v.ir.Select(stack, in_stack, in_declared)};
+    const IR::U32 offset{v.ir.Select(stack,
+                                     v.ir.IAdd(window_offset, v.ir.Imm32(stack_base - stack_bottom)),
+                                     v.ir.IAdd(window_offset, v.ir.Imm32(declared_base)))};
+    const IR::U32 word{v.ir.Select(in_bounds, v.ir.ShiftRightLogical(offset, v.ir.Imm32(2)),
+                                   v.ir.Imm32(spare_word))};
+    return {word, offset, in_bounds};
+}
+
+IR::U32 LoadNativeLocal(TranslatorVisitor& v, const NativeLocal& local) {
+    return IR::U32{v.ir.Select(local.in_bounds, v.ir.LoadLocal(local.word), v.ir.Imm32(0))};
+}
+
 std::pair<int, bool> GetSize(u64 insn) {
     union {
         u64 raw;
@@ -95,6 +141,33 @@ IR::U32 LoadLocal(TranslatorVisitor& v, const IR::U32& word_offset, const IR::U3
 } // Anonymous namespace
 
 void TranslatorVisitor::LDL(u64 insn) {
+    if (env.IsNativeProgram()) {
+        const IR::U32 window_offset{Offset(*this, insn)};
+        const NativeLocal local{MapNativeLocal(*this, window_offset)};
+        const IR::U32 word{LoadNativeLocal(*this, local)};
+        const IR::Reg dest{Reg(insn)};
+        const auto [bit_size, is_signed]{GetSize(insn)};
+        switch (bit_size) {
+        case 8:
+            X(dest, ir.BitFieldExtract(word, ByteOffset(ir, local.offset), ir.Imm32(8), is_signed));
+            return;
+        case 16:
+            X(dest,
+              ir.BitFieldExtract(word, ShortOffset(ir, local.offset), ir.Imm32(16), is_signed));
+            return;
+        default:
+            if (!IR::IsAligned(dest, static_cast<size_t>(bit_size / 32))) {
+                throw NotImplementedException("Unaligned destination register {}", dest);
+            }
+            X(dest, word);
+            // Each word is mapped on its own: a wide access may straddle the declared memory's end.
+            for (int i = 1; i < bit_size / 32; ++i) {
+                const IR::U32 next{ir.IAdd(window_offset, ir.Imm32(i * 4))};
+                X(dest + i, LoadNativeLocal(*this, MapNativeLocal(*this, next)));
+            }
+            return;
+        }
+    }
     const auto [word_offset, offset]{WordOffset(*this, insn)};
     const IR::U32 word{LoadLocal(*this, word_offset, offset)};
     const IR::Reg dest{Reg(insn)};
@@ -150,6 +223,34 @@ void TranslatorVisitor::LDS(u64 insn) {
 }
 
 void TranslatorVisitor::STL(u64 insn) {
+    if (env.IsNativeProgram()) {
+        // Out-of-bounds stores go to the spare word, which no load reads.
+        const IR::U32 window_offset{Offset(*this, insn)};
+        const NativeLocal local{MapNativeLocal(*this, window_offset)};
+        const IR::Reg reg{Reg(insn)};
+        const IR::U32 src{X(reg)};
+        const int bit_size{GetSize(insn).first};
+        switch (bit_size) {
+        case 8:
+        case 16: {
+            const IR::U32 bit{bit_size == 8 ? ByteOffset(ir, local.offset)
+                                            : ShortOffset(ir, local.offset)};
+            ir.WriteLocal(local.word, ir.BitFieldInsert(ir.LoadLocal(local.word), src, bit,
+                                                        ir.Imm32(bit_size)));
+            return;
+        }
+        default:
+            if (!IR::IsAligned(reg, static_cast<size_t>(bit_size / 32))) {
+                throw NotImplementedException("Unaligned source register");
+            }
+            ir.WriteLocal(local.word, src);
+            for (int i = 1; i < bit_size / 32; ++i) {
+                const IR::U32 next{ir.IAdd(window_offset, ir.Imm32(i * 4))};
+                ir.WriteLocal(MapNativeLocal(*this, next).word, X(reg + i));
+            }
+            return;
+        }
+    }
     const auto [word_offset, offset]{WordOffset(*this, insn)};
     if (offset.IsImmediate()) {
         // TODO: Support storing out of bounds at runtime

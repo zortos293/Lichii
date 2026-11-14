@@ -456,20 +456,27 @@ void SetupDenormControl(const Profile& profile, const IR::Program& program, Emit
 
 void SetupSignedNanCapabilities(const Profile& profile, const IR::Program& program,
                                 EmitContext& ctx, Id main_func) {
-    if (profile.has_broken_fp16_float_controls && program.info.uses_fp16) {
+    // Drivers with broken fp16 float controls (NVIDIA) get no mode in programs that use fp16
+    // (ff35ef8ec1, Fire Emblem: Three Houses). Native (Switch 2) programs still get the fp32 and
+    // fp64 ones there: without the fp32 mode the driver may fold clamps such as
+    // min(max(1/x, -FLT_MAX), FLT_MAX) away, so 0 * (1/0) gives NaN where the console gives 0
+    // (black and NaN-spread blocks in The Duskbloods).
+    const bool broken_fp16 = profile.has_broken_fp16_float_controls && program.info.uses_fp16;
+    if (broken_fp16 && !program.is_native) {
         return;
     }
-    if (program.info.uses_fp16 && profile.support_fp16_signed_zero_nan_preserve) {
+    const auto preserve = [&](u32 width) {
         ctx.AddCapability(spv::Capability::SignedZeroInfNanPreserve);
-        ctx.AddExecutionMode(main_func, spv::ExecutionMode::SignedZeroInfNanPreserve, 16U);
+        ctx.AddExecutionMode(main_func, spv::ExecutionMode::SignedZeroInfNanPreserve, width);
+    };
+    if (program.info.uses_fp16 && profile.support_fp16_signed_zero_nan_preserve && !broken_fp16) {
+        preserve(16U);
     }
     if (profile.support_fp32_signed_zero_nan_preserve) {
-        ctx.AddCapability(spv::Capability::SignedZeroInfNanPreserve);
-        ctx.AddExecutionMode(main_func, spv::ExecutionMode::SignedZeroInfNanPreserve, 32U);
+        preserve(32U);
     }
     if (program.info.uses_fp64 && profile.support_fp64_signed_zero_nan_preserve) {
-        ctx.AddCapability(spv::Capability::SignedZeroInfNanPreserve);
-        ctx.AddExecutionMode(main_func, spv::ExecutionMode::SignedZeroInfNanPreserve, 64U);
+        preserve(64U);
     }
 }
 
