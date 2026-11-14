@@ -155,12 +155,34 @@ validates all 44 original bytes through `0x2F53294`, including the instructions
 the stub skips. Any changed hook, cave, state byte, or user mod in a record
 skips the entire FPS Unlock patch transactionally.
 
+The movie frame count stub at `0x3C46A70` (56 bytes) uses the same helper and slots.
+
 FPS Unlock reserves `0x1C0` bytes from `0x4E9FE00`. Its step state occupies
 `0x4E9FEB0..0x4E9FFC0` (end exclusive): a replacement index at `+0`, then 16
 slots of `{u64 counter address, f32 remainder, pad}` at `+0x10`. The range
 `0x4E9FE10..0x4E9FEB0` holds the water slots (state through `+0x98`, cave `0x3C46300`)
 and the sound gate (state through `+0xA8`, caves `0x3C46280` and `0x3C46800`), so the
 three patches share the timer state without overlapping.
+
+## FPS Unlock movie frame count
+
+A movie player counts its updates that show a picture: `add w8, w8, #1` at `0x3B5C7C8` on its
+count at `+0x2F8`. A cutscene that plays a movie reads that count as its timeline's time
+(`0x3B3EC10` returns it as a float), and the timeline places the cutscene's voices, overlays and
+its end by it. The movie's picture and sound follow the clock, so at a step of 2 (30 fps) the cues
+come at half speed and at 0.5 (120 fps) at twice the speed, and they drift from the picture and the
+voices: the sages' lines play over each other (#1474, likely the post-credits in #1572).
+
+`FPS Unlock (built-in)` branches at `0x3B5C7C8` to 56 bytes at `0x3C46A70`, which adds the
+shared step helper's whole ticks for the counter's address instead of one. At 30 fps that is 2 per
+update; at 120 fps it alternates 0 and 1; at 60 fps it stays at 1 apart from the odd 0 or 2 when
+the measured step drifts around 1.0. The movie start path's own `+1` at `0x3B5C90C` stays.
+Dynamic FPS by Dark keeps its original records, so with FPS Unlock unchecked
+the cutscenes still drift at 30 fps.
+
+The site and the time-based count follow Hookshot's movie frame count (issue 1742, GPL-3.0). Its
+notes say the timeline fires the events between its previous frame and the new one, so whole ticks
+above 1 skip no cue, and at steps of 1 and 2 it measured every narration line and rumble as at 60 fps.
 
 ## FPS Unlock ground velocity
 

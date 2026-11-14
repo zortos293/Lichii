@@ -303,6 +303,21 @@ constexpr std::array<u8, 40> TURN_SPEED_ROUTINE{
     0x28, 0x1E, 0x01, 0x40, 0x21, 0x1E, 0x33, 0x60, 0xA7, 0x17, 0xE1, 0x0F, 0x40, 0xBD,
     0x01, 0x08, 0x21, 0x1E, 0x00, 0x08, 0x28, 0x1E, 0x2F, 0x60, 0xA7, 0x17,
 };
+// A movie player counts its updates with a picture shown (+0x2F8, one more each), and a cutscene
+// that plays a movie takes that count as its timeline frame: its voices, overlays and its end are
+// placed by it. The picture and the sound follow the clock, so at any other frame rate than 60 the
+// cues drift from them (sages' lines over each other at 30 or 120 fps, #1474, #1572). The count
+// takes whole ticks of the step through the shared helper instead, keyed by the counter's address.
+// Same site as Hookshot's movie frame count (issue 1742).
+constexpr std::array<u8, 4> MOVIE_FRAMES_ORIGINAL{0x08, 0x05, 0x00, 0x11}; // add w8, w8, #1
+constexpr std::array<u8, 4> MOVIE_FRAMES_HOOK{0xAA, 0xA8, 0x03, 0x14};     // b main+0x3C46A70
+// add x13, x20, #0x2f8 ; load raw step ; bl helper ; add w8, w8, w13 ; b 0x3B5C7CC
+constexpr std::array<u8, 56> MOVIE_FRAMES_ROUTINE{
+    0xED, 0x3B, 0xBD, 0xA9, 0xEF, 0x43, 0x01, 0xA9, 0xFE, 0x13, 0x00, 0xF9, 0x8D, 0xE2,
+    0x0B, 0x91, 0xCE, 0x81, 0x00, 0x90, 0xCE, 0x49, 0x44, 0xF9, 0xCE, 0x01, 0x40, 0xF9,
+    0xC0, 0x11, 0x40, 0xBD, 0xBC, 0xFF, 0xFF, 0x97, 0x08, 0x01, 0x0D, 0x0B, 0xFE, 0x13,
+    0x40, 0xF9, 0xEF, 0x43, 0x41, 0xA9, 0xED, 0x3B, 0xC3, 0xA8, 0x4A, 0x57, 0xFC, 0x17,
+};
 constexpr std::array FPS_UNLOCK_RECORDS{
     BuiltinPatchRecord{0x6E6CC4, DYNAMIC_FPS_CALL, DYNAMIC_FPS_ORIGINAL},
     BuiltinPatchRecord{0x3C46200, FPS_UNLOCK_ROUTINE, {}, true},
@@ -327,6 +342,8 @@ constexpr std::array FPS_UNLOCK_RECORDS{
     BuiltinPatchRecord{0x389AC2C, GROUND_VELOCITY_NOP, GROUND_VELOCITY_ORIGINAL_C},
     BuiltinPatchRecord{0x261EB18, TURN_SPEED_HOOK, TURN_SPEED_ORIGINAL},
     BuiltinPatchRecord{0x3C46A40, TURN_SPEED_ROUTINE, {}, true},
+    BuiltinPatchRecord{0x3B5C7C8, MOVIE_FRAMES_HOOK, MOVIE_FRAMES_ORIGINAL},
+    BuiltinPatchRecord{0x3C46A70, MOVIE_FRAMES_ROUTINE, {}, true},
 };
 
 constexpr std::array BUILTIN_PATCHES{
