@@ -603,6 +603,19 @@ std::unique_ptr<ComputePipeline> ShaderCache::CreateComputePipeline(
     auto hash = key.Hash();
     LOG_INFO(Render_OpenGL, "{:#016x}", hash);
 
+    if (env.IsNativeProgram() &&
+        ::Settings::values.renderer_backend.GetValue() != Settings::RendererBackend::OpenGL_SPIRV) {
+        // GLSL and GLASM index local memory directly: a native compute stack address past the
+        // allocation would write out of bounds at runtime. Only SPIR-V clamps those accesses.
+        static std::atomic<bool> logged{};
+        if (!logged.exchange(true)) {
+            LOG_WARNING(Render_OpenGL,
+                        "Skipping native compute pipelines: the GLSL and GLASM backends cannot "
+                        "bound local memory accesses");
+        }
+        return nullptr;
+    }
+
     Shader::Maxwell::Flow::CFG cfg{env, pools.flow_block, env.StartAddress()};
 
     if (Settings::values.dump_guest_shaders) {

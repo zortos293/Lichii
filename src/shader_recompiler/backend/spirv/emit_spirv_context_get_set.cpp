@@ -633,16 +633,21 @@ Id EmitRenderArea(EmitContext& ctx) {
     }
 }
 
+namespace {
+Id LocalMemoryPointer(EmitContext& ctx, Id word_offset) {
+    // The offset can come from guest data: an access past the array is undefined in SPIR-V and
+    // hangs the GPU on RADV, where the array lives in scratch memory.
+    const Id index{ctx.OpUMin(ctx.U32[1], word_offset, ctx.local_memory_spare)};
+    return ctx.OpAccessChain(ctx.private_u32, ctx.local_memory, index, ctx.Const(0U));
+}
+} // Anonymous namespace
+
 Id EmitLoadLocal(EmitContext& ctx, Id word_offset) {
-    const Id pointer{
-        ctx.OpAccessChain(ctx.private_u32, ctx.local_memory, word_offset, ctx.Const(0U))};
-    return ctx.OpLoad(ctx.U32[1], pointer);
+    return ctx.OpLoad(ctx.U32[1], LocalMemoryPointer(ctx, word_offset));
 }
 
 void EmitWriteLocal(EmitContext& ctx, Id word_offset, Id value) {
-    const Id pointer{
-        ctx.OpAccessChain(ctx.private_u32, ctx.local_memory, word_offset, ctx.Const(0U))};
-    ctx.OpStore(pointer, value);
+    ctx.OpStore(LocalMemoryPointer(ctx, word_offset), value);
 }
 
 } // namespace Shader::Backend::SPIRV

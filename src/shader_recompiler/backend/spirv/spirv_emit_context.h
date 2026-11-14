@@ -346,6 +346,7 @@ public:
     u32 render_are_member_index{};
 
     Id local_memory{};
+    Id local_memory_spare{}; ///< Index of the element out of bounds accesses land on
 
     bool uses_explicit_workgroup_layout{};
     Id shared_memory_u8{};

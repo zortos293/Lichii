@@ -56,7 +56,12 @@ std::size_t KAddressSpaceInfo::GetAddressSpaceStart(size_t width, KAddressSpaceI
     return GetAddressSpaceInfo(width, type).address;
 }
 
-std::size_t KAddressSpaceInfo::GetAddressSpaceSize(size_t width, KAddressSpaceInfo::Type type) {
+std::size_t KAddressSpaceInfo::GetAddressSpaceSize(size_t width, KAddressSpaceInfo::Type type,
+                                               bool is_switch2) {
+    // The Switch 2 SDK uses this as its VAMM address pool. Xenoblade 2 reserves 60 GiB twice.
+    if (is_switch2 && width == 39 && type == Type::Alias) {
+        return 128_GiB;
+    }
     return GetAddressSpaceInfo(width, type).size;
 }
 

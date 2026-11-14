@@ -35,8 +35,24 @@ IR::U32 Offset(TranslatorVisitor& v, u64 insn) {
     }
 }
 
-std::pair<IR::U32, IR::U32> WordOffset(TranslatorVisitor& v, u64 insn) {
+// A Switch 2 compute program addresses its local memory at the top of a 24-bit space: its stack
+// pointer (constant buffer 0, word 10) is that top minus the driver's part of the allocation, and
+// the program's own slots lie below it.
+IR::U32 LocalOffset(TranslatorVisitor& v, u64 insn) {
     const IR::U32 offset{Offset(v, insn)};
+    if (!v.env.IsNativeProgram() || v.env.ShaderStage() != Stage::Compute) {
+        return offset;
+    }
+    constexpr u32 mask{0xffffff};
+    const u32 size{v.env.LocalMemorySize()};
+    if (offset.IsImmediate()) {
+        return v.ir.Imm32((offset.U32() + size) & mask);
+    }
+    return v.ir.BitwiseAnd(v.ir.IAdd(offset, v.ir.Imm32(size)), v.ir.Imm32(mask));
+}
+
+std::pair<IR::U32, IR::U32> WordOffset(TranslatorVisitor& v, u64 insn) {
+    const IR::U32 offset{LocalOffset(v, insn)};
     if (offset.IsImmediate()) {
         return {v.ir.Imm32(offset.U32() / 4), offset};
     } else {

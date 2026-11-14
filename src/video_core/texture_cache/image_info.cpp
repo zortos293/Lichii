@@ -46,6 +46,7 @@ ImageInfo::ImageInfo(const TICEntry& config) noexcept {
             .height = config.block_height,
             .depth = config.block_depth,
         };
+        maxwell_gob_layout = config.UsesMaxwellGobLayout();
     }
     rescaleable = false;
     is_sparse = config.is_sparse != 0;
@@ -106,7 +107,6 @@ ImageInfo::ImageInfo(const TICEntry& config) noexcept {
         resources.layers = config.BaseLayer() + 6;
         break;
     case TextureType::TextureCubeArray:
-        UNIMPLEMENTED_IF(config.load_store_hint != 0);
         type = ImageType::e2D;
         size.width = config.Width();
         size.height = config.Height();

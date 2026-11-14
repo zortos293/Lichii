@@ -639,9 +639,11 @@ void EmitContext::DefineLocalMemory(const IR::Program& program) {
     }
     const u32 num_elements{Common::DivCeil(program.local_memory_size, 4U)};
     const Id element_type{TypeStruct(U32[1])};
-    const Id type{TypeArray(element_type, Const(num_elements))};
+    // One spare element takes the accesses whose runtime offset is out of bounds.
+    const Id type{TypeArray(element_type, Const(num_elements + 1))};
     const Id pointer{TypePointer(spv::StorageClass::Private, type)};
     local_memory = AddGlobalVariable(pointer, spv::StorageClass::Private);
+    local_memory_spare = Const(num_elements);
     if (profile.supported_spirv >= 0x00010400) {
         interfaces.push_back(local_memory);
     }

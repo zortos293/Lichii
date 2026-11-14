@@ -42,6 +42,7 @@ Users report game bugs with Lichii logs (`eden_log.txt`, `eden_log.txt.old`). Ea
 | 0100F2C0115B6000 | The Legend of Zelda: Tears of the Kingdom (Switch 1) |
 | 01006D0017F7A000 | Mario & Luigi: Brothership (Switch 1) |
 | 010051F0207B2000 | Tomodachi Life: Living the Dream (Switch 1) |
+| 0400E95004038001 | Xenoblade Chronicles 2 – Nintendo Switch 2 Edition |
 
 Add ids here when a report identifies a new game.
 
