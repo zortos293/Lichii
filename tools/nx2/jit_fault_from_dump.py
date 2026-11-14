@@ -178,10 +178,18 @@ class Dump:
         return None
 
     def read(self, address, size):
-        for start, length, rva in self.segments:
-            if start <= address and address + size <= start + length:
-                return self.data[rva + address - start:rva + address - start + size]
-        return b""
+        """The bytes at [address, address + size), joined across adjacent ranges; b"" on a gap."""
+        out = bytearray()
+        end = address + size
+        while address < end:
+            segment = next(((s, l, r) for s, l, r in self.segments if s <= address < s + l), None)
+            if segment is None:
+                return b""
+            start, length, rva = segment
+            take = min(end, start + length) - address
+            out += self.data[rva + address - start:rva + address - start + take]
+            address += take
+        return bytes(out)
 
     def region_of(self, address):
         for base, size, state, protect in self.regions:
