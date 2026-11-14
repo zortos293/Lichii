@@ -6,6 +6,8 @@
 
 #pragma once
 
+#include "common/common_types.h"
+
 namespace DiscordRPC {
 
 class DiscordInterface {
@@ -13,7 +15,7 @@ public:
     virtual ~DiscordInterface() = default;
 
     virtual void Pause() = 0;
-    virtual void Update() = 0;
+    virtual void Update(s64 session_start = 0) = 0;
 };
 
 class NullImpl : public DiscordInterface {
@@ -21,7 +23,7 @@ public:
     ~NullImpl() = default;
 
     void Pause() override {}
-    void Update() override {}
+    void Update(s64) override {}
 };
 
 } // namespace DiscordRPC

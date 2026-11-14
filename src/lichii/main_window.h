@@ -529,6 +529,7 @@ private:
     std::unique_ptr<Ui::MainWindow> ui;
 
     std::unique_ptr<DiscordRPC::DiscordInterface> discord_rpc;
+    s64 discord_session_start{};
     std::unique_ptr<PlayTime::PlayTimeManager> play_time_manager;
     std::shared_ptr<InputCommon::InputSubsystem> input_subsystem;
 
