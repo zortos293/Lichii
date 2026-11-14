@@ -177,6 +177,12 @@ class Dump:
                 return name, address - base
         return None
 
+    def read(self, address, size):
+        for start, length, rva in self.segments:
+            if start <= address and address + size <= start + length:
+                return self.data[rva + address - start:rva + address - start + size]
+        return b""
+
     def region_of(self, address):
         for base, size, state, protect in self.regions:
             if base <= address < base + size:
@@ -207,7 +213,7 @@ def parse_context(data, at):
     return {"flags": flags, "mxcsr": mxcsr, "cs": cs, "ss": ss, "eflags": eflags, "regs": regs}
 
 
-def is_context(dump, data, at):
+def is_context(dump, data, at, record_addresses):
     flags = struct.unpack_from("<I", data, at + 0x30)[0]
     if not flags & CONTEXT_AMD64 or flags & ~CONTEXT_ALLOWED or flags & 3 != 3:
         return None
@@ -216,7 +222,9 @@ def is_context(dump, data, at):
         return None
     if ctx["mxcsr"] >> 16 or not user_address(ctx["regs"]["rsp"]):
         return None
-    return ctx if dump.plausible_code(ctx["regs"]["rip"]) else None
+    # An execute fault's RIP can lie outside committed memory; a record at that RIP vouches for it.
+    rip = ctx["regs"]["rip"]
+    return ctx if rip in record_addresses or dump.plausible_code(rip) else None
 
 
 def is_record(data, at):
@@ -234,15 +242,11 @@ def is_record(data, at):
 
 
 def scan(dump, stack, base):
-    contexts, records = [], []
-    for off in range(0, len(stack) - RECORD_SIZE + 1, 8):
-        rec = is_record(stack, off)
-        if rec:
-            records.append((base + off, rec))
-        if off + CONTEXT_SIZE <= len(stack):
-            ctx = is_context(dump, stack, off)
-            if ctx:
-                contexts.append((base + off, ctx))
+    records = [(base + off, rec) for off in range(0, len(stack) - RECORD_SIZE + 1, 8)
+               if (rec := is_record(stack, off))]
+    record_addresses = {rec["address"] for _, rec in records}
+    contexts = [(base + off, ctx) for off in range(0, len(stack) - CONTEXT_SIZE + 1, 8)
+                if (ctx := is_context(dump, stack, off, record_addresses))]
     return contexts, records
 
 
@@ -380,7 +384,9 @@ def main():
     if thread is None:
         list_threads(dump)
         sys.exit(f"no thread {tid}; pass --thread")
-    stack = dump.data[thread["stack_rva"]:thread["stack_rva"] + thread["stack_size"]]
+    # Wine's full-memory dumps leave the stack RVA at 0 and keep the stack in the memory list.
+    stack = (dump.data[thread["stack_rva"]:thread["stack_rva"] + thread["stack_size"]]
+             if thread["stack_rva"] else dump.read(thread["stack"], thread["stack_size"]))
     base = thread["stack"]
     print(f"scanning thread {tid} ({thread_label(dump, tid)}) stack {base:#x}+{len(stack):#x}")
 
