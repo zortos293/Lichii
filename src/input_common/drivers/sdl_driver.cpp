@@ -7,6 +7,14 @@
 #include <array>
 #include <numbers>
 #include <optional>
+#include <string>
+#include <string_view>
+
+#ifdef __linux__
+#include <filesystem>
+#include <system_error>
+#include <unistd.h>
+#endif
 #include "common/logging.h"
 #include "common/math_util.h"
 #include "common/param_package.h"
@@ -20,6 +28,29 @@
 namespace InputCommon {
 
 namespace {
+#ifdef __linux__
+// When SDL cannot open a controller's raw HID node it falls back to the evdev
+// device. Return the hidraw node that sits next to such an evdev device and is
+// not accessible to the current user, or an empty string if there is none.
+std::string FindUnreadableHidraw(const char* device_path) {
+    constexpr std::string_view evdev_prefix = "/dev/input/event";
+    if (device_path == nullptr || !std::string_view{device_path}.starts_with(evdev_prefix)) {
+        return {};
+    }
+    const std::filesystem::path event_name = std::filesystem::path{device_path}.filename();
+    const std::filesystem::path hidraw_dir =
+        std::filesystem::path{"/sys/class/input"} / event_name / "device/device/hidraw";
+    std::error_code ec;
+    for (const auto& entry : std::filesystem::directory_iterator{hidraw_dir, ec}) {
+        const std::string node = "/dev/" + entry.path().filename().string();
+        if (access(node.c_str(), R_OK | W_OK) != 0) {
+            return node;
+        }
+    }
+    return {};
+}
+#endif
+
 Common::UUID GetGUID(SDL_Joystick* joystick) {
     const SDL_GUID guid = SDL_GetJoystickGUID(joystick);
     std::array<u8, 16> data{};
@@ -665,24 +696,32 @@ void SDLDriver::InitJoystick(SDL_JoystickID joystick_id) {
 
     if (SDL_IsGamepad(joystick_id)) {
         sdl_gamecontroller = SDL_OpenGamepad(joystick_id);
-        // SDL reports a gamepad even when its HIDAPI driver could not be opened
-        // (e.g. /dev/hidrawN is not readable by the current user, which happens
-        // for BLE controllers because uhid devices get no uaccess ACL). In that
-        // state SDL keeps the device listed but it will never deliver input,
-        // silently. Detect this and tell the user how to fix it.
-        if (sdl_gamecontroller && SDL_GetGamepadSerial(sdl_gamecontroller) == nullptr) {
-            LOG_WARNING(
-                Input,
-                "Gamepad '{}' is detected but SDL could not read it (raw HID device not "
-                "accessible to this user - common for Bluetooth controllers via uhid, "
-                "where uaccess is not applied). The device will not deliver any input. "
-                "Fix with a udev rule, e.g. create /etc/udev/rules.d/99-<name>-hidraw.rules "
-                "containing: KERNEL==\"hidraw*\", ATTRS{{id/vendor}}==\"{:04x}\", MODE=\"0666\" "
-                "(then reload with: udevadm control --reload-rules && udevadm trigger). "
-                "See also https://bugzilla.kernel.org/show_bug.cgi?id=222266",
-                SDL_GetGamepadName(sdl_gamecontroller),
-                SDL_GetJoystickVendor(SDL_GetGamepadJoystick(sdl_gamecontroller)));
+#ifdef __linux__
+        // SDL keeps a gamepad listed even when its HIDAPI driver could not open
+        // the raw HID node (e.g. /dev/hidrawN not accessible to this user, which
+        // happens for Bluetooth LE controllers because they come up via uhid and
+        // get no uaccess ACL). SDL then falls back to evdev, which for these
+        // controllers may deliver no usable input. Point the user at the cause.
+        if (sdl_gamecontroller) {
+            const std::string hidraw =
+                FindUnreadableHidraw(SDL_GetGamepadPath(sdl_gamecontroller));
+            if (!hidraw.empty()) {
+                const char* name = SDL_GetGamepadName(sdl_gamecontroller);
+                const u16 vendor = SDL_GetGamepadVendor(sdl_gamecontroller);
+                const u16 product = SDL_GetGamepadProduct(sdl_gamecontroller);
+                LOG_WARNING(
+                    Input,
+                    "Gamepad '{}' ({:04x}:{:04x}): SDL cannot access its raw HID device {}, "
+                    "so it may not receive input from it. This is common for Bluetooth "
+                    "controllers. Possible fix: a udev rule such as "
+                    "KERNEL==\"hidraw*\", KERNELS==\"*{:04X}:{:04X}*\", MODE=\"0660\", "
+                    "TAG+=\"uaccess\" in /etc/udev/rules.d/, then run "
+                    "'udevadm control --reload-rules && udevadm trigger'. For Bluetooth LE "
+                    "controllers uaccess may not be applied; MODE=\"0666\" works there.",
+                    name ? name : "unknown", vendor, product, hidraw, vendor, product);
+            }
         }
+#endif
     }
 
     if (!sdl_joystick) {
