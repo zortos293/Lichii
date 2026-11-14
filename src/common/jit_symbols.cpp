@@ -38,12 +38,13 @@ void Register(const void* start, const void* end, std::string_view name) {
     ranges.insert_or_assign(first, Range{reinterpret_cast<std::uintptr_t>(end), std::string{name}});
 }
 
-void Clear() {
+void Clear(const void* begin, const void* end) {
     if (!Enabled()) {
         return;
     }
     std::scoped_lock lock{mutex};
-    ranges.clear();
+    ranges.erase(ranges.lower_bound(reinterpret_cast<std::uintptr_t>(begin)),
+                 ranges.lower_bound(reinterpret_cast<std::uintptr_t>(end)));
 }
 
 std::optional<std::string> Lookup(const void* address) {

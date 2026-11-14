@@ -17,8 +17,9 @@ bool Enabled();
 
 void Register(const void* start, const void* end, std::string_view name);
 
-/// Forgets every range (the JIT cleared its code cache).
-void Clear();
+/// Forgets the ranges that start in [begin, end): that JIT cleared its code cache. Each core has
+/// its own JIT and code buffer, so the other cores' blocks keep their names.
+void Clear(const void* begin, const void* end);
 
 /// The name of the block holding the host address, if one is registered.
 std::optional<std::string> Lookup(const void* address);
