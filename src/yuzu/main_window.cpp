@@ -3831,12 +3831,14 @@ void MainWindow::OnConfigure() {
         // Runs if the user hit Cancel or closed the window, and did not ever press the Apply button
         // or `Reset to Defaults` button
         return;
-    } else if (result == QDialog::Accepted) {
+    }
+    // Applied settings (OK, Apply or Reset to Defaults) replace the speed limit the hotkeys changed.
+    speed_limit_before_hotkeys.reset();
+    if (result == QDialog::Accepted) {
         // Only apply new changes if user hit Okay
         // This is here to avoid applying changes if the user hit Apply, made some changes, then hit
         // Cancel
         configure_dialog.ApplyConfiguration();
-        speed_limit_before_hotkeys.reset();
     } else if (UISettings::values.reset_to_defaults) {
         LOG_INFO(Frontend, "Resetting all settings to defaults");
         if (!Common::FS::RemoveFile(config->GetConfigFilePath())) {
@@ -4116,9 +4118,10 @@ void MainWindow::OpenPerGameConfiguration(u64 title_id, const std::string& file_
     if (result != QDialog::Accepted && !UISettings::values.configuration_applied) {
         Settings::RestoreGlobalState(QtCommon::system->IsPoweredOn());
         return;
-    } else if (result == QDialog::Accepted) {
+    }
+    speed_limit_before_hotkeys.reset();
+    if (result == QDialog::Accepted) {
         dialog.ApplyConfiguration();
-        speed_limit_before_hotkeys.reset();
     }
 
     const auto reload = UISettings::values.is_game_list_reload_pending.exchange(false);
