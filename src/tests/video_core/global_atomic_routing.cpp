@@ -99,7 +99,107 @@ std::vector<u32> EmitUntrackedAtomic(IR::Opcode opcode) {
     profile.min_ssbo_alignment = 16;
     return Backend::SPIRV::EmitSPIRV(profile, program);
 }
+
+// A compute program with two tracked pointers in constant buffer 0 and, through the pointer loaded
+// from the first one, untracked accesses of every width, an atomic and a compare-exchange.
+std::vector<u32> EmitUntrackedAccesses(bool native, u32 min_ssbo_alignment) {
+    ObjectPool<IR::Inst> pool;
+    IR::Block block{pool};
+    IR::IREmitter ir{block};
+    const auto pointer = [&](u32 offset) {
+        return IR::U64{
+            ir.PackUint2x32(ir.CompositeConstruct(ir.GetCbuf(ir.Imm32(0), ir.Imm32(offset)),
+                                                  ir.GetCbuf(ir.Imm32(0), ir.Imm32(offset + 4))))};
+    };
+    const auto loaded = ir.LoadGlobal64(pointer(0x110));
+    const IR::U32 value{ir.LoadGlobal32(pointer(0x120))};
+    const IR::U64 address{ir.PackUint2x32(
+        ir.CompositeConstruct(ir.CompositeExtract(loaded, 0), ir.CompositeExtract(loaded, 1)))};
+    ir.WriteGlobal32(address, ir.LoadGlobal32(address));
+    ir.WriteGlobal64(address, ir.LoadGlobal64(address));
+    ir.WriteGlobal128(address, ir.LoadGlobal128(address));
+    const IR::U32 sum{
+        &*block.PrependNewInst(block.end(), IR::Opcode::GlobalAtomicIAdd32, {address, value})};
+    const IR::U32 swapped{&*block.PrependNewInst(
+        block.end(), IR::Opcode::GlobalAtomicCompareExchange32, {address, value, sum})};
+    ir.WriteGlobal32(address, swapped);
+
+    IR::Program program;
+    program.stage = Stage::Compute;
+    program.workgroup_size = {1, 1, 1};
+    program.blocks = {&block};
+    program.post_order_blocks = {&block};
+    program.syntax_list = {{{.block = &block}, IR::AbstractSyntaxNode::Type::Block},
+                           {{}, IR::AbstractSyntaxNode::Type::Return}};
+    HostTranslateInfo host{};
+    host.min_ssbo_alignment = min_ssbo_alignment;
+    StubEnvironment env;
+    Optimization::GlobalMemoryToStorageBufferPass(env, program, host);
+    REQUIRE(std::ranges::any_of(block.Instructions(), [](const IR::Inst& inst) {
+        return inst.GetOpcode() == IR::Opcode::LoadGlobal128;
+    }));
+    Optimization::CollectShaderInfoPass(env, program);
+    program.info.native_global_bounds = native;
+    program.info.nvn_buffer_base = 0x110;
+    program.info.nvn_buffer_used.set(0);
+    program.info.nvn_buffer_used.set(1);
+    program.info.constant_buffer_descriptors = {{0, 1}};
+    REQUIRE(program.info.storage_buffers_descriptors.size() >= 2);
+
+    Profile profile{};
+    profile.supported_spirv = 0x00010300;
+    profile.support_int64 = true;
+    profile.support_descriptor_aliasing = true;
+    profile.unified_descriptor_binding = true;
+    profile.min_ssbo_alignment = min_ssbo_alignment;
+    return Backend::SPIRV::EmitSPIRV(profile, program);
+}
 } // namespace
+
+TEST_CASE("Global memory helpers branch per buffer and return only from their last block",
+          "[shader_recompiler][global_memory]") {
+    constexpr u32 OpEntryPoint = 15;
+    constexpr u32 OpFunction = 54;
+    constexpr u32 OpFunctionEnd = 56;
+    constexpr u32 OpSwitch = 251;
+    constexpr u32 OpReturn = 253;
+    constexpr u32 OpReturnValue = 254;
+    for (const bool native : {true, false}) {
+        for (const u32 alignment : {16U, 4U}) {
+            CAPTURE(native, alignment);
+            std::vector<u32> code;
+            REQUIRE_NOTHROW(code = EmitUntrackedAccesses(native, alignment));
+            const auto entry_points = Instructions(code, OpEntryPoint);
+            REQUIRE(entry_points.size() == 1);
+            const u32 main_id = entry_points[0][1];
+
+            size_t helpers{};
+            u32 function_id{};
+            u32 returns{};
+            u32 previous{};
+            for (size_t i = 5; i < code.size();) {
+                const u32 count = code[i] >> 16;
+                const u32 opcode = code[i] & 0xffff;
+                REQUIRE(count > 0);
+                if (opcode == OpFunction) {
+                    function_id = code[i + 2];
+                    returns = 0;
+                } else if (opcode == OpReturn || opcode == OpReturnValue) {
+                    ++returns;
+                } else if (opcode == OpFunctionEnd && function_id != main_id) {
+                    ++helpers;
+                    CAPTURE(function_id);
+                    CHECK(returns == 1);
+                    CHECK((previous == OpReturn || previous == OpReturnValue));
+                }
+                previous = opcode;
+                i += count;
+            }
+            CHECK(helpers >= 7);
+            CHECK(Instructions(code, OpSwitch).empty());
+        }
+    }
+}
 
 TEST_CASE("Untracked 32-bit global atomics route to their storage buffer",
           "[shader_recompiler][global_memory]") {
