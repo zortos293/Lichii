@@ -1611,7 +1611,11 @@ int main(int argc, char** argv) {
                 diagnostic["override_within_emulator_limits"] =
                     Shader::Ampere::ProgramOverrideSourceSize(record) != 0 &&
                     record.size() <= size_t{16} * 1024 * 1024;
-                WriteFile(override_out, record);
+                // Renamed into place once complete, so a reader never sees a partial record.
+                auto partial = override_out;
+                partial += ".partial";
+                WriteFile(partial, record);
+                std::filesystem::rename(partial, override_out);
             }
             if (lower_only) {
                 diagnostic["phase"] = "output";

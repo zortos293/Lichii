@@ -119,6 +119,12 @@ def main():
     def lower(program):
         """Lowers one program (reusing its record); returns it with the record, None on failure."""
         record = work / f"{program['code_sha256']}.ovr"
+        if record.exists():
+            # A record left truncated by an older run is lowered again.
+            try:
+                read_override(record)
+            except (ValueError, struct.error, OSError):
+                record.unlink()
         if not record.exists():
             # A hung or unstartable sweep counts as a failed program instead of stopping the run.
             try:
@@ -145,15 +151,19 @@ def main():
             instructions, offsets, texture_buffer = read_override(record)
             code = runtime_code(instructions, offsets)
             workgroup, shared, local = control_values((corpus / program['control']).read_bytes())
+            if not all(workgroup):
+                failed += 1
+                continue
+            data, key = entry(code, workgroup, shared, local, texture_buffer)
         except (ValueError, struct.error, OSError, KeyError) as ex:
             print(f"{program['code_sha256']}: {type(ex).__name__}: {ex}", file=sys.stderr)
             failed += 1
             continue
-        if not all(workgroup):
-            failed += 1
-            continue
-        data, key = entry(code, workgroup, shared, local, texture_buffer)
         entries.setdefault(key, data)
+
+    if programs and not entries:
+        print('no compute program lowered; the output is left as it was', file=sys.stderr)
+        return 1
 
     out = Path(args.out)
     with open(out, 'wb') as f:
