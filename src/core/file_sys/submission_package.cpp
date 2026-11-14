@@ -57,7 +57,11 @@ NSP::~NSP() = default;
 VirtualFile NSP::GetNCAFileById(const std::array<u8, 16>& id) const {
     std::scoped_lock lock{resolved_nca_files_mutex};
     if (const auto found = resolved_nca_files.find(id); found != resolved_nca_files.end()) {
-        return found->second;
+        // A solid NCZ reader that failed (disk full, decoder budget) stays failed: reopen it.
+        if (found->second->IsReadable()) {
+            return found->second;
+        }
+        resolved_nca_files.erase(found);
     }
     const auto name = Common::HexToString(id, false);
     auto result = pfs->GetFile(fmt::format("{}.nca", name));
