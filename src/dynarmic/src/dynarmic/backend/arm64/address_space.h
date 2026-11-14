@@ -71,6 +71,7 @@ protected:
 
     IR::Block ir_block;
     const std::size_t code_cache_size;
+    u64 cache_generation = 0;
     oaknut::CodeBlock mem;
     oaknut::CodeGenerator code;
 
