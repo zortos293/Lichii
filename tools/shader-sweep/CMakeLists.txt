@@ -15,8 +15,11 @@ if(CMAKE_SOURCE_DIR STREQUAL CMAKE_CURRENT_SOURCE_DIR)
     find_package(OpenSSL REQUIRED)
     find_package(nlohmann_json REQUIRED)
     find_package(PkgConfig REQUIRED)
-    pkg_check_modules(HTTPLIB REQUIRED IMPORTED_TARGET cpp-httplib)
-    add_library(httplib::httplib ALIAS PkgConfig::HTTPLIB)
+    find_package(httplib CONFIG QUIET)
+    if(NOT TARGET httplib::httplib)
+        pkg_check_modules(HTTPLIB REQUIRED IMPORTED_TARGET cpp-httplib)
+        add_library(httplib::httplib ALIAS PkgConfig::HTTPLIB)
+    endif()
     pkg_check_modules(LZ4 REQUIRED IMPORTED_TARGET liblz4)
     add_library(lz4::lz4 ALIAS PkgConfig::LZ4)
     pkg_check_modules(ZSTD REQUIRED IMPORTED_TARGET libzstd)
@@ -51,6 +54,15 @@ add_executable(shader-sweep main.cpp diagnostics.cpp)
 target_link_libraries(shader-sweep PRIVATE common shader_recompiler)
 target_include_directories(shader-sweep PRIVATE ${REPOSITORY_ROOT}/src)
 create_target_directory_groups(shader-sweep)
+
+option(SHADER_SWEEP_TENSOR_BENCH "Build the standalone Vulkan tensor shader benchmark" OFF)
+if(SHADER_SWEEP_TENSOR_BENCH)
+    find_package(Vulkan REQUIRED)
+    add_executable(tensor-bench tensor_bench.cpp tensor_bench_shader.cpp)
+    target_link_libraries(tensor-bench PRIVATE common shader_recompiler Vulkan::Vulkan)
+    target_include_directories(tensor-bench PRIVATE ${REPOSITORY_ROOT}/src)
+    create_target_directory_groups(tensor-bench)
+endif()
 if(NOT CMAKE_SOURCE_DIR STREQUAL CMAKE_CURRENT_SOURCE_DIR)
     # In the tree, --path v2 replays through the production shader cache v2
     target_sources(shader-sweep PRIVATE vma.cpp)
@@ -91,6 +103,19 @@ if(CMAKE_SOURCE_DIR STREQUAL CMAKE_CURRENT_SOURCE_DIR)
         add_test(NAME shader-sweep-cli
             COMMAND Python3::Interpreter "${CMAKE_CURRENT_SOURCE_DIR}/test_cli.py" $<TARGET_FILE:shader-sweep>)
         find_program(SPIRV_VAL_EXECUTABLE spirv-val REQUIRED)
+        if(TARGET tensor-bench)
+            add_executable(tensor-bench-reference-tests
+                tensor_bench_reference_tests.cpp tensor_bench_shader.cpp)
+            target_link_libraries(tensor-bench-reference-tests PRIVATE common shader_recompiler)
+            target_include_directories(tensor-bench-reference-tests PRIVATE ${REPOSITORY_ROOT}/src)
+            add_test(NAME tensor-bench-reference COMMAND tensor-bench-reference-tests)
+            add_test(NAME tensor-bench-cli
+                COMMAND Python3::Interpreter "${CMAKE_CURRENT_SOURCE_DIR}/test_tensor_bench.py"
+                        $<TARGET_FILE:tensor-bench> --spirv-val "${SPIRV_VAL_EXECUTABLE}")
+            add_test(NAME tensor-bench-compile-pipeline
+                COMMAND Python3::Interpreter "${CMAKE_CURRENT_SOURCE_DIR}/test_compile_pipeline.py"
+                        $<TARGET_FILE:shader-sweep> $<TARGET_FILE:tensor-bench>)
+        endif()
         add_test(NAME shader-sweep-captured
             COMMAND Python3::Interpreter "${CMAKE_CURRENT_SOURCE_DIR}/test_captured.py"
                     $<TARGET_FILE:shader-sweep> --spirv-val "${SPIRV_VAL_EXECUTABLE}")

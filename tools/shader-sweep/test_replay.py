@@ -157,6 +157,7 @@ class ReplayTests(ReplayCase):
                 changed[offset] ^= 1
             code, result = self.compile(record([byte_store], bytes(changed)))
             self.assertEqual(code, 0, result)
+            self.assertNotIn("compile_context", result)
             hashes.append(result["pipeline_hash"])
         self.assertEqual(hashes[0], hashes[1])
         self.assertNotEqual(hashes[0], hashes[2])
@@ -169,6 +170,22 @@ class ReplayTests(ReplayCase):
             code, result = self.compile(record([byte_store], key), *extra)
             self.assertEqual(code, 2, result)
             self.assertEqual(result["phase"], "input")
+            self.assertNotIn("compile_context", result)
+
+    def test_compute_compile_context_preserves_captured_resources(self):
+        atomic, data = fixture("bananza-unmapped-atomic-counter")
+        code, result = self.compile(record([atomic], bytes.fromhex(data["compute_pipeline_key"])))
+        self.assertEqual(code, 0, result)
+        context = result["compile_context"]
+        self.assertEqual(context["workgroup_size"], [32, 1, 1])
+        self.assertEqual(context["shared_memory_bytes"], 0)
+        self.assertTrue(context["uses_warp_ops"])
+        self.assertFalse(context["uses_cooperative_matrix"])
+        bindings = context["bindings"]
+        self.assertEqual([entry["binding"] for entry in bindings], list(range(len(bindings))))
+        self.assertTrue(any(entry["type"] == "uniform_buffer" for entry in bindings))
+        self.assertTrue(any(entry["type"] == "storage_buffer" for entry in bindings))
+        self.assertTrue(all(entry["count"] > 0 for entry in bindings))
 
     def test_task_mesh_and_vertex_a_records(self):
         """Synthetic task/mesh and vertex A pipelines replay identically or fail on both paths."""

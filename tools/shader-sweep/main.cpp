@@ -859,11 +859,68 @@ struct PipelineStage {
     std::vector<u32> spirv;
 };
 
+// State needed to compile the offline compute module without dispatching it.
+struct CompiledPipeline {
+    std::vector<PipelineStage> stages;
+    Json compute_context;
+};
+
+// Match the subgroup-sensitive features in Vulkan::ComputePipeline.
+bool UsesWarpOps(const Shader::Info& info) {
+    return info.uses_subgroup_vote || info.uses_subgroup_invocation_id ||
+           info.uses_subgroup_shuffles || info.uses_subgroup_mask || info.uses_quad_shuffles ||
+           info.uses_fswzadd || info.uses_cooperative_matrix;
+}
+
+// Match DescriptorLayoutBuilder::Add's set-0 binding order and array counts.
+Json DescriptorBindings(const Shader::Info& info) {
+    Json bindings = Json::array();
+    u32 binding{};
+    const auto add = [&](const char* type, const auto& descriptors) {
+        for (const auto& descriptor : descriptors) {
+            Json entry{{"binding", binding}, {"type", type}, {"count", descriptor.count}};
+            ++binding;
+            bindings.push_back(std::move(entry));
+        }
+    };
+    add("uniform_buffer", info.constant_buffer_descriptors);
+    add("storage_buffer", info.storage_buffers_descriptors);
+    add("uniform_texel_buffer", info.texture_buffer_descriptors);
+    add("storage_texel_buffer", info.image_buffer_descriptors);
+    add("combined_image_sampler", info.texture_descriptors);
+    add("storage_image", info.image_descriptors);
+    return bindings;
+}
+
+// Match DescriptorLayoutBuilder::CreatePipelineLayout's compute push-constant range.
+constexpr u32 ComputePushConstantBytes() {
+    using Shader::Backend::SPIRV::RenderAreaLayout;
+    using Shader::Backend::SPIRV::RescalingLayout;
+    return static_cast<u32>(sizeof(RescalingLayout)) -
+           static_cast<u32>(sizeof(RescalingLayout::down_factor)) +
+           static_cast<u32>(sizeof(RenderAreaLayout));
+}
+
+Json ComputeCompileContext(const Shader::IR::Program& program, const std::vector<u32>& spirv) {
+    const Shader::Info& info = program.info;
+    const u64 spirv_hash = Common::CityHash64(reinterpret_cast<const char*>(spirv.data()),
+                                            spirv.size() * sizeof(u32));
+    return Json{{"schema_version", 1},
+                {"profile", "offline-spirv-1.4"},
+                {"workgroup_size", program.workgroup_size},
+                {"shared_memory_bytes", program.shared_memory_size},
+                {"uses_warp_ops", UsesWarpOps(info)},
+                {"uses_cooperative_matrix", info.uses_cooperative_matrix},
+                {"bindings", DescriptorBindings(info)},
+                {"push_constant_bytes", ComputePushConstantBytes()},
+                {"spirv_hash", fmt::format("{:016x}", spirv_hash)}};
+}
+
 // The legacy path: translation and emission as PipelineCache::CreateGraphicsPipeline and
 // CreateComputePipeline do them, one module per stage. Vertex A merges into vertex B and has no
 // module of its own.
-std::vector<PipelineStage> CompileLegacyPipeline(std::span<OfflineEnvironment> envs,
-                                                 std::span<const u8> key, Json& diagnostic) {
+CompiledPipeline CompileLegacyPipeline(std::span<OfflineEnvironment> envs,
+                                       std::span<const u8> key, Json& diagnostic) {
     const Shader::HostTranslateInfo host = OfflineHost();
     const Shader::Profile profile = OfflineProfile(host);
     Shader::ObjectPool<Shader::Maxwell::Flow::Block> flow_pool;
@@ -877,9 +934,12 @@ std::vector<PipelineStage> CompileLegacyPipeline(std::span<OfflineEnvironment> e
         Shader::Maxwell::Flow::CFG cfg{env, flow_pool, Shader::Maxwell::Location{env.EntryPoint()}};
         auto program = Shader::Maxwell::TranslateProgram(inst_pool, block_pool, env, cfg, host);
         diagnostic["phase"] = "spirv";
-        stages.push_back({0, Stage::Compute, Shader::Backend::SPIRV::EmitSPIRV(profile, program)});
+        auto spirv = Shader::Backend::SPIRV::EmitSPIRV(profile, program);
+        // The emission just above settles uses_cooperative_matrix (emit_spirv.cpp).
+        Json context = ComputeCompileContext(program, spirv);
         diagnostic.erase("failed_slot");
-        return stages;
+        return CompiledPipeline{.stages = {{0, Stage::Compute, std::move(spirv)}},
+                                .compute_context = std::move(context)};
     }
     std::array<u64, 6> hashes;
     std::memcpy(hashes.data(), key.data(), sizeof(hashes));
@@ -931,7 +991,7 @@ std::vector<PipelineStage> CompileLegacyPipeline(std::span<OfflineEnvironment> e
         previous = &program;
     }
     diagnostic.erase("failed_slot");
-    return stages;
+    return CompiledPipeline{std::move(stages), Json{}};
 }
 
 struct ParsedRecord {
@@ -1302,9 +1362,9 @@ int RunPipeline(const std::string& record_path, u32 version, const std::string& 
     auto compiled = CompileLegacyPipeline(record.envs, key, diagnostic);
     diagnostic["phase"] = "output";
     std::filesystem::create_directories(output_dir);
-    for (size_t index = 0; index < compiled.size(); ++index) {
+    for (size_t index = 0; index < compiled.stages.size(); ++index) {
         auto& entry = diagnostic["stages"][index];
-        const PipelineStage& stage = compiled[index];
+        const PipelineStage& stage = compiled.stages[index];
         if (stage.spirv.empty())
             continue;
         const auto name =
@@ -1312,6 +1372,10 @@ int RunPipeline(const std::string& record_path, u32 version, const std::string& 
         WriteFile(output_dir / name, stage.spirv);
         entry["spirv"] = name;
         entry["spirv_words"] = stage.spirv.size();
+    }
+    // Publish context only after all module writes have succeeded.
+    if (!compiled.compute_context.is_null()) {
+        diagnostic["compile_context"] = std::move(compiled.compute_context);
     }
     diagnostic["status"] = "ok";
     std::cout << diagnostic.dump() << '\n';

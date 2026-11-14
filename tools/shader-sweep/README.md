@@ -22,6 +22,124 @@ SPIRV-Headers, sirit, and ZBIC sources. It does not require system SPIRV-Headers
 The tests include synthetic CLI cases, parser bounds checks, and three small captured
 regression programs. `spirv-val` is required when `BUILD_TESTING` is enabled.
 
+## Game-free Radeon tensor benchmark
+
+The optional `tensor-bench` target emits synthetic compute shaders through the production
+tensor lowering and runs them directly on Vulkan. It needs no game, save, emulator window,
+or captured game shader. Build it in the standalone configuration:
+
+```sh
+cmake -S tools/shader-sweep -B build/tensor-bench -G Ninja \
+    -DCMAKE_BUILD_TYPE=Release -DBUILD_TESTING=ON -DSHADER_SWEEP_TENSOR_BENCH=ON
+cmake --build build/tensor-bench --target shader-sweep tensor-bench tensor-bench-reference-tests --parallel 4
+ctest --test-dir build/tensor-bench -R '^tensor-bench-(cli|reference|compile-pipeline)$' --output-on-failure
+```
+
+Vulkan headers and the loader are required in addition to the dependencies above. The CLI
+contract tests need `spirv-val`, but no Vulkan device. To emit a module without opening Vulkan:
+
+```sh
+build/tensor-bench/tensor-bench --emit-only --depth 16 \
+    --emit-spirv /tmp/tensor-k16.spv
+spirv-val --target-env vulkan1.2 /tmp/tensor-k16.spv
+```
+
+For a device run, list devices first and select the intended GPU explicitly:
+
+```sh
+build/tensor-bench/tensor-bench --list-devices
+build/tensor-bench/tensor-bench --device 0 --depth 8 --validation
+build/tensor-bench/tensor-bench --device 0 --depth 16 --pattern fractions
+build/tensor-bench/tensor-bench --device 0 --mode cooperative --depth 16
+```
+
+The software mode exercises K8/K16 emulation even on GPUs with matrix instructions. The
+cooperative mode exercises the production shared-memory 16x16x16 path only when its device
+requirements are satisfied. Unsupported cases exit 77 with a reason, not a passing result.
+Use `--operations` to vary the number of dependent matrix operations and `--workgroups` to
+vary dispatch size. Inputs come from a storage buffer, and results are checked against an
+independent CPU reference; both lanes and separate warps receive distinct data.
+
+JSON output separates host pipeline-creation wall time from dispatch GPU timestamps.
+Timestamp availability and the actual device/driver are reported. Process peak RSS, where
+available, is a whole-process metric, not a measurement of driver allocations or VRAM.
+Validation is a separate correctness run; leave it off for performance comparisons.
+
+A fresh `VkPipeline` is not necessarily a cold compile: the driver's persistent cache may
+already contain the shader. Use identical driver-cache conditions on both sides of a
+comparison, preserve the output, and distinguish first and subsequent builds. The tool
+does not clear user caches. These synthetic results do not establish gameplay FPS or
+correct rendering, and one Radeon generation does not validate another.
+
+### Compile captured compute pipelines without dispatching
+
+Successful compute `--pipeline` replay also writes `compile_context` in its JSON result:
+descriptor bindings, workgroup dimensions, shared memory and subgroup requirements, and the
+production compute push-constant range. `tensor-bench --compile-pipeline` consumes that result
+and the adjacent module. It creates Vulkan pipelines only: no resource contents, queue
+submission, shader dispatch or game are required.
+Each compile-only repeat destroys the previous `VkPipeline` before timing its replacement;
+the device, shader module and layout remain alive. JSON reports this as
+`pipeline_lifetime: "destroy_before_recreate"`. This is a driver-lifecycle probe, not a replay of
+the emulator's graphics-only, frame-age-based eviction policy.
+
+```sh
+CASE=$(mktemp -d)
+build/tensor-bench/shader-sweep --pipeline /path/to/pipeline.record \
+    --cache-version 54 --path legacy --output-dir "$CASE" > "$CASE/replay.json"
+spirv-val --target-env vulkan1.2 "$CASE/0-compute.spv"
+build/tensor-bench/tensor-bench --compile-pipeline "$CASE/replay.json" \
+    --device 0 --compile-repeats 1 --validation
+mkdir "$CASE/driver-cache"
+MESA_SHADER_CACHE_DIR="$CASE/driver-cache" build/tensor-bench/tensor-bench \
+    --compile-pipeline "$CASE/replay.json" --device 0 --compile-repeats 3
+```
+
+Use only successful, validated replays; missing captured context is an error, not permission
+to guess descriptors or constant-buffer values. The module hash detects accidental mixing
+of metadata and SPIR-V, not malicious modification. Unsupported features are reported rather
+than silently changing the shader.
+Use matching, unmodified `shader-sweep` output: descriptor and subgroup metadata are trusted.
+The checksum is not a security boundary, and `spirv-val` alone cannot check a Vulkan layout.
+Replay JSON is bounded to 4 MiB and modules to 64 MiB. This fixed offline profile uses software
+matrix lowering; cooperative matrices remain available through the synthetic benchmark.
+
+This measures the offline SPIR-V 1.4 profile, not necessarily the exact module or descriptor
+mechanism selected by the running emulator. A fresh private Mesa cache directory separates
+these samples from the user's persistent cache; it does not prove every driver layer is cold.
+Keep cache-disable environment variables consistent between comparisons. Compile-only success
+does not establish numerical correctness, rendering correctness, GPU throughput or gameplay FPS.
+Keep captured modules and records local.
+
+### Compare application and driver caches
+
+`--pipeline-cache PATH` creates an application `VkPipelineCache`, loads it if the file exists,
+keeps it alive across pipeline destruction/recreation, then saves it after successful builds.
+Without the flag, pipeline creation uses `VK_NULL_HANDLE`. Cache loading, serialization and
+file I/O are outside `pipeline_build_ms`; JSON reports the path, `enabled`, `initial_bytes` and
+`saved_bytes` under `application_cache`. Bytes supplied are not proof of a cache hit.
+
+To isolate the application cache from Mesa's disk cache:
+
+```sh
+MESA_SHADER_CACHE_DIR="$CASE/driver-cache" MESA_SHADER_CACHE_DISABLE=true \
+    build/tensor-bench/tensor-bench --compile-pipeline "$CASE/replay.json" \
+    --pipeline-cache "$CASE/application-cache.bin" --device 0 --compile-repeats 3
+```
+
+Run the command again to test file reload in a new process. To test Mesa alone, omit
+`--pipeline-cache` and leave its disk cache enabled, using a fresh private directory for each
+independent cold-cache candidate. Neither mode clears a cache.
+
+The file is a raw Vulkan version-one blob (at most 64 MiB), not the emulator's versioned
+cache wrapper. Invalid headers and mismatched vendor/device/cache UUIDs fail without deleting
+the input. Only use trusted blobs from the intended driver; their opaque contents are not
+validated by this tool. Blobs can contain compiled game code and must stay private.
+Use a separate file per writer; concurrent cache-file writers are not supported.
+This comparison does not exercise `VK_KHR_pipeline_binary`, graphics pipeline eviction,
+shader retranslation, GPU-completion delays, or gameplay FPS.
+
+
 ## Inputs
 
 Compile one extracted v46 to v54 serialized environment record:
