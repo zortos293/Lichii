@@ -62,6 +62,7 @@ add_executable(tests
     video_core/storage_buffer_pointer_tracking.cpp
     video_core/storage_write_extent.cpp
     video_core/storage_buffer_control_flow.cpp
+    video_core/conditional_barrier.cpp
     video_core/storage_buffer_shared_tracking.cpp
     core/nup_validation.cpp
     core/nx_archive.cpp
