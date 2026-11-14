@@ -244,7 +244,7 @@ void Disable(std::string_view reason) {
 const Api* GetApi() {
     State& state = GetState();
     if (!state.started) {
-        Start();
+        (void)Start();
     }
     return state.available ? &state.api : nullptr;
 }
