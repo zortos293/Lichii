@@ -68,7 +68,10 @@ add_executable(tests
     core/nx_archive.cpp
     frontend_common/nx_archive.cpp
     core/vfs_vector.cpp
+    core/ncz_cache.cpp
+    core/ncz_decompressor.cpp
     core/ncz_io_guards.cpp
+    core/ncz_container.cpp
     core/file_sys_parsers.cpp
     input_common/calibration_lifetime.cpp
     video_core/ampere_logged_numeric.cpp
@@ -254,6 +257,23 @@ create_target_directory_groups(tests)
 
 target_link_libraries(tests PRIVATE common core audio_core input_common video_core frontend_common ZLIB::ZLIB)
 target_link_libraries(tests PRIVATE ${PLATFORM_LIBRARIES} Catch2::Catch2WithMain Threads::Threads)
+
+add_executable(ncz_tests
+    core/ncz_cache.cpp
+    core/ncz_decompressor.cpp
+    core/ncz_io_guards.cpp
+    ../core/crypto/ncz_cache.cpp
+    ../core/crypto/ncz_decompressor.cpp
+    ../core/crypto/aes_util.cpp
+    ../core/file_sys/vfs/vfs.cpp
+    ../core/file_sys/vfs/vfs_vector.cpp)
+target_sources(ncz_tests PRIVATE
+    ../core/file_sys/fssystem/fssystem_utility.cpp
+    ../core/file_sys/fssystem/fssystem_aes_ctr_storage.cpp
+    ../core/file_sys/fssystem/fssystem_alignment_matching_storage_impl.cpp)
+target_link_libraries(ncz_tests PRIVATE common OpenSSL::Crypto zstd::zstd
+    ${PLATFORM_LIBRARIES} Catch2::Catch2WithMain Threads::Threads)
+add_test(NAME ncz_tests COMMAND ncz_tests)
 
 if (TARGET dynarmic::dynarmic)
     target_sources(tests PRIVATE core/jit_codegen_options.cpp core/jit_ordered_loads.cpp core/window_trace.cpp)
