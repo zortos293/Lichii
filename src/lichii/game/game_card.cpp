@@ -66,7 +66,10 @@ void GameCard::paint(QPainter* painter, const QStyleOptionViewItem& option,
 
     if (UISettings::values.show_game_name.GetValue()) {
         // Keep the title within the icon's width: at most two lines, cut with "..." beyond that.
-        const QRect textRect(iconRect.left(), iconRect.bottom() + cardMargin, iconRect.width(),
+        // Without icons (size 0) it takes the card's width instead.
+        const int text_left = icon_size == 0 ? cardRect.left() + cardMargin : iconRect.left();
+        const int text_width = icon_size == 0 ? cardRect.width() - 2 * cardMargin : iconRect.width();
+        const QRect textRect(text_left, iconRect.bottom() + cardMargin, text_width,
                              cardRect.bottom() - iconRect.bottom() - cardMargin);
 
         QString title = index.data(Qt::DisplayRole).toString().split(QLatin1Char('\n')).first();
