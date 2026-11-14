@@ -12,6 +12,7 @@
 #include "core/core.h"
 #include "video_core/engines/maxwell_3d.h"
 #include "video_core/engines/maxwell_dma.h"
+#include "video_core/engines/maxwell_dma_const_a.h"
 #include "video_core/guest_memory.h"
 #include "video_core/memory_manager.h"
 #include "video_core/renderer_base.h"
@@ -131,7 +132,8 @@ void MaxwellDMA::Launch() {
                 accelerate.BufferClear(regs.offset_out, regs.line_length_in, regs.remap_const.remap_consta_value);
             }
             read_buffer.resize_destructive(regs.line_length_in * sizeof(u32));
-            std::ranges::fill(std::span<u32>(reinterpret_cast<u32*>(read_buffer.data()), regs.line_length_in), regs.remap_const.remap_consta_value);
+            std::ranges::fill(std::span<u32>(reinterpret_cast<u32*>(read_buffer.data()), regs.line_length_in),
+                              ExpandConstA(regs.remap_const.remap_consta_value, component_size));
             memory_manager.WriteBlockUnsafe(regs.offset_out, reinterpret_cast<u8*>(read_buffer.data()), static_cast<size_t>(regs.line_length_in) * component_size);
         } else {
             memory_manager.FlushCaching();
