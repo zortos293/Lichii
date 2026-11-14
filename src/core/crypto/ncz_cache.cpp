@@ -27,16 +27,18 @@
 namespace Core::Crypto {
 
 NczCache::NczCache() {
+    std::error_code ec;
 #ifdef __ANDROID__
     // Android sets no temporary directory variable, and the fallback isn't writable by apps.
-    const auto directory = Common::FS::GetEdenPath(Common::FS::EdenPath::CacheDir);
+    // Android's startup records the cache path without creating it.
+    const auto& directory = Common::FS::GetEdenPath(Common::FS::EdenPath::CacheDir);
+    std::filesystem::create_directories(directory, ec);
 #else
-    std::error_code ec;
     const auto directory = std::filesystem::temp_directory_path(ec);
+#endif
     if (ec) {
         return;
     }
-#endif
 #ifdef _WIN32
     PSECURITY_DESCRIPTOR descriptor{};
     if (!ConvertStringSecurityDescriptorToSecurityDescriptorW(L"D:P(A;;GA;;;OW)", SDDL_REVISION_1,
