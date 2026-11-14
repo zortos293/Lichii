@@ -19,12 +19,14 @@ add_executable(tests
     video_core/gpu_timestamp.cpp
     video_core/semaphore_waiters.cpp
     video_core/hdr_output.cpp
+    core/mii_model.cpp
     core/nx2_streamplay.cpp
     core/nx2_video_ready.cpp
     core/nx2_thread_stats.cpp
     core/nx2_debug_server.cpp
     core/nx2_zip.cpp
     core/nx2_present_pacer.cpp
+    core/nx2_fence_action.cpp
     core/nx2_frame_interval.cpp
     core/ldn_lan_protocol.cpp
     core/perf_stats.cpp
@@ -66,6 +68,7 @@ add_executable(tests
     core/nx_archive.cpp
     frontend_common/nx_archive.cpp
     core/vfs_vector.cpp
+    core/ncz_io_guards.cpp
     core/file_sys_parsers.cpp
     input_common/calibration_lifetime.cpp
     video_core/ampere_logged_numeric.cpp
@@ -158,6 +161,7 @@ add_executable(tests
     video_core/ssa_fixed_variables.cpp
     video_core/virtual_range_cache.cpp
     video_core/ocarina_upscale.cpp
+    video_core/ocarina_camera.cpp
     video_core/fsr4_support.cpp
     common/bit_field.cpp
     common/bit_util.cpp
@@ -205,6 +209,8 @@ add_executable(tests
     core/internal_network/socket_proxy.cpp
     core/priority_queue.cpp
     core/internal_network/network.cpp
+    core/numeric_name_info.cpp
+    core/numeric_name_info_ipc.cpp
     video_core/memory_tracker.cpp
     video_core/invalidation_accumulator.cpp
     video_core/memory_manager_runs.cpp
@@ -246,7 +252,7 @@ add_executable(tests
 
 create_target_directory_groups(tests)
 
-target_link_libraries(tests PRIVATE common core audio_core input_common video_core frontend_common)
+target_link_libraries(tests PRIVATE common core audio_core input_common video_core frontend_common ZLIB::ZLIB)
 target_link_libraries(tests PRIVATE ${PLATFORM_LIBRARIES} Catch2::Catch2WithMain Threads::Threads)
 
 if (TARGET dynarmic::dynarmic)

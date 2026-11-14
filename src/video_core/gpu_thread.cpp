@@ -20,6 +20,7 @@
 #include "video_core/control/scheduler.h"
 #include "video_core/dma_pusher.h"
 #include "video_core/gpu.h"
+#include "video_core/gpu_trace/recorder.h"
 #include "video_core/gpu_thread.h"
 #include "video_core/gpu_split.h"
 #include "video_core/nx2.h"
@@ -180,6 +181,13 @@ void ThreadManager::StartThread(VideoCore::RendererBase& renderer, Core::Fronten
             if (stop_token.stop_requested()) {
                 break;
             }
+            if (VideoCommon::GpuTrace::g_requested.load(std::memory_order_relaxed) ||
+                VideoCommon::GpuTrace::g_file_trigger) {
+                const auto* const submit = std::get_if<SubmitListCommand>(&next.data);
+                VideoCommon::GpuTrace::OnCommand(
+                    system, scheduler.HasPendingChannels(), submit ? &submit->entries : nullptr,
+                    submit ? submit->channel : -1, std::holds_alternative<GPUTickCommand>(next.data));
+            }
             if (split.Active()) {
                 // Only command lists are parsed here; everything else runs on the back thread
                 // in order, and so does the signal that the command ran.
@@ -225,6 +233,9 @@ void ThreadManager::StartThread(VideoCore::RendererBase& renderer, Core::Fronten
                 last_progress = std::chrono::steady_clock::now();
                 continue;
             }
+            // Match split Call boundaries before callbacks, flushes and invalidations, and
+            // conservatively end reuse at each submitted list, including channel changes.
+            VideoCommon::Nx2FastDraw::BreakUnsplit(VideoCommon::Nx2FastDraw::Reason::Call);
             if (!std::holds_alternative<SubmitListCommand>(next.data)) {
                 Tegra::DmaPusher::WaitForSnapshotCopies();
             }
