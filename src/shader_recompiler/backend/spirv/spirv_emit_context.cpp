@@ -492,6 +492,7 @@ EmitContext::EmitContext(const Profile& profile_, const RuntimeInfo& runtime_inf
     DefineLocalMemory(program);
     DefineSharedMemory(program);
     DefineSharedMemoryFunctions(program);
+    DefineBarrierVoteFunctions(program);
     DefineConstantBuffers(program.info, uniform_binding);
     DefineConstantBufferIndirectFunctions(program.info);
     DefineStorageBuffers(program.info, storage_binding);
@@ -741,6 +742,88 @@ void EmitContext::DefineSharedMemory(const IR::Program& program) {
     }
     if (program.info.uses_int16) {
         shared_store_u16_func = make_function(16, 16);
+    }
+}
+
+Id EmitContext::GuestBarrierSemantics() {
+    auto semantics{spv::MemorySemanticsMask::AcquireRelease |
+                   spv::MemorySemanticsMask::WorkgroupMemory};
+    if (requires_coherent_global_memory) {
+        semantics = semantics | spv::MemorySemanticsMask::UniformMemory;
+    }
+    if (requires_coherent_image_memory) {
+        semantics = semantics | spv::MemorySemanticsMask::ImageMemory;
+    }
+    return BarrierSemantics(semantics);
+}
+
+Id EmitContext::BarrierVoteWord(Id offset) {
+    const Id index{OpShiftRightLogical(U32[1], offset, Const(2U))};
+    if (uses_explicit_workgroup_layout) {
+        return OpAccessChain(shared_u32, shared_memory_u32, u32_zero_value, index);
+    }
+    return OpAccessChain(shared_u32, shared_memory_u32, index);
+}
+
+void EmitContext::DefineBarrierVoteFunctions(const IR::Program& program) {
+    if (!program.info.uses_barrier_vote) {
+        return;
+    }
+    const Id workgroup{Const(static_cast<u32>(spv::Scope::Workgroup))};
+    const auto begin{[&](Id& func, size_t num_params) {
+        const std::vector<Id> types(num_params, U32[1]);
+        func = OpFunction(void_id, spv::FunctionControlMask::MaskNone,
+                          TypeFunction(void_id, std::span<const Id>(types)));
+        std::vector<Id> params;
+        for (size_t i = 0; i < num_params; ++i) {
+            params.push_back(OpFunctionParameter(U32[1]));
+        }
+        AddLabel();
+        return params;
+    }};
+    // True while the count of every vote so far is a multiple of the workgroup size: each branch
+    // went the same way for the whole workgroup.
+    const auto together{[&](Id offset, Id size) {
+        const Id count{OpAtomicLoad(U32[1], BarrierVoteWord(offset), workgroup, u32_zero_value)};
+        return OpIEqual(U1, OpUMod(U32[1], count, size), u32_zero_value);
+    }};
+    {
+        const auto args{begin(voted_barrier_func, 2)};
+        const Id cond{together(args[0], args[1])};
+        const Id wait_label{OpLabel()};
+        const Id order_label{OpLabel()};
+        const Id merge_label{OpLabel()};
+        OpSelectionMerge(merge_label, spv::SelectionControlMask::MaskNone);
+        OpBranchConditional(cond, wait_label, order_label);
+        AddLabel(wait_label);
+        OpControlBarrier(workgroup, workgroup, GuestBarrierSemantics());
+        OpBranch(merge_label);
+        AddLabel(order_label);
+        OpMemoryBarrier(workgroup, GuestBarrierSemantics());
+        OpBranch(merge_label);
+        AddLabel(merge_label);
+        OpReturn();
+        OpFunctionEnd();
+    }
+    {
+        // The first barrier keeps every invocation's read of the count before any vote's add, the
+        // second every add before the reads that follow.
+        const auto args{begin(barrier_vote_func, 3)};
+        const Id cond{together(args[0], args[1])};
+        const Id vote_label{OpLabel()};
+        const Id merge_label{OpLabel()};
+        const Id semantics{BarrierSemantics(spv::MemorySemanticsMask::AcquireRelease |
+                                            spv::MemorySemanticsMask::WorkgroupMemory)};
+        OpSelectionMerge(merge_label, spv::SelectionControlMask::MaskNone);
+        OpBranchConditional(cond, vote_label, merge_label);
+        AddLabel(vote_label);
+        OpControlBarrier(workgroup, workgroup, semantics);
+        OpAtomicIAdd(U32[1], BarrierVoteWord(args[0]), workgroup, u32_zero_value, args[2]);
+        OpControlBarrier(workgroup, workgroup, semantics);
+        OpBranch(merge_label);
+        AddLabel(merge_label);
+        OpReturn();
+        OpFunctionEnd();
     }
 }
 

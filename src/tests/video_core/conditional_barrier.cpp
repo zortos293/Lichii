@@ -41,19 +41,22 @@ public:
 enum class Guard { Uniform, Invocation, ShuffleBounds };
 enum class Leave { Never, InvocationBreak, InvocationReturn };
 
-// if (guard) { i = 0; do { BAR.SYNC; if (tid == i) break or return; } while (++i < n); }
-// with n = c[3][4]. Mario Kart World's loading compute shaders 5f7463314fdbfc35 and
-// 674f08299f626801 guard their loop with the invocation id.
+// if (guard) { i = 0; do { BAR.SYNC; if (tid == i) break or return; [if (tid != 0) {}] }
+// while (++i < n); } with n = c[3][4]. Mario Kart World's loading compute shaders
+// 5f7463314fdbfc35 and 674f08299f626801 guard their loop with the invocation id.
 struct BarrierLoop {
     Shader::ObjectPool<IR::Inst> pool{64};
     std::deque<IR::Block> blocks;
     IR::Program program;
 
-    BarrierLoop(Guard guard, Leave leave) {
+    BarrierLoop(Guard guard, Leave leave, Shader::Stage stage = Shader::Stage::Compute,
+                bool invocation_if = false) {
         IR::Block& entry{Block()};
         IR::Block& header{Block()};
         IR::Block& body{Block()};
         IR::Block& skip{Block()};
+        IR::Block& inner{Block()};
+        IR::Block& inner_merge{Block()};
         IR::Block& next{Block()};
         IR::Block& exit{Block()};
         IR::Block& loop_merge{Block()};
@@ -63,7 +66,14 @@ struct BarrierLoop {
         header.AddBranch(&body);
         body.AddBranch(leave == Leave::InvocationReturn ? &exit : &loop_merge);
         body.AddBranch(&skip);
-        skip.AddBranch(&next);
+        if (invocation_if) {
+            skip.AddBranch(&inner);
+            skip.AddBranch(&inner_merge);
+            inner.AddBranch(&inner_merge);
+            inner_merge.AddBranch(&next);
+        } else {
+            skip.AddBranch(&next);
+        }
         next.AddBranch(&header);
         next.AddBranch(&loop_merge);
         loop_merge.AddBranch(&merge);
@@ -91,6 +101,8 @@ struct BarrierLoop {
                                                       ? loop.Imm1(false)
                                                       : loop.IEqual(tid, IR::U32{index}))};
         IR::IREmitter{exit}.Epilogue();
+        IR::IREmitter in_skip{skip};
+        const IR::U1 inner_cond{in_skip.ConditionRef(in_skip.INotEqual(tid, in_skip.Imm32(0)))};
 
         IR::IREmitter step{next};
         const IR::U32 incremented{step.IAdd(IR::U32{IR::Value{index}}, step.Imm32(1))};
@@ -98,9 +110,9 @@ struct BarrierLoop {
         index->AddPhiOperand(&entry, start.Imm32(0));
         index->AddPhiOperand(&next, incremented);
 
-        program.stage = Shader::Stage::Compute;
+        program.stage = stage;
         program.workgroup_size = {64, 1, 1};
-        program.post_order_blocks = {&merge, &loop_merge, &next, &skip,
+        program.post_order_blocks = {&merge, &loop_merge, &next,   &inner_merge, &inner, &skip,
                                      &exit,  &body,       &header, &entry};
         for (IR::Block& block : blocks) {
             program.blocks.push_back(&block);
@@ -123,8 +135,16 @@ struct BarrierLoop {
             program.syntax_list.push_back(
                 {.data{.break_node{leave_cond, &loop_merge, &skip}}, .type = NodeType::Break});
         }
+        program.syntax_list.push_back({.data{.block = &skip}, .type = NodeType::Block});
+        if (invocation_if) {
+            program.syntax_list.insert(program.syntax_list.end(), {
+                {.data{.if_node{inner_cond, &inner, &inner_merge}}, .type = NodeType::If},
+                {.data{.block = &inner}, .type = NodeType::Block},
+                {.data{.end_if{&inner_merge}}, .type = NodeType::EndIf},
+                {.data{.block = &inner_merge}, .type = NodeType::Block},
+            });
+        }
         program.syntax_list.insert(program.syntax_list.end(), {
-            {.data{.block = &skip}, .type = NodeType::Block},
             {.data{.block = &next}, .type = NodeType::Block},
             {.data{.repeat{repeat_cond, &header, &loop_merge}}, .type = NodeType::Repeat},
             {.data{.block = &loop_merge}, .type = NodeType::Block},
@@ -166,38 +186,70 @@ struct BarrierLoop {
 };
 } // namespace
 
-TEST_CASE("Barriers in loops only some invocations enter keep only their memory ordering",
+TEST_CASE("Barriers in loops only some invocations enter keep only their memory ordering "
+          "outside compute",
+          "[shader][barrier]") {
+    BarrierLoop shader{Guard::Invocation, Leave::Never, Shader::Stage::Mesh};
+    CHECK(shader.Count(IR::Opcode::Barrier) == 0);
+    CHECK(shader.Count(IR::Opcode::WorkgroupMemoryBarrier) == 1);
+    CHECK(shader.Count(IR::Opcode::VotedBarrier) == 0);
+    CHECK(shader.Count(IR::Opcode::BarrierVote) == 0);
+    CHECK(shader.program.info.demoted_conditional_barrier);
+    CHECK_FALSE(shader.program.info.uses_barrier_vote);
+}
+
+// The guard decides who reaches the barrier: it is voted on, and the barrier waits while the vote
+// found the whole workgroup on one side. A loop only some invocations enter counts as divergent,
+// so its break and repeat are voted on too.
+TEST_CASE("Compute barriers in loops only some invocations enter wait while the workgroup agrees",
           "[shader][barrier]") {
     BarrierLoop shader{Guard::Invocation, Leave::Never};
     CHECK(shader.Count(IR::Opcode::Barrier) == 0);
-    CHECK(shader.Count(IR::Opcode::WorkgroupMemoryBarrier) == 1);
+    CHECK(shader.Count(IR::Opcode::WorkgroupMemoryBarrier) == 0);
+    CHECK(shader.Count(IR::Opcode::VotedBarrier) == 1);
+    CHECK(shader.Count(IR::Opcode::BarrierVote) == 3);
+    CHECK(shader.Count(IR::Opcode::BarrierVoteInit) == 1);
+    CHECK(shader.program.info.uses_barrier_vote);
     CHECK(shader.program.info.demoted_conditional_barrier);
-    CHECK(shader.CountSpirv(spv::Op::OpControlBarrier) == 0);
+    CHECK(shader.program.shared_memory_size == 4);
+    // The initial barrier, the voted barrier and the vote's two
+    CHECK(shader.CountSpirv(spv::Op::OpControlBarrier) == 4);
     CHECK(shader.CountSpirv(spv::Op::OpMemoryBarrier) == 1);
+    CHECK(shader.CountSpirv(spv::Op::OpFunctionCall) == 4);
 }
 
-TEST_CASE("Barriers in loops invocations leave on different iterations keep only their memory "
-          "ordering",
+TEST_CASE("Compute barriers in loops invocations leave on different iterations vote on the break "
+          "and the repeat",
           "[shader][barrier]") {
     BarrierLoop shader{Guard::Uniform, Leave::InvocationBreak};
     CHECK(shader.Count(IR::Opcode::Barrier) == 0);
-    CHECK(shader.Count(IR::Opcode::WorkgroupMemoryBarrier) == 1);
+    CHECK(shader.Count(IR::Opcode::VotedBarrier) == 1);
+    CHECK(shader.Count(IR::Opcode::BarrierVote) == 2);
     CHECK(shader.program.info.demoted_conditional_barrier);
 }
 
-TEST_CASE("Barriers in loops some invocations return from keep only their memory ordering",
+TEST_CASE("Compute barriers in loops some invocations return from vote on the return",
           "[shader][barrier]") {
     BarrierLoop shader{Guard::Uniform, Leave::InvocationReturn};
     CHECK(shader.Count(IR::Opcode::Barrier) == 0);
-    CHECK(shader.Count(IR::Opcode::WorkgroupMemoryBarrier) == 1);
-    CHECK(shader.CountSpirv(spv::Op::OpControlBarrier) == 0);
+    CHECK(shader.Count(IR::Opcode::VotedBarrier) == 1);
+    CHECK(shader.Count(IR::Opcode::BarrierVote) == 2);
 }
 
-TEST_CASE("Barriers guarded by a shuffle's lane bounds keep only their memory ordering",
+// Mario Kart World's froxel integration (e31f793331b8021d) runs work on one z-slice between its
+// barriers. That if rejoins before the next barrier, so voting on it would only split the vote.
+TEST_CASE("Compute ifs that rejoin before the next barrier are not voted on", "[shader][barrier]") {
+    BarrierLoop shader{Guard::Uniform, Leave::InvocationBreak, Shader::Stage::Compute, true};
+    CHECK(shader.Count(IR::Opcode::VotedBarrier) == 1);
+    CHECK(shader.Count(IR::Opcode::BarrierVote) == 2);
+}
+
+TEST_CASE("Barriers guarded by a shuffle's lane bounds wait while the workgroup agrees",
           "[shader][barrier]") {
     BarrierLoop shader{Guard::ShuffleBounds, Leave::Never};
     CHECK(shader.Count(IR::Opcode::Barrier) == 0);
-    CHECK(shader.Count(IR::Opcode::WorkgroupMemoryBarrier) == 1);
+    CHECK(shader.Count(IR::Opcode::VotedBarrier) == 1);
+    CHECK(shader.Count(IR::Opcode::BarrierVote) == 3);
 }
 
 TEST_CASE("Barriers under control flow the whole workgroup takes stay execution barriers",
@@ -208,4 +260,6 @@ TEST_CASE("Barriers under control flow the whole workgroup takes stay execution 
     CHECK_FALSE(shader.program.info.demoted_conditional_barrier);
     CHECK(shader.CountSpirv(spv::Op::OpControlBarrier) == 1);
     CHECK(shader.CountSpirv(spv::Op::OpMemoryBarrier) == 0);
+    CHECK(shader.Count(IR::Opcode::BarrierVote) == 0);
+    CHECK_FALSE(shader.program.info.uses_barrier_vote);
 }

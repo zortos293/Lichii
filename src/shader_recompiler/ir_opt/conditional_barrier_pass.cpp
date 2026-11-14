@@ -4,6 +4,7 @@
 #include <unordered_set>
 #include <vector>
 
+#include "common/alignment.h"
 #include "shader_recompiler/frontend/ir/program.h"
 #include "shader_recompiler/ir_opt/passes.h"
 
@@ -52,19 +53,137 @@ class Divergence {
 public:
     explicit Divergence(IR::Program& program_)
         : program{program_}, divergent_loops(program.syntax_list.size()) {
-        while (Walk(false)) {
+        while (Walk(Mode::Analyze)) {
         }
     }
 
+    bool HasDivergentBarrier() {
+        return Walk(Mode::Find);
+    }
+
     void DemoteBarriers() {
-        Walk(true);
+        Walk(Mode::Demote);
+    }
+
+    // Keeps the execution barriers of a compute program while the whole workgroup takes the same
+    // way at every branch that could split it around one. Each such branch first counts its
+    // condition into a shared word; a barrier runs as an execution barrier while that count stays
+    // a multiple of the workgroup size, and keeps only its memory ordering once a branch split the
+    // workgroup. Returns false when a branch has no block to count its condition in.
+    bool VoteBarriers() {
+        FindVotes();
+        const auto& syntax_list{program.syntax_list};
+        for (size_t index = 0; index < syntax_list.size(); ++index) {
+            if (votes[index] && (index == 0 || syntax_list[index - 1].type != NodeType::Block)) {
+                return false;
+            }
+        }
+        vote_offset = Common::AlignUp(program.shared_memory_size, 4U);
+        program.shared_memory_size = vote_offset + 4;
+        workgroup_size = program.workgroup_size[0] * program.workgroup_size[1] *
+                         program.workgroup_size[2];
+        Walk(Mode::Vote);
+
+        IR::Block& entry{*syntax_list.front().data.block};
+        const auto it{
+            std::ranges::find(entry.Instructions(), IR::Opcode::Prologue, &IR::Inst::GetOpcode)};
+        entry.PrependNewInst(it == entry.end() ? entry.begin() : std::next(it),
+                             IR::Opcode::BarrierVoteInit, {IR::Value{vote_offset}});
+        program.info.uses_barrier_vote = true;
+        return true;
     }
 
 private:
+    enum class Mode { Analyze, Find, Demote, Vote };
+
     struct Construct {
         size_t node;
         bool divergent;
     };
+
+    // The branches whose way decides whether some invocations skip a barrier the others run: an
+    // if around a barrier, a return or a break out of a loop with a barrier, and the breaks and
+    // repeats of such a loop.
+    void FindVotes() {
+        const auto& syntax_list{program.syntax_list};
+        std::vector<bool> has_barrier(syntax_list.size());
+        std::vector<size_t> stack;
+        for (size_t index = 0; index < syntax_list.size(); ++index) {
+            const IR::AbstractSyntaxNode& node{syntax_list[index]};
+            switch (node.type) {
+            case NodeType::Block:
+                if (std::ranges::any_of(node.data.block->Instructions(), [](const IR::Inst& inst) {
+                        return inst.GetOpcode() == IR::Opcode::Barrier;
+                    })) {
+                    for (const size_t construct : stack) {
+                        has_barrier[construct] = true;
+                    }
+                }
+                break;
+            case NodeType::If:
+            case NodeType::Loop:
+                stack.push_back(index);
+                break;
+            case NodeType::EndIf:
+            case NodeType::Repeat:
+                stack.pop_back();
+                break;
+            default:
+                break;
+            }
+        }
+        votes.assign(syntax_list.size(), false);
+        const auto mark_ifs{[&] {
+            for (const size_t construct : stack) {
+                if (syntax_list[construct].type == NodeType::If) {
+                    votes[construct] = true;
+                }
+            }
+        }};
+        for (size_t index = 0; index < syntax_list.size(); ++index) {
+            const IR::AbstractSyntaxNode& node{syntax_list[index]};
+            switch (node.type) {
+            case NodeType::If:
+                votes[index] = has_barrier[index];
+                stack.push_back(index);
+                break;
+            case NodeType::Loop:
+                stack.push_back(index);
+                break;
+            case NodeType::EndIf:
+                stack.pop_back();
+                break;
+            case NodeType::Repeat:
+                votes[index] = has_barrier[stack.back()];
+                stack.pop_back();
+                break;
+            case NodeType::Return:
+                mark_ifs();
+                break;
+            case NodeType::Break: {
+                const auto loop{std::ranges::find_if(stack.rbegin(), stack.rend(), [&](size_t c) {
+                    return syntax_list[c].type == NodeType::Loop;
+                })};
+                if (loop != stack.rend() && has_barrier[*loop]) {
+                    votes[index] = true;
+                    mark_ifs();
+                }
+                break;
+            }
+            default:
+                break;
+            }
+        }
+    }
+
+    void Vote(size_t index, const IR::U1& cond) {
+        if (!votes[index] || !IsDivergent(cond)) {
+            return;
+        }
+        program.syntax_list[index - 1].data.block->AppendNewInst(
+            IR::Opcode::BarrierVote,
+            {cond, IR::Value{vote_offset}, IR::Value{workgroup_size}});
+    }
 
     bool IsDivergent(const IR::Value& value) const {
         return !value.IsImmediate() && values.contains(value.InstRecursive());
@@ -92,7 +211,7 @@ private:
 
     // One pass in program order. Returns true when it found new divergence, so loop back edges
     // and divergence found after a construct's start reach a fixed point.
-    bool Walk(bool demote) {
+    bool Walk(Mode mode) {
         std::vector<Construct> stack;
         bool exited{};
         bool changed{};
@@ -110,20 +229,41 @@ private:
                     return syntax_list[c.node].type == NodeType::Loop && c.divergent;
                 })};
                 const bool divergent_merge{divergent_merges.contains(node.data.block)};
-                for (IR::Inst& inst : node.data.block->Instructions()) {
-                    if (demote && divergent_flow && inst.GetOpcode() == IR::Opcode::Barrier) {
+                IR::Block& block{*node.data.block};
+                for (auto it = block.begin(); it != block.end(); ++it) {
+                    IR::Inst& inst{*it};
+                    if (mode != Mode::Analyze && divergent_flow &&
+                        inst.GetOpcode() == IR::Opcode::Barrier) {
+                        changed = true;
+                        if (mode == Mode::Find) {
+                            continue;
+                        }
+                        program.info.demoted_conditional_barrier = true;
+                        if (mode == Mode::Vote) {
+                            LOG_INFO(Shader, "Barrier in divergent control flow waits for the "
+                                             "workgroup while its branches agree");
+                            block.PrependNewInst(
+                                it, IR::Opcode::VotedBarrier,
+                                {IR::Value{vote_offset}, IR::Value{workgroup_size}});
+                            inst.Invalidate();
+                            continue;
+                        }
                         LOG_WARNING(Shader, "Barrier in divergent control flow keeps only its "
                                             "memory ordering");
                         inst.ReplaceOpcode(IR::Opcode::WorkgroupMemoryBarrier);
-                        program.info.demoted_conditional_barrier = true;
                         continue;
                     }
-                    changed |= Mark(inst, divergent_loop, divergent_merge);
+                    if (mode == Mode::Analyze) {
+                        changed |= Mark(inst, divergent_loop, divergent_merge);
+                    }
                 }
                 break;
             }
             case NodeType::If: {
                 const bool divergent{IsDivergent(node.data.if_node.cond)};
+                if (mode == Mode::Vote) {
+                    Vote(index, node.data.if_node.cond);
+                }
                 if (divergent) {
                     changed |= divergent_merges.insert(node.data.if_node.merge).second;
                 }
@@ -134,6 +274,9 @@ private:
                 stack.push_back({index, divergent_loops[index]});
                 break;
             case NodeType::Break: {
+                if (mode == Mode::Vote) {
+                    Vote(index, node.data.break_node.cond);
+                }
                 if (!divergent_flow && !IsDivergent(node.data.break_node.cond)) {
                     break;
                 }
@@ -151,6 +294,9 @@ private:
                 stack.pop_back();
                 break;
             case NodeType::Repeat: {
+                if (mode == Mode::Vote) {
+                    Vote(index, node.data.repeat.cond);
+                }
                 const size_t loop{stack.back().node};
                 if (IsDivergent(node.data.repeat.cond)) {
                     changed |= MarkLoop(loop);
@@ -186,14 +332,26 @@ private:
     std::unordered_set<const IR::Inst*> values;
     std::unordered_set<const IR::Block*> divergent_merges;
     std::vector<bool> divergent_loops;
+    std::vector<bool> votes;
+    u32 vote_offset{};
+    u32 workgroup_size{};
 };
 } // Anonymous namespace
 
 // Some drivers hang when only part of a workgroup reaches a barrier, which the guest allows: the
-// invocations that skip it or have exited count as arrived. Barriers under divergent control flow
-// keep their memory ordering without the execution barrier; the rest stay as they are.
+// invocations that skip it or have exited count as arrived. Compute programs vote on the branches
+// around such barriers and wait at them while the workgroup stays together; elsewhere barriers
+// under divergent control flow keep their memory ordering without the execution barrier. The rest
+// stay as they are.
 void ConditionalBarrierPass(IR::Program& program) {
-    Divergence{program}.DemoteBarriers();
+    Divergence divergence{program};
+    if (!divergence.HasDivergentBarrier()) {
+        return;
+    }
+    if (program.stage == Stage::Compute && divergence.VoteBarriers()) {
+        return;
+    }
+    divergence.DemoteBarriers();
 }
 
 } // namespace Shader::Optimization
