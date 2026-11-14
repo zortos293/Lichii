@@ -41,11 +41,13 @@ public:
 
     /// Information about the clients connected to the same room as us.
     MemberList member_information;
+    mutable std::mutex member_information_mutex;
     /// Information about the room we're connected to.
     RoomInformation room_information;
 
     /// The current game name, id and version
     GameInfo current_game_info;
+    mutable std::mutex game_info_mutex;
 
     std::atomic<State> state{State::Idle}; ///< Current state of the RoomMember.
 
@@ -314,9 +316,9 @@ void RoomMember::RoomMemberImpl::HandleRoomInformationPacket(const ENetEvent* ev
 
     u32 num_members;
     packet.Read(num_members);
-    member_information.resize(num_members);
+    MemberList members(num_members);
 
-    for (auto& member : member_information) {
+    for (auto& member : members) {
         packet.Read(member.nickname);
         packet.Read(member.fake_ip);
         packet.Read(member.game_info.name);
@@ -332,6 +334,10 @@ void RoomMember::RoomMemberImpl::HandleRoomInformationPacket(const ENetEvent* ev
                 username = member.username;
             }
         }
+    }
+    {
+        std::lock_guard lock(member_information_mutex);
+        member_information = std::move(members);
     }
     Invoke(room_information);
 }
@@ -443,7 +449,10 @@ void RoomMember::RoomMemberImpl::HandleModBanListResponsePacket(const ENetEvent*
 }
 
 void RoomMember::RoomMemberImpl::Disconnect() {
-    member_information.clear();
+    {
+        std::lock_guard lock(member_information_mutex);
+        member_information.clear();
+    }
     room_information.member_slots = 0;
     room_information.name.clear();
 
@@ -549,8 +558,14 @@ RoomMember::State RoomMember::GetState() const {
     return room_member_impl->state;
 }
 
-const RoomMember::MemberList& RoomMember::GetMemberInformation() const {
+RoomMember::MemberList RoomMember::GetMemberInformation() const {
+    std::lock_guard lock(room_member_impl->member_information_mutex);
     return room_member_impl->member_information;
+}
+
+GameInfo RoomMember::GetCurrentGameInfo() const {
+    std::lock_guard lock(room_member_impl->game_info_mutex);
+    return room_member_impl->current_game_info;
 }
 
 const std::string& RoomMember::GetNickname() const {
@@ -608,7 +623,7 @@ void RoomMember::Join(const std::string& nick, const char* server_addr, u16 serv
         room_member_impl->nickname = nick;
         room_member_impl->StartLoop();
         room_member_impl->SendJoinRequest(nick, preferred_fake_ip, password, token);
-        SendGameInfo(room_member_impl->current_game_info);
+        SendGameInfo(GetCurrentGameInfo());
     } else {
         enet_peer_disconnect(room_member_impl->server, 0);
         room_member_impl->SetState(State::Idle);
@@ -639,6 +654,10 @@ void RoomMember::SendProxyPacket(const ProxyPacket& proxy_packet) {
     room_member_impl->Send(std::move(packet));
 }
 
+void RoomMember::DeliverLoopbackProxyPacket(const ProxyPacket& proxy_packet) {
+    room_member_impl->Invoke<ProxyPacket>(proxy_packet);
+}
+
 void RoomMember::SendLdnPacket(const LDNPacket& ldn_packet) {
     Packet packet;
     packet.Write(static_cast<u8>(IdLdnPacket));
@@ -662,7 +681,10 @@ void RoomMember::SendChatMessage(const std::string& message) {
 }
 
 void RoomMember::SendGameInfo(const GameInfo& game_info) {
-    room_member_impl->current_game_info = game_info;
+    {
+        std::lock_guard lock(room_member_impl->game_info_mutex);
+        room_member_impl->current_game_info = game_info;
+    }
     if (!IsConnected())
         return;
 

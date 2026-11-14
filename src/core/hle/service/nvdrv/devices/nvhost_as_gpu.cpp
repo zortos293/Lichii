@@ -148,7 +148,10 @@ NvResult nvhost_as_gpu::Ioctl1(DeviceFD fd, Ioctl command, std::span<const u8> i
             return WrapFixed(this, &nvhost_as_gpu::GetVARegions1, input, output);
         case 0x9: {
             const auto result = WrapFixed(this, &nvhost_as_gpu::AllocAsEx, input, output);
-            if (result == NvResult::Success && g_nx2_driver) {
+            const auto* session = container.GetSession(nx2_session);
+            const bool switch2_process =
+                session != nullptr && session->process != nullptr && session->process->IsSwitch2();
+            if (result == NvResult::Success && g_nx2_driver && switch2_process) {
                 Nx2GpuMemoryRegistry::Get().AddListener(
                     this,
                     [this](u64 gpu_address, u64 cpu_address, u64 size) {

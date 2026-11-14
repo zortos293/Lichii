@@ -13,6 +13,7 @@
 #include "core/core.h"
 #include "core/hle/kernel/k_process.h"
 #include "core/hle/kernel/svc.h"
+#include "core/hle/resort_bus.h"
 #include "core/hle/kernel/k_readable_event.h"
 #include "core/hle/service/kernel_helpers.h"
 
@@ -2568,6 +2569,9 @@ void Call(Core::System& system, u32 imm) {
         LOG_DEBUG(Kernel_SVC, "Switch 2 svc 0x80 addr={:#x} size={:#x} mask={:#x} attr={:#x} -> {:#x}",
                   address, size, mask, attr, result.raw);
         args[0] = result.raw;
+    } else if (imm == Core::HLE::ResortBus::BusSvc) {
+        args[0] = static_cast<u64>(
+            static_cast<s64>(Core::HLE::ResortBus::HandleSvc(system, process, args)));
     } else if (process.Is64Bit()) {
         Call64(system, imm, args);
     } else {

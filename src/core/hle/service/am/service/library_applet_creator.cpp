@@ -7,6 +7,7 @@
 #include <unordered_set>
 
 #include "common/settings.h"
+#include "core/hle/kernel/k_process.h"
 #include "core/hle/kernel/k_transfer_memory.h"
 #include "core/hle/service/am/applet_data_broker.h"
 #include "core/hle/service/am/applet_manager.h"
@@ -26,7 +27,11 @@ namespace Service::AM {
 
 namespace {
 
-bool ShouldCreateGuestApplet(AppletId applet_id) {
+bool ShouldCreateGuestApplet(AppletId applet_id, const Applet& caller) {
+    const auto* caller_process = caller.process ? caller.process->GetHandle() : nullptr;
+    if (caller_process != nullptr && caller_process->IsSwitch2()) {
+        return false;
+    }
 #define X(Name, name)                                                                              \
     if (applet_id == AppletId::Name &&                                                             \
         Settings::values.name##_applet_mode.GetValue() != Settings::AppletMode::LLE) {             \
@@ -224,7 +229,7 @@ Result ILibraryAppletCreator::CreateLibraryApplet(
     applet_id = NormalizeAppletId(applet_id);
 
     std::shared_ptr<ILibraryAppletAccessor> library_applet;
-    if (ShouldCreateGuestApplet(applet_id)) {
+    if (ShouldCreateGuestApplet(applet_id, *m_applet)) {
         library_applet =
             CreateGuestApplet(system, m_window_system, m_applet, applet_id, library_applet_mode);
     }
@@ -252,7 +257,7 @@ Result ILibraryAppletCreator::CreateLibraryAppletEx(
     applet_id = NormalizeAppletId(applet_id);
 
     std::shared_ptr<ILibraryAppletAccessor> library_applet;
-    if (ShouldCreateGuestApplet(applet_id)) {
+    if (ShouldCreateGuestApplet(applet_id, *m_applet)) {
         library_applet =
             CreateGuestApplet(system, m_window_system, m_applet, applet_id, library_applet_mode);
     }

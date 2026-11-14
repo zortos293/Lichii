@@ -121,12 +121,21 @@ static_assert(sizeof(IpAddressSetting) == 0xD, "IpAddressSetting has incorrect s
 // Room fake IPs are spread over 192.168.0.0/16, and some room servers give members different /24s.
 // A host /24 mask would then put room members on different subnets, so LAN games ignore each other.
 constexpr Network::IPv4Address RoomSubnetMask{255, 255, 0, 0};
+constexpr Network::IPv4Address RoomGateway{192, 168, 0, 1};
 
 static void ApplyRoomAddress(IpAddressSetting& setting) {
     if (const auto room_ip = Network::GetRoomIPv4Address()) {
         setting.ip_address = *room_ip;
         setting.subnet_mask = RoomSubnetMask;
+        if (Network::SwitchSportsLanFixesEnabled()) {
+            setting.is_automatic = true;
+            setting.default_gateway = RoomGateway;
+        }
     }
+}
+
+static bool RoomEnablesCommunication() {
+    return Network::GetRoomIPv4Address().has_value() && Network::SwitchSportsLanFixesEnabled();
 }
 
 // This is nn::nifm::DnsSetting
@@ -624,10 +633,18 @@ void IGeneralService::EnumerateNetworkInterfaces(HLERequestContext& ctx) {
 
     using Network::HostAdapterKind;
 
-    const auto adapters = Network::GetAvailableNetworkInterfaces();
+    auto adapters = Network::GetAvailableNetworkInterfaces();
     const auto selected = Network::GetSelectedNetworkInterface();
     const auto room_ip = Network::GetRoomIPv4Address();
     constexpr size_t kEntry = 0x3F0;
+
+    if (room_ip && Network::SwitchSportsLanFixesEnabled()) {
+        Network::NetworkInterface room_adapter{.name = "Eden Multiplayer"};
+        std::memcpy(&room_adapter.ip_address, room_ip->data(), sizeof(in_addr));
+        std::memcpy(&room_adapter.subnet_mask, RoomSubnetMask.data(), sizeof(in_addr));
+        std::memcpy(&room_adapter.gateway, RoomGateway.data(), sizeof(in_addr));
+        adapters.assign(1, room_adapter);
+    }
 
     std::vector<u8> blob(adapters.size() * kEntry, 0);
 
@@ -954,7 +971,7 @@ void IGeneralService::SetWirelessCommunicationEnabled(HLERequestContext& ctx) {
 }
 
 void IGeneralService::IsWirelessCommunicationEnabled(HLERequestContext& ctx) {
-    const bool en = !Settings::values.airplane_mode.GetValue();
+    const bool en = !Settings::values.airplane_mode.GetValue() || RoomEnablesCommunication();
     IPC::ResponseBuilder rb{ctx, 3};
     rb.Push(ResultSuccess);
     rb.Push<u8>(en);
@@ -1001,7 +1018,8 @@ void IGeneralService::IsEthernetCommunicationEnabled(HLERequestContext& ctx) {
 
     IPC::ResponseBuilder rb{ctx, 3};
     rb.Push(ResultSuccess);
-    if (Network::GetHostIPv4Address().has_value() && !Settings::values.airplane_mode.GetValue()) {
+    if ((Network::GetHostIPv4Address().has_value() && !Settings::values.airplane_mode.GetValue()) ||
+        RoomEnablesCommunication()) {
         rb.Push<u8>(1);
     } else {
         rb.Push<u8>(0);

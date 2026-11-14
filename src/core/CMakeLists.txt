@@ -408,6 +408,8 @@ add_library(core STATIC
     hle/kernel/svc_results.h
     hle/kernel/svc_types.h
     hle/result.h
+    hle/resort_bus.cpp
+    hle/resort_bus.h
     hle/service/acc/acc.cpp
     hle/service/acc/acc.h
     hle/service/acc/async_context.cpp
@@ -687,6 +689,13 @@ add_library(core STATIC
     hle/service/friend/friend.h
     hle/service/friend/friend_interface.cpp
     hle/service/friend/friend_interface.h
+    hle/service/friend/resort_doc_adapter.cpp
+    hle/service/friend/resort_doc_adapter.h
+    hle/service/friend/resort_doc_bus.cpp
+    hle/service/friend/resort_doc_bus.h
+    hle/service/friend/resort_doc_bus_room.cpp
+    hle/service/friend/resort_lan_friends.cpp
+    hle/service/friend/resort_lan_friends.h
     hle/service/glue/arp.cpp
     hle/service/glue/arp.h
     hle/service/glue/bgtc.cpp

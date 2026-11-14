@@ -127,6 +127,8 @@ std::optional<IPv4Address> GetHostIPv4Address();
 /// @return nullopt outside a room, while still joining it and while LAN play is active
 std::optional<IPv4Address> GetRoomIPv4Address();
 
+bool SwitchSportsLanFixesEnabled();
+
 /// While LAN play carries LDN, the guest keeps host sockets and its real address in a room too
 bool IsDirectLanActive();
 void SetDirectLanActive(bool active);

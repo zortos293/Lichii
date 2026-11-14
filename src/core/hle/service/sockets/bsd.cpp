@@ -49,11 +49,16 @@ bool IsConnectionBased(Type type) {
     case Type::STREAM:
         return true;
     case Type::DGRAM:
+    case Type::RAW:
         return false;
     default:
         UNIMPLEMENTED_MSG("Unimplemented type={}", type);
         return false;
     }
+}
+
+bool IsEmulatedReadable(Network::SocketBase& socket) {
+    return True(socket.EmulatedPoll(Network::PollEvents::RdNorm).value_or(Network::PollEvents{}));
 }
 
 template <typename T>
@@ -1393,7 +1398,10 @@ std::pair<s32, Errno> BSD_USA::SocketImpl(Domain domain, Type type, Protocol pro
 
     std::shared_ptr<Network::SocketBase> socket;
     auto room_member = Network::GetRoomMember().lock();
-    if (room_member && room_member->IsConnected() && !Network::IsDirectLanActive()) {
+    const bool emulated_ping =
+        type == Type::RAW && protocol == Protocol::ICMP && Network::SwitchSportsLanFixesEnabled();
+    if ((room_member && room_member->IsConnected() && !Network::IsDirectLanActive()) ||
+        emulated_ping) {
         socket = std::make_shared<Network::ProxySocket>();
     } else {
         socket = std::make_shared<Network::Socket>();
@@ -2086,7 +2094,15 @@ std::pair<s32, Errno> BSD_USA::SendToImpl(s32 fd, u32 flags, std::span<const u8>
         p_addr_in = &addr_in;
     }
 
-    return Translate(descriptor->socket->SendTo(flags, message, p_addr_in));
+    if (!Network::SwitchSportsLanFixesEnabled()) {
+        return Translate(descriptor->socket->SendTo(flags, message, p_addr_in));
+    }
+    const bool was_readable = IsEmulatedReadable(*descriptor->socket);
+    const auto result = Translate(descriptor->socket->SendTo(flags, message, p_addr_in));
+    if (!was_readable && IsEmulatedReadable(*descriptor->socket)) {
+        select_notifier->NotifyChange();
+    }
+    return result;
 }
 
 std::optional<std::pair<s32, Errno>> BSD_USA::RecvMMsgImpl(HLERequestContext& ctx, s32 fd, u32 vlen,
@@ -2412,7 +2428,16 @@ std::optional<std::pair<s32, Errno>> BSD_USA::SendMMsgImpl(HLERequestContext& ct
                     return Translate(descriptor->socket->Send(rest, FLAG_MSG_DONTWAIT));
                 }
                 const Network::SockAddrIn addr_in = Translate(GetValue<SockAddrIn>(fields->name));
-                return Translate(descriptor->socket->SendTo(FLAG_MSG_DONTWAIT, rest, &addr_in));
+                if (!Network::SwitchSportsLanFixesEnabled()) {
+                    return Translate(descriptor->socket->SendTo(FLAG_MSG_DONTWAIT, rest, &addr_in));
+                }
+                const bool was_readable = IsEmulatedReadable(*descriptor->socket);
+                const auto send_result =
+                    Translate(descriptor->socket->SendTo(FLAG_MSG_DONTWAIT, rest, &addr_in));
+                if (!was_readable && IsEmulatedReadable(*descriptor->socket)) {
+                    select_notifier->NotifyChange();
+                }
+                return send_result;
             }();
             if (ret < 0) {
                 return {-1, send_errno};
@@ -2887,6 +2912,15 @@ BSD_USA::~BSD_USA() {
         room_member->Unbind(proxy_packet_received);
     }
     proxy_packet_received.reset();
+    if (Network::SwitchSportsLanFixesEnabled()) {
+        std::scoped_lock table_lock{file_descriptors_mutex};
+        for (size_t fd = 0; fd < file_descriptors.size(); ++fd) {
+            if (file_descriptors[fd]) {
+                file_descriptors[fd].reset();
+                ++file_descriptor_generations[fd];
+            }
+        }
+    }
 }
 
 std::unique_lock<std::mutex> BSD_USA::LockService() noexcept {

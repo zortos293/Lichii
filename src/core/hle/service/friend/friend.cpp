@@ -3,7 +3,13 @@
 
 // SPDX-License-Identifier: GPL-2.0-or-later
 
+#include <algorithm>
+#include <array>
+#include <cstddef>
 #include <queue>
+#include <vector>
+#include "common/common_funcs.h"
+#include "common/game_presets.h"
 #include "common/logging.h"
 #include "common/uuid.h"
 #include "core/core.h"
@@ -11,6 +17,7 @@
 #include "core/hle/service/acc/errors.h"
 #include "core/hle/service/friend/friend.h"
 #include "core/hle/service/friend/friend_interface.h"
+#include "core/hle/service/friend/resort_lan_friends.h"
 #include "core/hle/service/ipc_helpers.h"
 #include "core/hle/service/kernel_helpers.h"
 #include "core/hle/service/server_manager.h"
@@ -165,6 +172,33 @@ private:
     };
     static_assert(sizeof(SizedFriendFilter) == 0x10, "SizedFriendFilter is an invalid size");
 
+    struct FriendPresenceImpl {
+        u64 last_played_application_id;
+        u64 presence_group_id;
+        s64 last_update_time;
+        u32 status;
+        u8 is_same_group;
+        INSERT_PADDING_BYTES(3);
+        std::array<u8, 0xC0> app_field;
+    };
+    static_assert(sizeof(FriendPresenceImpl) == 0xE0, "FriendPresenceImpl is an invalid size");
+
+    struct FriendImpl {
+        Common::UUID uid;
+        u64 account_id;
+        std::array<char, 0x21> nickname;
+        INSERT_PADDING_BYTES(7);
+        FriendPresenceImpl presence;
+        u8 is_favorite;
+        u8 is_newly;
+        INSERT_PADDING_BYTES(6);
+        u8 is_valid;
+        INSERT_PADDING_BYTES(0xD7);
+    };
+    static_assert(sizeof(FriendImpl) == 0x200, "FriendImpl is an invalid size");
+    static_assert(offsetof(FriendImpl, presence) == 0x40, "FriendImpl presence offset is wrong");
+    static_assert(offsetof(FriendImpl, is_valid) == 0x128, "FriendImpl is_valid offset is wrong");
+
     struct FriendsUserSetting {
         Common::UUID uuid;
         u32 presence_permission;
@@ -197,10 +231,44 @@ private:
 
     void GetFriendList(HLERequestContext& ctx) {
         IPC::RequestParser rp{ctx};
-        const auto friend_offset = rp.Pop<u32>();
+        const auto friend_offset = rp.Pop<s32>();
+        rp.Skip(1, false);
         const auto uuid = rp.PopRaw<Common::UUID>();
         [[maybe_unused]] const auto filter = rp.PopRaw<SizedFriendFilter>();
         const auto pid = rp.Pop<u64>();
+
+        if (ResortLanFriendsActive()) {
+            const auto hosts = CollectResortRoomHosts();
+            const std::size_t total = hosts.size();
+            const std::size_t start = static_cast<std::size_t>(std::max(friend_offset, 0));
+            const std::size_t capacity = ctx.GetWriteBufferNumElements<FriendImpl>();
+            const std::size_t end = start < total ? std::min(total, start + capacity) : start;
+
+            std::vector<FriendImpl> friends;
+            for (std::size_t i = start; i < end; ++i) {
+                FriendImpl entry{};
+                entry.uid = uuid;
+                entry.account_id = ResortFriendAccountId(hosts[i].ip);
+                const auto name_length = std::min<std::size_t>(hosts[i].nickname.size(), 0x20);
+                std::copy_n(hosts[i].nickname.begin(), name_length, entry.nickname.begin());
+                entry.presence.last_played_application_id = Settings::SwitchSportsResortProgramId;
+                entry.presence.status = 2;
+                entry.presence.is_same_group = 1;
+                entry.is_valid = 1;
+                friends.push_back(entry);
+            }
+            if (!friends.empty()) {
+                ctx.WriteBuffer(friends);
+            }
+            LOG_DEBUG(Service_Friend, "Resort room friends: offset={}, returned={}, hosting={}",
+                      friend_offset, friends.size(), total);
+
+            IPC::ResponseBuilder rb{ctx, 3};
+            rb.Push(ResultSuccess);
+            rb.Push(static_cast<s32>(friends.size()));
+            return;
+        }
+
         LOG_WARNING(Service_Friend, "(STUBBED) called, offset={}, uuid=0x{}, pid={}", friend_offset,
                     uuid.RawString(), pid);
 

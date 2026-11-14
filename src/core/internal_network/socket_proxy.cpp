@@ -3,12 +3,14 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 
 #include <algorithm>
+#include <atomic>
 #include <chrono>
 #include <cstring>
 
 #include "common/assert.h"
 #include "common/logging.h"
 #include "common/zstd_compression.h"
+#include "core/hle/service/friend/resort_lan_friends.h"
 #include "core/internal_network/network.h"
 #include "core/internal_network/network_interface.h"
 #include "core/internal_network/socket_proxy.h"
@@ -19,6 +21,51 @@
 #endif
 
 namespace Network {
+
+namespace {
+
+u16 InternetChecksum(std::span<const u8> data) {
+    u32 sum = 0;
+    for (std::size_t i = 0; i + 1 < data.size(); i += 2) {
+        sum += static_cast<u32>(data[i] << 8 | data[i + 1]);
+    }
+    if (data.size() % 2 != 0) {
+        sum += static_cast<u32>(data.back() << 8);
+    }
+    while (sum >> 16) {
+        sum = (sum & 0xFFFF) + (sum >> 16);
+    }
+    return static_cast<u16>(~sum);
+}
+
+std::vector<u8> MakeIcmpEchoReply(std::span<const u8> request, const IPv4Address& from,
+                                  const IPv4Address& to) {
+    constexpr std::size_t IpHeaderSize = 20;
+    std::vector<u8> packet(IpHeaderSize + request.size());
+    const auto total_length = static_cast<u16>(packet.size());
+    packet[0] = 0x45;
+    packet[2] = static_cast<u8>(total_length >> 8);
+    packet[3] = static_cast<u8>(total_length);
+    packet[8] = 64;
+    packet[9] = 1;
+    std::copy(from.begin(), from.end(), packet.begin() + 12);
+    std::copy(to.begin(), to.end(), packet.begin() + 16);
+    const u16 header_checksum = InternetChecksum(std::span(packet).first(IpHeaderSize));
+    packet[10] = static_cast<u8>(header_checksum >> 8);
+    packet[11] = static_cast<u8>(header_checksum);
+
+    std::copy(request.begin(), request.end(), packet.begin() + IpHeaderSize);
+    packet[IpHeaderSize] = 0;
+    packet[IpHeaderSize + 1] = 0;
+    packet[IpHeaderSize + 2] = 0;
+    packet[IpHeaderSize + 3] = 0;
+    const u16 icmp_checksum = InternetChecksum(std::span(packet).subspan(IpHeaderSize));
+    packet[IpHeaderSize + 2] = static_cast<u8>(icmp_checksum >> 8);
+    packet[IpHeaderSize + 3] = static_cast<u8>(icmp_checksum);
+    return packet;
+}
+
+} // Anonymous namespace
 
 ProxySocket::ProxySocket() noexcept {}
 
@@ -173,7 +220,8 @@ std::pair<s32, Errno> ProxySocket::Receive(int flags, std::span<u8> message, Soc
         // When receive_timeout is set to zero, the socket is supposed to wait indefinitely until a
         // packet arrives. In order to prevent lost packets from hanging the emulation thread, we set
         // the timeout to 5s instead. An expired wait is reported like an SO_RCVTIMEO timeout.
-        const u32 timeout = receive_timeout == 0 ? 5000 : receive_timeout;
+        const u32 indefinite_wait_cap_ms = SwitchSportsLanFixesEnabled() ? 250 : 5000;
+        const u32 timeout = receive_timeout == 0 ? indefinite_wait_cap_ms : receive_timeout;
         if (!packets_cv.wait_for(lock, std::chrono::milliseconds{timeout},
                                  [this] { return closed || !received_packets.empty(); })) {
             return {-1, Errno::AGAIN};
@@ -233,6 +281,11 @@ void ProxySocket::SendPacket(ProxyPacket& packet) {
         if (room_member->IsConnected()) {
             packet.data = Common::Compression::CompressDataZSTDDefault(packet.data.data(),
                                                                        packet.data.size());
+            if (packet.remote_endpoint.ip[0] == 127 && SwitchSportsLanFixesEnabled()) {
+                packet.local_endpoint.ip = packet.remote_endpoint.ip;
+                room_member->DeliverLoopbackProxyPacket(packet);
+                return;
+            }
             room_member->SendProxyPacket(packet);
         }
     }
@@ -241,6 +294,45 @@ void ProxySocket::SendPacket(ProxyPacket& packet) {
 std::pair<s32, Errno> ProxySocket::SendTo(u32 flags, std::span<const u8> message,
                                           const SockAddrIn* addr) {
     ASSERT((flags & ~FLAG_MSG_DONTWAIT) == 0);
+
+    if (protocol == Protocol::ICMP && SwitchSportsLanFixesEnabled()) {
+        constexpr u8 IcmpEchoRequest = 8;
+        if (addr && message.size() >= 8 && message[0] == IcmpEchoRequest) {
+            IPv4Address own_ip{127, 0, 0, 1};
+            if (const auto room_ip = GetRoomIPv4Address()) {
+                own_ip = *room_ip;
+            } else if (const auto host_ip = GetHostIPv4Address()) {
+                own_ip = *host_ip;
+            }
+            LOG_DEBUG(Network, "Answering ICMP echo to {}.{}.{}.{}", addr->ip[0], addr->ip[1],
+                      addr->ip[2], addr->ip[3]);
+            {
+                std::lock_guard guard(packets_mutex);
+                if (!closed) {
+                    received_packets.push(ProxyPacket{
+                        .local_endpoint = *addr,
+                        .remote_endpoint = local_endpoint,
+                        .protocol = protocol,
+                        .broadcast = false,
+                        .data = MakeIcmpEchoReply(message, addr->ip, own_ip),
+                    });
+                }
+            }
+            packets_cv.notify_all();
+        }
+        return {static_cast<s32>(message.size()), Errno::SUCCESS};
+    }
+
+    if (!is_bound && addr && SwitchSportsLanFixesEnabled()) {
+        constexpr u32 EphemeralPortFirst = 50000;
+        constexpr u32 EphemeralPortCount = 65536 - EphemeralPortFirst;
+        static std::atomic<u32> next_ephemeral_port{0};
+        SockAddrIn ephemeral{};
+        ephemeral.family = Domain::INET;
+        ephemeral.portno = static_cast<u16>(EphemeralPortFirst +
+                                            next_ephemeral_port.fetch_add(1) % EphemeralPortCount);
+        Bind(ephemeral);
+    }
 
     if (!is_bound) {
         LOG_ERROR(Network, "ProxySocket is not bound!");
@@ -251,6 +343,11 @@ std::pair<s32, Errno> ProxySocket::SendTo(u32 flags, std::span<const u8> message
         if (!room_member->IsConnected()) {
             return {static_cast<s32>(message.size()), Errno::SUCCESS};
         }
+    }
+
+    if (socket_type == Type::DGRAM && addr && addr->ip[0] != 127 && addr->ip[3] != 255 &&
+        addr->ip != GetRoomIPv4Address() && SwitchSportsLanFixesEnabled()) {
+        Service::Friend::NoteResortUnicastTarget(addr->ip);
     }
 
     ProxyPacket packet;

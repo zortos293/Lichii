@@ -5,6 +5,8 @@
 
 #include <openssl/evp.h>
 
+#include "common/fs/path_util.h"
+#include "common/game_presets.h"
 #include "common/hex_util.h"
 #include "common/settings.h"
 #include "common/uuid.h"
@@ -17,6 +19,7 @@
 #include "core/hle/kernel/k_process.h"
 #include "core/hle/kernel/k_transfer_memory.h"
 #include "core/hle/result.h"
+#include "core/hle/service/acc/profile_manager.h"
 #include "core/hle/service/am/am_results.h"
 #include "core/hle/service/am/applet.h"
 #include "core/hle/service/am/service/application_functions.h"
@@ -383,6 +386,13 @@ Result IApplicationFunctions::GetPseudoDeviceId(Out<Common::UUID> out_pseudo_dev
     auto const algorithm = EVP_sha1();
     EVP_DigestInit_ex(ctx, algorithm, nullptr);
     EVP_DigestUpdate(ctx, &seed, sizeof(seed));
+    if (m_applet->program_id == Settings::SwitchSportsResortProgramId) {
+        const auto nand = Common::FS::GetEdenPathString(Common::FS::EdenPath::NANDDir);
+        EVP_DigestUpdate(ctx, nand.data(), nand.size());
+        if (const auto user = system.GetProfileManager().GetUser(0)) {
+            EVP_DigestUpdate(ctx, user->uuid.data(), user->uuid.size());
+        }
+    }
     EVP_DigestFinal_ex(ctx, hash.data(), &hash_len);
     EVP_MD_CTX_free(ctx);
     *out_pseudo_device_id = Common::UUID::MakeRFC4122V5(std::span<u8, 16>{hash.begin(), hash.begin() + 16});

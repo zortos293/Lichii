@@ -130,7 +130,9 @@ public:
     /**
      * Returns information about the members in the room we're currently connected to.
      */
-    const MemberList& GetMemberInformation() const;
+    MemberList GetMemberInformation() const;
+
+    GameInfo GetCurrentGameInfo() const;
 
     /**
      * Returns the nickname of the RoomMember.
@@ -170,6 +172,8 @@ public:
      * @param packet The WiFi packet to send.
      */
     void SendProxyPacket(const ProxyPacket& packet);
+
+    void DeliverLoopbackProxyPacket(const ProxyPacket& packet);
 
     /**
      * Sends an LDN packet to the room.
