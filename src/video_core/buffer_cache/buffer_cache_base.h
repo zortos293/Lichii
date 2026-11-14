@@ -165,6 +165,12 @@ public:
     u64 native_compute_storage_buffers = 0;
     // Bytes from each compute storage binding's start that a dispatch marks GPU-written.
     std::array<u32, NUM_STORAGE_BUFFERS> compute_storage_write_marks{};
+    // How far a native (Switch 2) draw's stores reach into each written graphics storage binding:
+    // the program's extent (unbounded: the whole binding) and the bytes from the binding's start
+    // to the pointer it counts from. Resolved per draw (BindHostGraphicsStorageBuffers).
+    std::array<std::array<Shader::StorageWriteExtent, NUM_STORAGE_BUFFERS>, NUM_STAGES>
+        graphics_storage_write_extents{};
+    std::array<std::array<u32, NUM_STORAGE_BUFFERS>, NUM_STAGES> graphics_storage_write_pads{};
 
     u32 total_graphics_storage_buffers = 0;
     u32 total_compute_storage_buffers = 0;
@@ -383,7 +389,8 @@ public:
     void UnbindGraphicsStorageBuffers(size_t stage);
 
     bool BindGraphicsStorageBuffer(size_t stage, size_t ssbo_index, u32 cbuf_index, u32 cbuf_offset,
-                                   bool is_written, u32 indirect_offset = ~0U);
+                                   bool is_written, u32 indirect_offset = ~0U,
+                                   const Shader::StorageWriteExtent& write_extent = {});
 
     void UnbindGraphicsTextureBuffers(size_t stage);
 
@@ -465,6 +472,17 @@ public:
     /// instead of waiting for it.
     Nx2ListRead Nx2ReadListCopy(DAddr device_addr, std::span<u8> out, bool past_sync,
                                 u64* pending_tick = nullptr);
+    /// EDEN_NX2_DRAW_WRITE_EXTENT=0: a draw marks its written native storage bindings
+    /// GPU-written whole, as before their programs' store extents were used.
+    [[nodiscard]] static bool Nx2DrawWriteExtents() {
+        static const bool enabled = [] {
+            const char* const value = std::getenv("EDEN_NX2_DRAW_WRITE_EXTENT");
+            return value == nullptr || value[0] != '0';
+        }();
+        return enabled;
+    }
+    /// Front thread: whether draws write the command list page of `device_addr`.
+    bool Nx2IsDrawWrittenListPage(DAddr device_addr);
     /// Front thread, the split drained: the command list page was flushed to guest memory.
     void Nx2NoteListSynced(DAddr page);
 
@@ -1192,6 +1210,8 @@ private:
     std::vector<std::pair<u64, Nx2Staging>> nx2_retired_list_copies;
     boost::container::small_vector<std::pair<BufferId, DAddr>, 8> nx2_list_copy_requests;
     bool nx2_collect_list_copies{};
+    /// Whether the draw being prepared is indexed (UpdateGraphicsBuffers).
+    bool nx2_draw_indexed{};
 };
 
 } // namespace VideoCommon

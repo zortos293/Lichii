@@ -284,6 +284,10 @@ public:
     /// flushes and reads guest memory. With `pending`, a copy the GPU has not finished sets
     /// `*pending` and pending_list_tick instead of waiting (the result is false then).
     bool ReadGpuWrittenCommands(GPUVAddr address, u32 count, bool* pending = nullptr);
+    /// List indexed draws (nx2_list_indexed_draw.h): the entry at `address` is the five
+    /// GPU-written parameters of an indexed indirect draw macro call; returns whether the 3D
+    /// engine took them without waiting for them.
+    bool TakeListIndexedDraw(GPUVAddr address, u32 count);
     /// Brings command list words the GPU wrote (still only in host buffers) to guest memory.
     bool FlushGpuWrittenCommands(GPUVAddr address, size_t size);
 
