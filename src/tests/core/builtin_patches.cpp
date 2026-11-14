@@ -82,6 +82,11 @@ constexpr u32 TurnSpeedHookInstruction = 0x14589FCA;
 constexpr u32 TurnSpeedSecondInstruction = 0x1E280800;
 constexpr size_t TurnSpeedRoutineOffset = sizeof(Loader::NSOHeader) + 0x3C46A40;
 constexpr size_t TurnSpeedRoutineSize = 40;
+constexpr size_t MovieFramesHookOffset = sizeof(Loader::NSOHeader) + 0x3B5C7C8;
+constexpr u32 MovieFramesOriginalInstruction = 0x11000508; // add w8, w8, #1
+constexpr u32 MovieFramesHookInstruction = 0x1403A8AA;     // b main+0x3C46A70
+constexpr size_t MovieFramesRoutineOffset = sizeof(Loader::NSOHeader) + 0x3C46A70;
+constexpr size_t MovieFramesRoutineSize = 56;
 constexpr u32 ScarecrowCutOriginalInstruction = 0x1E390008; // fcvtzu w8, s0
 constexpr size_t ScarecrowRecordHookOffset = sizeof(Loader::NSOHeader) + 0x3296B08;
 constexpr u32 ScarecrowRecordHookInstruction = 0x1426BFEA; // b main+0x3C46AB0
@@ -329,6 +334,7 @@ std::vector<u8> MakeDynamicMain() {
     }
     std::memcpy(nso.data() + TurnSpeedHookOffset, &TurnSpeedOriginalInstruction, sizeof(u32));
     std::memcpy(nso.data() + TurnSpeedHookOffset + 4, &TurnSpeedSecondInstruction, sizeof(u32));
+    std::memcpy(nso.data() + MovieFramesHookOffset, &MovieFramesOriginalInstruction, sizeof(u32));
     std::memcpy(nso.data() + ScarecrowRecordHookOffset, &ScarecrowCutOriginalInstruction,
                 sizeof(u32));
     std::memcpy(nso.data() + ScarecrowLastHookOffset, &ScarecrowCutOriginalInstruction,
@@ -398,6 +404,11 @@ TEST_CASE("Built-in FPS Unlock defaults on and replaces Dynamic FPS", "[patch_ma
                 std::span{patched}.subspan(TurnSpeedRoutineOffset, TurnSpeedRoutineSize)) ==
             "01102E1E0021211E8A0000540018281E0140211E3360A717E10F40BD0108211E0008281E"
             "2F60A717");
+    REQUIRE(WordAt(patched, MovieFramesHookOffset) == MovieFramesHookInstruction);
+    REQUIRE(Common::HexToString(
+                std::span{patched}.subspan(MovieFramesRoutineOffset, MovieFramesRoutineSize)) ==
+            "ED3BBDA9EF4301A9FE1300F98DE20B91CE810090CE4944F9CE0140F9C01140BDBCFFFF97"
+            "08010D0BFE1340F9EF4341A9ED3BC3A84A57FC17");
     REQUIRE(WordAt(patched, ScarecrowRecordHookOffset) == ScarecrowRecordHookInstruction);
     REQUIRE(Common::HexToString(std::span{patched}.subspan(ScarecrowRecordRoutineOffset,
                                                            ScarecrowRoutineSize)) ==
@@ -434,6 +445,9 @@ TEST_CASE("Built-in FPS Unlock defaults on and replaces Dynamic FPS", "[patch_ma
     // The turn speed fix belongs to FPS Unlock only.
     REQUIRE(WordAt(patched, TurnSpeedHookOffset) == TurnSpeedOriginalInstruction);
     REQUIRE(WordAt(patched, TurnSpeedRoutineOffset) == 0);
+    // So does the movie frame count, since its helper is FPS Unlock's.
+    REQUIRE(WordAt(patched, MovieFramesHookOffset) == MovieFramesOriginalInstruction);
+    REQUIRE(WordAt(patched, MovieFramesRoutineOffset) == 0);
     // So do the Scarecrow's Song recording counters, since their helper is FPS Unlock's.
     REQUIRE(WordAt(patched, ScarecrowRecordHookOffset) == ScarecrowCutOriginalInstruction);
     REQUIRE(WordAt(patched, ScarecrowRecordRoutineOffset) == 0);
@@ -768,6 +782,39 @@ TEST_CASE("Built-in FPS Unlock leaves all records alone when a user mod changes 
     }
     SECTION("User turn speed routine takes precedence") {
         offset = TurnSpeedRoutineOffset;
+    }
+    constexpr u32 mod_word = 0x11223344;
+    PatchManagerTestContext context{mod_word, offset};
+    Settings::values.disabled_addons[OcarinaTitleId] = {std::string{MaxResolution},
+                                                        std::string{DynamicFps}};
+    const auto nso = MakeDynamicMain();
+    auto expected = nso;
+    std::memcpy(expected.data() + offset, &mod_word, sizeof(mod_word));
+    REQUIRE(context.Manager().PatchNSO(nso, "main") == expected);
+}
+
+TEST_CASE("Built-in FPS Unlock validates the movie frame count records before writing",
+          "[patch_manager]") {
+    PatchManagerTestContext context;
+    Settings::values.disabled_addons[OcarinaTitleId] = {std::string{MaxResolution},
+                                                        std::string{DynamicFps}};
+    auto nso = MakeDynamicMain();
+    SECTION("Wrong movie frame count original") {
+        nso[MovieFramesHookOffset] ^= 1;
+    }
+    SECTION("Nonzero movie frame count cave") {
+        nso[MovieFramesRoutineOffset + MovieFramesRoutineSize - 1] = 1;
+    }
+    REQUIRE(context.Manager().PatchNSO(nso, "main") == nso);
+}
+
+TEST_CASE("Built-in FPS Unlock leaves all records alone when a user mod changes the movie frame "
+          "count",
+          "[patch_manager]") {
+    size_t offset = MovieFramesHookOffset;
+    SECTION("User movie frame count hook takes precedence") {}
+    SECTION("User movie frame count routine takes precedence") {
+        offset = MovieFramesRoutineOffset;
     }
     constexpr u32 mod_word = 0x11223344;
     PatchManagerTestContext context{mod_word, offset};
