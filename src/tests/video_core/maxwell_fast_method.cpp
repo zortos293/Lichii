@@ -1675,7 +1675,7 @@ TEST_CASE("Split front sends state writes to the back as register blocks that ma
         u32 argument;
         bool is_last;
     };
-    struct Result {
+    struct RunResult {
         std::array<u32, Maxwell3D::Regs::NUM_REGS> regs;
         std::array<u32, Maxwell3D::Regs::NUM_REGS> shadow;
         Maxwell3D::DirtyState::Flags dirty;
@@ -1693,9 +1693,9 @@ TEST_CASE("Split front sends state writes to the back as register blocks that ma
         split.Defer([&engine, &f] { engine.ConsumeSink(f.system); },
                     VideoCommon::GpuSplit::FastDrawNeutral);
         split.Drain(VideoCommon::DrainSite::Other);
-        return Result{engine.regs.reg_array, engine.shadow_state.reg_array, engine.dirty.flags,
-                      VideoCommon::Nx2FastDraw::Serial() != serial,
-                      VideoCommon::Nx2FastDraw::g_last_break.load()};
+        return RunResult{engine.regs.reg_array, engine.shadow_state.reg_array, engine.dirty.flags,
+                         VideoCommon::Nx2FastDraw::Serial() != serial,
+                         VideoCommon::Nx2FastDraw::g_last_break.load()};
     };
     std::vector<Step> setup{{MAXWELL3D_REG_INDEX(load_mme.instruction_ptr), 0, true}};
     for (const u32 word : code) {
@@ -1739,8 +1739,8 @@ TEST_CASE("Split front sends state writes to the back as register blocks that ma
                 steps.push_back({ShadowControl, random(4), true});
             }
         }
-        const Result blocks = run(0, steps);
-        const Result single = run(1, steps);
+        const RunResult blocks = run(0, steps);
+        const RunResult single = run(1, steps);
         REQUIRE(blocks.regs == single.regs);
         REQUIRE(blocks.shadow == single.shadow);
         REQUIRE(blocks.dirty == single.dirty);
