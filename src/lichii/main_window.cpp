@@ -195,6 +195,11 @@ static FileSys::VirtualFile VfsDirectoryCreateFileWrapper(const FileSys::Virtual
 
 #include <SDL3/SDL.h>
 
+#include <atomic>
+#include <chrono>
+#include <cstdlib>
+#include <mutex>
+#include <thread>
 #include <boost/container/flat_set.hpp>
 
 // Platform stuff //
@@ -342,7 +347,7 @@ constexpr int default_mouse_hide_timeout = 2500;
 constexpr int default_input_update_timeout = 1;
 constexpr int EmuThreadStopTimeoutMs = 10'000;
 // A teardown that keeps making progress (Common::ShutdownProgress) is waited for this long at
-// most before its thread is terminated.
+// most before Lichii gives up on it and exits.
 constexpr qint64 MaxEmuThreadShutdownMs = 180'000;
 
 constexpr size_t CopyBufferSize = 1_MiB;
@@ -1059,6 +1064,7 @@ void MainWindow::InitializeWidgets() {
 
     volume_button = new VolumeButton();
     volume_button->setObjectName(QStringLiteral("TogglableStatusBarButton"));
+    volume_button->setProperty("chip", QStringLiteral("volume"));
     volume_button->setFocusPolicy(Qt::NoFocus);
     volume_button->setCheckable(true);
     UpdateVolumeUI();
@@ -1100,6 +1106,7 @@ void MainWindow::InitializeWidgets() {
 
     frame_gen_status_button = new QPushButton();
     frame_gen_status_button->setObjectName(QStringLiteral("TogglableStatusBarButton"));
+    frame_gen_status_button->setProperty("chip", QStringLiteral("fg"));
     frame_gen_status_button->setFocusPolicy(Qt::NoFocus);
     frame_gen_status_button->setCheckable(true);
     connect(frame_gen_status_button, &QPushButton::clicked, this, [this] {
@@ -1133,6 +1140,7 @@ void MainWindow::InitializeWidgets() {
 #ifdef HAS_RESHADE
     post_shader_status_button = new QPushButton();
     post_shader_status_button->setObjectName(QStringLiteral("TogglableStatusBarButton"));
+    post_shader_status_button->setProperty("chip", QStringLiteral("fx"));
     post_shader_status_button->setFocusPolicy(Qt::NoFocus);
     post_shader_status_button->setCheckable(true);
     connect(post_shader_status_button, &QPushButton::clicked, this, [this] {
@@ -1168,6 +1176,7 @@ void MainWindow::InitializeWidgets() {
     // setup AA button
     aa_status_button = new QPushButton();
     aa_status_button->setObjectName(QStringLiteral("TogglableStatusBarButton"));
+    aa_status_button->setProperty("chip", QStringLiteral("aa"));
     aa_status_button->setFocusPolicy(Qt::NoFocus);
     connect(aa_status_button, &QPushButton::clicked, [&] {
         auto aa_mode = Settings::values.anti_aliasing.GetValue();
@@ -1201,6 +1210,7 @@ void MainWindow::InitializeWidgets() {
     // Setup Filter button
     filter_status_button = new QPushButton();
     filter_status_button->setObjectName(QStringLiteral("TogglableStatusBarButton"));
+    filter_status_button->setProperty("chip", QStringLiteral("filter"));
     filter_status_button->setFocusPolicy(Qt::NoFocus);
     connect(filter_status_button, &QPushButton::clicked, this, &MainWindow::OnToggleAdaptingFilter);
     UpdateFilterText();
@@ -1226,6 +1236,7 @@ void MainWindow::InitializeWidgets() {
     // Setup Dock button
     dock_status_button = new QPushButton();
     dock_status_button->setObjectName(QStringLiteral("DockingStatusBarButton"));
+    dock_status_button->setProperty("chip", QStringLiteral("dock"));
     dock_status_button->setFocusPolicy(Qt::NoFocus);
     connect(dock_status_button, &QPushButton::clicked, this, &MainWindow::OnToggleDockedMode);
     dock_status_button->setCheckable(true);
@@ -1252,6 +1263,7 @@ void MainWindow::InitializeWidgets() {
     // Setup GPU Accuracy button
     gpu_accuracy_button = new QPushButton();
     gpu_accuracy_button->setObjectName(QStringLiteral("GPUStatusBarButton"));
+    gpu_accuracy_button->setProperty("chip", QStringLiteral("gpu"));
     gpu_accuracy_button->setCheckable(true);
     gpu_accuracy_button->setFocusPolicy(Qt::NoFocus);
     connect(gpu_accuracy_button, &QPushButton::clicked, this, &MainWindow::OnToggleGpuAccuracy);
@@ -1377,6 +1389,7 @@ void MainWindow::InitializeHotkeys() {
     hotkey_registry.LoadHotkeys();
 
     LinkActionShortcut(ui->action_Load_File, QStringLiteral("Load File"));
+    LinkActionShortcut(ui->action_Load_Amiibo, QStringLiteral("Load/Remove Amiibo"));
     LinkActionShortcut(ui->action_Exit, QStringLiteral("Exit Eglantine"));
     LinkActionShortcut(ui->action_Restart, QStringLiteral("Restart Emulation"));
     LinkActionShortcut(ui->action_Pause, QStringLiteral("Continue/Pause Emulation"));
@@ -1426,16 +1439,28 @@ void MainWindow::InitializeHotkeys() {
     connect_shortcut(QStringLiteral("Audio Volume Up"), &MainWindow::OnIncreaseVolume);
 
     connect_shortcut(QStringLiteral("Toggle Framerate Limit"), [this] {
+        if (!emulation_running) {
+            return;
+        }
+        RememberSpeedLimitBeforeHotkey();
         Settings::ToggleStandardMode();
         SetFPSSuffix();
     });
 
     connect_shortcut(QStringLiteral("Toggle Turbo Speed"), [this] {
+        if (!emulation_running) {
+            return;
+        }
+        RememberSpeedLimitBeforeHotkey();
         Settings::ToggleTurboMode();
         SetFPSSuffix();
     });
 
     connect_shortcut(QStringLiteral("Toggle Slow Speed"), [this] {
+        if (!emulation_running) {
+            return;
+        }
+        RememberSpeedLimitBeforeHotkey();
         Settings::ToggleSlowMode();
         SetFPSSuffix();
     });
@@ -2214,6 +2239,7 @@ void MainWindow::BootGame(const QString& filename, Service::AM::FrontendAppletPa
     }
 
     PrepareShaderPrecache(title_id, std::filesystem::path{filename.toStdU16String()});
+    speed_limit_before_hotkeys.reset();
     Settings::LogSettings();
 
     if (UISettings::values.select_user_on_boot && !user_flag_cmd_line) {
@@ -2473,6 +2499,29 @@ void MainWindow::BootGameFromList(const QString& filename, StartGameType with_co
     BootGame(filename, ApplicationAppletParameters(), with_config);
 }
 
+void MainWindow::RememberSpeedLimitBeforeHotkey() {
+    if (!speed_limit_before_hotkeys) {
+        speed_limit_before_hotkeys = SessionSpeedLimit{
+            .value = Settings::values.use_speed_limit.GetValue(),
+            .using_global = Settings::values.use_speed_limit.UsingGlobal(),
+        };
+    }
+}
+
+void MainWindow::UndoSessionSpeedChanges() {
+    // Undo the session's frame rate limit hotkey and turbo/slow modes. Only what the hotkeys
+    // changed is put back, in the scope (global or per-game) it was changed in: forcing the
+    // limit on here saved "Limit Speed Percent" as checked after every game, whatever the user
+    // had chosen.
+    // A configuration applied in a dialog that is still open replaces the hotkeys' change too.
+    if (speed_limit_before_hotkeys && !UISettings::values.configuration_applied &&
+        Settings::values.use_speed_limit.UsingGlobal() == speed_limit_before_hotkeys->using_global) {
+        Settings::values.use_speed_limit.SetValue(speed_limit_before_hotkeys->value);
+    }
+    speed_limit_before_hotkeys.reset();
+    Settings::values.current_speed_mode = Settings::SpeedMode::Standard;
+}
+
 bool MainWindow::OnShutdownBegin() {
     if (!emulation_running) {
         return false;
@@ -2484,9 +2533,7 @@ bool MainWindow::OnShutdownBegin() {
 
     AllowOSSleep();
 
-    // Disable unlimited frame rate and turbo/slow modes
-    Settings::values.use_speed_limit.SetValue(true);
-    Settings::values.current_speed_mode = Settings::SpeedMode::Standard;
+    UndoSessionSpeedChanges();
 
     if (QtCommon::system->IsShuttingDown()) {
         status_bar_update_timer.stop();
@@ -2541,8 +2588,43 @@ void MainWindow::OnShutdownBeginDialog() {
     shutdown_dialog->open();
 }
 
+/// Ends the process at once: no destructors, no atexit handlers, no flush of C streams.
+[[noreturn]] static void EndProcessNow(int exit_code) {
+#ifdef _WIN32
+    TerminateProcess(GetCurrentProcess(), static_cast<UINT>(exit_code));
+#endif
+    std::_Exit(exit_code);
+}
+
+static s64 SteadyNowMs() {
+    return std::chrono::duration_cast<std::chrono::milliseconds>(
+               std::chrono::steady_clock::now().time_since_epoch())
+        .count();
+}
+
+/// When set (steady clock ms), the exit watchdog ends the process once it is reached.
+static std::atomic<s64> exit_deadline_ms{0};
+
+/// Started at the first forced stop, while no lock can be stuck yet: arming it later (see
+/// ExitIfEmulationThreadStuck) only stores a deadline and allocates nothing.
+static void StartExitWatchdog() {
+    static std::once_flag started;
+    std::call_once(started, [] {
+        std::thread([] {
+            for (;;) {
+                std::this_thread::sleep_for(std::chrono::milliseconds(100));
+                const s64 deadline = exit_deadline_ms.load(std::memory_order_relaxed);
+                if (deadline != 0 && SteadyNowMs() >= deadline) {
+                    EndProcessNow(1);
+                }
+            }
+        }).detach();
+    });
+}
+
 void MainWindow::OnEmulationStopTimeExpired() {
     if (QtCommon::emu_thread) {
+        StartExitWatchdog();
         QtCommon::emu_thread->ForceStop();
         emu_force_stop_clock.start();
         shutdown_progress_seen = Common::ShutdownProgress();
@@ -2562,9 +2644,8 @@ bool MainWindow::EmulationShutdownProgressing() {
 }
 
 void MainWindow::OnEmulationStopTimeout() {
-    // Terminating the thread mid-teardown can leave a lock it holds (the heap's, the driver's)
-    // taken for good, which froze the whole app. While the teardown still moves (pipeline caches
-    // written, pipelines destroyed), it gets another timeout.
+    // While the teardown still moves (pipeline caches written, pipelines destroyed), it gets
+    // another timeout. A stalled teardown ends the process (see ExitIfEmulationThreadStuck).
     if (QtCommon::emu_thread && QtCommon::emu_thread->isRunning() &&
         EmulationShutdownProgressing()) {
         LOG_INFO(Frontend, "Emulation thread still shutting down after {} ms, waiting",
@@ -2572,20 +2653,33 @@ void MainWindow::OnEmulationStopTimeout() {
         emu_terminate_timer.start(EmuThreadStopTimeoutMs);
         return;
     }
-    TerminateEmulationThread();
+    ExitIfEmulationThreadStuck();
     OnEmulationStopped();
 }
 
-void MainWindow::TerminateEmulationThread() {
-    if (QtCommon::emu_thread && QtCommon::emu_thread->isRunning()) {
-        LOG_ERROR(Frontend, "Emulation thread failed to stop, terminating it");
-        // On Windows terminate() emits finished with the thread's mutex held, and
-        // OnEmulationStopped calls isRunning(), which takes it. Both callers run it afterwards.
-        disconnect(QtCommon::emu_thread.get(), &QThread::finished, this,
-                   &MainWindow::OnEmulationStopped);
-        QtCommon::emu_thread->terminate();
-        QtCommon::emu_thread->wait();
+/// Called when the stop wait is over. Returns if the emulation thread has stopped. If it still
+/// runs, saves the settings and ends the process with all threads alive, so the program closes
+/// from Stop as well as from the window close. Terminating the thread instead can orphan a lock
+/// it holds (the process heap's, a driver's), after which every allocation in the process hangs.
+void MainWindow::ExitIfEmulationThreadStuck() {
+    if (!QtCommon::emu_thread || !QtCommon::emu_thread->isRunning()) {
+        return;
     }
+    // The stuck thread can hold a lock that the save needs. The save gets this long.
+    exit_deadline_ms.store(SteadyNowMs() + 5'000, std::memory_order_relaxed);
+    LOG_ERROR(Frontend,
+              "Emulation thread failed to stop after {} ms (shutdown progress {}); saving "
+              "settings and exiting",
+              emu_force_stop_clock.elapsed(), Common::ShutdownProgress());
+    play_time_manager->Stop();
+    UpdateUISettings();
+    game_list->SaveInterfaceLayout();
+    UISettings::SaveWindowState();
+    hotkey_registry.SaveHotkeys();
+    config->SaveAllValues();
+    LOG_INFO(Frontend, "Settings saved; exiting without emulation cleanup");
+    Common::Log::Stop();
+    EndProcessNow(0);
 }
 
 void MainWindow::OnEmulationStopped() {
@@ -2598,6 +2692,7 @@ void MainWindow::OnEmulationStopped() {
     if (bug_report_dialog) {
         bug_report_dialog->StopCapture();
     }
+    UndoSessionSpeedChanges();
     shutdown_timer.stop();
     emu_terminate_timer.stop();
     if (QtCommon::emu_thread) {
@@ -2712,7 +2807,7 @@ void MainWindow::ShutdownGame() {
         } while (QtCommon::emu_thread && QtCommon::emu_thread->isRunning() &&
                  EmulationShutdownProgressing());
     }
-    TerminateEmulationThread();
+    ExitIfEmulationThreadStuck();
     OnEmulationStopped();
 }
 
@@ -3961,7 +4056,10 @@ void MainWindow::OnConfigure() {
         // Runs if the user hit Cancel or closed the window, and did not ever press the Apply button
         // or `Reset to Defaults` button
         return;
-    } else if (result == QDialog::Accepted) {
+    }
+    // Applied settings (OK, Apply or Reset to Defaults) replace the speed limit the hotkeys changed.
+    speed_limit_before_hotkeys.reset();
+    if (result == QDialog::Accepted) {
         // Only apply new changes if user hit Okay
         // This is here to avoid applying changes if the user hit Apply, made some changes, then hit
         // Cancel
@@ -4239,6 +4337,9 @@ void MainWindow::OpenPerGameConfiguration(u64 title_id, const std::string& file_
     Settings::SetConfiguringGlobal(false);
     ConfigurePerGame dialog(this, title_id, file_name, vk_device_records, *QtCommon::system);
     dialog.LoadFromFile(Core::GetGameFileFromPath(QtCommon::vfs, file_name));
+    // Artwork saved here wins over a SteamGridDB lookup still running for the game.
+    connect(&dialog, &ConfigurePerGame::CustomArtworkChanged, game_list,
+            &GameList::OnCustomArtworkChanged);
 
     const auto result = dialog.exec();
 
@@ -4260,7 +4361,9 @@ void MainWindow::OpenPerGameConfiguration(u64 title_id, const std::string& file_
         }
         Settings::RestoreGlobalState(QtCommon::system->IsPoweredOn());
         return;
-    } else if (result == QDialog::Accepted) {
+    }
+    speed_limit_before_hotkeys.reset();
+    if (result == QDialog::Accepted) {
         dialog.ApplyConfiguration();
     }
 
