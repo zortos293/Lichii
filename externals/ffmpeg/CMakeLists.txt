@@ -98,7 +98,8 @@ elseif (UNIX AND NOT DEFINED FFmpeg_IS_CROSS_COMPILING AND NOT ANDROID)
             list(APPEND FFmpeg_HWACCEL_FLAGS
                 --enable-hwaccel=h264_vaapi
                 --enable-hwaccel=vp8_vaapi
-                --enable-hwaccel=vp9_vaapi)
+                --enable-hwaccel=vp9_vaapi
+                --enable-hwaccel=av1_vaapi)
             list(APPEND FFmpeg_HWACCEL_INCLUDE_DIRS
                 ${X11_INCLUDE_DIRS}
                 ${LIBVA-DRM_INCLUDE_DIRS}

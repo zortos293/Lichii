@@ -29,7 +29,6 @@ namespace FFmpeg {
 namespace {
 
 constexpr AVPixelFormat PreferredGpuFormat = AV_PIX_FMT_NV12;
-constexpr AVPixelFormat PreferredCpuFormat = AV_PIX_FMT_YUV420P;
 constexpr std::array PreferredGpuDecoders = {
 #if defined(_WIN32)
     AV_HWDEVICE_TYPE_CUDA,
@@ -52,39 +51,43 @@ constexpr std::array PreferredGpuDecoders = {
     AV_HWDEVICE_TYPE_VULKAN,
 };
 
-AVPixelFormat GetGpuFormat(AVCodecContext* codec_context, const AVPixelFormat* pix_fmts) {
-    const auto desc = av_pix_fmt_desc_get(codec_context->pix_fmt);
-    if (desc && !(desc->flags & AV_PIX_FMT_FLAG_HWACCEL)) {
-        for (int i = 0;; i++) {
-            const AVCodecHWConfig* config = avcodec_get_hw_config(codec_context->codec, i);
-            if (!config) {
-                break;
-            }
-
-            for (const auto type : PreferredGpuDecoders) {
-                if (config->methods & AV_CODEC_HW_CONFIG_METHOD_HW_DEVICE_CTX && config->device_type == type) {
-                    codec_context->pix_fmt = config->pix_fmt;
-                }
-            }
-        }
-    }
-
-    for (const AVPixelFormat* p = pix_fmts; *p != AV_PIX_FMT_NONE; ++p) {
-        if (*p == codec_context->pix_fmt) {
-            return codec_context->pix_fmt;
-        }
-    }
-
-    LOG_INFO(HW_GPU, "Could not find supported GPU pixel format, falling back to CPU decoder");
-    av_buffer_unref(&codec_context->hw_device_ctx);
-    codec_context->pix_fmt = PreferredCpuFormat;
-    return codec_context->pix_fmt;
-}
-
 std::string AVError(int errnum) {
     char errbuf[AV_ERROR_MAX_STRING_SIZE] = {};
     av_make_error_string(errbuf, sizeof(errbuf) - 1, errnum);
     return errbuf;
+}
+
+AVPixelFormat GetGpuFormat(AVCodecContext* codec_context, const AVPixelFormat* pix_fmts) {
+    if (!codec_context->hw_device_ctx) {
+        for (const AVPixelFormat* p = pix_fmts; *p != AV_PIX_FMT_NONE; ++p) {
+            const AVPixFmtDescriptor* desc = av_pix_fmt_desc_get(*p);
+            if (desc && !(desc->flags & AV_PIX_FMT_FLAG_HWACCEL)) {
+                return *p;
+            }
+        }
+        return AV_PIX_FMT_NONE;
+    }
+
+    const auto* hwctx =
+        reinterpret_cast<const AVHWDeviceContext*>(codec_context->hw_device_ctx->data);
+    for (int i = 0;; i++) {
+        const AVCodecHWConfig* config = avcodec_get_hw_config(codec_context->codec, i);
+        if (!config) {
+            break;
+        }
+        if (config->device_type != hwctx->type) {
+            continue;
+        }
+        for (const AVPixelFormat* p = pix_fmts; *p != AV_PIX_FMT_NONE; ++p) {
+            if (*p == config->pix_fmt) {
+                return *p;
+            }
+        }
+    }
+
+    LOG_INFO(HW_GPU, "No {} pixel format offered to get_format",
+             av_hwdevice_get_type_name(hwctx->type));
+    return AV_PIX_FMT_NONE;
 }
 
 #if defined(__ANDROID__)
@@ -153,6 +156,40 @@ Frame::~Frame() {
     av_frame_free(&m_frame);
 }
 
+static bool CodecHasUsableHWConfig(const AVCodec* codec) {
+    const auto supported_types = HardwareContext::GetSupportedDeviceTypes();
+    for (int i = 0;; i++) {
+        const AVCodecHWConfig* config = avcodec_get_hw_config(codec, i);
+        if (!config) {
+            return false;
+        }
+        if (!(config->methods & AV_CODEC_HW_CONFIG_METHOD_HW_DEVICE_CTX)) {
+            continue;
+        }
+        for (const auto type : PreferredGpuDecoders) {
+            if (config->device_type == type &&
+                std::ranges::find(supported_types, type) != supported_types.end()) {
+                return true;
+            }
+        }
+    }
+}
+
+static const AVCodec* GetHWCodec(AVCodecID av_codec) {
+    void* iter = nullptr;
+    while (const AVCodec* codec = av_codec_iterate(&iter)) {
+        if (!av_codec_is_decoder(codec) || codec->id != av_codec) {
+            continue;
+        }
+        if (!CodecHasUsableHWConfig(codec)) {
+            continue;
+        }
+        LOG_DEBUG(HW_GPU, "found HW decoder {}", codec->long_name);
+        return codec;
+    }
+    return nullptr;
+}
+
 Decoder::Decoder(Tegra::Host1x::NvdecCommon::VideoCodec codec) {
     const AVCodecID av_codec = [&] {
         switch (codec) {
@@ -185,6 +222,10 @@ Decoder::Decoder(Tegra::Host1x::NvdecCommon::VideoCodec codec) {
         }
     }
 #endif
+    if (!m_codec &&
+        Settings::values.nvdec_emulation.GetValue() == Settings::NvdecEmulation::Gpu) {
+        m_codec = GetHWCodec(av_codec);
+    }
     if (!m_codec && av_codec == AV_CODEC_ID_AV1) {
         // FFmpeg's own av1 decoder only decodes through a GPU hwaccel.
         m_codec = avcodec_find_decoder_by_name("libdav1d");
@@ -258,7 +299,9 @@ bool HardwareContext::InitializeWithType(AVHWDeviceType type) {
     av_buffer_unref(&m_gpu_decoder);
 
     if (const int ret = av_hwdevice_ctx_create(&m_gpu_decoder, type, nullptr, nullptr, 0); ret < 0) {
-        LOG_DEBUG(HW_GPU, "av_hwdevice_ctx_create({}) failed: {}", av_hwdevice_get_type_name(type), AVError(ret));
+        m_gpu_decoder = nullptr;
+        LOG_DEBUG(HW_GPU, "av_hwdevice_ctx_create({}) failed: {}", av_hwdevice_get_type_name(type),
+                  AVError(ret));
         return false;
     }
 
@@ -271,6 +314,7 @@ bool HardwareContext::InitializeWithType(AVHWDeviceType type) {
         if (strstr(vendor_name, "VDPAU backend")) {
             // VDPAU impersonated VAAPI impls are super buggy, we need to skip them.
             LOG_DEBUG(HW_GPU, "Skipping VDPAU impersonated VAAPI driver");
+            av_buffer_unref(&m_gpu_decoder);
             return false;
         } else {
             // According to some user testing, certain VAAPI drivers (Intel?) could be buggy.
@@ -300,9 +344,10 @@ DecoderContext::~DecoderContext() {
 }
 
 void DecoderContext::InitializeHardwareDecoder(const HardwareContext& context, AVPixelFormat hw_pix_fmt) {
+    // Leave pix_fmt unset until get_format (same as FFmpeg hw_decode.c).
+    (void)hw_pix_fmt;
     m_codec_context->hw_device_ctx = av_buffer_ref(context.GetBufferRef());
     m_codec_context->get_format = GetGpuFormat;
-    m_codec_context->pix_fmt = hw_pix_fmt;
 }
 
 bool DecoderContext::OpenContext(const Decoder& decoder, std::span<const u8> extradata) {
