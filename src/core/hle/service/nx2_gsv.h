@@ -1777,7 +1777,8 @@ struct Nx2NativeObjects {
 // GameChat's graphics side (nn::chat::gsv), handed out by gsv 1202. Read from the SDK's
 // nn::chat::gsv::Initialize: TIPC 1() returns a u32 id at word 3 (it aborts with 2162-0001 if
 // the id is over 0x3ff), then TIPC 11(u32 id) returns an event (copy handle at word 3, result at
-// word 4) that it attaches as a system event. Everything else falls through to the nx2 auto stub.
+// word 4) that it attaches as a system event. 103 (OpenVirtualDisplay: u64 name packed from up to
+// 8 chars, u32 slot id) only reads the result. Everything else falls through to the nx2 auto stub.
 class INx2ChatGsvSession final : public ServiceFramework<INx2ChatGsvSession> {
 public:
     explicit INx2ChatGsvSession(Core::System& system_)
@@ -1785,6 +1786,7 @@ public:
         RegisterHandlersTipc({
             {1, &INx2ChatGsvSession::GetEventId, "GetEventId (guessed)"},
             {11, &INx2ChatGsvSession::GetEvent, "GetEvent (guessed)"},
+            {103, &INx2ChatGsvSession::OpenVirtualDisplay, "OpenVirtualDisplay"},
         });
     }
 
@@ -1812,36 +1814,74 @@ private:
         rb.PushCopyObjects(ctx, event->GetReadableEvent());
     }
 
+    void OpenVirtualDisplay(HLERequestContext& ctx) {
+        LOG_DEBUG(Service, "nx2:chat:gsv TIPC 103 [2]={:#x} [3]={:#x} [4]={:#x}",
+                  ctx.CommandBuffer()[2], ctx.CommandBuffer()[3], ctx.CommandBuffer()[4]);
+        IPC::ResponseBuilder rb{ctx, 2};
+        rb.Push(ResultSuccess);
+    }
+
     KernelHelpers::ServiceContext m_context;
     std::map<u32, Kernel::KEvent*> m_events;
 };
 
 // nn::camera::sdk camera context (gsv 602). GameChat builds its local camera video storage from it
-// and polls it every frame. Nothing about the commands is known beyond the arguments seen (3 and
-// 21 take the camera name "Default", 29 a u32 0x180 = 384, the width of the 384x216 camera images),
-// and the game runs on an empty success, so they answer that without a log line per call.
+// and polls it every frame. The titles' statically linked camera client talks CMIF on it, not TIPC
+// (Star Fox sends type 6 requests). 3(char name[16]) opens "Default" and returns a u64 camera id,
+// 21(u64 id) returns a copy handle attached as the camera's system event, and 29 (an image
+// preference and the id) reads only the result. The titles run on success and id 0, so this keeps
+// those answers and adds the event 21 lacked; it is never signalled. Everything else falls through
+// to the nx2 auto stub.
 class INx2CameraSession final : public ServiceFramework<INx2CameraSession> {
 public:
-    explicit INx2CameraSession(Core::System& system_) : ServiceFramework{system_, "nx2:camera"} {
-        RegisterHandlersTipc({
-            {3, &INx2CameraSession::Stub, "Unknown3 (camera name \"Default\")"},
-            {21, &INx2CameraSession::Stub, "Unknown21 (camera name \"Default\")"},
-            {29, &INx2CameraSession::Stub, "Unknown29 (u32 0x180, polled every frame)"},
-        });
+    explicit INx2CameraSession(Core::System& system_)
+        : ServiceFramework{system_, "nx2:camera"}, m_context{system_, "nx2:camera"} {
+        static const FunctionInfo functions[] = {
+            {3, &INx2CameraSession::OpenCamera, "OpenCamera"},
+            {21, &INx2CameraSession::GetCameraEvent, "GetCameraEvent"},
+            {29, &INx2CameraSession::CheckImagePreference, "CheckImagePreference"},
+        };
+        RegisterHandlers(functions);
+        m_event = m_context.CreateEvent("nx2:camera:Event");
+    }
+
+    ~INx2CameraSession() override {
+        m_context.CloseEvent(m_event);
     }
 
 private:
-    void Stub(HLERequestContext& ctx) {
-        const u32 command = ctx.GetCommand();
-        if (m_logged.insert(command).second) {
-            LOG_WARNING(Service, "(STUBBED) nx2:camera TIPC {} [2]={:#x} [3]={:#x}, returning success",
-                        command, ctx.CommandBuffer()[2], ctx.CommandBuffer()[3]);
+    void OpenCamera(HLERequestContext& ctx) {
+        IPC::RequestParser rp{ctx};
+        const auto name = rp.PopRaw<std::array<char, 16>>();
+        const std::string_view name_view{name.data(), name.size()};
+        LOG_WARNING(Service, "(STUBBED) nx2:camera 3 name={}, returning camera id 0",
+                    name_view.substr(0, name_view.find('\0')));
+        IPC::ResponseBuilder rb{ctx, 4};
+        rb.Push(ResultSuccess);
+        rb.Push<u64>(0);
+    }
+
+    void GetCameraEvent(HLERequestContext& ctx) {
+        IPC::RequestParser rp{ctx};
+        LOG_WARNING(Service, "(STUBBED) nx2:camera 21 id={}, returning an event", rp.Pop<u64>());
+        IPC::ResponseBuilder rb{ctx, 2, 1};
+        rb.Push(ResultSuccess);
+        rb.PushCopyObjects(ctx, m_event->GetReadableEvent());
+    }
+
+    void CheckImagePreference(HLERequestContext& ctx) {
+        if (!m_logged_29) {
+            m_logged_29 = true;
+            LOG_WARNING(Service, "(STUBBED) nx2:camera 29 [8]={:#x}, returning success",
+                        ctx.CommandBuffer()[8]);
         }
         IPC::ResponseBuilder rb{ctx, 2};
         rb.Push(ResultSuccess);
     }
 
-    std::set<u32> m_logged;
+    KernelHelpers::ServiceContext m_context;
+    Kernel::KEvent* m_event;
+    bool m_logged_29 = false;
 };
 
 // Video decoder output images (nn::codec image pools, gsv 991/911/961). The preference
