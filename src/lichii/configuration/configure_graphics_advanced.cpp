@@ -32,6 +32,7 @@ ConfigureGraphicsAdvanced::~ConfigureGraphicsAdvanced() = default;
 
 void ConfigureGraphicsAdvanced::SetConfiguration() {}
 
+/// Build advanced graphics controls, exposing neural adjustments only with the native backend.
 void ConfigureGraphicsAdvanced::Setup(const ConfigurationShared::Builder& builder) {
     auto& normal_layout = *ui->normal_target->layout();
 
@@ -40,6 +41,12 @@ void ConfigureGraphicsAdvanced::Setup(const ConfigurationShared::Builder& builde
 
     for (auto setting :
          Settings::values.linkage.by_category[Settings::Category::RendererAdvanced]) {
+#ifndef EGLANTINE_NGX
+        if (setting->Id() == Settings::values.neural_rendering_tone.Id() ||
+            setting->Id() == Settings::values.neural_rendering_structure.Id()) {
+            continue;
+        }
+#endif
         ConfigurationShared::Widget* widget = builder.BuildWidget(setting, apply_funcs);
 
         if (widget == nullptr) {

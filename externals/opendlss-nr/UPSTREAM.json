@@ -1,0 +1,26 @@
+{
+  "repository": "https://github.com/maanHimself/OpenDLSS-NR",
+  "revision": "9d08f4184bbcb9d858e2fb7a7834ec0837a9d2f1",
+  "license": "MIT",
+  "project_glue": {
+    "license": "GPL-3.0-or-later",
+    "copyright": "2026 Eden Emulator Project",
+    "files": ["CMakeLists.txt", "scripts/build_assets.py", "src/assets.h"]
+  },
+  "selection": "Inference core, reference arithmetic for the SiLU table, shaders, PTX generators and adapted preprocessing/composition shaders. No model weights, scene assets or DLSS5VKLayer.",
+  "patches": [
+    "GCC compatibility from upstream PR 8",
+    "Embedded SPIR-V and PTX assets instead of runtime file lookup",
+    "Private volk namespace to avoid Vulkan symbol interposition",
+    "Renderer RGBA16F input/output, LDR or linear HDR, and game motion vectors in the frame shaders",
+    "Release partially created Vulkan resources when initialization fails",
+    "Document inference resource contracts and PTX generator functions",
+    "Preserve the unmodified renderer image at zero neural intensity while retaining history"
+  ],
+  "volk": {
+    "repository": "https://github.com/zeux/volk",
+    "revision": "776893306c5d3b22b6185b5d4a258b81d94572bf",
+    "tag": "vulkan-sdk-1.4.357.0",
+    "license": "MIT"
+  }
+}

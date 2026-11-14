@@ -1,0 +1,24 @@
+This directory contains selected OpenDLSS-NR inference sources, shaders and PTX
+generators, including local adaptations, under the MIT License in LICENSE
+(Copyright (c) 2026 maan). The imported revision and adaptations are recorded in
+UPSTREAM.json. No demo renderer, scene assets or scene-conversion tools are included.
+
+Lichii's own build/integration files CMakeLists.txt, scripts/build_assets.py and
+src/assets.h are separate from that import. They are Copyright 2026 Eden Emulator
+Project and licensed GPL-3.0-or-later, as their SPDX headers specify. See the
+repository's LICENSE.txt. The MIT license in this directory does not replace
+those file-specific terms.
+
+Other components used by this directory:
+
+- volk is vendored under volk/ under the MIT License; see volk/LICENSE.md and
+  the pinned revision in UPSTREAM.json.
+- glslang is a build-time shader compiler. If a suitable installed compiler is
+  unavailable, CMake downloads the pinned source into the build tree. Its
+  BSD-style and component-specific notices are provided in that source's
+  LICENSE.txt. glslang source is not vendored here.
+
+This code is not affiliated with, endorsed by, or supported by NVIDIA Corporation.
+"DLSS" is a trademark of NVIDIA Corporation and describes compatibility. No
+NVIDIA model weights, libraries, headers or documentation are included in this
+directory, and no rights under NVIDIA intellectual property are granted here.

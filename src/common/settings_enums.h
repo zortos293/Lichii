@@ -153,6 +153,7 @@ ENUM(AntiAliasing, None, Fxaa, Smaa);
 ENUM(OotAntiAliasing, Game, NoSharpening);
 ENUM(NvidiaDlssQuality, Automatic, Native, Quality, Balanced, Performance, UltraPerformance);
 ENUM(NvidiaDlssPreset, M, NvidiaDefault, E, F, J, K, L);
+ENUM(NeuralRendering, Off, Standard, Natural, Cinematic);
 ENUM(HdrMode, Off, On, Auto);
 ENUM(HdrSwapchain, Hdr10, Scrgb);
 ENUM(AspectRatio, R16_9, R4_3, R21_9, R16_10, Stretch);

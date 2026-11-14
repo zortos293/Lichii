@@ -48,6 +48,7 @@ SWITCHABLE(AnisotropyMode, true);
 SWITCHABLE(AntiAliasing, false);
 SWITCHABLE(OotAntiAliasing, false);
 SWITCHABLE(NvidiaDlssQuality, false);
+SWITCHABLE(NeuralRendering, false);
 SWITCHABLE(NvidiaDlssPreset, false);
 SWITCHABLE(HdrMode, false);
 SWITCHABLE(HdrSwapchain, false);
@@ -89,14 +90,22 @@ SWITCHABLE(ConfirmStop, true);
 Values values;
 
 namespace {
-std::atomic<u32> nvidia_dlss_runtime_options{};
+// One byte per option; the three percentages default to 100 while quality/style default to zero.
+std::atomic<u64> nvidia_dlss_runtime_options{(u64{100} << 16) | (u64{100} << 24) | (u64{100} << 32)};
 std::atomic<u32> applied_ocarina_render_scale{};
-}
+} // namespace
 
+/// Publish enablement, quality, style and neural percentages after frontend settings are applied.
 void RefreshNvidiaDlssRuntimeSettings() {
+    const auto quality = static_cast<u64>(values.nvidia_dlss_quality.GetValue());
+    const auto neural = static_cast<u64>(values.neural_rendering.GetValue());
+    const auto strength = static_cast<u64>(values.neural_rendering_strength.GetValue());
+    const auto tone = static_cast<u64>(values.neural_rendering_tone.GetValue());
+    const auto structure = static_cast<u64>(values.neural_rendering_structure.GetValue());
+    const auto enabled = static_cast<u64>(values.nvidia_dlss.GetValue());
     nvidia_dlss_runtime_options.store(
-        static_cast<u32>(values.nvidia_dlss_quality.GetValue()) |
-            (static_cast<u32>(values.nvidia_dlss_preset.GetValue()) << 8),
+        quality | (neural << 8) | (strength << 16) | (tone << 24) | (structure << 32) |
+            (enabled << 40) | (static_cast<u64>(values.nvidia_dlss_preset.GetValue()) << 48),
         std::memory_order_relaxed);
 }
 
@@ -123,10 +132,16 @@ std::optional<NvidiaDlssQuality> AppliedOcarinaRenderScale() {
     return static_cast<NvidiaDlssQuality>(value - 1);
 }
 
+/// Decode the atomic option snapshot used by the GPU and scheduler threads.
 NvidiaDlssRuntimeSettings GetNvidiaDlssRuntimeSettings() {
-    const u32 options = nvidia_dlss_runtime_options.load(std::memory_order_relaxed);
+    const auto options = nvidia_dlss_runtime_options.load(std::memory_order_relaxed);
     return {static_cast<NvidiaDlssQuality>(options & 0xff),
-            static_cast<NvidiaDlssPreset>((options >> 8) & 0xff)};
+            static_cast<NeuralRendering>((options >> 8) & 0xff),
+            static_cast<u32>((options >> 16) & 0xff),
+            static_cast<u32>((options >> 24) & 0xff),
+            static_cast<u32>((options >> 32) & 0xff),
+            ((options >> 40) & 1) != 0,
+            static_cast<NvidiaDlssPreset>((options >> 48) & 0xff)};
 }
 
 std::string GetTimeZoneString(TimeZone time_zone) {

@@ -83,6 +83,7 @@ add_executable(lichii
     configuration/amd_fsr4_panel.cpp
     configuration/amd_fsr4_panel.h
     configuration/nvidia_dlss_panel.cpp
+    configuration/nvidia_dlss_panel_linux.cpp
     configuration/nvidia_dlss_panel.h
     configuration/configure_graphics.ui
     configuration/configure_graphics_advanced.cpp

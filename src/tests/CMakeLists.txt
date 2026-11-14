@@ -4,6 +4,7 @@
 # SPDX-License-Identifier: GPL-2.0-or-later
 
 add_executable(tests
+    video_core/neural_rendering_model.cpp
     common/addon_config.cpp
     common/thread_worker.cpp
     video_core/vulkan_overlay_filter.cpp
@@ -261,6 +262,12 @@ target_compile_definitions(tests PRIVATE
     LICHII_NX_FIXTURE_DIR="${CMAKE_CURRENT_SOURCE_DIR}/core/nx_fixtures")
 
 add_test(NAME tests COMMAND tests)
+
+if (ENABLE_NVIDIA_DLSS AND CMAKE_SYSTEM_NAME STREQUAL "Linux")
+    add_executable(ngx_smoke EXCLUDE_FROM_ALL video_core/ngx_smoke.cpp)
+    target_link_libraries(ngx_smoke PRIVATE video_core core common frontend_common ${PLATFORM_LIBRARIES})
+    target_include_directories(ngx_smoke PRIVATE $<TARGET_PROPERTY:video_core,INCLUDE_DIRECTORIES>)
+endif()
 
 add_executable(profile_migration_tests
     common/profile_migration.cpp)

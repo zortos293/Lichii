@@ -309,6 +309,10 @@ public:
         return instance;
     }
 
+    bool SupportsNeuralRendering() const noexcept {
+        return neural_rendering_supported;
+    }
+
     VkPipelineCache StaticPipelineCache() const noexcept {
         return *static_pipeline_cache;
     }
@@ -1345,6 +1349,7 @@ private:
     void SaveStaticPipelineCache() const;
 
 private:
+    bool EnableNeuralRendering();
     VkInstance instance;         ///< Vulkan instance.
     VmaAllocator allocator{};    ///< VMA allocator.
     mutable std::mutex separate_pools_mutex;
@@ -1417,6 +1422,13 @@ private:
     Properties properties{};
 
     VkPhysicalDeviceFeatures2 features2{};
+#ifdef EGLANTINE_NGX
+    VkPhysicalDeviceCooperativeMatrix2FeaturesNV nr_cooperative_matrix{};
+    VkPhysicalDeviceShaderFloat8FeaturesEXT nr_float8{};
+    VkPhysicalDeviceShaderClockFeaturesKHR nr_clock{};
+    VkPhysicalDeviceShaderSMBuiltinsFeaturesNV nr_sm{};
+#endif
+    bool neural_rendering_supported{};
     VkPhysicalDeviceFaultFeaturesEXT device_fault_features{};
     /// Enabled as the driver reports them (VK_KHR_portability_subset devices only).
     VkPhysicalDevicePortabilitySubsetFeaturesKHR portability_subset_features{};
@@ -1462,8 +1474,8 @@ private:
     // Telemetry parameters
     std::set<std::string, std::less<>> supported_extensions; ///< Reported Vulkan extensions.
     std::set<std::string, std::less<>> loaded_extensions;    ///< Loaded Vulkan extensions.
-    bool streamline_extensions{}; ///< NVIDIA DLSS's extensions are loaded.
-    bool streamline_attached{};   ///< Streamline has this device.
+    bool nvidia_dlss_extensions{}; ///< NVIDIA DLSS's extensions are loaded.
+    bool nvidia_dlss_attached{};   ///< NVIDIA's runtime has this device.
     std::vector<size_t> valid_heap_memory;                   ///< Heaps used.
     size_t main_heap{};       ///< Largest device-local heap, where images live.
     u64 heap_size_limit{};    ///< EDEN_NX2_VRAM_LIMIT_MIB for device-local heaps, 0 if unset.

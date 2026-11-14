@@ -18,7 +18,7 @@
 #include "video_core/dlss_mode.h"
 #include "video_core/renderer_base.h"
 #include "video_core/renderer_vulkan/vk_scheduler.h"
-#include "video_core/renderer_vulkan/vk_streamline_dlss.h"
+#include "video_core/renderer_vulkan/vk_nvidia_dlss.h"
 #include "video_core/vulkan_common/streamline.h"
 #include "video_core/vulkan_common/streamline_api.h"
 #include "video_core/vulkan_common/streamline_frame_gen.h"
@@ -97,7 +97,7 @@ sl::float4x4 Identity() {
     return matrix;
 }
 
-VkImageMemoryBarrier Barrier(const StreamlineDlssUpscaler::Image& image, VkAccessFlags src_access,
+VkImageMemoryBarrier Barrier(const NvidiaDlssUpscaler::Image& image, VkAccessFlags src_access,
                              VkAccessFlags dst_access, VkImageLayout old_layout,
                              VkImageLayout new_layout) {
     VkImageSubresourceRange range = image.range;
@@ -224,7 +224,7 @@ sl::float3 ToStreamline(const Vector3& vector) {
 /// Fills the camera constants DLSS-G checks from the scene's view-projection: the camera's
 /// position and axes come out of it, and the projection is what is left once the view is taken
 /// out. Streamline's clip depth goes from 0 to 1 where ours goes from -1 to 1.
-bool SetCamera(sl::Constants& constants, const StreamlineDlssUpscaler::Inputs::Camera& camera) {
+bool SetCamera(sl::Constants& constants, const NvidiaDlssUpscaler::Inputs::Camera& camera) {
     constexpr Matrix4 TO_ZERO_ONE{{
         {1.0, 0.0, 0.0, 0.0},
         {0.0, 1.0, 0.0, 0.0},
@@ -359,7 +359,9 @@ sl::Resource Resource(VkImage image, VkImageView view, VkFormat format, VkImageL
 
 } // Anonymous namespace
 
-StreamlineDlssUpscaler::StreamlineDlssUpscaler(const Device& device_, Scheduler& scheduler_,
+/// Acquire Streamline DLSS entry points and initialize the upscaler after availability has been
+/// established.
+NvidiaDlssUpscaler::NvidiaDlssUpscaler(const Device& device_, Scheduler& scheduler_,
                                                MemoryAllocator& memory_allocator_)
     : device{device_}, scheduler{scheduler_}, memory_allocator{memory_allocator_} {
     if (!Streamline::IsDlssAvailable()) {
@@ -378,33 +380,12 @@ StreamlineDlssUpscaler::StreamlineDlssUpscaler(const Device& device_, Scheduler&
     if (!get_optimal_settings) {
         throw vk::Exception(VK_ERROR_FEATURE_NOT_PRESENT);
     }
-    VkSamplerCreateInfo sampler_info{
-        .sType = VK_STRUCTURE_TYPE_SAMPLER_CREATE_INFO,
-        .pNext = nullptr,
-        .flags = 0,
-        .magFilter = VK_FILTER_NEAREST,
-        .minFilter = VK_FILTER_NEAREST,
-        .mipmapMode = VK_SAMPLER_MIPMAP_MODE_NEAREST,
-        .addressModeU = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE,
-        .addressModeV = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE,
-        .addressModeW = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE,
-        .mipLodBias = 0.0f,
-        .anisotropyEnable = VK_FALSE,
-        .maxAnisotropy = 1.0f,
-        .compareEnable = VK_FALSE,
-        .compareOp = VK_COMPARE_OP_NEVER,
-        .minLod = 0.0f,
-        .maxLod = VK_LOD_CLAMP_NONE,
-        .borderColor = VK_BORDER_COLOR_FLOAT_TRANSPARENT_BLACK,
-        .unnormalizedCoordinates = VK_FALSE,
-    };
-    point_sampler = device.GetLogical().CreateSampler(sampler_info);
-    sampler_info.magFilter = VK_FILTER_LINEAR;
-    sampler_info.minFilter = VK_FILTER_LINEAR;
-    linear_sampler = device.GetLogical().CreateSampler(sampler_info);
+    CreateSampler();
 }
 
-StreamlineDlssUpscaler::~StreamlineDlssUpscaler() {
+/// Wait for outstanding device work and release Streamline DLSS resources after renderer
+/// recording stops.
+NvidiaDlssUpscaler::~NvidiaDlssUpscaler() {
     // Not scheduler.Finish(): this runs when the renderer goes away, after the game's channels are
     // released, and a submit would touch their state. Nothing more gets recorded by then.
     void(device.GetLogical().WaitIdle());
@@ -413,69 +394,9 @@ StreamlineDlssUpscaler::~StreamlineDlssUpscaler() {
     }
 }
 
-void StreamlineDlssUpscaler::CreateOutput(VkExtent2D upscale_size) {
-    if (output_image) {
-        scheduler.Finish(); // the old output may still be in use
-    }
-    output_image = memory_allocator.CreateImage(VkImageCreateInfo{
-        .sType = VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO,
-        .pNext = nullptr,
-        .flags = 0,
-        .imageType = VK_IMAGE_TYPE_2D,
-        .format = OUTPUT_FORMAT,
-        .extent = {upscale_size.width, upscale_size.height, 1},
-        .mipLevels = 1,
-        .arrayLayers = 1,
-        .samples = VK_SAMPLE_COUNT_1_BIT,
-        .tiling = VK_IMAGE_TILING_OPTIMAL,
-        .usage = OUTPUT_USAGE,
-        .sharingMode = VK_SHARING_MODE_EXCLUSIVE,
-        .queueFamilyIndexCount = 0,
-        .pQueueFamilyIndices = nullptr,
-        .initialLayout = VK_IMAGE_LAYOUT_UNDEFINED,
-    });
-    output_view = device.GetLogical().CreateImageView(VkImageViewCreateInfo{
-        .sType = VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO,
-        .pNext = nullptr,
-        .flags = 0,
-        .image = *output_image,
-        .viewType = VK_IMAGE_VIEW_TYPE_2D,
-        .format = OUTPUT_FORMAT,
-        .components{},
-        .subresourceRange{
-            .aspectMask = VK_IMAGE_ASPECT_COLOR_BIT,
-            .baseMipLevel = 0,
-            .levelCount = 1,
-            .baseArrayLayer = 0,
-            .layerCount = 1,
-        },
-    });
-    scheduler.RequestOutsideRenderPassOperationContext();
-    scheduler.Record([image = *output_image](vk::CommandBuffer cmdbuf) {
-        cmdbuf.PipelineBarrier(VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT,
-                               VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, 0,
-                               VkImageMemoryBarrier{
-                                   .sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER,
-                                   .pNext = nullptr,
-                                   .srcAccessMask = 0,
-                                   .dstAccessMask = VK_ACCESS_SHADER_WRITE_BIT,
-                                   .oldLayout = VK_IMAGE_LAYOUT_UNDEFINED,
-                                   .newLayout = VK_IMAGE_LAYOUT_GENERAL,
-                                   .srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
-                                   .dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
-                                   .image = image,
-                                   .subresourceRange{
-                                       .aspectMask = VK_IMAGE_ASPECT_COLOR_BIT,
-                                       .baseMipLevel = 0,
-                                       .levelCount = 1,
-                                       .baseArrayLayer = 0,
-                                       .layerCount = 1,
-                                   },
-                               });
-    });
-}
-
-bool StreamlineDlssUpscaler::Upscale(const Inputs& in) {
+/// Record Streamline DLSS using the common image contract, recreating extent-dependent state
+/// and tracking failure.
+bool NvidiaDlssUpscaler::Upscale(const Inputs& in) {
     if (failed) {
         return false;
     }
@@ -776,7 +697,7 @@ bool StreamlineDlssUpscaler::Upscale(const Inputs& in) {
     return true;
 }
 
-VideoCore::DlssStatus StreamlineDlssUpscaler::Status() {
+VideoCore::DlssStatus NvidiaDlssUpscaler::Status() {
     const u64 count = evaluations.load(std::memory_order_acquire);
     const u32 last = last_evaluation.load(std::memory_order_relaxed);
     return {

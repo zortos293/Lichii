@@ -139,9 +139,14 @@ temporal upscaling takes precedence because it replaces the same output pass.
 
 ## Settings and comparison runs
 
-"Use NVIDIA DLSS in place of a game's DLSS" defaults to off and takes effect when the game
-starts. Disabled means no NVIDIA runtime is loaded; an explicitly selected temporal
-replacement uses FSR 3.1. Missing DLLs and unsupported GPUs fall back to FSR. Recording is
+"Use NVIDIA DLSS in place of a game's DLSS" defaults to off. On Linux, it can be changed
+during gameplay with Apply, including when the session started with DLSS disabled. Install
+the NVIDIA runtime files before launching: NGX and its Vulkan device features are prepared
+at startup, while DLSS evaluation follows the live setting. Ocarina changes backend between
+frames, finishes outstanding work before releasing its resources, and resets temporal history.
+On Windows, the checkbox remains a startup setting and disabling it skips runtime loading.
+An explicitly selected temporal replacement uses FSR 3.1 when NVIDIA DLSS is disabled.
+Missing runtime files and unsupported GPUs fall back to FSR. Recording is
 asynchronous. A failed DLSS recording clears that frame's output, restores input layouts,
 and makes later evaluations fall back; it does not wait for the scheduler worker.
 

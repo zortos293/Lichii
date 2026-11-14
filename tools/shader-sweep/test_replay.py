@@ -193,7 +193,9 @@ result = subprocess.run([{binary!r}, *sys.argv[1:]], capture_output=True, text=T
 if "--list" in sys.argv:
     listed = json.loads(result.stdout)
     directory = Path(sys.argv[sys.argv.index("--output-dir") + 1])
-    path = directory / listed["records"][{record}]["file"]
+    selected, = (record for record in listed["records"]
+                 if record["record_key"] == {record_key!r})
+    path = directory / selected["file"]
     data = bytearray(path.read_bytes())
     data[{offset}] ^= {mask}
     path.write_bytes(data)
@@ -234,15 +236,21 @@ class V2ReplayTests(ReplayCase):
 
     @unittest.skipIf(os.name == "nt", "the planting compiler needs a POSIX shebang")
     def test_planted_byte_in_a_migrated_record_is_one_mismatch(self):
+        baseline = self.replay(fixture_cache(), "--path-b", "v2")
+        target, = (row for row in baseline["stages"] if row["record"] == "000-000001")
+        self.assertEqual(target["verdict"], "match")
+        # Migration keeps the newest duplicate, so record positions can change.
         planting = self.root / "planting-shader-sweep"
         planting.write_text(f"#!{sys.executable}\n" + PLANTING_COMPILER.format(
-            binary=str(BINARY), record=1, offset=PLANT_OFFSET, mask=PLANT_MASK))
+            binary=str(BINARY), record_key=target["record_key"],
+            offset=PLANT_OFFSET, mask=PLANT_MASK))
         planting.chmod(0o755)
         report = self.replay(fixture_cache(), "--path-b", "v2", "--compiler-b", str(planting),
                              code=1)
         bad = [row for row in report["stages"] if row["verdict"] not in ("match", "collapsed")]
         self.assertEqual([(row["verdict"], row["record"]) for row in bad],
                          [("mismatch", "000-000001")], bad)
+        self.assertEqual(bad[0]["record_key"], target["record_key"])
 
 
 if __name__ == "__main__":

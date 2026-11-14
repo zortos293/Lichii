@@ -10,6 +10,8 @@
 #include <catch2/catch_test_macros.hpp>
 #include <fmt/format.h>
 #include "common/fs/path_util.h"
+#include "common/fs/profile_migration.h"
+#include "frontend_common/profile_import.h"
 #include "common/recommended_settings.h"
 #include "common/settings.h"
 #include "frontend_common/config.h"
@@ -59,10 +61,14 @@ class ConfigDirectory {
 public:
     ConfigDirectory()
         : original{Common::FS::GetEdenPath(Common::FS::EdenPath::ConfigDir)},
+          original_data{Common::FS::GetEdenPath(Common::FS::EdenPath::EdenDir)},
           path{std::filesystem::temp_directory_path() /
                fmt::format("lichii-config-{}", std::random_device{}())} {
         REQUIRE(std::filesystem::create_directory(path));
         Common::FS::SetEdenPath(Common::FS::EdenPath::ConfigDir, path);
+        // Configuration tests use a fresh private profile, independent of host migration state.
+        Common::FS::SetEdenPath(Common::FS::EdenPath::EdenDir, path / "data");
+        Common::FS::ProfileMigration::MarkFresh(FrontendCommon::ProfileImportStateDirectory());
         for (const auto& [key, setting] : Settings::values.linkage.by_key) {
             setting->SetGlobal(false);
             setting->LoadString("");
@@ -73,6 +79,7 @@ public:
 
     ~ConfigDirectory() {
         Common::FS::SetEdenPath(Common::FS::EdenPath::ConfigDir, original);
+        Common::FS::SetEdenPath(Common::FS::EdenPath::EdenDir, original_data);
         std::error_code error;
         std::filesystem::remove_all(path, error);
     }
@@ -85,6 +92,7 @@ public:
     }
 
     const std::filesystem::path original;
+    const std::filesystem::path original_data;
     const std::filesystem::path path;
 };
 
@@ -292,6 +300,57 @@ TEST_CASE("Per-game overrides and use-global flags survive the new global profil
         CHECK(Settings::values.use_asynchronous_shaders.UsingGlobal());
         CHECK(Settings::values.use_asynchronous_shaders.GetValue());
     }
+}
+
+TEST_CASE("Neural controls retain defaults, persist, and publish per-game overrides", "[config]") {
+    ConfigDirectory directory;
+    directory.Write("qt-config.ini", "[Renderer]\nneural_rendering=2\nneural_rendering\\default=false\n"
+                                    "nvidia_dlss=true\nnvidia_dlss\\default=false\n");
+    FileConfig global{std::string{"qt-config"}};
+    auto& values = Settings::values;
+    CHECK(values.neural_rendering_strength.GetValue() == 100);
+    CHECK(values.neural_rendering_tone.GetValue() == 100);
+    CHECK(values.neural_rendering_structure.GetValue() == 100);
+    values.neural_rendering_strength = 37;
+    values.neural_rendering_tone = 82;
+    values.neural_rendering_structure = 61;
+    global.SaveValues();
+    values.neural_rendering_strength = 100;
+    values.neural_rendering_tone = 100;
+    values.neural_rendering_structure = 100;
+    FileConfig reloaded{std::string{"qt-config"}};
+    CHECK(values.neural_rendering_strength.GetValue() == 37);
+    CHECK(values.neural_rendering_tone.GetValue() == 82);
+    CHECK(values.neural_rendering_structure.GetValue() == 61);
+
+    directory.Write("custom/neural.ini",
+                    "[Renderer]\nnvidia_dlss=false\nnvidia_dlss\\default=false\n"
+                    "nvidia_dlss\\use_global=false\nneural_rendering_strength=0\n"
+                    "neural_rendering_strength\\default=false\n"
+                    "neural_rendering_strength\\use_global=false\n"
+                    "neural_rendering_tone=200\nneural_rendering_tone\\default=false\n"
+                    "neural_rendering_tone\\use_global=false\n"
+                    "neural_rendering_structure\\use_global=true\n");
+    FileConfig game{std::string{"neural"}, Config::ConfigType::PerGameConfig};
+    Settings::RefreshNvidiaDlssRuntimeSettings();
+    const auto options = Settings::GetNvidiaDlssRuntimeSettings();
+    CHECK_FALSE(options.enabled);
+    CHECK(values.nvidia_dlss.GetValue(true));
+    values.nvidia_dlss.SetGlobal(true);
+    CHECK_FALSE(Settings::GetNvidiaDlssRuntimeSettings().enabled);
+    Settings::RefreshNvidiaDlssRuntimeSettings();
+    CHECK(Settings::GetNvidiaDlssRuntimeSettings().enabled);
+    CHECK(options.neural_rendering == Settings::NeuralRendering::Natural);
+    CHECK(options.strength == 0);
+    CHECK(options.tone == 100);
+    CHECK(options.structure == 61);
+    CHECK(values.neural_rendering_strength.GetValue(true) == 37);
+    CHECK(values.neural_rendering_tone.GetValue(true) == 82);
+    values.neural_rendering_strength.SetGlobal(true);
+    values.neural_rendering_tone.SetGlobal(true);
+    Settings::RefreshNvidiaDlssRuntimeSettings();
+    CHECK(Settings::GetNvidiaDlssRuntimeSettings().strength == 37);
+    CHECK(Settings::GetNvidiaDlssRuntimeSettings().tone == 82);
 }
 
 TEST_CASE("Missing per-game and input profiles are not seeded", "[config]") {

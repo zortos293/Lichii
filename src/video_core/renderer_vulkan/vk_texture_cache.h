@@ -17,8 +17,8 @@
 #include "video_core/renderer_vulkan/vk_compute_pass.h"
 #include "video_core/renderer_vulkan/vk_dlss_network_probe.h"
 #include "video_core/renderer_vulkan/vk_fsr3_upscaler.h"
-#ifdef EGLANTINE_STREAMLINE
-#include "video_core/renderer_vulkan/vk_streamline_dlss.h"
+#ifdef EGLANTINE_NVIDIA_DLSS
+#include "video_core/renderer_vulkan/vk_nvidia_dlss.h"
 #endif
 #include "video_core/renderer_vulkan/vk_render_pass_cache.h"
 #include "video_core/renderer_vulkan/vk_staging_buffer_pool.h"
@@ -265,27 +265,30 @@ public:
     std::unique_ptr<Fsr3Upscaler> fsr3_upscaler;
     bool fsr3_unsupported{};
 
-    /// The LOD bias Ocarina's FSR adds to mipmapped samplers this session (0 for other games or
-    /// upscalers), resolved on first use.
+    /// Potential FSR LOD bias (0 for other games); sampler variants gate it on the active backend.
     [[nodiscard]] f32 OcarinaFsrLodBias();
     std::optional<f32> ocarina_fsr_lod_bias;
     /// Set when the Ocarina upscaler fails during the session: samplers drop the bias again.
     bool ocarina_fsr_failed{};
+    bool ocarina_fsr_active{};
     /// The game DLSS network's health check (ProbeGameDlssOutput), created on first use.
     std::unique_ptr<DlssNetworkProbe> dlss_network_probe;
     std::optional<std::chrono::steady_clock::time_point> fsr3_last_evaluation;
+    bool dlss_history_reset = true;
+    bool fsr3_history_reset = true;
+    bool last_dlss_enabled{};
 
     /// Draws an upscaler's RGBA16F output into the DLSS output and returns it to GENERAL.
     void DrawUpscaledOutput(Framebuffer* dst_framebuffer, VkImageView view, VkImage image,
                             VkSampler sampler);
-#ifdef EGLANTINE_STREAMLINE
+#ifdef EGLANTINE_NVIDIA_DLSS
     /// NVIDIA's DLSS (through NVIDIA Streamline) in place of the game's,
     /// before FSR 3.1, when the setting is on. Returns false to fall back to FSR 3.1.
     bool UpscaleWithDlss(Framebuffer* dst_framebuffer, ImageView& input_color,
                          ImageView& motion_vectors, ImageView& depth,
                          std::array<u32, 2> render_size, std::array<f32, 2> jitter,
                          std::array<f32, 2> motion_scale, bool reset);
-    std::unique_ptr<StreamlineDlssUpscaler> dlss_upscaler;
+    std::unique_ptr<NvidiaDlssUpscaler> dlss_upscaler;
     bool dlss_unsupported{};
 #endif
 
@@ -893,6 +896,7 @@ private:
 
     const Device* device_ptr{nullptr};
     const bool* ocarina_fsr_failed{}; ///< TextureCacheRuntime::ocarina_fsr_failed
+    const bool* ocarina_fsr_active{}; ///< TextureCacheRuntime::ocarina_fsr_active
     Tegra::Texture::TSCEntry descriptor{};
     VkSamplerCreateInfo base_ci{};
     VkSamplerReductionModeEXT reduction_mode{VK_SAMPLER_REDUCTION_MODE_WEIGHTED_AVERAGE_EXT};

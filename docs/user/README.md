@@ -18,6 +18,7 @@ A copy of this handbook is [available online](https://git.eden-emu.dev/eden-emu/
     - **[Controller profiles](./Controllers.md#configuring-controller-profiles)**
 - **[Audio](Audio.md)**
 - **[Graphics](Graphics.md)**
+- **[NVIDIA DLSS on Linux](DLSSLinux.md)**
 - **[Installing Mods](./Mods.md)**
 - **[Data, Savefiles and Storage](Storage.md)**
 - **[Orphaned Profiles](Orphaned.md)**

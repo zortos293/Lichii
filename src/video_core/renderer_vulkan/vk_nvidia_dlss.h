@@ -1,19 +1,25 @@
 // SPDX-FileCopyrightText: Copyright 2026 Eden Emulator Project
 // SPDX-License-Identifier: GPL-3.0-or-later
 
-// NVIDIA DLSS (through NVIDIA Streamline) in place of a game's DLSS
-// evaluation. NVIDIA's DLLs come from the user's PC; see vulkan_common/streamline.h.
+// NVIDIA DLSS replacement through the platform runtime (Streamline or native NGX).
 
 #pragma once
 
 #include <array>
 #include <atomic>
+#include <memory>
 #include <optional>
 
 #include "common/common_types.h"
 #include "common/settings_enums.h"
 #include "video_core/vulkan_common/vulkan_wrapper.h"
 
+struct NVSDK_NGX_Handle;
+struct NVSDK_NGX_Parameter;
+
+namespace VideoCore::NeuralRendering {
+class Backend;
+}
 namespace VideoCore {
 struct DlssStatus;
 }
@@ -24,8 +30,8 @@ class Device;
 class MemoryAllocator;
 class Scheduler;
 
-class StreamlineDlssUpscaler {
-public:
+class NvidiaDlssUpscaler {
+  public:
     struct Image {
         VkImageView view;
         VkImage image;
@@ -61,18 +67,16 @@ public:
         std::optional<Camera> camera;
     };
 
-    /// Throws vk::Exception when Streamline has no DLSS for this device.
-    explicit StreamlineDlssUpscaler(const Device& device, Scheduler& scheduler,
-                                    MemoryAllocator& memory_allocator);
-    ~StreamlineDlssUpscaler();
+    /// Throws vk::Exception when the runtime has no DLSS for this device.
+    explicit NvidiaDlssUpscaler(const Device &device, Scheduler &scheduler,
+                                MemoryAllocator &memory_allocator);
+    ~NvidiaDlssUpscaler();
 
     /// Records one evaluation into the output image (RGBA16F at the upscale size, GENERAL
     /// layout). Returns false when DLSS can't run, so the caller can fall back to FSR 3.1.
-    bool Upscale(const Inputs& inputs);
+    bool Upscale(const Inputs &inputs);
 
-    [[nodiscard]] bool Failed() const noexcept {
-        return failed.load();
-    }
+    [[nodiscard]] bool Failed() const noexcept { return failed.load(); }
 
     /// Evaluations that succeeded in this process, for the status bar.
     [[nodiscard]] static VideoCore::DlssStatus Status();
@@ -91,15 +95,28 @@ public:
         return *linear_sampler;
     }
 
-private:
+  private:
+    void CreateSampler();
     void CreateOutput(VkExtent2D upscale_size);
 
-    const Device& device;
-    Scheduler& scheduler;
-    MemoryAllocator& memory_allocator;
-    void* set_options{}; ///< slDLSSSetOptions
-    void* get_state{};   ///< slDLSSGetState
-    void* get_optimal_settings{};
+    const Device &device;
+    Scheduler &scheduler;
+    MemoryAllocator &memory_allocator;
+#ifdef EGLANTINE_NGX
+    void PrepareNeuralRendering(const Inputs& inputs, bool requested);
+    std::unique_ptr<VideoCore::NeuralRendering::Backend> neural_rendering;
+    VkImageView neural_motion_view{};
+    bool neural_requested{};
+    bool neural_failed{};
+    bool neural_model_verified{};
+    NVSDK_NGX_Handle *feature{};
+    NVSDK_NGX_Parameter *parameters{};
+    bool depth_inverted = true;
+#else
+    void *set_options{}; ///< slDLSSSetOptions
+    void *get_state{}; ///< slDLSSGetState
+    void *get_optimal_settings{};
+#endif
     VkExtent2D render_extent{};
     VkExtent2D upscale_extent{};
     bool hdr_input = true;

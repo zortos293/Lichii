@@ -52,9 +52,9 @@
 #include "video_core/renderer_vulkan/maxwell_to_vk.h"
 #include "video_core/renderer_vulkan/vk_ocarina_camera_motion.h"
 #include "video_core/renderer_vulkan/vk_fsr3_upscaler.h"
-#ifdef EGLANTINE_STREAMLINE
-#include "video_core/renderer_vulkan/vk_streamline_dlss.h"
-#include "video_core/vulkan_common/streamline.h"
+#ifdef EGLANTINE_NVIDIA_DLSS
+#include "video_core/renderer_vulkan/vk_nvidia_dlss.h"
+#include "video_core/vulkan_common/nvidia_dlss.h"
 #endif
 #include "video_core/renderer_vulkan/submission_policy.h"
 #include "video_core/renderer_vulkan/vk_buffer_cache.h"
@@ -3675,6 +3675,31 @@ void RasterizerVulkan::TickFrame() {
     }
     frame_dump.TickFrame();
     ++render_trace_frame;
+    if (program_id == 0x0400486024DEC000ULL && oot_backend) {
+        const auto backend = ResolveOcarinaUpscaler(device);
+        if (backend != *oot_backend) {
+            // Finish the previous frame before releasing resources referenced by queued work.
+            scheduler.Finish();
+            oot_live_dlss.reset();
+            oot_backend = backend;
+            oot_live_failed = false;
+            oot_camera_sample_frame.reset();
+            oot_motion = {};
+            oot_actor = {};
+            oot_previous_actor = {};
+            oot_dlss_frame.reset();
+            oot_4k_scene_frame.reset();
+            oot_effects_frame.reset();
+            oot_jitter_frame.reset();
+            texture_cache_runtime.ocarina_fsr_failed = false;
+            texture_cache_runtime.ocarina_fsr_active =
+                backend == VideoCommon::OcarinaUpscaleBackend::Fsr;
+            scheduler.InvalidateState();
+            LOG_INFO(Render_Vulkan, "Ocarina upscaler changed live: {} (history reset)",
+                     backend == VideoCommon::OcarinaUpscaleBackend::Dlss ? "NVIDIA DLSS" :
+                     backend == VideoCommon::OcarinaUpscaleBackend::Fsr ? "FSR" : "game native");
+        }
+    }
     render_trace_draws = 0;
     render_trace_clears = 0;
     if (Common::DkbFrameTrace::Enabled()) {

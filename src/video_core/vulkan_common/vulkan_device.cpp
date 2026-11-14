@@ -35,8 +35,16 @@
 #include "video_core/vulkan_common/vulkan_wrapper.h"
 #include "video_core/gpu_logging/gpu_logging.h"
 #include "video_core/shader_cache_v2/cache.h"
+#ifdef EGLANTINE_NVIDIA_DLSS
+#include "video_core/vulkan_common/nvidia_dlss.h"
+#include "common/scope_exit.h"
+#endif
 #ifdef EGLANTINE_STREAMLINE
 #include "video_core/vulkan_common/streamline.h"
+#endif
+#ifdef EGLANTINE_NGX
+#include "video_core/neural_rendering/runtime.h"
+#include "video_core/vulkan_common/ngx_dlss.h"
 #endif
 
 #if defined(__ANDROID__) && defined(ARCHITECTURE_arm64)
@@ -534,10 +542,20 @@ bool WantsFsr4Port(VkDriverId driver_id) {
 }
 } // Anonymous namespace
 
+/// Select supported Vulkan features, create renderer resources, and attach optional DLSS to the
+/// logical device.
 Device::Device(VkInstance instance_, vk::PhysicalDevice physical_, VkSurfaceKHR surface,
                const vk::InstanceDispatch& dld_)
     : instance{instance_}, dld{dld_}, physical{physical_},
     format_properties(GetFormatProperties(physical)) {
+#ifdef EGLANTINE_NVIDIA_DLSS
+    bool constructed = false;
+    SCOPE_EXIT {
+        if (!constructed && nvidia_dlss_attached) {
+            NvidiaDlss::Stop();
+        }
+    };
+#endif
     // Get suitability and device properties.
     const bool is_suitable = GetSuitability(surface != VkSurfaceKHR{});
 
@@ -836,11 +854,11 @@ Device::Device(VkInstance instance_, vk::PhysicalDevice physical_, VkSurfaceKHR 
         RemoveExtensionFeature(extensions.descriptor_buffer, features.descriptor_buffer,
                                VK_EXT_DESCRIPTOR_BUFFER_EXTENSION_NAME);
     }
-#ifdef EGLANTINE_STREAMLINE
+#ifdef EGLANTINE_NVIDIA_DLSS
     // NVIDIA's DLSS needs buffer device addresses: keep the feature enabled for
     // it, but leave Eglantine's own buffers as they are without descriptor buffers.
     const bool dlss_wants_device_address =
-        streamline_extensions && features.buffer_device_address.bufferDeviceAddress;
+        nvidia_dlss_extensions && features.buffer_device_address.bufferDeviceAddress;
     if (!extensions.descriptor_buffer && dlss_wants_device_address) {
         extensions.buffer_device_address = false;
     } else
@@ -866,13 +884,16 @@ Device::Device(VkInstance instance_, vk::PhysicalDevice physical_, VkSurfaceKHR 
     if (host_float16_supported || (device_float16 && WantsAmdFsr4(driver_id))) {
         features.shader_float16_int8.shaderFloat16 = VK_TRUE;
     }
+    neural_rendering_supported = EnableNeuralRendering();
+#ifdef EGLANTINE_NVIDIA_DLSS
+    u32 first_streamline_queue = 0;
+#endif
 
 #ifdef EGLANTINE_STREAMLINE
     // With manual hooking the renderer creates the features and queues DLSS Frame Generation
     // needs. Anything missing turns frame generation off, never the device.
     std::vector<float> queue_priorities;
-    u32 first_streamline_queue = 0;
-    if (streamline_extensions && Streamline::FrameGenPending()) {
+    if (nvidia_dlss_extensions && Streamline::FrameGenPending()) {
         const bool has_descriptor_indexing =
             instance_version >= VK_API_VERSION_1_2 || extensions.descriptor_indexing;
         const std::array<std::pair<std::string_view, bool>, 16> enabled{{
@@ -913,7 +934,7 @@ Device::Device(VkInstance instance_, vk::PhysicalDevice physical_, VkSurfaceKHR 
         }
     }
     if (const Streamline::QueueCounts extra = Streamline::ExtraQueues();
-        streamline_extensions && extra.graphics + extra.compute != 0) {
+        nvidia_dlss_extensions && extra.graphics + extra.compute != 0) {
         const auto ci = std::ranges::find(queue_cis, graphics_family,
                                           &VkDeviceQueueCreateInfo::queueFamilyIndex);
         const u32 available = physical.GetQueueFamilyProperties()[graphics_family].queueCount;
@@ -939,12 +960,15 @@ Device::Device(VkInstance instance_, vk::PhysicalDevice physical_, VkSurfaceKHR 
     graphics_queue = logical.GetQueue(graphics_family);
     present_queue = logical.GetQueue(present_family);
 
-#ifdef EGLANTINE_STREAMLINE
-    if (streamline_extensions) {
-        streamline_attached = Streamline::AttachDevice(instance, physical, *logical,
-                                                       graphics_family, first_streamline_queue, dld);
-    } else if (Streamline::WantsDevice()) {
-        Streamline::Stop();
+#ifdef EGLANTINE_NVIDIA_DLSS
+    if (nvidia_dlss_extensions) {
+        nvidia_dlss_attached = NvidiaDlss::AttachDevice(
+            instance, physical, *logical, graphics_family, first_streamline_queue, dld);
+    } else if (NvidiaDlss::WantsDevice()) {
+#ifdef EGLANTINE_NGX
+        Ngx::ReportFailure("the selected GPU lacks required DLSS Vulkan extensions");
+#endif
+        NvidiaDlss::Stop();
     }
 #endif
 
@@ -1002,12 +1026,110 @@ Device::Device(VkInstance instance_, vk::PhysicalDevice physical_, VkSurfaceKHR 
 
     // Initialize GPU logging if enabled
     InitializeGPULogging();
+#ifdef EGLANTINE_NVIDIA_DLSS
+    constructed = true;
+#endif
 }
 
+/// Prepare native inference features so DLSS and neural styles can be switched live.
+bool Device::EnableNeuralRendering() {
+#ifdef EGLANTINE_NGX
+    namespace NR = VideoCore::NeuralRendering;
+    NR::ResetStatus();
+    const auto unavailable = [](const char* reason) {
+        NR::ReportFailure(reason);
+        return false;
+    };
+    if (!IsNvidia() || instance_version < VK_API_VERSION_1_3 || !nvidia_dlss_extensions) {
+        return unavailable("the selected device does not support native NVIDIA neural rendering");
+    }
+    constexpr std::array required_extensions{VK_KHR_COOPERATIVE_MATRIX_EXTENSION_NAME,
+                                             VK_NV_COOPERATIVE_MATRIX_2_EXTENSION_NAME,
+                                             VK_EXT_SHADER_FLOAT8_EXTENSION_NAME,
+                                             VK_KHR_PIPELINE_EXECUTABLE_PROPERTIES_EXTENSION_NAME,
+                                             VK_KHR_SHADER_CLOCK_EXTENSION_NAME,
+                                             VK_NV_SHADER_SM_BUILTINS_EXTENSION_NAME,
+                                             "VK_NV_cuda_kernel_launch"};
+    if (!std::ranges::all_of(required_extensions, [&](const char* name) {
+            return supported_extensions.contains(name);
+        })) {
+        return unavailable("the selected GPU or driver lacks required neural rendering extensions");
+    }
+    // The renderer already owns these core feature structures. Require their enabled bits instead
+    // of adding duplicate Vulkan 1.1/1.2/1.3 structures to its device-creation chain.
+    const bool core =
+        features2.features.shaderInt16 && features2.features.shaderInt64 &&
+        features.bit16_storage.storageBuffer16BitAccess &&
+        features.bit16_storage.uniformAndStorageBuffer16BitAccess &&
+        features.bit8_storage.storageBuffer8BitAccess &&
+        features.bit8_storage.uniformAndStorageBuffer8BitAccess &&
+        features.shader_float16_int8.shaderFloat16 && features.shader_float16_int8.shaderInt8 &&
+        features.vulkan_memory_model.vulkanMemoryModel &&
+        features.vulkan_memory_model.vulkanMemoryModelDeviceScope &&
+        features.buffer_device_address.bufferDeviceAddress &&
+        features.host_query_reset.hostQueryReset &&
+        features.subgroup_size_control.subgroupSizeControl &&
+        features.subgroup_size_control.computeFullSubgroups && features.maintenance4.maintenance4 &&
+        features.synchronization2.synchronization2 && features.cooperative_matrix.cooperativeMatrix;
+    if (!core) {
+        return unavailable("required neural rendering Vulkan features are unavailable");
+    }
+    nr_cooperative_matrix.sType =
+        VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_COOPERATIVE_MATRIX_2_FEATURES_NV;
+    nr_float8.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_SHADER_FLOAT8_FEATURES_EXT;
+    nr_clock.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_SHADER_CLOCK_FEATURES_KHR;
+    nr_sm.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_SHADER_SM_BUILTINS_FEATURES_NV;
+    VkPhysicalDevicePipelineExecutablePropertiesFeaturesKHR executable{
+        VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PIPELINE_EXECUTABLE_PROPERTIES_FEATURES_KHR};
+    VkPhysicalDeviceFeatures2 probe{VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FEATURES_2};
+    probe.pNext = &nr_cooperative_matrix;
+    nr_cooperative_matrix.pNext = &nr_float8;
+    nr_float8.pNext = &nr_clock;
+    nr_clock.pNext = &nr_sm;
+    nr_sm.pNext = &executable;
+    physical.GetFeatures2(probe);
+    const bool extra = nr_float8.shaderFloat8 && nr_float8.shaderFloat8CooperativeMatrix &&
+                       nr_cooperative_matrix.cooperativeMatrixWorkgroupScope &&
+                       nr_cooperative_matrix.cooperativeMatrixFlexibleDimensions &&
+                       nr_cooperative_matrix.cooperativeMatrixReductions &&
+                       nr_cooperative_matrix.cooperativeMatrixConversions &&
+                       nr_cooperative_matrix.cooperativeMatrixPerElementOperations &&
+                       nr_cooperative_matrix.cooperativeMatrixTensorAddressing &&
+                       nr_cooperative_matrix.cooperativeMatrixBlockLoads &&
+                       nr_clock.shaderSubgroupClock && nr_clock.shaderDeviceClock &&
+                       nr_sm.shaderSMBuiltins && executable.pipelineExecutableInfo;
+    if (!extra) {
+        nr_sm.pNext = nullptr;
+        return unavailable("the GPU cannot execute the FP8 neural rendering kernels");
+    }
+    // Reuse the renderer's float8 feature node. FSR 4 also owns this structure, and Vulkan
+    // permits only one node of its type in the device-creation chain.
+    features.shader_float8.shaderFloat8 = nr_float8.shaderFloat8;
+    features.shader_float8.shaderFloat8CooperativeMatrix = nr_float8.shaderFloat8CooperativeMatrix;
+    extensions.shader_float8 = true;
+    nr_cooperative_matrix.pNext = &nr_clock;
+    // Only now modify the renderer's enabled feature chain; failed probes leave it unchanged.
+    nr_sm.pNext = features2.pNext;
+    features2.pNext = &nr_cooperative_matrix;
+    features.pipeline_executable_properties.pipelineExecutableInfo = VK_TRUE;
+    loaded_extensions.insert(required_extensions.begin(), required_extensions.end());
+    LOG_INFO(Render_Vulkan, "Native FP8 neural rendering device features enabled");
+    return true;
+#else
+    return false;
+#endif
+}
+
+/// Detach optional DLSS and release renderer resources before the logical device is destroyed.
 Device::~Device() {
-#ifdef EGLANTINE_STREAMLINE
-    if (streamline_attached) {
-        Streamline::Stop();
+#ifdef EGLANTINE_NGX
+    if (nvidia_dlss_attached) {
+        VideoCore::NeuralRendering::ResetStatus();
+    }
+#endif
+#ifdef EGLANTINE_NVIDIA_DLSS
+    if (nvidia_dlss_attached) {
+        NvidiaDlss::Stop();
     }
 #endif
     SaveStaticPipelineCache();
@@ -1374,6 +1496,8 @@ bool Device::MustEmulateBGR565() const {
     return Settings::values.emulate_bgr565.GetValue();
 }
 
+/// Query device capabilities and check renderer requirements, including presentation when
+/// requested.
 bool Device::GetSuitability(bool requires_swapchain) {
     // Assume we will be suitable.
     bool suitable = true;
@@ -1446,13 +1570,14 @@ bool Device::GetSuitability(bool requires_swapchain) {
         extensions.robustness_2 = false;
     }
 
-#ifdef EGLANTINE_STREAMLINE
+#ifdef EGLANTINE_NVIDIA_DLSS
     // The extensions NVIDIA's DLSS asks for, where the device has them all.
-    if (Streamline::WantsDevice()) {
+    if (NvidiaDlss::WantsDevice()) {
         const auto supported = [&](const std::string& name) {
             return supported_extensions.contains(name);
         };
-        std::vector<std::string> wanted = Streamline::DeviceExtensions();
+        std::vector<std::string> wanted = NvidiaDlss::DeviceExtensions(instance, physical);
+#ifdef EGLANTINE_STREAMLINE
         // Frame generation's extensions must not cost DLSS its own.
         if (!std::ranges::all_of(wanted, supported) && Streamline::FrameGenPending()) {
             std::string missing;
@@ -1462,8 +1587,9 @@ bool Device::GetSuitability(bool requires_swapchain) {
                 }
             }
             Streamline::DropFrameGen(fmt::format("the device lacks {}", missing));
-            wanted = Streamline::DeviceExtensions();
+            wanted = NvidiaDlss::DeviceExtensions(instance, physical);
         }
+#endif
         // Streamline may ask for no extensions at all.
         const bool all = std::ranges::all_of(wanted, supported);
         std::string names;
@@ -1473,7 +1599,7 @@ bool Device::GetSuitability(bool requires_swapchain) {
             }
             names += (names.empty() ? "" : ", ") + name;
         }
-        streamline_extensions = all;
+        nvidia_dlss_extensions = all;
         LOG_INFO(Render_Vulkan, "NVIDIA DLSS device extensions: {} ({})",
                  all ? "enabled" : "unavailable", names.empty() ? "none" : names);
     }

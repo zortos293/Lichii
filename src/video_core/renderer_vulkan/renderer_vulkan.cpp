@@ -44,8 +44,11 @@
 #include "video_core/vulkan_common/vulkan_memory_allocator.h"
 #include "video_core/vulkan_common/vulkan_surface.h"
 #include "video_core/vulkan_common/vulkan_wrapper.h"
+#ifdef EGLANTINE_NVIDIA_DLSS
+#include "video_core/renderer_vulkan/vk_nvidia_dlss.h"
+#include "video_core/vulkan_common/nvidia_dlss.h"
+#endif
 #ifdef EGLANTINE_STREAMLINE
-#include "video_core/renderer_vulkan/vk_streamline_dlss.h"
 #include "video_core/vulkan_common/streamline.h"
 #include "video_core/vulkan_common/streamline_frame_gen.h"
 #endif
@@ -165,8 +168,8 @@ try
     , gpu(gpu_)
     , library(OpenLibrary(context.get()))
     , dld()
-#ifdef EGLANTINE_STREAMLINE
-    , streamline_started(Streamline::Start(render_window.GetWindowInfo().render_surface))
+#ifdef EGLANTINE_NVIDIA_DLSS
+    , nvidia_dlss_started(NvidiaDlss::Start(render_window.GetWindowInfo().render_surface))
 #endif
     // Create raw Vulkan instance first
     , instance(CreateInstance(*library,
@@ -572,9 +575,9 @@ void RendererVulkan::RenderAppletCaptureLayer(
                             CaptureFormat, CaptureHdrPresent());
 }
 
-#ifdef EGLANTINE_STREAMLINE
+#ifdef EGLANTINE_NVIDIA_DLSS
 VideoCore::DlssStatus RendererVulkan::GetDlssStatus() const {
-    return StreamlineDlssUpscaler::Status();
+    return NvidiaDlssUpscaler::Status();
 }
 #endif
 

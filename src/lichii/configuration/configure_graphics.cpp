@@ -210,6 +210,7 @@ ConfigureGraphics::~ConfigureGraphics() = default;
 
 void ConfigureGraphics::SetConfiguration() {}
 
+/// Build graphics controls and connect dependent DLSS quality and neural rendering settings.
 void ConfigureGraphics::Setup(const ConfigurationShared::Builder& builder) {
     QLayout* api_layout = ui->api_widget->layout();
     QWidget* api_grid_widget = new QWidget(this);
@@ -224,7 +225,7 @@ void ConfigureGraphics::Setup(const ConfigurationShared::Builder& builder) {
     QCheckBox* frame_gen_checkbox = nullptr;
     QComboBox* frame_gen_type_combobox = nullptr;
     QCheckBox* nvidia_dlss_checkbox = nullptr;
-#ifdef EGLANTINE_STREAMLINE
+#ifdef EGLANTINE_NVIDIA_DLSS
     NvidiaDlssPanel* nvidia_dlss_panel = nullptr;
 #endif
 
@@ -234,11 +235,17 @@ void ConfigureGraphics::Setup(const ConfigurationShared::Builder& builder) {
             continue;
         }
 #endif
-#ifndef EGLANTINE_STREAMLINE
-        // Only builds with NVIDIA Streamline (Windows) can use it.
+#ifndef EGLANTINE_NVIDIA_DLSS
+        // Only builds with a platform NVIDIA runtime backend can use it.
         if (setting->Id() == Settings::values.nvidia_dlss.Id() ||
             setting->Id() == Settings::values.nvidia_dlss_quality.Id() ||
             setting->Id() == Settings::values.nvidia_dlss_preset.Id()) {
+            continue;
+        }
+#endif
+#ifndef EGLANTINE_NGX
+        if (setting->Id() == Settings::values.neural_rendering.Id() ||
+            setting->Id() == Settings::values.neural_rendering_strength.Id()) {
             continue;
         }
 #endif
@@ -367,7 +374,7 @@ void ConfigureGraphics::Setup(const ConfigurationShared::Builder& builder) {
 
             hold_graphics.emplace(setting->Id(), widget);
 #endif
-#ifdef EGLANTINE_STREAMLINE
+#ifdef EGLANTINE_NVIDIA_DLSS
         } else if (setting->Id() == Settings::values.nvidia_dlss.Id()) {
             nvidia_dlss_checkbox = widget->checkbox;
             // NVIDIA's files and a download button under the checkbox.
@@ -446,6 +453,13 @@ void ConfigureGraphics::Setup(const ConfigurationShared::Builder& builder) {
         }
     }
 #else
+#ifdef EGLANTINE_NVIDIA_DLSS
+    if (nvidia_dlss_panel != nullptr) {
+        nvidia_dlss_panel->setVisible(nvidia_dlss_checkbox->isChecked());
+        connect(nvidia_dlss_checkbox, &QCheckBox::toggled, nvidia_dlss_panel,
+                &QWidget::setVisible);
+    }
+#endif
     // Only builds with NVIDIA Streamline (Windows) have DLSS Frame Generation.
     if (frame_gen_type_combobox != nullptr) {
         frame_gen_type_combobox->removeItem(frame_gen_type_combobox->findData(

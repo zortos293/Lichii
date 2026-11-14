@@ -4,6 +4,8 @@ On Windows, enable NVIDIA DLSS in Graphics, then select a quality mode and model
 preset. Apply or OK updates these two choices while playing. The master DLSS
 checkbox still takes effect when a game starts. These controls apply only to the
 supported game-upscaler replacements, not every game or the window scaling filter.
+On Linux, [native NGX](DLSSLinux.md) provides the same quality and model choices,
+and the master DLSS checkbox can also change during gameplay.
 
 ## Checking that DLSS runs
 
@@ -73,7 +75,4 @@ Ultra Quality is not offered merely because an SDK enum exists; this integration
 does not establish runtime support for it.
 
 Old profiles without these settings load Automatic and M. The Automatic/Native
-values remain compatible with the quality settings in
-[myshadowww's PR #840](https://github.com/zortos293/Lichii/pull/840), from which the
-Native DLAA sizing and atomic runtime-settings publication were adapted. This
-change does not import that PR's Linux backend or neural rendering.
+values remain compatible with earlier native Linux DLSS profiles.
