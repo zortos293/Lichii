@@ -131,6 +131,33 @@ the game keeps its own pass whenever DLSS is off, unavailable or fails to start.
   `EDEN_NX2_DLSS_CONTRACT_TRACE=1` logs every FSR evaluation and scheduler writeback;
   otherwise periodic evaluation/writeback messages avoid a per-frame logging cost.
 
+## XeSS-SR
+
+On Windows with Vulkan, **Use Intel XeSS upscaling in Ocarina of Time** selects Intel's official
+XeSS-SR Vulkan runtime instead of the game's native network. This is a separate choice from FSR;
+it does not automatically replace FSR. When NVIDIA DLSS is enabled and available, DLSS takes
+precedence. XeSS uses the host-reconstructed camera motion, scene depth and the same host jitter
+applied to the scene. The SDK's `Ultra Quality`, `Quality`, `Balanced`, `Performance` and
+`Ultra Performance` presets are available. The selected preset is used only when the game's
+render/output sizes fall within XeSS's reported input range; otherwise XeSS falls back.
+
+The public headers are fetched from Intel's MIT-licensed XeSS repository at commit
+`de0fb9c1c510661c571164e1418ceca8101dab69`. The proprietary runtime is not bundled. Download the
+official [XeSS SDK 3.0.2 release](https://github.com/intel/xess/releases/tag/v3.0.2) and place
+`libxess.dll` from its `bin` directory in the `xess` directory under Lichii's user data folder, or
+next to the executable. Restart Lichii after adding the runtime. At startup the log reports the
+runtime version and whether Vulkan requirements were enabled; when it is absent, incompatible, or
+unsupported by the device, FSR 3.1 is used when available, otherwise the native game path remains
+active. XeSS is a temporal output upscaler and does not accelerate the guest's HMMA instructions
+themselves.
+
+XeSS Frame Generation is not implemented in this Vulkan path. Intel's XeSS 3.0.2 FG API is a
+Direct3D 12 proxy-swapchain integration that requires XeLL and replaces the application's DXGI
+swap chain; it does not provide a Vulkan FG API. Lichii's Vulkan renderer and existing frame
+generation backends do not expose that D3D12 swap-chain contract, so routing XeSS-FG through them
+would not be a valid integration. XeSS support here is XeSS-SR only; FSR 3 frame generation remains
+a separate option.
+
 Shader hashes, buffer offsets and Link's mesh shape are taken from the game's current build.
 A game update that changes them disables the replacement and leaves the game's pass in place.
 The "Ocarina of Time anti-aliasing" option (No sharpening, docs/nx2/oot-network-bypass.md)

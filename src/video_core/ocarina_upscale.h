@@ -7,21 +7,34 @@
 
 namespace VideoCommon {
 
-enum class OcarinaUpscaleBackend { Native, Fsr, Dlss };
+enum class OcarinaUpscaleBackend { Native, Fsr, Dlss, Xess };
 
 /// render_scaled: a DLSS render-scale patch shrank the scene to a size FSR 3.1 takes, so FSR 3.1
 /// reconstructs it when DLSS can't run.
 constexpr OcarinaUpscaleBackend SelectOcarinaUpscaler(bool fsr_enabled, bool dlss_enabled,
-                                                    bool dlss_available, bool render_scaled,
-                                                    std::string_view override) {
+                                                     bool dlss_available, bool render_scaled,
+                                                     std::string_view override,
+                                                     bool xess_enabled = false,
+                                                     bool xess_available = false) {
     if (override == "native") {
         return OcarinaUpscaleBackend::Native;
     }
     if (override == "fsr") {
         return OcarinaUpscaleBackend::Fsr;
     }
-    if ((dlss_enabled || override == "dlss") && dlss_available) {
+    if (override == "xess") {
+        return xess_available ? OcarinaUpscaleBackend::Xess : OcarinaUpscaleBackend::Fsr;
+    }
+    if (override == "dlss") {
+        return dlss_available ? OcarinaUpscaleBackend::Dlss
+                              : (fsr_enabled || render_scaled ? OcarinaUpscaleBackend::Fsr
+                                                              : OcarinaUpscaleBackend::Native);
+    }
+    if (dlss_enabled && dlss_available) {
         return OcarinaUpscaleBackend::Dlss;
+    }
+    if (xess_enabled) {
+        return xess_available ? OcarinaUpscaleBackend::Xess : OcarinaUpscaleBackend::Fsr;
     }
     return fsr_enabled || render_scaled ? OcarinaUpscaleBackend::Fsr
                                         : OcarinaUpscaleBackend::Native;

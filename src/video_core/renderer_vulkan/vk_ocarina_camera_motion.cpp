@@ -14,6 +14,7 @@
 #include "video_core/renderer_vulkan/vk_compute_pass.h"
 #include "video_core/renderer_vulkan/vk_fsr3_upscaler.h"
 #include "video_core/renderer_vulkan/vk_fsr4_upscaler.h"
+#include "video_core/renderer_vulkan/vk_xess_upscaler.h"
 #include "video_core/host_shaders/ocarina_dlss_color_comp_spv.h"
 #include "video_core/host_shaders/ocarina_dlss_output_comp_spv.h"
 #include "video_core/host_shaders/ocarina_dlss_4k_composite_comp_spv.h"
@@ -715,9 +716,10 @@ struct OcarinaUpscaler::Impl {
          ComputePassDescriptorQueue& queue_, MemoryAllocator& allocator_, StagingBufferPool& staging,
          VideoCommon::OcarinaUpscaleBackend backend)
         : device{device_}, scheduler{scheduler_}, queue{queue_}, allocator{allocator_}, pool{pool_},
+                    backend{backend},
           motion_pass{device, scheduler, pool_},
-          color_pass{device, scheduler, pool_},
-          output_pass{device, scheduler, pool_, OCARINA_DLSS_OUTPUT_COMP_SPV} {
+                    color_pass{device, scheduler, pool_},
+                    output_pass{device, scheduler, pool_, OCARINA_DLSS_OUTPUT_COMP_SPV} {
 #ifdef EGLANTINE_STREAMLINE
         if (backend == VideoCommon::OcarinaUpscaleBackend::Dlss) {
             dlss = std::make_unique<StreamlineDlssUpscaler>(device, scheduler, allocator);
@@ -726,7 +728,8 @@ struct OcarinaUpscaler::Impl {
 #endif
         // FSR 4 when it's turned on and AMD's runtime offers it; FSR 3.1 stays the fallback (it
         // takes over if FSR 4 fails to create or dispatch).
-        if (Fsr4Upscaler::IsWanted(device)) {
+        if (backend == VideoCommon::OcarinaUpscaleBackend::Fsr &&
+            Fsr4Upscaler::IsWanted(device)) {
             try {
                 fsr4 = std::make_unique<Fsr4Upscaler>(device, scheduler, allocator);
             } catch (const vk::Exception& error) {
@@ -739,6 +742,10 @@ struct OcarinaUpscaler::Impl {
         }
         fsr = std::make_unique<Fsr3Upscaler>(device, scheduler, allocator, staging, pool_, queue,
                                            Fsr3Upscaler::Profile::OcarinaLdr);
+        if (backend == VideoCommon::OcarinaUpscaleBackend::Xess) {
+            xess = std::make_unique<XessUpscaler>(device, scheduler, allocator,
+                                                  Settings::values.xess_quality.GetValue());
+        }
     }
 
     const Device& device;
@@ -746,15 +753,18 @@ struct OcarinaUpscaler::Impl {
     ComputePassDescriptorQueue& queue;
     MemoryAllocator& allocator;
     DescriptorPool& pool;
+    VideoCommon::OcarinaUpscaleBackend backend;
 #ifdef EGLANTINE_STREAMLINE
     std::unique_ptr<StreamlineDlssUpscaler> dlss;
 #endif
+    std::unique_ptr<XessUpscaler> xess;
     std::unique_ptr<Fsr3Upscaler> fsr;
     std::unique_ptr<Fsr4Upscaler> fsr4;
     /// The last recorded frame's output is FSR 4's. Kept per frame: a dispatch failure found on
     /// the worker thread must not switch that frame's writeback and 4K composite to FSR 3.1,
     /// which didn't evaluate it.
     bool output_fsr4{};
+    bool output_xess{};
     std::optional<std::chrono::steady_clock::time_point> last_evaluation;
 
     bool UsesFsr4() const {
@@ -778,6 +788,7 @@ struct OcarinaUpscaler::Impl {
 #ifdef EGLANTINE_STREAMLINE
         if (dlss) return dlss->OutputView();
 #endif
+        if (output_xess && xess) return xess->OutputView();
         if (output_fsr4) return fsr4->OutputView();
         return fsr->OutputView();
     }
@@ -1023,8 +1034,25 @@ bool OcarinaUpscaler::Record(VkImageView color, VkImageView depth, VkImageView t
         return false;
     }
 #endif
+    bool used_xess = false;
+    if (state.backend == VideoCommon::OcarinaUpscaleBackend::Xess && state.xess &&
+        !state.xess->Failed()) {
+        used_xess = state.xess->Upscale({
+            .color_image = *resources.color,
+            .color_view = *resources.color_view,
+            .depth_image = depth_image,
+            .depth_view = depth,
+            .motion_image = *resources.motion,
+            .motion_view = *resources.motion_view,
+            .render_size = extent,
+            .depth_size = depth_extent,
+            .output_size = output_extent,
+            .jitter = jitter,
+            .reset = reset,
+        });
+    }
     bool used_fsr4 = false;
-    if (state.UsesFsr4()) {
+    if (state.backend == VideoCommon::OcarinaUpscaleBackend::Fsr && state.UsesFsr4()) {
         const auto now = std::chrono::steady_clock::now();
         const f32 elapsed = state.last_evaluation
             ? std::chrono::duration<f32, std::milli>(now - *state.last_evaluation).count() : 16.67f;
@@ -1059,14 +1087,14 @@ bool OcarinaUpscaler::Record(VkImageView color, VkImageView depth, VkImageView t
             }
         }
     }
-    if (state.fsr && !used_fsr4) {
+    if (state.fsr && !used_fsr4 && !used_xess) {
         const auto now = std::chrono::steady_clock::now();
         const f32 elapsed = state.last_evaluation
             ? std::chrono::duration<f32, std::milli>(now - *state.last_evaluation).count() : 16.67f;
         const f32 sharpness = FSR::RcasSharpnessFromStops(
             static_cast<f32>(Settings::values.fsr_sharpening_slider.GetValue()) / 100.0f);
-        // Taking over from FSR 4: FSR 3.1 has no history of the frames FSR 4 drew.
-        const bool fsr_reset = reset || elapsed > 250.0f || state.output_fsr4;
+        // Taking over from FSR 4 or XeSS: FSR 3.1 has no history of those frames.
+        const bool fsr_reset = reset || elapsed > 250.0f || state.output_fsr4 || state.output_xess;
         state.fsr->Upscale({
             .color = *resources.color_view,
             .depth = depth,
@@ -1094,6 +1122,7 @@ bool OcarinaUpscaler::Record(VkImageView color, VkImageView depth, VkImageView t
         }
     }
     state.output_fsr4 = used_fsr4;
+    state.output_xess = used_xess;
     // A resize can submit the inputs before recording evaluation, so keep the later tick.
     resources.tick = state.scheduler.CurrentTick();
     if (target) {
@@ -1120,9 +1149,12 @@ VideoCommon::OcarinaUpscaleBackend ResolveOcarinaUpscaler(const Device& device) 
     // Balanced's scene is padded, which only DLSS takes.
     const auto scale = Settings::AppliedOcarinaRenderScale();
     const bool render_scaled = scale && *scale != Settings::NvidiaDlssQuality::Balanced;
+    const bool xess_available = XessUpscaler::IsSupported(device) &&
+                                Fsr3Upscaler::IsSupported(device);
     const auto backend = VideoCommon::SelectOcarinaUpscaler(
         Settings::values.ocarina_fsr.GetValue(), Settings::values.nvidia_dlss.GetValue(),
-        dlss_available, render_scaled, value ? value : "");
+        dlss_available, render_scaled, value ? value : "",
+        Settings::values.ocarina_xess.GetValue(), xess_available);
     if (backend == VideoCommon::OcarinaUpscaleBackend::Fsr && !Fsr3Upscaler::IsSupported(device)) {
         return VideoCommon::OcarinaUpscaleBackend::Native;
     }

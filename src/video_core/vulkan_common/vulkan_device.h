@@ -368,6 +368,10 @@ public:
         return properties.driver.driverID;
     }
 
+    bool IsXeSSSupported() const {
+        return xess_supported;
+    }
+
     bool IsSparseBindingSupported() const {
         return features.features.sparseBinding && graphics_family_sparse_binding;
     }
@@ -1417,6 +1421,7 @@ private:
     Properties properties{};
 
     VkPhysicalDeviceFeatures2 features2{};
+    void* xess_features_chain_head{};
     VkPhysicalDeviceFaultFeaturesEXT device_fault_features{};
     /// Enabled as the driver reports them (VK_KHR_portability_subset devices only).
     VkPhysicalDevicePortabilitySubsetFeaturesKHR portability_subset_features{};
@@ -1432,6 +1437,7 @@ private:
     bool cooperative_hmma_16x16x16{};          ///< HMMA runs on 16x16x16 matrices.
     bool fp8_matrix_shapes{}; ///< 16x16x16 FP16 and FP8 matrices with FP32 results (fsr4-vk).
     bool is_integrated{};                      ///< Is GPU an iGPU.
+    bool xess_supported{};                      ///< XeSS-SR runtime requirements were enabled.
     bool is_virtual{};                         ///< Is GPU a virtual GPU.
     bool is_non_gpu{};                         ///< Is SoftwareRasterizer, FPGA, non-GPU device.
     bool has_broken_compute{};                 ///< Compute shaders can cause crashes

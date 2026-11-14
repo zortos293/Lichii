@@ -198,6 +198,14 @@ std::unique_ptr<TranslationMap> InitializeTranslations(QObject* parent) {
            tr("Replaces Ocarina of Time's native upscaler using scene depth and camera motion. "
               "Works on any supported Vulkan GPU. NVIDIA DLSS takes precedence when enabled and "
               "available. RCAS Sharpness controls sharpening. Takes effect when a game starts."));
+        INSERT(Settings, ocarina_xess, tr("Use Intel XeSS upscaling in Ocarina of Time"),
+                  tr("Uses Intel XeSS-SR instead of the game's native network. Download Intel's official "
+                      "XeSS SDK 3.0.2 and place libxess.dll in the xess directory under Lichii's user "
+                      "data folder or next to the executable. If XeSS is unavailable, FSR 3.1 is used "
+                      "when supported, otherwise the native game path remains active. NVIDIA DLSS takes "
+                      "precedence when enabled and available. Takes effect when a game starts."));
+        INSERT(Settings, xess_quality, tr("Intel XeSS quality:"),
+            tr("Quality preset used by XeSS-SR in Ocarina of Time."));
 #if defined(__linux__) && !defined(__ANDROID__)
     INSERT(Settings, amd_fsr4, tr("Use FSR 4 (fsr4-vk community Vulkan port) in place of FSR 3.1"),
            tr("Uses fsr4-vk, a community Vulkan port of AMD's ML-based FSR 4.1.1 that Lichii's "
@@ -575,6 +583,12 @@ std::unique_ptr<ComboboxTranslationMap> ComboboxEnumeration(QObject* parent) {
                            PAIR(NvidiaDlssQuality, Balanced, tr("Balanced")),
                            PAIR(NvidiaDlssQuality, Performance, tr("Performance")),
                            PAIR(NvidiaDlssQuality, UltraPerformance, tr("Ultra Performance"))}});
+    translations->insert({Settings::EnumMetadata<Settings::XessQuality>::Index(),
+                          {PAIR(XessQuality, UltraQuality, tr("Ultra Quality")),
+                           PAIR(XessQuality, Quality, tr("Quality")),
+                           PAIR(XessQuality, Balanced, tr("Balanced")),
+                           PAIR(XessQuality, Performance, tr("Performance")),
+                           PAIR(XessQuality, UltraPerformance, tr("Ultra Performance"))}});
     translations->insert(
         {Settings::EnumMetadata<Settings::NvidiaDlssPreset>::Index(),
          {PAIR(NvidiaDlssPreset, M, tr("M (DLSS 4.5, default)")),

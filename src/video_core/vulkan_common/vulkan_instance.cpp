@@ -22,6 +22,7 @@
 #include <string>
 #include "video_core/vulkan_common/streamline.h"
 #endif
+#include "video_core/vulkan_common/xess_runtime.h"
 
 namespace Vulkan {
 namespace {
@@ -114,6 +115,27 @@ namespace {
         }
     }
 #endif
+    static std::vector<std::string> xess;
+    xess = XeSS::InstanceExtensions();
+    if (XeSS::IsAvailable()) {
+        const auto missing = std::ranges::find_if(xess, [&](const std::string& name) {
+            return !std::ranges::any_of(properties, [&](const VkExtensionProperties& property) {
+                return name == property.extensionName;
+            });
+        });
+        if (missing != xess.end()) {
+            XeSS::Disable("the Vulkan instance lacks a required extension");
+            xess.clear();
+        }
+        for (const std::string& name : xess) {
+            const bool listed = std::ranges::any_of(extensions, [&](const char* extension) {
+                return name == extension;
+            });
+            if (!listed) {
+                extensions.push_back(name.c_str());
+            }
+        }
+    }
     return extensions;
 }
 

@@ -3,6 +3,16 @@
 
 # SPDX-License-Identifier: GPL-2.0-or-later
 
+if (WIN32)
+    include(FetchContent)
+    FetchContent_Declare(intel_xess_sdk
+        GIT_REPOSITORY https://github.com/intel/xess.git
+        GIT_TAG de0fb9c1c510661c571164e1418ceca8101dab69
+        GIT_SHALLOW FALSE
+        SOURCE_SUBDIR inc)
+    FetchContent_MakeAvailable(intel_xess_sdk)
+endif()
+
 add_subdirectory(host_shaders)
 add_subdirectory(gpu_logging)
 
@@ -223,9 +233,13 @@ add_library(video_core STATIC
     renderer_vulkan/vk_fsr3_upscaler.h
     renderer_vulkan/vk_fsr4_upscaler.cpp
     renderer_vulkan/vk_fsr4_upscaler.h
+    renderer_vulkan/vk_xess_upscaler.cpp
+    renderer_vulkan/vk_xess_upscaler.h
     vulkan_common/ffx_files.h
     vulkan_common/ffx_runtime.cpp
     vulkan_common/ffx_runtime.h
+    vulkan_common/xess_runtime.cpp
+    vulkan_common/xess_runtime.h
     renderer_vulkan/vk_dlss_network_probe.cpp
     renderer_vulkan/vk_dlss_network_probe.h
     renderer_vulkan/vk_ocarina_camera_motion.cpp
@@ -609,6 +623,8 @@ target_include_directories(video_core PRIVATE ${HOST_SHADERS_INCLUDE})
 # AMD's FFX API headers (MIT), for calling AMD's FSR 4 runtime (vk_fsr4_upscaler.cpp).
 target_include_directories(video_core PRIVATE ${CMAKE_SOURCE_DIR}/externals/ffx-api)
 if (WIN32)
+    # Intel's public XeSS Vulkan headers (MIT); the user supplies libxess.dll.
+    target_include_directories(video_core PRIVATE "${intel_xess_sdk_SOURCE_DIR}/inc")
     # Checks AMD's downloaded FSR 4 runtime (vulkan_common/ffx_runtime.cpp).
     target_link_libraries(video_core PRIVATE bcrypt wintrust crypt32)
 endif()
