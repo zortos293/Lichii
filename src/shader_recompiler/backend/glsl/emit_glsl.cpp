@@ -7,6 +7,7 @@
 #include <string>
 #include <tuple>
 #include <type_traits>
+#include <vector>
 
 #include "common/div_ceil.h"
 #include "common/settings.h"
@@ -117,6 +118,7 @@ void Precolor(const IR::Program& program) {
 }
 
 void EmitCode(EmitContext& ctx, const IR::Program& program) {
+    std::vector<u32> safety_loops;
     for (const IR::AbstractSyntaxNode& node : program.syntax_list) {
         switch (node.type) {
         case IR::AbstractSyntaxNode::Type::Block:
@@ -144,14 +146,21 @@ void EmitCode(EmitContext& ctx, const IR::Program& program) {
             ctx.Add("return;");
             break;
         case IR::AbstractSyntaxNode::Type::Loop:
-            ctx.Add("for(;;){{");
+            if (Settings::values.disable_shader_loop_safety_checks) {
+                ctx.Add("for(;;){{");
+            } else {
+                // Each entry of the loop gets the whole count, also inside an outer loop.
+                safety_loops.push_back(ctx.num_safety_loop_vars++);
+                ctx.Add("loop{}=0x2000;for(;;){{", safety_loops.back());
+            }
             break;
         case IR::AbstractSyntaxNode::Type::Repeat:
             if (Settings::values.disable_shader_loop_safety_checks) {
                 ctx.Add("if(!{}){{break;}}}}", ctx.var_alloc.Consume(node.data.repeat.cond));
             } else {
-                ctx.Add("if(--loop{}<0 || !{}){{break;}}}}", ctx.num_safety_loop_vars++,
+                ctx.Add("if(--loop{}<0 || !{}){{break;}}}}", safety_loops.back(),
                         ctx.var_alloc.Consume(node.data.repeat.cond));
+                safety_loops.pop_back();
             }
             break;
         default:

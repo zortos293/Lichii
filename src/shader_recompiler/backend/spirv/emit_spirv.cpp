@@ -160,8 +160,14 @@ Id TypeId(const EmitContext& ctx, IR::Type type) {
     }
 }
 
+/// Back-edges a loop's safety check lets through each time the loop is entered
+constexpr u32 LoopSafetyIterations = 0x2000;
+
 void Traverse(EmitContext& ctx, IR::Program& program) {
     IR::Block* current_block{};
+    // Safety counters set again where their loop exits, so that each entry of the loop gets the
+    // whole count: a loop nested in another one is entered again on every outer iteration.
+    std::vector<std::pair<const IR::Block*, Id>> counter_resets;
     for (const IR::AbstractSyntaxNode& node : program.syntax_list) {
         switch (node.type) {
         case IR::AbstractSyntaxNode::Type::Block: {
@@ -171,8 +177,18 @@ void Traverse(EmitContext& ctx, IR::Program& program) {
             }
             current_block = node.data.block;
             ctx.AddLabel(label);
-            for (IR::Inst& inst : node.data.block->Instructions()) {
-                EmitInst(ctx, &inst);
+            auto& insts = node.data.block->Instructions();
+            auto it = insts.begin();
+            for (; it != insts.end() && it->GetOpcode() == IR::Opcode::Phi; ++it) {
+                EmitInst(ctx, &*it);
+            }
+            for (const auto& [merge, counter] : counter_resets) {
+                if (merge == node.data.block) {
+                    ctx.OpStore(counter, ctx.Const(LoopSafetyIterations));
+                }
+            }
+            for (; it != insts.end(); ++it) {
+                EmitInst(ctx, &*it);
             }
             break;
         }
@@ -208,7 +224,7 @@ void Traverse(EmitContext& ctx, IR::Program& program) {
             if (!Settings::values.disable_shader_loop_safety_checks) {
                 const Id pointer_type{ctx.TypePointer(spv::StorageClass::Private, ctx.U32[1])};
                 const Id safety_counter{ctx.AddGlobalVariable(
-                    pointer_type, spv::StorageClass::Private, ctx.Const(0x2000u))};
+                    pointer_type, spv::StorageClass::Private, ctx.Const(LoopSafetyIterations))};
                 if (ctx.profile.supported_spirv >= 0x00010400) {
                     ctx.interfaces.push_back(safety_counter);
                 }
@@ -219,6 +235,7 @@ void Traverse(EmitContext& ctx, IR::Program& program) {
                 const Id safety_cond{
                     ctx.OpSGreaterThanEqual(ctx.U1, new_counter, ctx.u32_zero_value)};
                 cond = ctx.OpLogicalAnd(ctx.U1, cond, safety_cond);
+                counter_resets.emplace_back(node.data.repeat.merge, safety_counter);
             }
             const Id loop_header_label{node.data.repeat.loop_header->Definition<Id>()};
             const Id merge_label{node.data.repeat.merge->Definition<Id>()};

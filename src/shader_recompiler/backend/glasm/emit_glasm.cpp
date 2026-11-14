@@ -3,6 +3,7 @@
 #include <algorithm>
 #include <string>
 #include <tuple>
+#include <vector>
 
 #include "common/div_ceil.h"
 #include "common/settings.h"
@@ -206,6 +207,7 @@ void Precolor(const IR::Program& program) {
 void EmitCode(EmitContext& ctx, const IR::Program& program) {
     const auto eval{
         [&](const IR::U1& cond) { return ScalarS32{ctx.reg_alloc.Consume(IR::Value{cond})}; }};
+    std::vector<u32> safety_loops;
     for (const IR::AbstractSyntaxNode& node : program.syntax_list) {
         switch (node.type) {
         case IR::AbstractSyntaxNode::Type::Block:
@@ -222,11 +224,18 @@ void EmitCode(EmitContext& ctx, const IR::Program& program) {
             ctx.Add("ENDIF;");
             break;
         case IR::AbstractSyntaxNode::Type::Loop:
+            if (!Settings::values.disable_shader_loop_safety_checks) {
+                // Each entry of the loop gets the whole count, also inside an outer loop.
+                const u32 loop_index{ctx.num_safety_loop_vars++};
+                safety_loops.push_back(loop_index);
+                ctx.Add("MOV.S loop{}.{},0x2000;", loop_index / 4, "xyzw"[loop_index % 4]);
+            }
             ctx.Add("REP;");
             break;
         case IR::AbstractSyntaxNode::Type::Repeat:
             if (!Settings::values.disable_shader_loop_safety_checks) {
-                const u32 loop_index{ctx.num_safety_loop_vars++};
+                const u32 loop_index{safety_loops.back()};
+                safety_loops.pop_back();
                 const u32 vector_index{loop_index / 4};
                 const char component{"xyzw"[loop_index % 4]};
                 ctx.Add("SUB.S.CC loop{}.{},loop{}.{},1;"
