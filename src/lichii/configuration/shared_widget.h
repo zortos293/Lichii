@@ -6,10 +6,12 @@
 #pragma once
 
 #include <functional>
+#include <map>
 #include <memory>
 #include <string>
 #include <vector>
 #include <QObject>
+#include <QPointer>
 #include <QString>
 #include <QStringLiteral>
 #include <QWidget>
@@ -94,6 +96,32 @@ public:
      */
     [[nodiscard]] static QPushButton* CreateRestoreGlobalButton(bool using_global, QWidget* parent);
 
+    /**
+     * Shows a value in the component for `which` (this widget's setting or its paired checkbox
+     * setting) without applying it; per-game, the setting is marked custom.
+     * @returns False if this widget cannot take a value from outside.
+     */
+    bool Stage(const Settings::BasicSetting& which, const std::string& value);
+
+    /// Per-game only: shows the global value, as the restore button does.
+    void StageGlobal();
+
+    /// The value the component currently shows for `which`, as Settings::LoadString takes it.
+    [[nodiscard]] std::string Current(const Settings::BasicSetting& which) const;
+
+    /// Per-game only: true if the widget currently uses the global value.
+    [[nodiscard]] bool ShowsGlobal() const;
+
+    /// False when the tab fills and reads the component itself (e.g. lists known only at runtime).
+    [[nodiscard]] bool Managed() const {
+        return managed_component;
+    }
+
+    /// The paired checkbox setting, if any.
+    [[nodiscard]] const Settings::BasicSetting* CheckboxSetting() const {
+        return checkbox_setting;
+    }
+
     // Direct handles to sub components created
     QPushButton* restore_button{}; ///< Restore button for custom configurations
     QLineEdit* line_edit{};        ///< QLineEdit, used for LineEdit and HexEdit
@@ -151,6 +179,13 @@ private:
 
     bool created{false};
     bool runtime_lock{false};
+    bool managed_component{false};
+
+    Settings::BasicSetting* checkbox_setting{};
+    std::function<std::string()> stage_serializer;
+    std::function<void()> stage_restore;
+    std::function<std::string()> stage_checkbox_serializer;
+    std::function<void()> stage_touch;
 };
 
 class Builder {
@@ -173,7 +208,12 @@ public:
 
     const ComboboxTranslationMap& ComboboxTranslations() const;
 
+    /// The widget built for a setting (or for the setting of its paired checkbox), if any.
+    Widget* FindWidget(const Settings::BasicSetting& setting) const;
+
 private:
+    mutable std::map<const Settings::BasicSetting*, QPointer<Widget>> widgets;
+
     std::unique_ptr<TranslationMap> translations;
     std::unique_ptr<ComboboxTranslationMap> combobox_translations;
 

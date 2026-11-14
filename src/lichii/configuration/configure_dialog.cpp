@@ -42,6 +42,7 @@
 #include "lichii/configuration/configure_system.h"
 #include "lichii/configuration/configure_ui.h"
 #include "lichii/configuration/configure_web.h"
+#include "lichii/configuration/settings_share.h"
 #include "lichii/hotkeys.h"
 
 ConfigureDialog::ConfigureDialog(QWidget* parent, HotkeyRegistry& registry_,
@@ -153,6 +154,29 @@ ConfigureDialog::ConfigureDialog(QWidget* parent, HotkeyRegistry& registry_,
     ui->selectorList->setFixedWidth(std::max(184, ui->selectorList->sizeHintForColumn(0) +
                                                       2 * ui->selectorList->frameWidth() + 32));
     ConfigurationShared::FitToScreen(this, QSize(1040, 760));
+
+    SettingsShare::AddShareButton(
+        this, ui->buttonBox,
+        {
+            .current_section =
+                [this] {
+                    const std::map<const QWidget*, QString> sections{
+                        {general_tab.get(), QStringLiteral("gen")},
+                        {system_tab.get(), QStringLiteral("sys")},
+                        {applets_tab.get(), QStringLiteral("app")},
+                        {cpu_tab.get(), QStringLiteral("cpu")},
+                        {graphics_tab.get(), QStringLiteral("gfx")},
+                        {graphics_advanced_tab.get(), QStringLiteral("gfxa")},
+                        {graphics_extensions_tab.get(), QStringLiteral("gfxx")},
+                        {audio_tab.get(), QStringLiteral("aud")},
+                    };
+                    const auto it = sections.find(ui->tabWidget->currentWidget());
+                    return it == sections.end() ? QString{} : it->second;
+                },
+            .builder = builder.get(),
+        });
+
+    adjustSize();
     ui->selectorList->setCurrentRow(0);
 
     // Selects the leftmost button on the bottom bar (Cancel as of writing)

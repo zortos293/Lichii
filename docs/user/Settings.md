@@ -21,6 +21,18 @@ Lichii can switch to the developer's recommended settings. It never asks on its 
 
 Neither is available while a game runs.
 
+## Sharing settings
+
+The **Share settings** button at the bottom of Configure and of a game's Properties turns settings into a short line of text (a code) you can paste in a chat, keep as a backup, or move between games.
+
+- `Copy code for <tab>`: every setting of the tab you are on (General, System, Applets, CPU, Graphics, Advanced Graphics, Graphics Extensions, Audio), as the fields show them.
+- `Copy code for all settings`: every tab above in one code.
+- `Paste code...`: sets that tab's fields to match the code exactly, after showing what will change (Show Details lists each setting). Nothing is saved until you press OK or Apply; Cancel drops it.
+
+To stay short, a code only writes out the values that differ from the defaults; everything it leaves out is a default, so pasting puts those back to default too. A Graphics code with one change reads like `LX1.gfx.anti_aliasing=0`; long codes are compressed. In a game's Properties, a pasted value equal to your global one stays global.
+
+A code never carries your GPU or audio device, paths, accounts or controller setup, and pasting never changes them. Settings that only exist globally are skipped in a game's Properties, and fields locked while a game runs are skipped too. A code from a newer Lichii asks you to update.
+
 ## General
 
 - `General/Force X11 as Graphics Backend`: Wayland on *NIX has prominent issues that are unlikely to be resolved; the kind that are "not our fault, it's Wayland issue", this "temporary" hack forces X11 as the backend, regardless of the desktop manager's default.

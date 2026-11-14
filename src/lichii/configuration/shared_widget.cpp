@@ -84,7 +84,13 @@ void Repolish(QWidget* widget) {
 
 } // namespace
 
+// Set while Widget::Stage runs a restore function, so it shows this value instead of the default.
+static const std::string* staged_value = nullptr;
+
 static std::string RelevantDefault(const Settings::BasicSetting& setting) {
+    if (staged_value != nullptr) {
+        return *staged_value;
+    }
     return Settings::IsConfiguringGlobal() ? setting.DefaultToString() : setting.ToStringGlobal();
 }
 
@@ -695,6 +701,13 @@ void Widget::SetupComponent(const QString& label, std::function<void()>& load_fu
 
     layout->addWidget(data_component, 1);
 
+    checkbox_setting = require_checkbox ? other_setting : nullptr;
+    stage_serializer = serializer;
+    stage_restore = restore_func;
+    stage_checkbox_serializer = checkbox_serializer;
+    stage_touch = touch;
+    managed_component = managed;
+
     if (!managed) {
         return;
     }
@@ -765,6 +778,36 @@ void Widget::SetCustom(bool custom) {
     for (auto* const child : findChildren<QWidget*>()) {
         Repolish(child);
     }
+}
+
+bool Widget::Stage(const Settings::BasicSetting& which, const std::string& value) {
+    if (!created || !managed_component) {
+        return false;
+    }
+    if (&which == checkbox_setting) {
+        // Set directly: unchecking resets the paired component, which must not see this value.
+        checkbox->setCheckState(value == "true" ? Qt::Checked : Qt::Unchecked);
+    } else {
+        staged_value = &value;
+        stage_restore();
+        staged_value = nullptr;
+    }
+    stage_touch();
+    return true;
+}
+
+void Widget::StageGlobal() {
+    if (restore_button != nullptr && restore_button->isEnabled()) {
+        restore_button->click();
+    }
+}
+
+std::string Widget::Current(const Settings::BasicSetting& which) const {
+    return &which == checkbox_setting ? stage_checkbox_serializer() : stage_serializer();
+}
+
+bool Widget::ShowsGlobal() const {
+    return restore_button == nullptr || !restore_button->isEnabled();
 }
 
 Widget::~Widget() = default;
@@ -853,8 +896,22 @@ Widget* Builder::BuildWidget(Settings::BasicSetting* setting,
         return nullptr;
     }
 
-    return new Widget(setting, *translations, *combobox_translations, parent, runtime_lock,
-                      apply_funcs, request, managed, multiplier, other_setting, suffix);
+    auto* const widget =
+        new Widget(setting, *translations, *combobox_translations, parent, runtime_lock,
+                   apply_funcs, request, managed, multiplier, other_setting, suffix);
+    // Only managed widgets: the tab handles the others' values itself.
+    if (widget->Valid() && widget->Managed()) {
+        widgets[setting] = widget;
+        if (const auto* paired = widget->CheckboxSetting()) {
+            widgets[paired] = widget;
+        }
+    }
+    return widget;
+}
+
+Widget* Builder::FindWidget(const Settings::BasicSetting& setting) const {
+    const auto it = widgets.find(&setting);
+    return it == widgets.end() ? nullptr : it->second.data();
 }
 
 Widget* Builder::BuildWidget(Settings::BasicSetting* setting,
