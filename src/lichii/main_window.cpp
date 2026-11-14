@@ -9,6 +9,9 @@
 #endif
 
 #include <QSysInfo>
+#include <atomic>
+#include <future>
+#include <stop_token>
 #include <boost/algorithm/string/split.hpp>
 #include "common/fs/path_util.h"
 #include "common/settings.h"
@@ -144,6 +147,7 @@ static FileSys::VirtualFile VfsDirectoryCreateFileWrapper(const FileSys::Virtual
 #endif
 
 // Common //
+#include "common/fs/file.h"
 #include "common/fs/fs.h"
 #include "common/logging.h"
 #include "common/memory_detect.h"
@@ -168,7 +172,10 @@ static FileSys::VirtualFile VfsDirectoryCreateFileWrapper(const FileSys::Virtual
 
 #include "core/file_sys/card_image.h"
 #include "core/file_sys/common_funcs.h"
+#include "core/file_sys/nup_container.h"
+#include "core/loader/loader.h"
 #include "core/file_sys/nup_writer.h"
+#include "core/file_sys/nx2_shader_extract.h"
 #include "core/file_sys/romfs.h"
 #include "core/file_sys/savedata_factory.h"
 #include "core/loader/nx.h"
@@ -186,6 +193,8 @@ static FileSys::VirtualFile VfsDirectoryCreateFileWrapper(const FileSys::Virtual
 
 // Video Core //
 #include "video_core/gpu.h"
+#include "video_core/nx2_precompile.h"
+#include "video_core/pipeline_cache_files.h"
 #include "video_core/renderer_base.h"
 #include "video_core/shader_notify.h"
 #ifdef EGLANTINE_STREAMLINE
@@ -1005,6 +1014,10 @@ void MainWindow::InitializeWidgets() {
 
     shader_building_label = new QLabel();
     shader_building_label->setToolTip(tr("The amount of shaders currently being built"));
+    shader_prepare_label = new QLabel();
+    shader_prepare_label->setToolTip(
+        tr("Precompiled shaders being prepared in the background. Until this finishes, new "
+           "areas can still stutter; what is done is kept for the next launch."));
     res_scale_label = new QLabel();
     res_scale_label->setToolTip(tr("The current selected resolution scaling multiplier."));
     emu_speed_label = new QLabel();
@@ -1023,8 +1036,8 @@ void MainWindow::InitializeWidgets() {
         tr("Time taken to emulate a Switch frame, not counting framelimiting or v-sync. For "
            "full-speed emulation this should be at most 16.67 ms."));
 
-    for (auto& label : {shader_building_label, res_scale_label, emu_speed_label, game_fps_label,
-                        dlss_status_label, emu_frametime_label}) {
+    for (auto& label : {shader_prepare_label, shader_building_label, res_scale_label,
+                        emu_speed_label, game_fps_label, dlss_status_label, emu_frametime_label}) {
         label->setVisible(false);
         label->setFrameStyle(QFrame::NoFrame);
         label->setContentsMargins(4, 0, 4, 0);
@@ -1572,6 +1585,8 @@ void MainWindow::ConnectWidgetEvents() {
             &MainWindow::OnGameListRemovePlayTimeData);
     connect(game_list, &GameList::SetPlayTimeRequested, this, &MainWindow::OnGameListSetPlayTime);
     connect(game_list, &GameList::DumpRomFSRequested, this, &MainWindow::OnGameListDumpRomFS);
+    connect(game_list, &GameList::BuildPrecompiledFromPlayRequested, this,
+            &MainWindow::OnGameListBuildPrecompiledFromPlay);
     connect(game_list, &GameList::VerifyIntegrityRequested, this,
             &MainWindow::OnGameListVerifyIntegrity);
     connect(game_list, &GameList::ConvertToNupRequested, this,
@@ -2232,6 +2247,7 @@ void MainWindow::BootGame(const QString& filename, Service::AM::FrontendAppletPa
         QtCommon::system->ApplySettings();
     }
 
+    OfferPrecompiledBuild(title_id, filename.toStdString());
     PrepareShaderPrecache(title_id, std::filesystem::path{filename.toStdU16String()});
     speed_limit_before_hotkeys.reset();
     Settings::LogSettings();
@@ -2693,6 +2709,7 @@ void MainWindow::OnEmulationStopped() {
     // Disable status bar updates
     status_bar_update_timer.stop();
     shader_building_label->setVisible(false);
+    shader_prepare_label->setVisible(false);
     res_scale_label->setVisible(false);
     emu_speed_label->setVisible(false);
     game_fps_label->setVisible(false);
@@ -2994,11 +3011,23 @@ void MainWindow::OnGameListRemoveFile(u64 program_id, QtCommon::Game::GameListRe
             return tr("Remove Custom Game Configuration?");
         case QtCommon::Game::GameListRemoveTarget::CacheStorage:
             return tr("Remove Cache Storage?");
+        case QtCommon::Game::GameListRemoveTarget::ShaderPreparation:
+            return tr("Remove Shader Preparation?\n\nThe game's precompiled shaders are "
+                      "prepared again at its next launch. The precompiled shaders themselves, "
+                      "the pipeline caches and the GPU driver's own cache stay, so preparing "
+                      "again is faster than the first time.");
         default:
             return QString{};
         }
     }();
 
+    // The running game's preparation writes these files.
+    if (target == QtCommon::Game::GameListRemoveTarget::ShaderPreparation && emulation_running &&
+        QtCommon::system->GetApplicationProcessProgramID() == program_id) {
+        QMessageBox::warning(this, tr("Remove Shader Preparation"),
+                             tr("Stop the game before removing its shader preparation."));
+        return;
+    }
     if (!MainWindow::question(this, tr("Remove File"), question, QMessageBox::Yes | QMessageBox::No,
                               QMessageBox::No)) {
         return;
@@ -3019,6 +3048,9 @@ void MainWindow::OnGameListRemoveFile(u64 program_id, QtCommon::Game::GameListRe
         break;
     case QtCommon::Game::GameListRemoveTarget::CacheStorage:
         QtCommon::Game::RemoveCacheStorage(program_id);
+        break;
+    case QtCommon::Game::GameListRemoveTarget::ShaderPreparation:
+        QtCommon::Game::RemoveShaderPreparation(program_id);
         break;
     }
 }
@@ -3171,6 +3203,339 @@ void MainWindow::OnGameListDumpRomFS(u64 program_id, const std::string& game_pat
         progress.close();
         failed();
         QtCommon::vfs->DeleteDirectory(path);
+    }
+}
+
+// The game's own shader programs and the shaders the player's play recorded give this build's
+// precompiled pipeline file (video_core/nx2_precompile.h), prepared at the game's next boot.
+namespace {
+/// A game's RomFS as it loads it, for finding its shaders: a NUP's update laid over its base
+/// (loader/nup.cpp), or what the game's loader reads.
+struct GameShaderRoots {
+    std::unique_ptr<FileSys::NupContainer> nup;
+    std::vector<FileSys::VirtualDir> roots;
+    std::optional<u32> version; ///< known for a NUP: its newest base or update package
+};
+
+GameShaderRoots OpenGameShaderRoots(const std::string& game_path) {
+    GameShaderRoots out;
+    auto& nup = out.nup;
+    auto& roots = out.roots;
+    auto& game_version = out.version;
+    const auto game_file = Core::GetGameFileFromPath(QtCommon::vfs, game_path);
+    if (game_file && FileSys::NupContainer::IsNupFile(game_file)) {
+        nup = std::make_unique<FileSys::NupContainer>(game_file);
+        if (nup->GetStatus() == Loader::ResultStatus::Success) {
+            const auto base = nup->FindBasePackage();
+            const auto update = nup->FindBestUpdatePackage();
+            const auto merged = FileSys::NupContainer::MergeShadowDirs(
+                base ? nup->GetRomFSDir(*base) : FileSys::VirtualDir{},
+                update ? nup->GetRomFSDir(*update) : FileSys::VirtualDir{});
+            if (merged) {
+                roots.push_back(merged);
+            }
+            game_version = 0;
+            for (const auto& package : nup->GetPackages()) {
+                if (package.kind != FileSys::NupContainer::PackageKind::Addon) {
+                    game_version = std::max(*game_version, package.version);
+                }
+            }
+        }
+    } else if (game_file) {
+        if (const auto loader = Loader::GetLoader(*QtCommon::system, game_file)) {
+            FileSys::VirtualFile romfs;
+            if (loader->ReadRomFS(romfs) == Loader::ResultStatus::Success && romfs) {
+                if (auto dir = FileSys::ExtractRomFS(romfs)) {
+                    roots.push_back(std::move(dir));
+                }
+            }
+        }
+    }
+    return out;
+}
+
+/// What the launch knows of a precompiled file built from the player's own play
+/// (<shader dir>/<title>/precompiled_from_play.fork-v<N>.txt): built from how many recorded
+/// pipelines, or the player declined at how many, or never wants to be asked.
+struct PlayBuildState {
+    enum class Kind { None, Built, Declined, Never } kind{Kind::None};
+    u64 recorded{};
+};
+
+std::filesystem::path TitleShaderDir(u64 program_id) {
+    return Common::FS::GetEdenPath(Common::FS::EdenPath::ShaderDir) /
+           fmt::format("{:016x}", program_id);
+}
+
+std::filesystem::path PrecompiledFilePath(u64 program_id) {
+    return TitleShaderDir(program_id) /
+           fmt::format("precompiled.fork-v{}.nx2prep", VideoCommon::VulkanPipelineCacheVersion);
+}
+
+std::filesystem::path PlayBuildStatePath(u64 program_id) {
+    return TitleShaderDir(program_id) / fmt::format("precompiled_from_play.fork-v{}.txt",
+                                                    VideoCommon::VulkanPipelineCacheVersion);
+}
+
+PlayBuildState ReadPlayBuildState(u64 program_id) {
+    std::ifstream file(PlayBuildStatePath(program_id));
+    std::string kind;
+    u64 recorded = 0;
+    if (!(file >> kind)) {
+        return {};
+    }
+    file >> recorded;
+    if (kind == "built") {
+        return {PlayBuildState::Kind::Built, recorded};
+    }
+    if (kind == "declined") {
+        return {PlayBuildState::Kind::Declined, recorded};
+    }
+    if (kind == "never") {
+        return {PlayBuildState::Kind::Never, recorded};
+    }
+    return {};
+}
+
+void WritePlayBuildState(u64 program_id, std::string_view kind, u64 recorded) {
+    std::error_code error;
+    std::filesystem::create_directories(TitleShaderDir(program_id), error);
+    std::ofstream file(PlayBuildStatePath(program_id), std::ios::trunc);
+    file << kind << ' ' << recorded << '\n';
+}
+
+/// Recorded pipelines before the launch offers to build a precompiled file from them.
+constexpr u64 PlayBuildFirstThreshold = 1000;
+} // Anonymous namespace
+
+bool MainWindow::BuildPrecompiledFromPlay(u64 program_id, const std::string& game_path,
+                                          bool at_launch) {
+    const QString title = tr("Build Precompiled Shaders");
+    const auto cache = TitleShaderDir(program_id) / "lichii-cache.v2.bin";
+    u64 recorded = 0;
+    try {
+        recorded = VideoCommon::Nx2Precompile::CountRecordedPipelines(cache);
+    } catch (const std::exception&) {
+    }
+    if (recorded == 0) {
+        QMessageBox::information(
+            this, title,
+            tr("Lichii has not recorded any shaders of this game yet. Play it for a while first: "
+               "the shaders it draws are what the precompiled shaders are predicted from."));
+        return false;
+    }
+    std::error_code error;
+    if (!at_launch && std::filesystem::exists(PrecompiledFilePath(program_id), error) &&
+        ReadPlayBuildState(program_id).kind != PlayBuildState::Kind::Built &&
+        QMessageBox::question(this, title,
+                              tr("This game already has precompiled shaders that were not built "
+                                 "here. Replace them with ones built from your own play?"),
+                              QMessageBox::Yes | QMessageBox::No,
+                              QMessageBox::No) != QMessageBox::Yes) {
+        return false;
+    }
+    GameShaderRoots game = OpenGameShaderRoots(game_path);
+    if (game.roots.empty()) {
+        QMessageBox::warning(this, title, tr("The game's files could not be read."));
+        return false;
+    }
+
+    QProgressDialog progress(tr("Finding the game's shaders..."), tr("Cancel"), 0, 1000, this);
+    progress.setWindowTitle(title);
+    progress.setWindowModality(Qt::WindowModal);
+    progress.setMinimumDuration(0);
+    progress.setAutoClose(false);
+    progress.setAutoReset(false);
+
+    namespace Precompile = VideoCommon::Nx2Precompile;
+    std::stop_source stop;
+    FileSys::Nx2ShaderExtract::Progress extract_progress;
+    Precompile::BuildProgress build_progress;
+    std::atomic<bool> building{false};
+    const auto out = PrecompiledFilePath(program_id);
+    const auto begin = std::chrono::steady_clock::now();
+    auto job = std::async(std::launch::async, [&]() -> std::pair<Precompile::BuildReport, std::string> {
+        Precompile::BuildReport report;
+        try {
+            // An XCI's or NSP's NCA layers are read one file at a time: they are not
+            // thread-safe. A NUP's reads lock where they need to.
+            const auto extracted = FileSys::Nx2ShaderExtract::Extract(
+                game.roots, 0, &extract_progress, stop.get_token(), !game.nup);
+            if (stop.stop_requested()) {
+                return {};
+            }
+            if (extracted.programs.empty()) {
+                return {report, "no shaders were found in the game's files"};
+            }
+            building = true;
+            const unsigned threads = std::max(1U, std::thread::hardware_concurrency() - 1);
+            if (!Common::FS::CreateDirs(out.parent_path())) {
+                return {report, "could not create the shader folder"};
+            }
+            const std::array caches{cache};
+            Precompile::Build(extracted, caches, out, VideoCommon::VulkanPipelineCacheVersion,
+                              threads, &build_progress, stop.get_token(), report);
+        } catch (const std::exception& e) {
+            return {report, e.what()};
+        }
+        return {report, {}};
+    });
+    while (job.wait_for(std::chrono::milliseconds(50)) != std::future_status::ready) {
+        if (building) {
+            const u64 total = build_progress.total;
+            const u64 done = build_progress.done;
+            switch (build_progress.step.load()) {
+            case Precompile::BuildStep::Reading:
+                progress.setLabelText(tr("Reading the shaders your play recorded..."));
+                progress.setValue(100);
+                break;
+            case Precompile::BuildStep::Scanning:
+                progress.setLabelText(tr("Translating the game's shaders..."));
+                progress.setValue(100 + static_cast<int>(total ? done * 700 / total : 0));
+                break;
+            case Precompile::BuildStep::Mesh:
+                progress.setLabelText(tr("Translating the game's mesh shaders..."));
+                progress.setValue(800);
+                break;
+            case Precompile::BuildStep::Writing:
+                progress.setLabelText(tr("Predicting the shaders and writing them..."));
+                progress.setValue(900);
+                break;
+            }
+        } else if (const u64 total = extract_progress.files_total) {
+            progress.setValue(static_cast<int>(extract_progress.files_done.load() * 100 / total));
+        }
+        if (progress.wasCanceled()) {
+            stop.request_stop();
+        }
+        QCoreApplication::processEvents(QEventLoop::AllEvents, 50);
+    }
+    const auto [report, failure] = job.get();
+    progress.close();
+    if (stop.stop_requested()) {
+        return false;
+    }
+    if (!failure.empty() || report.records == 0) {
+        QMessageBox::warning(this, title,
+                             tr("The precompiled shaders could not be built: %1")
+                                 .arg(QString::fromStdString(failure)));
+        return false;
+    }
+    WritePlayBuildState(program_id, "built", recorded);
+    const double seconds =
+        std::chrono::duration<double>(std::chrono::steady_clock::now() - begin).count();
+    LOG_INFO(Frontend, "Precompiled file built from {} recorded pipelines: {} records in {:.1f} s",
+             recorded, report.records, seconds);
+    QString text = tr("%n shader(s) were predicted from the %1 your play recorded and the "
+                      "game's own shader files.",
+                      "", static_cast<int>(report.records))
+                       .arg(recorded);
+    text += QStringLiteral("\n\n");
+    switch (Settings::values.precompiled_prepare.GetValue()) {
+    case Settings::PrecompiledPrepare::BeforeStart:
+        text += tr("They are prepared on the loading screen the next time the game starts.");
+        break;
+    case Settings::PrecompiledPrepare::Never:
+        text += tr("Prepare precompiled shaders is set to Never, so they are not prepared or "
+                   "used. Choose While playing or Before the game starts in Configure, "
+                   "Graphics, Advanced to use them.");
+        break;
+    default:
+        text += tr("They are prepared in the background while you play, starting with the "
+                   "next launch; the status bar shows the progress.");
+        break;
+    }
+    text += QStringLiteral("\n\n") +
+            tr("NVIDIA: set Shader Cache Size to Unlimited in the NVIDIA Control Panel, or the "
+               "driver keeps only part of them.");
+    QMessageBox::information(this, title, text);
+    return true;
+}
+
+void MainWindow::OnGameListBuildPrecompiledFromPlay(u64 program_id, const std::string& game_path) {
+    BuildPrecompiledFromPlay(program_id, game_path, false);
+}
+
+/// Once the player's play has recorded enough of a Switch 2 game's shaders, the launch offers to
+/// build its precompiled file from them, and again when much more has been recorded since. Not
+/// for a game whose precompiled file came from elsewhere (the nx2-precompile tool).
+void MainWindow::OfferPrecompiledBuild(u64 title_id, const std::string& game_path) {
+    if (title_id == 0 || !Settings::values.use_disk_shader_cache.GetValue() ||
+        Settings::values.precompiled_prepare.GetValue() == Settings::PrecompiledPrepare::Never) {
+        return;
+    }
+    const auto game_file = Core::GetGameFileFromPath(QtCommon::vfs, game_path);
+    if (!game_file || !FileSys::NupContainer::IsNupFile(game_file)) {
+        return;
+    }
+    const PlayBuildState state = ReadPlayBuildState(title_id);
+    std::error_code error;
+    const bool have_file = std::filesystem::exists(PrecompiledFilePath(title_id), error);
+    u64 wanted = PlayBuildFirstThreshold;
+    switch (state.kind) {
+    case PlayBuildState::Kind::Never:
+        return;
+    case PlayBuildState::Kind::None:
+        if (have_file) {
+            return;
+        }
+        break;
+    case PlayBuildState::Kind::Built:
+        // A quarter more, at least 500.
+        wanted = state.recorded + std::max<u64>(500, state.recorded / 4);
+        if (!have_file) {
+            wanted = PlayBuildFirstThreshold;
+        }
+        break;
+    case PlayBuildState::Kind::Declined:
+        wanted = state.recorded + PlayBuildFirstThreshold;
+        break;
+    }
+    u64 recorded = 0;
+    try {
+        recorded = VideoCommon::Nx2Precompile::CountRecordedPipelines(
+            TitleShaderDir(title_id) / "lichii-cache.v2.bin");
+    } catch (const std::exception&) {
+        return;
+    }
+    if (recorded < wanted) {
+        return;
+    }
+    const bool rebuild = state.kind == PlayBuildState::Kind::Built && have_file;
+    QMessageBox box(
+        QMessageBox::Question, tr("Build Precompiled Shaders"),
+        (rebuild ? tr("Your play has recorded %1 of this game's shaders, %2 more than its "
+                      "precompiled shaders were built from. Build them again now?")
+                       .arg(recorded)
+                       .arg(recorded - state.recorded)
+                 : tr("Your play has recorded %1 of this game's shaders. That is enough for "
+                      "Lichii to predict the shaders of the places you have not been yet, so "
+                      "they don't stutter the first time either. Build precompiled shaders "
+                      "now?")
+                       .arg(recorded)) +
+            QStringLiteral("\n\n") +
+            tr("It reads the game's shader files and takes about a minute and a few GB of "
+               "memory; then the game starts. The shaders are then prepared once, in the "
+               "background while you play or on the loading screen, as Prepare precompiled "
+               "shaders in Configure, Graphics, Advanced sets. The game list's \"Build "
+               "Precompiled Shaders from My Play\" does the same at any time."),
+        QMessageBox::NoButton, this);
+    QPushButton* const build = box.addButton(tr("Build now"), QMessageBox::AcceptRole);
+    QPushButton* const later = box.addButton(tr("Not now"), QMessageBox::RejectRole);
+    QPushButton* const never = box.addButton(tr("Don't ask for this game"), QMessageBox::DestructiveRole);
+    box.setDefaultButton(build);
+    box.exec();
+    if (box.clickedButton() == build) {
+        LOG_INFO(Frontend, "Building a precompiled file from {} recorded pipelines", recorded);
+        if (!BuildPrecompiledFromPlay(title_id, game_path, true) && !rebuild) {
+            WritePlayBuildState(title_id, "declined", recorded);
+        }
+    } else if (box.clickedButton() == never) {
+        WritePlayBuildState(title_id, "never", recorded);
+    } else {
+        (void)later;
+        WritePlayBuildState(title_id, rebuild ? "built" : "declined",
+                            rebuild ? state.recorded : recorded);
     }
 }
 
@@ -5438,6 +5803,15 @@ void MainWindow::UpdateStatusBar() {
         shader_building_label->setVisible(true);
     } else {
         shader_building_label->setVisible(false);
+    }
+    const auto preparing = VideoCommon::ShaderWarm::GetPreparationProgress();
+    if (preparing.total != 0 && preparing.done < preparing.total) {
+        shader_prepare_label->setText(
+            tr("Preparing shaders: %1%")
+                .arg(static_cast<int>(preparing.done * 100 / preparing.total)));
+        shader_prepare_label->setVisible(true);
+    } else {
+        shader_prepare_label->setVisible(false);
     }
 
     const auto res_info = Settings::values.resolution_info;

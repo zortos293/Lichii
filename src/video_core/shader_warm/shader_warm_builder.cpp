@@ -278,6 +278,9 @@ void WriteHeader(std::ofstream& out) {
 
 std::atomic<bool> warm_before_start{false};
 std::atomic<bool> skip_warm{false};
+std::atomic<PrepareSkip> skip_preparation{PrepareSkip::None};
+std::atomic<u64> preparation_done{0};
+std::atomic<u64> preparation_total{0};
 
 /// Records `entries` for the finished precache file at `warm_file` (see WarmCountPath).
 void WriteWarmCount(const fs::path& warm_file, u64 entries) {
@@ -416,6 +419,24 @@ void RequestSkipWarm() {
 
 bool TakeSkipWarm() {
     return skip_warm.exchange(false, std::memory_order_relaxed);
+}
+
+void RequestSkipPreparation(PrepareSkip choice) {
+    skip_preparation.store(choice, std::memory_order_relaxed);
+}
+
+PrepareSkip TakeSkipPreparation() {
+    return skip_preparation.exchange(PrepareSkip::None, std::memory_order_relaxed);
+}
+
+void SetPreparationProgress(u64 done, u64 total) {
+    preparation_done.store(done, std::memory_order_relaxed);
+    preparation_total.store(total, std::memory_order_relaxed);
+}
+
+PreparationProgress GetPreparationProgress() {
+    return {.done = preparation_done.load(std::memory_order_relaxed),
+            .total = preparation_total.load(std::memory_order_relaxed)};
 }
 
 bool DeleteWarmFiles(u64 title_id, std::string* error) {

@@ -3,6 +3,9 @@
 
 #include "qt_common/util/game.h"
 
+#include <algorithm>
+#include <array>
+#include <filesystem>
 #include <fmt/format.h>
 
 #include "common/fs/fs.h"
@@ -336,6 +339,44 @@ void RemoveAllTransferableShaderCaches(u64 program_id) {
 
             tr("Error Removing Transferable Shader Caches"),
             tr("Failed to remove the transferable shader cache directory."));
+    }
+}
+
+void RemoveShaderPreparation(u64 program_id) {
+    const auto shader_cache_dir = Common::FS::GetEdenPath(Common::FS::EdenPath::ShaderDir);
+    const auto dir = shader_cache_dir / fmt::format("{:016x}", program_id);
+    // The store (precompiled_kept*) and the files of the format before it, for any cache version
+    // (PipelineCache::PreparePrecompiled). Not the precompiled file (precompiled.fork-v<N>.nx2prep)
+    // or what the game list knows of building it (precompiled_from_play*).
+    constexpr std::array<std::string_view, 4> Prefixes{
+        "precompiled_kept", "precompiled_infos", "precompiled_prepared", "precompiled_progress"};
+    std::vector<std::filesystem::path> files;
+    std::error_code error;
+    for (const auto& entry : std::filesystem::directory_iterator(dir, error)) {
+        const std::string name = Common::FS::PathToUTF8String(entry.path().filename());
+        if (entry.is_regular_file(error) && name.find(".fork-v") != std::string::npos &&
+            std::ranges::any_of(
+                Prefixes, [&](std::string_view prefix) { return name.starts_with(prefix); })) {
+            files.push_back(entry.path());
+        }
+    }
+    if (files.empty()) {
+        QtCommon::Frontend::Warning(tr("Error Removing Shader Preparation"),
+                                    tr("This game's precompiled shaders have not been prepared."));
+        return;
+    }
+    bool removed = true;
+    for (const auto& file : files) {
+        removed &= std::filesystem::remove(file, error) && !error;
+    }
+    if (removed) {
+        QtCommon::Frontend::Information(
+            tr("Successfully Removed"),
+            tr("Successfully removed the shader preparation. The precompiled shaders are "
+               "prepared again at the game's next launch."));
+    } else {
+        QtCommon::Frontend::Warning(tr("Error Removing Shader Preparation"),
+                                    tr("Failed to remove the shader preparation."));
     }
 }
 

@@ -28,6 +28,10 @@ std::unique_ptr<TranslationMap> InitializeTranslations(QObject* parent);
 
 std::unique_ptr<ComboboxTranslationMap> ComboboxEnumeration(QObject* parent);
 
+/// One sentence on what makes the preparation of a game's precompiled shaders run again, for
+/// every text that explains it.
+QString PrecompiledPrepareRerunCauses();
+
 /// A text from the maps below, in the UI's language (the language `translator` holds). The maps
 /// hold the English texts, which QT_TRANSLATE_NOOP only marks for lupdate, so they are translated
 /// where they are shown. Many languages translate a setting's name in the settings dialog

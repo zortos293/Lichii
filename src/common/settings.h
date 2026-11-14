@@ -717,6 +717,19 @@ struct Values {
     SwitchableSetting<bool> build_all_cached_shaders{linkage, false, "build_all_cached_shaders",
                                                      Category::RendererAdvanced};
 
+    // When the precompiled pipelines of a game's precompiled file (tools/nx2-precompile) are
+    // prepared: on a few shader threads while the game runs, or on the loading screen first.
+    // Either way the work is kept as it goes, so a later launch continues where one stopped.
+    // Never: the file is neither prepared nor used, and native pipeline keys are not made
+    // canonical, so pipelines are compiled as without one (read once per game launch).
+    SwitchableSetting<PrecompiledPrepare> precompiled_prepare{linkage,
+                                                              PrecompiledPrepare::WhilePlaying,
+                                                              "precompiled_prepare",
+                                                              Category::RendererAdvanced,
+                                                              Specialization::Default,
+                                                              true,
+                                                              true};
+
     SwitchableSetting<bool> enable_compute_pipelines{linkage, false, "enable_compute_pipelines",
                                                      Category::RendererAdvanced};
 

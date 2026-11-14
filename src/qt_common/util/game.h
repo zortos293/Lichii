@@ -23,6 +23,7 @@ enum class GameListRemoveTarget {
     AllShaderCache,
     CustomConfiguration,
     CacheStorage,
+    ShaderPreparation,
 };
 
 enum class ShortcutTarget {
@@ -56,6 +57,9 @@ void RemoveAddOnContent(u64 program_id, InstalledEntryType type);
 void RemoveTransferableShaderCache(u64 program_id, GameListRemoveTarget target);
 void RemoveVulkanDriverPipelineCache(u64 program_id);
 void RemoveAllTransferableShaderCaches(u64 program_id);
+/// Removes what preparing a game's precompiled shaders kept, so its next launch prepares them
+/// again from the start. The precompiled file itself stays.
+void RemoveShaderPreparation(u64 program_id);
 void RemoveCustomConfiguration(u64 program_id, const std::string& game_path);
 void RemoveCacheStorage(u64 program_id);
 

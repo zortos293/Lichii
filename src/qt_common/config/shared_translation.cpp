@@ -26,6 +26,15 @@ namespace ConfigurationShared {
  * @param parent Object used for translation lookups.
  * @return The translation map.
  */
+QString PrecompiledPrepareRerunCauses() {
+    // The parts of the store's stamp (PipelineCache::PreparePrecompiled) a player can change.
+    return QCoreApplication::translate(
+        "ConfigurationShared",
+        "Preparation runs again after an emulator update, a GPU driver update, a different GPU, "
+        "new precompiled shaders, or a change to the resolution, Fix bloom effects, Disable Loop "
+        "safety checks or graphics debugging.");
+}
+
 std::unique_ptr<TranslationMap> InitializeTranslations(QObject* parent) {
     std::unique_ptr<TranslationMap> translations = std::make_unique<TranslationMap>();
     const auto& tr = [](const char* text) -> QString { return QCoreApplication::translate("ConfigurationShared", text); };
@@ -394,6 +403,19 @@ std::unique_ptr<TranslationMap> InitializeTranslations(QObject* parent) {
            tr("Enables GPU vendor-specific pipeline cache.\nThis option can improve shader loading "
               "time significantly in cases where the Vulkan driver does not store pipeline cache "
               "files internally."));
+    INSERT(Settings, precompiled_prepare, tr("Prepare precompiled shaders:"),
+           tr("Only for games with precompiled shaders (built from your play in the game list). "
+              "Preparing compiles every shader in them once, so new areas don't stutter, and "
+              "takes a while (about 10 minutes for Ocarina of Time on every CPU thread).\nWhile "
+              "playing: the game starts right away and a few shader threads prepare in the "
+              "background, the shaders most likely to be needed first; the status bar shows the "
+              "progress.\nBefore the game starts: the loading screen prepares on every CPU "
+              "thread first, with a Skip button that continues in the background.\nEither way, "
+              "work done is kept: closing the game continues it at the next launch.\nNever: "
+              "precompiled shaders are neither prepared nor used, and shaders compile the first "
+              "time the game uses them, as without precompiled shaders.\nA change applies at "
+              "the next launch. ") +
+               PrecompiledPrepareRerunCauses());
     INSERT(Settings, precache_shaders, tr("Precache shaders before game start:"),
            tr("Builds shaders on the loading screen, on every CPU thread, so they don't stutter "
               "the first time the game uses them: the compute shaders found in the game files. "
@@ -845,6 +867,12 @@ std::unique_ptr<ComboboxTranslationMap> ComboboxEnumeration(QObject* parent) {
                           {
                               PAIR(ConsoleMode, Docked, tr("Docked")),
                               PAIR(ConsoleMode, Handheld, tr("Handheld")),
+                          }});
+    translations->insert({Settings::EnumMetadata<Settings::PrecompiledPrepare>::Index(),
+                          {
+                              PAIR(PrecompiledPrepare, WhilePlaying, tr("While playing")),
+                              PAIR(PrecompiledPrepare, BeforeStart, tr("Before the game starts")),
+                              PAIR(PrecompiledPrepare, Never, tr("Never")),
                           }});
     translations->insert({Settings::EnumMetadata<Settings::PrecacheShaders>::Index(),
                           {

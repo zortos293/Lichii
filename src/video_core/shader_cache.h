@@ -45,7 +45,12 @@ struct ShaderInfo {
     size_t size_bytes{};
     /// Lowered code of a native program, reused when its pipelines are built.
     std::shared_ptr<const LoweredNativeCode> lowered_native;
+    /// Native vertex programs: the generic attributes their header says they read.
+    u32 generic_read_mask{~0U};
 };
+
+/// Generic attributes a vertex program's header says it reads (any component of each).
+u32 GenericReadMask(const Shader::ProgramHeader& sph) noexcept;
 
 /// A program of the current draw or dispatch, read back from GPU memory for a frame dump.
 struct CapturedProgram {

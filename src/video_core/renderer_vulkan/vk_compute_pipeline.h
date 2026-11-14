@@ -127,6 +127,24 @@ public:
         RunBuild();
     }
 
+    [[nodiscard]] const Shader::Info& StageInfo() const noexcept {
+        return info;
+    }
+
+    /// Built from a precompiled pipeline's kept info and SPIR-V; a failed build is replaced by a
+    /// pipeline translated from the game's state.
+    void MarkPrecompiled() noexcept {
+        precompiled = true;
+    }
+    [[nodiscard]] bool IsPrecompiled() const noexcept {
+        return precompiled;
+    }
+    /// Built, and its module could not be made (its emit function threw): dispatches skip it.
+    [[nodiscard]] bool BuildFailed() const noexcept {
+        return is_built.load(std::memory_order::acquire) &&
+               build_failed.load(std::memory_order::acquire);
+    }
+
 private:
     /// Builds the pipeline once, on whichever thread gets here first.
     void RunBuild();
@@ -155,6 +173,9 @@ private:
     vk::PipelineLayout pipeline_layout;
     vk::DescriptorUpdateTemplate descriptor_update_template;
     vk::Pipeline pipeline;
+
+    bool precompiled{};
+    std::atomic_bool build_failed{false};
 
     std::function<void()> build_task;
     std::atomic_bool build_claimed{false};

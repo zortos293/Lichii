@@ -57,6 +57,7 @@ add_executable(tests
     video_core/fast_fusion_surface_store.cpp
     video_core/fast_fusion_byte_store.cpp
     video_core/vk_byte_addressed_shadow.cpp
+    video_core/canonical_native_key.cpp
     video_core/global_memory_coherence.cpp
     video_core/storage_buffer_pointer_tracking.cpp
     video_core/storage_write_extent.cpp
@@ -140,6 +141,8 @@ add_executable(tests
     video_core/shader_cache_v2_driver.cpp
     video_core/vulkan_pipeline_binaries.cpp
     video_core/shader_precache.cpp
+    video_core/precompiled_store.cpp
+    video_core/nx2_precompile_build.cpp
     video_core/shader_object_pool.cpp
     video_core/storage_binding_capacity.cpp
     video_core/native_indirect_reset.cpp
