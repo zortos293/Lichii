@@ -668,7 +668,9 @@ void PatchMeshInstructions(std::vector<u32>& code, const EmitContext& ctx) {
 
 std::vector<u32> EmitSPIRV(const Profile& profile, const RuntimeInfo& runtime_info, IR::Program& program, Bindings& bindings) {
     const std::optional<u32> tensor_scratch_word{ReserveCooperativeHmmaScratch(profile, program)};
-    EmitContext ctx{profile, runtime_info, program, bindings};
+    const bool cooperative_hmma{tensor_scratch_word.has_value() ||
+                                UsesCooperativeHmma(profile, program)};
+    EmitContext ctx{profile, runtime_info, program, bindings, cooperative_hmma};
     ctx.tensor_scratch_word = tensor_scratch_word;
     DefineSoftwareMatrixFunctions(ctx, program);
     const Id main{DefineMain(ctx, program)};

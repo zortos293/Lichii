@@ -864,10 +864,8 @@ void TextureCache<P>::FillImageViews(std::span<ImageViewInOut> views, bool compu
 }
 
 template <class P>
-bool TextureCache<P>::ResolveMemoizedTextures(SampledTextureMemo& memo,
-                                              std::span<const GPUVAddr> handle_addresses,
-                                              std::span<ImageViewInOut> views,
-                                              std::span<SamplerId> samplers) {
+bool TextureCache<P>::TextureMemoStillHolds(const SampledTextureMemo& memo,
+                                            std::span<const GPUVAddr> handle_addresses) const {
     const auto& image_table = channel_state->graphics_image_table;
     const auto& sampler_table = channel_state->graphics_sampler_table;
     const bool via_header_index =
@@ -876,8 +874,7 @@ bool TextureCache<P>::ResolveMemoizedTextures(SampledTextureMemo& memo,
         memo.image_changes != image_table.changes ||
         memo.sampler_changes != sampler_table.changes ||
         memo.via_header_index != via_header_index ||
-        memo.entries.size() != handle_addresses.size() || views.size() != handle_addresses.size() ||
-        samplers.size() != handle_addresses.size() ||
+        memo.entries.size() != handle_addresses.size() ||
         memo.host_serial != gpu_memory->HostPointerSerial()) {
         return false;
     }
@@ -891,6 +888,18 @@ bool TextureCache<P>::ResolveMemoizedTextures(SampledTextureMemo& memo,
             std::memcmp(entry.tsc_host, &entry.tsc, sizeof(entry.tsc)) != 0) {
             return false;
         }
+    }
+    return true;
+}
+
+template <class P>
+bool TextureCache<P>::ResolveMemoizedTextures(SampledTextureMemo& memo,
+                                              std::span<const GPUVAddr> handle_addresses,
+                                              std::span<ImageViewInOut> views,
+                                              std::span<SamplerId> samplers) {
+    if (views.size() != handle_addresses.size() || samplers.size() != handle_addresses.size() ||
+        !TextureMemoStillHolds(memo, handle_addresses)) {
+        return false;
     }
     has_deleted_images = false;
     for (size_t i = 0; i < handle_addresses.size(); ++i) {

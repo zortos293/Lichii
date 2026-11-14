@@ -4755,7 +4755,15 @@ Sampler::Sampler(TextureCacheRuntime& runtime, const Tegra::Texture::TSCEntry& t
 
     f32 min_lod = 0.0f;
     f32 max_lod = 0.25f;
-    if (tsc.mipmap_filter != TextureMipmapFilter::None) {
+    // The Duskbloods: a sampler without mipmap filtering still reads the level an explicit LOD
+    // selects, as on the console. Its bloom blurs level 1 of its mip chain with
+    // textureLod(..., 1.0) through such a sampler; clamped to level 0 it read a level nothing
+    // wrote (zeros, or stale NaNs that spread into black and purple blocks). Its LOD clamps then
+    // apply with nearest level selection, to implicit LODs too.
+    constexpr u64 DuskbloodsNetworkTestProgramId = 0x0400D1D02399A000ULL;
+    const bool mip_none_lods = tsc.mipmap_filter == TextureMipmapFilter::None &&
+                               Settings::GetCurrentProgramID() == DuskbloodsNetworkTestProgramId;
+    if (tsc.mipmap_filter != TextureMipmapFilter::None || mip_none_lods) {
         min_lod = tsc.MinLod();
         max_lod = tsc.MaxLod();
         // EDEN_NX2_FORCE_LOD0: sample only the top mip level (debug aid for mip layout problems).
@@ -4773,6 +4781,10 @@ Sampler::Sampler(TextureCacheRuntime& runtime, const Tegra::Texture::TSCEntry& t
         const f32 biased = std::clamp(lod_bias + fsr_lod_bias, -15.0f, 15.0f);
         added_lod_bias = biased - lod_bias;
         lod_bias = biased;
+    }
+    if (!device.SupportsSamplerMipLodBias()) {
+        lod_bias = 0.0f;
+        added_lod_bias = 0.0f;
     }
     base_ci = VkSamplerCreateInfo{
         .sType = VK_STRUCTURE_TYPE_SAMPLER_CREATE_INFO,

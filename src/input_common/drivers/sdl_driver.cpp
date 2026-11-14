@@ -254,14 +254,51 @@ public:
         const auto high_amplitude = static_cast<u16>((std::max)(left.high, right.high) * 0xFFFF);
 
         if (sdl_controller) {
-            return SDL_RumbleGamepad(sdl_controller.get(), low_amplitude, high_amplitude,
-                                     rumble_max_duration_ms);
+            const bool rumbled = SDL_RumbleGamepad(sdl_controller.get(), low_amplitude,
+                                                   high_amplitude, rumble_max_duration_ms);
+            // After the body motors: on Windows with raw input, SDL plays trigger rumble through
+            // Windows.Gaming.Input, which sets all four motors at once from the values SDL kept
+            // from the last SDL_RumbleGamepad. Sent first, it played the previous update's body
+            // rumble over the one XInput had just set.
+            TriggerRumblePlay(left.high, right.high, rumble_max_duration_ms);
+            return rumbled;
         } else if (sdl_joystick) {
             return SDL_RumbleJoystick(sdl_joystick.get(), low_amplitude, high_amplitude,
                                       rumble_max_duration_ms);
         }
 
         return false;
+    }
+
+    /// On controllers with motors in their triggers, plays each side's light (high band) rumble
+    /// on its trigger too, the left side on the left trigger and the right side on the right one,
+    /// at Settings::values.trigger_rumble_strength percent. Under rumble_mutex.
+    void TriggerRumblePlay(f32 left_high, f32 right_high, u32 duration_ms) {
+        const int percent = Settings::values.trigger_rumble_strength.GetValue();
+        if (percent == 0 && !triggers_rumbling) {
+            return;
+        }
+        SDL_Gamepad* const gamepad = sdl_controller.get();
+        const bool has_trigger_rumble = SDL_GetBooleanProperty(
+            SDL_GetGamepadProperties(gamepad), SDL_PROP_GAMEPAD_CAP_TRIGGER_RUMBLE_BOOLEAN, false);
+        if (!trigger_rumble_logged) {
+            trigger_rumble_logged = true;
+            LOG_INFO(Input, "{}: trigger rumble {}", GetControllerName(),
+                     has_trigger_rumble ? "available" : "not available");
+        }
+        if (!has_trigger_rumble) {
+            triggers_rumbling = false;
+            return;
+        }
+        const f32 scale = static_cast<f32>(percent) / 100.0f;
+        const auto to_motor = [scale](f32 high) {
+            return static_cast<u16>(std::clamp(high * scale, 0.0f, 1.0f) * 0xFFFF);
+        };
+        const u16 left_trigger = to_motor(left_high);
+        const u16 right_trigger = to_motor(right_high);
+        SDL_RumbleGamepadTriggers(gamepad, left_trigger, right_trigger, duration_ms);
+        // (switched off in the menu while rumbling: one more call stops the triggers)
+        triggers_rumbling = left_trigger != 0 || right_trigger != 0;
     }
 
     /// Plays the vibration on the DualSense haptics. Returns false when the controller uses
@@ -535,6 +572,8 @@ private:
 
     std::mutex rumble_mutex;
     std::array<Common::Input::VibrationStatus, 2> side_vibrations{};
+    bool triggers_rumbling{};      // (under rumble_mutex)
+    bool trigger_rumble_logged{};  // (under rumble_mutex)
 };
 
 std::shared_ptr<SDLJoystick> SDLDriver::GetSDLJoystickByGUID(const Common::UUID& guid, int port) {

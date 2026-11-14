@@ -22,6 +22,8 @@
 #include "video_core/fsr4_support.h"
 #include "video_core/vulkan_common/vulkan_wrapper.h"
 
+#include <vulkan/vulkan_beta.h>
+
 VK_DEFINE_HANDLE(VmaAllocator)
 VK_DEFINE_HANDLE(VmaPool)
 
@@ -1283,6 +1285,12 @@ FN_MAX_LIMIT_LIST
         return properties.driver.driverID == VK_DRIVER_ID_MOLTENVK;
     }
 
+    /// Samplers may use a nonzero mipLodBias (false on portability subset devices without it).
+    bool SupportsSamplerMipLodBias() const {
+        return !loaded_extensions.contains(VK_KHR_PORTABILITY_SUBSET_EXTENSION_NAME) ||
+               portability_subset_features.samplerMipLodBias == VK_TRUE;
+    }
+
     /// The multiple vertex input binding strides must be. Metal needs 4 bytes, which MoltenVK
     /// reports as minVertexInputBindingStrideAlignment through VK_KHR_portability_subset.
     u32 GetMinVertexInputBindingStrideAlignment() const noexcept {
@@ -1410,6 +1418,8 @@ private:
 
     VkPhysicalDeviceFeatures2 features2{};
     VkPhysicalDeviceFaultFeaturesEXT device_fault_features{};
+    /// Enabled as the driver reports them (VK_KHR_portability_subset devices only).
+    VkPhysicalDevicePortabilitySubsetFeaturesKHR portability_subset_features{};
     VkPhysicalDeviceProperties2 properties2{};
 
     // Misc features

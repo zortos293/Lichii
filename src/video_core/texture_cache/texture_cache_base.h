@@ -307,6 +307,10 @@ public:
     /// Fill image_view_ids with the graphics/compute images in indices
     void FillImageViews(std::span<ImageViewInOut> views, bool compute, bool blacklist = true);
 
+    /// Whether the handle words and descriptors `memo` was built from still match guest memory.
+    [[nodiscard]] bool TextureMemoStillHolds(const SampledTextureMemo& memo,
+                                             std::span<const GPUVAddr> handle_addresses) const;
+
     /// Fills views and samplers of a draw from the pipeline's memo when nothing they were
     /// resolved from has changed since (true), prepares the images as FillImageViews does.
     /// handle_addresses are where the draw reads its texture handles from, in binding order.
