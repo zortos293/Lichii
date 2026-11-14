@@ -788,7 +788,7 @@ struct OcarinaUpscaler::Impl {
 #ifdef EGLANTINE_STREAMLINE
         if (dlss) return dlss->OutputView();
 #endif
-    if (output_xess && xess && !xess->Failed()) return xess->OutputView();
+        if (output_xess && xess) return xess->OutputView();
         if (output_fsr4) return fsr4->OutputView();
         return fsr->OutputView();
     }
@@ -1093,8 +1093,8 @@ bool OcarinaUpscaler::Record(VkImageView color, VkImageView depth, VkImageView t
             ? std::chrono::duration<f32, std::milli>(now - *state.last_evaluation).count() : 16.67f;
         const f32 sharpness = FSR::RcasSharpnessFromStops(
             static_cast<f32>(Settings::values.fsr_sharpening_slider.GetValue()) / 100.0f);
-        // Taking over from FSR 4: FSR 3.1 has no history of the frames FSR 4 drew.
-        const bool fsr_reset = reset || elapsed > 250.0f || state.output_fsr4;
+        // Taking over from FSR 4 or XeSS: FSR 3.1 has no history of those frames.
+        const bool fsr_reset = reset || elapsed > 250.0f || state.output_fsr4 || state.output_xess;
         state.fsr->Upscale({
             .color = *resources.color_view,
             .depth = depth,

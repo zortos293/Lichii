@@ -758,9 +758,9 @@ Device::Device(VkInstance instance_, vk::PhysicalDevice physical_, VkSurfaceKHR 
         is_intel_discrete && EnvFlagSet("EDEN_NX2_INTEL_DISCRETE_FP16", true);
     if (features.shader_float16_int8.shaderFloat16 && is_intel_windows &&
         !enable_intel_discrete_fp16) {
-        LOG_WARNING(Render_Vulkan,
-                    is_intel_discrete ? "Intel discrete FP16 disabled by EDEN_NX2_INTEL_DISCRETE_FP16"
-                                      : "Intel non-discrete GPU FP16 disabled for the Astral Chain workaround");
+        LOG_WARNING(Render_Vulkan, "{}",
+                is_intel_discrete ? "Intel discrete FP16 disabled by EDEN_NX2_INTEL_DISCRETE_FP16"
+                          : "Intel non-discrete GPU FP16 disabled for the Astral Chain workaround");
         features.shader_float16_int8.shaderFloat16 = false;
     }
     if (features.shader_float16_int8.shaderFloat16 && enable_intel_discrete_fp16) {

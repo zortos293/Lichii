@@ -102,7 +102,7 @@ struct XessUpscaler::Impl {
 #ifdef _WIN32
         scheduler.Finish();
         if (context) {
-            const Xess::Api* const api = Xess::GetApi();
+            const XeSS::Api* const api = XeSS::GetApi();
             xess_context_handle_t old_context = context;
             scheduler.Record([api, old_context](vk::CommandBuffer) {
                 api->destroy_context(old_context);
@@ -145,7 +145,9 @@ struct XessUpscaler::Impl {
             .subresourceRange = COLOR_RANGE,
         });
         output_size = extent;
+#ifdef _WIN32
         output_initialized.store(false, std::memory_order_relaxed);
+#endif
         ready.store(false, std::memory_order_relaxed);
         initialization_scheduled.store(false, std::memory_order_relaxed);
         failed.store(false, std::memory_order_relaxed);
@@ -153,10 +155,10 @@ struct XessUpscaler::Impl {
 
 #ifdef _WIN32
     void Initialize(VkExtent2D input_size, VkExtent2D output_extent) {
-        const Xess::Api* const api = Xess::GetApi();
-        if (!api || api->create_context(device.GetInstance(),
-                        static_cast<VkPhysicalDevice>(device.GetPhysical()),
-                                        *device.GetLogical(), &context) != XESS_RESULT_SUCCESS) {
+        const XeSS::Api* const api = XeSS::GetApi();
+        if (!api || (!context && api->create_context(
+                 device.GetInstance(), static_cast<VkPhysicalDevice>(device.GetPhysical()),
+                 *device.GetLogical(), &context) != XESS_RESULT_SUCCESS)) {
             Fail("could not create the Vulkan context");
             return;
         }
@@ -171,17 +173,15 @@ struct XessUpscaler::Impl {
             Fail("could not determine the selected quality mode's input range");
             return;
         }
-        const bool same_aspect =
-            static_cast<u64>(input_size.width) * output_extent.height ==
-            static_cast<u64>(input_size.height) * output_extent.width;
-        if (!same_aspect || input_size.width < minimum.x || input_size.height < minimum.y ||
-            input_size.width > maximum.x || input_size.height > maximum.y) {
+        minimum_input = minimum;
+        maximum_input = maximum;
+        if (!SupportsInput(input_size)) {
             LOG_INFO(Render_Vulkan,
                      "XeSS-SR quality mode does not support Ocarina input {}x{} for output {}x{} "
                      "(optimal {}x{}); using the selected fallback",
                      input_size.width, input_size.height, output_extent.width, output_extent.height,
                      optimal.x, optimal.y);
-            failed.store(true, std::memory_order_release);
+            initialization_scheduled.store(false, std::memory_order_release);
             return;
         }
         constexpr u32 flags = XESS_INIT_FLAG_LDR_INPUT_COLOR;
@@ -217,7 +217,7 @@ struct XessUpscaler::Impl {
     }
 
     void Execute(const Inputs& inputs) {
-        const Xess::Api* const api = Xess::GetApi();
+        const XeSS::Api* const api = XeSS::GetApi();
         if (!api || !context || failed.load(std::memory_order_acquire)) {
             return;
         }
@@ -272,12 +272,29 @@ struct XessUpscaler::Impl {
                 first_execution = false;
                 output_initialized.store(true, std::memory_order_relaxed);
             }
-            const VkImageMemoryBarrier back = Barrier(
-                *output_image, COLOR_RANGE, VK_ACCESS_SHADER_WRITE_BIT, VK_ACCESS_SHADER_READ_BIT,
-                VK_IMAGE_LAYOUT_GENERAL, VK_IMAGE_LAYOUT_GENERAL);
+            const std::array<VkImageMemoryBarrier, 4> back{
+                Barrier(inputs.color_image, Range(VK_IMAGE_ASPECT_COLOR_BIT),
+                        VK_ACCESS_SHADER_READ_BIT, 0, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
+                        VK_IMAGE_LAYOUT_GENERAL),
+                Barrier(inputs.motion_image, Range(VK_IMAGE_ASPECT_COLOR_BIT),
+                        VK_ACCESS_SHADER_READ_BIT, 0, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
+                        VK_IMAGE_LAYOUT_GENERAL),
+                Barrier(inputs.depth_image, Range(VK_IMAGE_ASPECT_DEPTH_BIT),
+                        VK_ACCESS_SHADER_READ_BIT, 0, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
+                        VK_IMAGE_LAYOUT_GENERAL),
+                Barrier(*output_image, COLOR_RANGE, VK_ACCESS_SHADER_WRITE_BIT,
+                        VK_ACCESS_SHADER_READ_BIT, VK_IMAGE_LAYOUT_GENERAL, VK_IMAGE_LAYOUT_GENERAL),
+            };
             cmdbuf.PipelineBarrier(VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
                                    VK_PIPELINE_STAGE_ALL_COMMANDS_BIT, 0, {}, {}, back);
         });
+    }
+
+    bool SupportsInput(VkExtent2D input_size) const {
+        return static_cast<u64>(input_size.width) * output_size.height ==
+                   static_cast<u64>(input_size.height) * output_size.width &&
+               input_size.width >= minimum_input.x && input_size.height >= minimum_input.y &&
+               input_size.width <= maximum_input.x && input_size.height <= maximum_input.y;
     }
 
     void Fail(std::string_view reason) {
@@ -305,6 +322,8 @@ struct XessUpscaler::Impl {
     std::atomic<bool> failed{};
 #ifdef _WIN32
     xess_context_handle_t context{};
+    xess_2d_t minimum_input{};
+    xess_2d_t maximum_input{};
     bool first_execution{true};
     std::atomic<bool> output_initialized{};
 #endif
@@ -343,7 +362,7 @@ bool XessUpscaler::Upscale(const Inputs& inputs) {
         if (state.output_size.width != 0 || state.context) {
             state.scheduler.Finish();
             if (state.context) {
-                const Xess::Api* const api = XeSS::GetApi();
+                const XeSS::Api* const api = XeSS::GetApi();
                 const xess_context_handle_t context = state.context;
                 state.scheduler.Record([api, context](vk::CommandBuffer) {
                     api->destroy_context(context);
@@ -356,6 +375,9 @@ bool XessUpscaler::Upscale(const Inputs& inputs) {
     }
     if (!state.output_image) {
         state.CreateOutput(inputs.output_size);
+    }
+    if (state.ready.load(std::memory_order_acquire) && !state.SupportsInput(inputs.render_size)) {
+        return false;
     }
     if (!state.ready.load(std::memory_order_acquire)) {
         if (!state.initialization_scheduled.exchange(true, std::memory_order_acq_rel)) {
