@@ -17,18 +17,13 @@ inline u64 NativeRegisterCopy(u32 destination_bank, u32 destination, u32 source_
     return 0x5c98000000070000ULL | (u64{10} << 44) | destination | (u64{destination_bank} << 8) |
            (u64{source_bank} << 10) | (u64{source} << 20);
 }
-// Preserve high guest registers in SSA while borrowing aligned low quartets
-// for one native instruction. The expanded instruction owns its temporary bank.
-inline RegisterPressure PrepareRegisterPressure(const Instruction& input, u32 reserved) {
-    RegisterPressure result{input};
-    if (reserved < 4 || reserved > 246 || (reserved & 3)) {
-        result.valid = false;
-        return result;
-    }
-    struct Operand {
-        u32 bit, count;
-    };
-    std::vector<Operand> operands;
+/// A register operand: its 8-bit field and how many consecutive registers it names.
+struct RegisterOperand {
+    u32 bit, count;
+};
+/// Appends the register operands of an instruction register shadowing knows, wide ones with all
+/// their registers; false for any other instruction.
+inline bool RegisterOperands(const Instruction& input, std::vector<RegisterOperand>& operands) {
     const auto operand = [&](u32 bit, u32 count = 1) { operands.push_back({bit, count}); };
     const u32 opcode = input.Bits(0, 12);
     switch (opcode) {
@@ -54,6 +49,8 @@ inline RegisterPressure PrepareRegisterPressure(const Instruction& input, u32 re
         break;
     case 0x807:
     case 0x808:
+    case 0xc07:
+    case 0xc08: // SEL / FSEL with a uniform source: Rd and Ra are registers
     case 0x923:
     case 0x820:
     case 0xa20:
@@ -217,6 +214,11 @@ inline RegisterPressure PrepareRegisterPressure(const Instruction& input, u32 re
         if (opcode == 0x825)
             operand(64, 2);
         break;
+    case 0xe25: // IMAD.WIDE with a uniform addend pair (bits 32-37, no register): Rd:Rd+1, Ra, Rb
+        operand(16, 2);
+        operand(24);
+        operand(64);
+        break;
     case 0x83b:
         operand(16, 1U << input.Bits(72, 2));
         operand(24);
@@ -253,6 +255,20 @@ inline RegisterPressure PrepareRegisterPressure(const Instruction& input, u32 re
         break;
     }
     default:
+        return false;
+    }
+    return true;
+}
+// Preserve high guest registers in SSA while borrowing aligned low quartets
+// for one native instruction. The expanded instruction owns its temporary bank.
+inline RegisterPressure PrepareRegisterPressure(const Instruction& input, u32 reserved) {
+    RegisterPressure result{input};
+    if (reserved < 4 || reserved > 246 || (reserved & 3)) {
+        result.valid = false;
+        return result;
+    }
+    std::vector<RegisterOperand> operands;
+    if (!RegisterOperands(input, operands)) {
         result.valid = false;
         return result;
     }

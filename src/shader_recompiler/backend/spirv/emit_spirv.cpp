@@ -593,7 +593,13 @@ void PatchPhiNodes(IR::Program& program, EmitContext& ctx) {
                     ++phi_index;
                 }
                 IR::Inst* phi = phi_instructions[phi_index];
-                return { ctx.Def(phi->Arg(phi_arg)), parent };
+                const Id value{ctx.Def(phi->Arg(phi_arg))};
+                if (!Sirit::ValidId(value)) {
+                    // An operand removed from the program: SPIR-V with ID 0 can bring the
+                    // driver down, a failed pipeline only skips its work.
+                    throw LogicError("Phi operand {} has no definition", phi_arg);
+                }
+                return { value, parent };
             });
         }
 

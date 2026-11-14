@@ -4,6 +4,7 @@
 #include <algorithm>
 #include <array>
 #include <optional>
+#include <utility>
 #include <vector>
 
 #include <catch2/catch_test_macros.hpp>
@@ -24,6 +25,7 @@ public:
     bool native{};
     std::vector<u32> scalar_offsets;
     TestEnvironment() { stage = Shader::Stage::Compute; }
+    void SetStage(Shader::Stage stage_) { stage = stage_; }
     bool IsNativeProgram() const override { return native; }
     bool IsCbufStorageBufferPointer(u32 index, u32 offset) override {
         return index == 0 && std::ranges::find(scalar_offsets, offset) == scalar_offsets.end();
@@ -628,6 +630,460 @@ TEST_CASE("NVN fallback descriptors use guest slots rather than compact binding 
     CHECK(selected(reversed) == std::vector<u32>{0x400, 0x340});
 }
 
+namespace {
+/// Native reads of records at a pointer loaded from *c0[0x30] plus a per-invocation offset, as
+/// The Duskbloods' tile-based lighting reads its light records.
+struct LoadedPointerRecords {
+    KernelProgram fixture;
+    IR::Block body{fixture.pool};
+    IR::Block exit{fixture.pool};
+
+    IR::U32 LoadedLow(IR::IREmitter& ir, IR::U32& high) {
+        fixture.env.native = true;
+        const IR::Value loaded{ir.LoadGlobal64(Address(ir, Word(ir, 0x30), Word(ir, 0x34)))};
+        high = IR::U32{ir.CompositeExtract(loaded, 1)};
+        return IR::U32{ir.CompositeExtract(loaded, 0)};
+    }
+
+    static IR::U32 RecordOffset(IR::IREmitter& ir) {
+        return ir.IAdd(ir.ShiftLeftLogical(ir.LocalInvocationIdX(), ir.Imm32(6)), ir.Imm32(60));
+    }
+
+    std::ptrdiff_t Count(IR::Opcode opcode) const {
+        std::ptrdiff_t total{};
+        for (const IR::Block* const block : fixture.program.blocks) {
+            total += std::ranges::count_if(block->Instructions(), [=](const IR::Inst& inst) {
+                return inst.GetOpcode() == opcode;
+            });
+        }
+        return total;
+    }
+
+    const IR::Inst* Find(IR::Opcode opcode) const {
+        for (const IR::Block* const block : fixture.program.blocks) {
+            for (const IR::Inst& inst : block->Instructions()) {
+                if (inst.GetOpcode() == opcode) {
+                    return &inst;
+                }
+            }
+        }
+        return nullptr;
+    }
+
+    void SetBlocks(std::initializer_list<IR::Block*> blocks) {
+        fixture.program.blocks.assign(blocks.begin(), blocks.end());
+        fixture.program.post_order_blocks.assign(fixture.program.blocks.rbegin(),
+                                                 fixture.program.blocks.rend());
+        for (u32 index = 0; index < fixture.program.blocks.size(); ++index) {
+            fixture.program.blocks[index]->SetOrder(index);
+        }
+    }
+};
+} // Anonymous namespace
+
+TEST_CASE("Native reads through one loaded pointer read its binding directly",
+          "[shader][storage_buffer]") {
+    LoadedPointerRecords records;
+    IR::IREmitter ir{records.fixture.entry};
+    IR::U32 high;
+    const IR::U32 low{records.LoadedLow(ir, high)};
+    ir.SetReg(IR::Reg::R0,
+              ir.LoadGlobal32(Address(ir, ir.IAdd(low, LoadedPointerRecords::RecordOffset(ir)),
+                                      high)));
+    records.fixture.TrackedOffsets();
+
+    // Read from the loaded pointer's own binding, not searched for among the buffers.
+    CHECK(records.Count(IR::Opcode::LoadGlobal32) == 0);
+    const IR::Inst* const read{records.Find(IR::Opcode::LoadStorage32)};
+    REQUIRE(read != nullptr);
+    const auto& descriptors{records.fixture.program.info.storage_buffers_descriptors};
+    REQUIRE(read->Arg(0).IsImmediate());
+    REQUIRE(read->Arg(0).U32() < descriptors.size());
+    const auto& binding{descriptors[read->Arg(0).U32()]};
+    CHECK(binding.cbuf_offset == 0x30);
+    CHECK(binding.indirect_offset == 0);
+    // The offset is taken from the loaded pointer, aligned down as the binding is.
+    const IR::Inst* const offset{read->Arg(1).InstRecursive()};
+    REQUIRE(offset->GetOpcode() == IR::Opcode::ISub32);
+    const IR::Inst* const base{offset->Arg(1).InstRecursive()};
+    REQUIRE(base->GetOpcode() == IR::Opcode::BitwiseAnd32);
+    CHECK(base->Arg(0).InstRecursive() == low.InstRecursive());
+    CHECK(base->Arg(1).U32() == ~15U);
+    // The holder stays bound for anything still routed at run time.
+    CHECK(std::ranges::any_of(descriptors, [](const auto& desc) {
+        return desc.cbuf_offset == 0x30 && desc.indirect_offset == ~0U;
+    }));
+}
+
+TEST_CASE("Native reads whose high word is another pointer's do not read the loaded binding",
+          "[shader][storage_buffer]") {
+    LoadedPointerRecords records;
+    IR::IREmitter ir{records.fixture.entry};
+    IR::U32 high;
+    const IR::U32 low{records.LoadedLow(ir, high)};
+    // The high word of a second pointer, read from another slot of the same buffer.
+    const IR::Value other{ir.LoadGlobal64(Address(ir, Word(ir, 0x40), Word(ir, 0x44)))};
+    const IR::U32 other_high{ir.CompositeExtract(other, 1)};
+    ir.SetReg(IR::Reg::R0,
+              ir.LoadGlobal32(Address(ir, ir.IAdd(low, LoadedPointerRecords::RecordOffset(ir)),
+                                      other_high)));
+    records.fixture.TrackedOffsets();
+
+    // The address is not in the loaded pointer's buffer: no read based on that pointer.
+    for (const IR::Block* const block : records.fixture.program.blocks) {
+        for (const IR::Inst& inst : block->Instructions()) {
+            if (inst.GetOpcode() != IR::Opcode::LoadStorage32) {
+                continue;
+            }
+            const IR::Inst* const offset{inst.Arg(1).InstRecursive()};
+            if (offset->GetOpcode() != IR::Opcode::ISub32) {
+                continue;
+            }
+            const IR::Value base{offset->Arg(1)};
+            CHECK((base.IsImmediate() || base.InstRecursive()->GetOpcode() != IR::Opcode::BitwiseAnd32 ||
+                   base.InstRecursive()->Arg(0).IsImmediate() ||
+                   base.InstRecursive()->Arg(0).InstRecursive() != low.InstRecursive()));
+        }
+    }
+}
+
+namespace {
+/// Whether the program's read takes the loaded pointer (low) as its offset base.
+bool ReadsFromLoadedPointer(const LoadedPointerRecords& records, const IR::U32& low) {
+    const IR::Inst* const read{records.Find(IR::Opcode::LoadStorage32)};
+    if (read == nullptr || read->Arg(1).IsImmediate()) {
+        return false;
+    }
+    const IR::Inst* const offset{read->Arg(1).InstRecursive()};
+    if (offset->GetOpcode() != IR::Opcode::ISub32 || offset->Arg(1).IsImmediate()) {
+        return false;
+    }
+    const IR::Inst* const base{offset->Arg(1).InstRecursive()};
+    return base->GetOpcode() == IR::Opcode::BitwiseAnd32 && !base->Arg(0).IsImmediate() &&
+           base->Arg(0).InstRecursive() == low.InstRecursive();
+}
+} // Anonymous namespace
+
+TEST_CASE("Native reads through a loaded pointer take carries only from the low word's additions",
+          "[shader][storage_buffer]") {
+    // The 64-bit address split as IADD3 / IADD3.X: high = pointer.high + carry(low addition).
+    LoadedPointerRecords carried;
+    {
+        IR::IREmitter ir{carried.fixture.entry};
+        IR::U32 high;
+        const IR::U32 low{carried.LoadedLow(ir, high)};
+        const IR::U32 address_low{ir.IAdd(low, LoadedPointerRecords::RecordOffset(ir))};
+        const IR::U32 carry{ir.Select(ir.GetCarryFromOp(address_low), ir.Imm32(1), ir.Imm32(0))};
+        ir.SetReg(IR::Reg::R0, ir.LoadGlobal32(Address(ir, address_low, ir.IAdd(high, carry))));
+        carried.fixture.TrackedOffsets();
+        CHECK(ReadsFromLoadedPointer(carried, low));
+    }
+    // A constant added to the high word moves the address by 4 GiB: not the pointer's buffer.
+    LoadedPointerRecords constant;
+    {
+        IR::IREmitter ir{constant.fixture.entry};
+        IR::U32 high;
+        const IR::U32 low{constant.LoadedLow(ir, high)};
+        const IR::U32 address_low{ir.IAdd(low, LoadedPointerRecords::RecordOffset(ir))};
+        ir.SetReg(IR::Reg::R0,
+                  ir.LoadGlobal32(Address(ir, address_low, ir.IAdd(high, ir.Imm32(1)))));
+        constant.fixture.TrackedOffsets();
+        CHECK_FALSE(ReadsFromLoadedPointer(constant, low));
+    }
+    // The carry of an addition the low word doesn't make.
+    LoadedPointerRecords unrelated;
+    {
+        IR::IREmitter ir{unrelated.fixture.entry};
+        IR::U32 high;
+        const IR::U32 low{unrelated.LoadedLow(ir, high)};
+        const IR::U32 address_low{ir.IAdd(low, LoadedPointerRecords::RecordOffset(ir))};
+        const IR::U32 other{ir.IAdd(Word(ir, 0x50), Word(ir, 0x54))};
+        const IR::U32 carry{ir.Select(ir.GetCarryFromOp(other), ir.Imm32(1), ir.Imm32(0))};
+        ir.SetReg(IR::Reg::R1, other);
+        ir.SetReg(IR::Reg::R0, ir.LoadGlobal32(Address(ir, address_low, ir.IAdd(high, carry))));
+        unrelated.fixture.TrackedOffsets();
+        CHECK_FALSE(ReadsFromLoadedPointer(unrelated, low));
+    }
+    // The carry of an addition inside the offset (shift + 60), not of one adding the offset to
+    // the pointer: the high word is 4 GiB past the pointer's when that addition overflows.
+    LoadedPointerRecords inner;
+    {
+        IR::IREmitter ir{inner.fixture.entry};
+        IR::U32 high;
+        const IR::U32 low{inner.LoadedLow(ir, high)};
+        const IR::U32 offset{LoadedPointerRecords::RecordOffset(ir)};
+        const IR::U32 address_low{ir.IAdd(low, offset)};
+        const IR::U32 carry{ir.Select(ir.GetCarryFromOp(offset), ir.Imm32(1), ir.Imm32(0))};
+        ir.SetReg(IR::Reg::R0, ir.LoadGlobal32(Address(ir, address_low, ir.IAdd(high, carry))));
+        inner.fixture.TrackedOffsets();
+        CHECK_FALSE(ReadsFromLoadedPointer(inner, low));
+    }
+    // Two additions down to the pointer, each carrying into the high word.
+    LoadedPointerRecords chained;
+    {
+        IR::IREmitter ir{chained.fixture.entry};
+        IR::U32 high;
+        const IR::U32 low{chained.LoadedLow(ir, high)};
+        const IR::U32 first{ir.IAdd(low, LoadedPointerRecords::RecordOffset(ir))};
+        const IR::U32 second{ir.IAdd(first, ir.Imm32(4))};
+        const IR::U32 first_carry{
+            ir.Select(ir.GetCarryFromOp(first), ir.Imm32(1), ir.Imm32(0))};
+        const IR::U32 second_carry{
+            ir.Select(ir.GetCarryFromOp(second), ir.Imm32(1), ir.Imm32(0))};
+        ir.SetReg(IR::Reg::R0,
+                  ir.LoadGlobal32(Address(ir, second,
+                                          ir.IAdd(ir.IAdd(high, first_carry), second_carry))));
+        chained.fixture.TrackedOffsets();
+        CHECK(ReadsFromLoadedPointer(chained, low));
+    }
+    // One addition's carry added twice: the high word is 4 GiB too far when that addition
+    // overflows.
+    LoadedPointerRecords twice;
+    {
+        IR::IREmitter ir{twice.fixture.entry};
+        IR::U32 high;
+        const IR::U32 low{twice.LoadedLow(ir, high)};
+        const IR::U32 address_low{ir.IAdd(low, LoadedPointerRecords::RecordOffset(ir))};
+        const IR::U1 overflow{ir.GetCarryFromOp(address_low)};
+        const IR::U32 carry{ir.Select(overflow, ir.Imm32(1), ir.Imm32(0))};
+        const IR::U32 again{ir.Select(overflow, ir.Imm32(1), ir.Imm32(0))};
+        ir.SetReg(IR::Reg::R0, ir.LoadGlobal32(Address(ir, address_low,
+                                                       ir.IAdd(ir.IAdd(high, carry), again))));
+        twice.fixture.TrackedOffsets();
+        CHECK_FALSE(ReadsFromLoadedPointer(twice, low));
+    }
+}
+
+TEST_CASE("Native reads through a pointer a loop carries read its binding directly",
+          "[shader][storage_buffer]") {
+    LoadedPointerRecords records;
+    records.fixture.entry.AddBranch(&records.body);
+    records.body.AddBranch(&records.body);
+    records.body.AddBranch(&records.exit);
+    records.SetBlocks({&records.fixture.entry, &records.body, &records.exit});
+    IR::IREmitter ir{records.fixture.entry};
+    IR::U32 high;
+    const IR::U32 low{records.LoadedLow(ir, high)};
+    records.body.AppendNewInst(IR::Opcode::Phi, {});
+    IR::Inst* const carried{&records.body.back()};
+    carried->SetFlags(IR::Type::U32);
+    carried->AddPhiOperand(&records.fixture.entry, low);
+    carried->AddPhiOperand(&records.body, IR::Value{carried});
+    IR::IREmitter loop{records.body};
+    const IR::U32 address_low{
+        loop.IAdd(IR::U32{IR::Value{carried}}, LoadedPointerRecords::RecordOffset(loop))};
+    loop.SetReg(IR::Reg::R0, loop.LoadGlobal32(Address(loop, address_low, high)));
+    records.fixture.TrackedOffsets();
+
+    CHECK(records.Count(IR::Opcode::LoadGlobal32) == 0);
+    CHECK(records.Count(IR::Opcode::LoadStorage32) == 1);
+}
+
+TEST_CASE("Native reads through a pointer or null stay global", "[shader][storage_buffer]") {
+    LoadedPointerRecords records;
+    records.fixture.entry.AddBranch(&records.body);
+    records.fixture.entry.AddBranch(&records.exit);
+    records.body.AddBranch(&records.exit);
+    records.SetBlocks({&records.fixture.entry, &records.body, &records.exit});
+    IR::IREmitter ir{records.fixture.entry};
+    IR::U32 high;
+    const IR::U32 low{records.LoadedLow(ir, high)};
+    IR::IREmitter body{records.body};
+    const IR::U32 record_low{body.IAdd(low, LoadedPointerRecords::RecordOffset(body))};
+    records.exit.AppendNewInst(IR::Opcode::Phi, {});
+    IR::Inst* const either{&records.exit.back()};
+    either->SetFlags(IR::Type::U32);
+    either->AddPhiOperand(&records.body, record_low);
+    either->AddPhiOperand(&records.fixture.entry, IR::Value{0U});
+    IR::IREmitter exit{records.exit};
+    exit.SetReg(IR::Reg::R0, exit.LoadGlobal32(Address(exit, IR::U32{IR::Value{either}}, high)));
+    records.fixture.TrackedOffsets();
+
+    // A direct read of the null path would land on the pointer's records instead of reading 0.
+    CHECK(records.Count(IR::Opcode::LoadGlobal32) == 1);
+    CHECK(records.Count(IR::Opcode::LoadStorage32) == 0);
+}
+
+namespace {
+/// A fragment program that reads through a pointer or null: the pointer's path adds the record
+/// offset in `body`, `exit` merges the address with null from `entry`.
+struct PointerOrNullRead {
+    LoadedPointerRecords records;
+    IR::U32 low;
+
+    enum class Carry { None, Address, Offset };
+
+    /// high_null: the high word is merged with zero on the same path; offset_after: an offset is
+    /// added after the merge; other_null_block: the high word's zero comes from the body instead;
+    /// carry: the body's high word adds the carry of the address addition, or of one in its offset.
+    void Build(bool high_null, bool offset_after, bool other_null_block = false,
+               Carry carry = Carry::None) {
+        records.fixture.env.SetStage(Shader::Stage::Fragment);
+        records.fixture.entry.AddBranch(&records.body);
+        records.fixture.entry.AddBranch(&records.exit);
+        records.body.AddBranch(&records.exit);
+        records.SetBlocks({&records.fixture.entry, &records.body, &records.exit});
+        IR::IREmitter ir{records.fixture.entry};
+        IR::U32 high;
+        low = records.LoadedLow(ir, high);
+        IR::IREmitter body{records.body};
+        const IR::U32 offset{LoadedPointerRecords::RecordOffset(body)};
+        const IR::U32 record_low{body.IAdd(low, offset)};
+        IR::U32 body_high{high};
+        if (carry != Carry::None) {
+            const IR::U32 from{carry == Carry::Address ? record_low : offset};
+            const IR::U32 carried{
+                body.Select(body.GetCarryFromOp(from), body.Imm32(1), body.Imm32(0))};
+            body_high = body.IAdd(high, carried);
+        }
+        records.exit.AppendNewInst(IR::Opcode::Phi, {});
+        IR::Inst* const either{&records.exit.back()};
+        either->SetFlags(IR::Type::U32);
+        either->AddPhiOperand(&records.body, record_low);
+        either->AddPhiOperand(&records.fixture.entry, IR::Value{0U});
+        IR::U32 address_high{high};
+        if (high_null) {
+            records.exit.AppendNewInst(IR::Opcode::Phi, {});
+            IR::Inst* const high_or_null{&records.exit.back()};
+            high_or_null->SetFlags(IR::Type::U32);
+            high_or_null->AddPhiOperand(&records.body,
+                                        other_null_block ? IR::Value{0U} : IR::Value{body_high});
+            high_or_null->AddPhiOperand(&records.fixture.entry,
+                                        other_null_block ? IR::Value{high} : IR::Value{0U});
+            address_high = IR::U32{IR::Value{high_or_null}};
+        }
+        IR::IREmitter exit{records.exit};
+        IR::U32 address_low{IR::Value{either}};
+        if (offset_after) {
+            address_low = exit.IAdd(address_low, exit.Imm32(16));
+        }
+        exit.SetReg(IR::Reg::R0, exit.LoadGlobal32(Address(exit, address_low, address_high)));
+        records.fixture.TrackedOffsets();
+    }
+
+    /// What a word of the merged address takes on the loop's own edge.
+    enum class Edge { Carried, Null, Pointer };
+
+    /// `exit` loops on itself, the low and high words taking low_edge and high_edge on that edge.
+    void BuildLoop(Edge low_edge, Edge high_edge) {
+        records.fixture.env.SetStage(Shader::Stage::Fragment);
+        records.fixture.entry.AddBranch(&records.body);
+        records.fixture.entry.AddBranch(&records.exit);
+        records.body.AddBranch(&records.exit);
+        records.exit.AddBranch(&records.exit);
+        records.SetBlocks({&records.fixture.entry, &records.body, &records.exit});
+        IR::IREmitter ir{records.fixture.entry};
+        IR::U32 high;
+        low = records.LoadedLow(ir, high);
+        const IR::U32 record_low{ir.IAdd(low, LoadedPointerRecords::RecordOffset(ir))};
+        const auto merge = [&](const IR::U32& pointer, Edge edge) {
+            records.exit.AppendNewInst(IR::Opcode::Phi, {});
+            IR::Inst* const phi{&records.exit.back()};
+            phi->SetFlags(IR::Type::U32);
+            phi->AddPhiOperand(&records.body, pointer);
+            phi->AddPhiOperand(&records.fixture.entry, IR::Value{0U});
+            phi->AddPhiOperand(&records.exit, edge == Edge::Carried ? IR::Value{phi}
+                                              : edge == Edge::Null  ? IR::Value{0U}
+                                                                    : IR::Value{pointer});
+            return IR::U32{IR::Value{phi}};
+        };
+        const IR::U32 address_low{merge(record_low, low_edge)};
+        const IR::U32 address_high{merge(high, high_edge)};
+        IR::IREmitter exit{records.exit};
+        exit.SetReg(IR::Reg::R0, exit.LoadGlobal32(Address(exit, address_low, address_high)));
+        records.fixture.TrackedOffsets();
+    }
+
+    /// Whether the read became the pointer-or-null read (a select of the binding's read and 0).
+    bool ReadsPointerOrNull() const {
+        if (records.Count(IR::Opcode::LoadGlobal32) != 0) {
+            return false;
+        }
+        for (const IR::Block* const block : records.fixture.program.blocks) {
+            for (const IR::Inst& inst : block->Instructions()) {
+                if (inst.GetOpcode() == IR::Opcode::SelectU32 && !inst.Arg(1).IsImmediate() &&
+                    inst.Arg(1).InstRecursive()->GetOpcode() == IR::Opcode::LoadStorage32) {
+                    return true;
+                }
+            }
+        }
+        return false;
+    }
+};
+} // Anonymous namespace
+
+TEST_CASE("Native reads through a pointer or null outside compute read zero on the null path",
+          "[shader][storage_buffer]") {
+    PointerOrNullRead read;
+    read.Build(true, false);
+    const auto& records{read.records};
+
+    // Read from the pointer's binding, and zero where the null path was taken.
+    CHECK(records.Count(IR::Opcode::LoadGlobal32) == 0);
+    CHECK(records.Count(IR::Opcode::LoadStorage32) == 1);
+    const IR::Inst* const select{records.Find(IR::Opcode::SelectU32)};
+    REQUIRE(select != nullptr);
+    CHECK(select->Arg(1).InstRecursive()->GetOpcode() == IR::Opcode::LoadStorage32);
+    REQUIRE(select->Arg(2).IsImmediate());
+    CHECK(select->Arg(2).U32() == 0);
+    // Which path was taken decides, not the pointer's value: a pointer whose low word is zero
+    // is not null.
+    const IR::Inst* const taken{select->Arg(0).InstRecursive()};
+    REQUIRE(taken->GetOpcode() == IR::Opcode::Phi);
+    REQUIRE(taken->NumArgs() == 2);
+    for (size_t arg = 0; arg < taken->NumArgs(); ++arg) {
+        REQUIRE(taken->Arg(arg).IsImmediate());
+        CHECK(taken->Arg(arg).U1() == (taken->PhiBlock(arg) == &records.body));
+    }
+}
+
+TEST_CASE("A pointer or null whose address is not null on the null path is not read as zero",
+          "[shader][storage_buffer]") {
+    // The high word stays the pointer's on the null path: the address is the pointer's high half.
+    PointerOrNullRead high_kept;
+    high_kept.Build(false, false);
+    CHECK_FALSE(high_kept.ReadsPointerOrNull());
+    // An offset added after the merge: the null path's address is that offset.
+    PointerOrNullRead offset_after;
+    offset_after.Build(true, true);
+    CHECK_FALSE(offset_after.ReadsPointerOrNull());
+    // The high word is null on the other path.
+    PointerOrNullRead other_path;
+    other_path.Build(true, false, true);
+    CHECK_FALSE(other_path.ReadsPointerOrNull());
+}
+
+TEST_CASE("A pointer or null takes carries only from the additions down to the pointer",
+          "[shader][storage_buffer]") {
+    // The high word adds the carry of the addition that adds the offset to the pointer.
+    PointerOrNullRead address;
+    address.Build(true, false, false, PointerOrNullRead::Carry::Address);
+    CHECK(address.ReadsPointerOrNull());
+    // The carry of an addition inside the offset: not the pointer-or-null read.
+    PointerOrNullRead offset;
+    offset.Build(true, false, false, PointerOrNullRead::Carry::Offset);
+    CHECK_FALSE(offset.ReadsPointerOrNull());
+}
+
+TEST_CASE("A pointer or null a loop carries keeps both words in step on the loop's edge",
+          "[shader][storage_buffer]") {
+    using Edge = PointerOrNullRead::Edge;
+    const auto reads_pointer_or_null = [](Edge low_edge, Edge high_edge) {
+        PointerOrNullRead read;
+        read.BuildLoop(low_edge, high_edge);
+        return read.ReadsPointerOrNull();
+    };
+    // Both words carried round the loop, or both null on its edge: the address is still the
+    // pointer's or null.
+    CHECK(reads_pointer_or_null(Edge::Carried, Edge::Carried));
+    CHECK(reads_pointer_or_null(Edge::Null, Edge::Null));
+    // The high word carried while the low word is null or the pointer's on the same edge, and
+    // the low word carried while the high word is the pointer's: neither the pointer nor null.
+    CHECK_FALSE(reads_pointer_or_null(Edge::Null, Edge::Carried));
+    CHECK_FALSE(reads_pointer_or_null(Edge::Pointer, Edge::Carried));
+    CHECK_FALSE(reads_pointer_or_null(Edge::Carried, Edge::Pointer));
+}
+
 TEST_CASE("Iterator analysis handles deep loop-carried shader graphs",
           "[shader][storage_buffer]") {
     KernelProgram fixture;
@@ -650,4 +1106,73 @@ TEST_CASE("Iterator analysis handles deep loop-carried shader graphs",
     IR::IREmitter entry{fixture.entry};
     entry.WriteGlobal32(Address(entry, Word(entry, 0x310), Word(entry, 0x314)), entry.Imm32(1));
     CHECK(fixture.TrackedOffsets() == std::vector<u32>{0x310});
+}
+
+TEST_CASE("Native reads through a loaded pointer whose holder the program writes stay global",
+          "[shader][storage_buffer]") {
+    LoadedPointerRecords records;
+    IR::IREmitter ir{records.fixture.entry};
+    IR::U32 high;
+    const IR::U32 low{records.LoadedLow(ir, high)};
+    ir.SetReg(IR::Reg::R0,
+              ir.LoadGlobal32(Address(ir, ir.IAdd(low, LoadedPointerRecords::RecordOffset(ir)),
+                                      high)));
+    // A store to the buffer that holds the pointer, after the read: what the read loads can then
+    // be another pointer than the one bound for the dispatch.
+    ir.WriteGlobal32(Address(ir, Word(ir, 0x30), Word(ir, 0x34)), ir.Imm32(0));
+    records.fixture.TrackedOffsets();
+
+    CHECK_FALSE(ReadsFromLoadedPointer(records, low));
+    CHECK(records.Count(IR::Opcode::LoadGlobal32) == 1);
+    // The bindings it is routed among at run time stay: the pointer's and its written holder.
+    const auto& descriptors{records.fixture.program.info.storage_buffers_descriptors};
+    CHECK(std::ranges::any_of(descriptors, [](const auto& desc) {
+        return desc.cbuf_offset == 0x30 && desc.indirect_offset == 0;
+    }));
+    CHECK(std::ranges::any_of(descriptors, [](const auto& desc) {
+        return desc.cbuf_offset == 0x30 && desc.indirect_offset == ~0U && desc.is_written;
+    }));
+    CHECK(records.fixture.program.info.native_global_bounds);
+}
+
+TEST_CASE("Native reads through a loaded pointer stay global beside a store not tracked to a buffer",
+          "[shader][storage_buffer]") {
+    LoadedPointerRecords records;
+    IR::IREmitter ir{records.fixture.entry};
+    IR::U32 high;
+    const IR::U32 low{records.LoadedLow(ir, high)};
+    ir.SetReg(IR::Reg::R0,
+              ir.LoadGlobal32(Address(ir, ir.IAdd(low, LoadedPointerRecords::RecordOffset(ir)),
+                                      high)));
+    // A store whose address no constant buffer pointer gives: it stays global, and the backend
+    // routes it among every binding, the pointer's holder included.
+    ir.WriteGlobal32(Address(ir, ir.LocalInvocationIdX(), ir.Imm32(0)), ir.Imm32(0));
+    records.fixture.TrackedOffsets();
+
+    CHECK(records.Count(IR::Opcode::WriteGlobal32) == 1);
+    CHECK_FALSE(ReadsFromLoadedPointer(records, low));
+    CHECK(records.Count(IR::Opcode::LoadGlobal32) == 1);
+    CHECK(records.fixture.program.info.native_global_bounds);
+}
+
+TEST_CASE("An address offset that doesn't fit 32 bits keeps the access global",
+          "[shader][storage_buffer]") {
+    const auto read = [](u64 imm) {
+        KernelProgram fixture;
+        IR::IREmitter ir{fixture.entry};
+        const IR::U64 address{
+            ir.IAdd(Address(ir, Word(ir, 0x310), Word(ir, 0x314)), ir.Imm64(imm))};
+        static_cast<void>(ir.LoadGlobal32(address));
+        const std::vector<u32> offsets{fixture.TrackedOffsets()};
+        const bool global{std::ranges::any_of(fixture.entry.Instructions(), [](const auto& inst) {
+            return inst.GetOpcode() == IR::Opcode::LoadGlobal32;
+        })};
+        return std::pair{offsets, global};
+    };
+    // Offsets an s32 holds, positive and negative, are taken as before.
+    CHECK(read(0x10) == std::pair{std::vector<u32>{0x310}, false});
+    CHECK(read(~u64{0xf}) == std::pair{std::vector<u32>{0x310}, false});
+    // 4 GiB + 0x10 is not 0x10, and 2 GiB is not -2 GiB.
+    CHECK(read(0x1'0000'0010ULL) == std::pair{std::vector<u32>{}, true});
+    CHECK(read(0x8000'0000ULL) == std::pair{std::vector<u32>{}, true});
 }

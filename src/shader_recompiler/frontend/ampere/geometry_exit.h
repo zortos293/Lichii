@@ -2,6 +2,8 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 #pragma once
 
+#include <algorithm>
+#include <bit>
 #include <string_view>
 #include <vector>
 #include "common/common_types.h"
@@ -122,7 +124,13 @@ GeometryExitEnvelope AnalyzeGeometryExit(const Code& code) {
             if (form == 2 || form == 3 || form == 7) read_register(bits(index, 64, 8));
             if (has_c && (form == 1 || form == 4 || form == 5 || form == 6)) read_register(bits(index, 64, 8));
         };
-        read_predicate(guard & 7);
+        // The uniform datapath instructions below (ULDC, UIADD3, ULEA, UIMAD, UPRMT, UMOV) are
+        // guarded by a uniform predicate UPn, not Pn (lower_to_maxwell swaps it in from R239).
+        const bool uniform_guard = opcode == 0xab9 || opcode == 0x290 || opcode == 0x890 ||
+                                   opcode == 0x291 || opcode == 0x891 || opcode == 0x2a4 ||
+                                   opcode == 0x8a4 || opcode == 0x896 || opcode == 0x882 ||
+                                   opcode == 0xc82;
+        if (!uniform_guard) read_predicate(guard & 7);
         if (is_exit(index)) {
             if (guard != 7)
                 return fail(index, "native instruction before exit setup state is dead");
@@ -135,7 +143,66 @@ GeometryExitEnvelope AnalyzeGeometryExit(const Code& code) {
         if (opcode == 0x919 || opcode == 0x923) {
             if (opcode == 0x923) read_register(bits(index, 24, 8));
             write_register(bits(index, 16, 8));
-        } else if (opcode == 0x805 || opcode == 0xab9 || opcode == 0x945) {
+        } else if (opcode == 0x805) {
+            // CS2R SRZ: the 64-bit form zeroes a register pair.
+            write_register(bits(index, 16, 8));
+            if (bits(index, 80, 1)) write_register(bits(index, 16, 8) + 1);
+        } else if (opcode == 0xab9 || opcode == 0x945 || opcode == 0x290 || opcode == 0x890 ||
+                   opcode == 0x291 || opcode == 0x891 || opcode == 0x2a4 || opcode == 0x8a4 ||
+                   opcode == 0x896 || opcode == 0x882 || opcode == 0xc82) {
+            // Uniform datapath (UIADD3, ULEA, UIMAD, UPRMT, UMOV): no general or P registers.
+        } else if (opcode == 0x321) {
+            // ALD: the vertex index in Rb, 1-4 components into Rd.
+            read_register(bits(index, 24, 8));
+            read_register(bits(index, 32, 8));
+            const u32 dest = bits(index, 16, 8), components = bits(index, 74, 2) + 1;
+            if (dest != 255)
+                for (u32 i = 0; i < components; ++i) write_register(dest + i);
+        } else if (opcode == 0xb66) {
+            // TLD.SCR: a 1D or 2D .LZ fetch reads x from Ra and y from Rb; other forms read a
+            // coordinate group from Ra and a level or offsets from Rb. Results go to Rd and, for
+            // three or four channels, to the second destination in c.
+            const u32 dimension = bits(index, 61, 3), source_a = bits(index, 24, 8),
+                      source_b = bits(index, 32, 8);
+            if (bits(index, 78, 1) && dimension == 1) {
+                // .MS (2D): x and y in Ra, Ra+1 and the sample in Rb, as lower_to_maxwell reads.
+                read_register(source_a);
+                if (source_a != 255) read_register(source_a + 1);
+                read_register(source_b);
+            } else if (bits(index, 87, 3) != 3 && !bits(index, 76, 1) && !bits(index, 78, 1) &&
+                       dimension <= 1) {
+                read_register(source_a);
+                if (dimension == 1) read_register(source_b);
+            } else {
+                for (u32 i = 0; i < 3; ++i)
+                    if (source_a != 255) read_register(source_a + i);
+                for (u32 i = 0; i < 2; ++i)
+                    if (source_b != 255) read_register(source_b + i);
+            }
+            // Two channels fill Rd and Rd+1 (half results pack them into Rd); the rest go to the
+            // second destination.
+            const u32 dest = bits(index, 16, 8), second = bits(index, 64, 8);
+            const u32 channels = std::popcount(bits(index, 72, 4));
+            const bool half = bits(index, 79, 1) != 0;
+            const u32 first = half ? 1 : (std::min)(channels, 2U);
+            for (u32 i = 0; i < first && dest != 255; ++i) write_register(dest + i);
+            if (second != 255 && channels > 2) {
+                const u32 rest = half ? 1 : channels - 2;
+                for (u32 i = 0; i < rest; ++i) write_register(second + i);
+            }
+        } else if (opcode == 0x3c2) {
+            // R2UR: reads Ra into a uniform register.
+            read_register(bits(index, 24, 8));
+        } else if ((family == 0x020 || family == 0x021 || family == 0x023) && form != 0) {
+            // FMUL, FADD, FFMA.
+            read_sources(family == 0x023);
+            write_register(bits(index, 16, 8));
+        } else if (family == 0x00b && form != 0) {
+            // FSETP, as ISETP below.
+            read_sources(false);
+            read_predicate(bits(index, 87, 3));
+            write_predicate(bits(index, 81, 3));
+            write_predicate(bits(index, 84, 3));
         } else if (opcode == 0x381 || opcode == 0x981) {
             const u32 address = bits(index, 24, 8), size = bits(index, 73, 3);
             if (opcode == 0x381) read_predicate(7 - bits(index, 64, 3));

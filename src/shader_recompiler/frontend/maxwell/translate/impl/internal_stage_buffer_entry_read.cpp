@@ -135,6 +135,7 @@ void TranslatorVisitor::ISBE_nx2(u64 insn) {
         BitField<20, 24, u64> offset;
         BitField<44, 1, u64> is_32;
         BitField<45, 1, u64> attribute;
+        BitField<47, 1, u64> output;
         BitField<48, 1, u64> write;
     } const isbe{insn};
 
@@ -144,6 +145,14 @@ void TranslatorVisitor::ISBE_nx2(u64 insn) {
     }
     const IR::U32 address{ir.IAdd(X(isbe.address_reg), ir.Imm32(static_cast<u32>(isbe.offset)))};
     if (isbe.write == 0) {
+        if (isbe.output != 0) {
+            // Task programs read back the payload words they wrote.
+            if (stage != Stage::Task || isbe.attribute == 0 || isbe.is_32 == 0) {
+                throw NotImplementedException("Stage buffer output read mode");
+            }
+            X(isbe.reg, ir.IsbeReadOutput(address));
+            return;
+        }
         X(isbe.reg, ir.IsbeRead(address));
         return;
     }

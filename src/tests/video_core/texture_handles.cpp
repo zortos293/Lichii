@@ -38,7 +38,8 @@ public:
         return Shader::TexturePixelFormat::A8B8G8R8_UNORM;
     }
     bool IsTexturePixelFormatInteger(u32 handle) override {
-        REQUIRE(handle == expected_handle);
+        // ~0U: any handle (a test with several textures).
+        REQUIRE((expected_handle == ~0U || handle == expected_handle));
         ++format_reads;
         return integer_texture;
     }
@@ -975,6 +976,29 @@ TEST_CASE("A texture handle word that holds a storage buffer address is not a ha
     desc.cbuf_index = 0;
     desc.handle_program = 0; // computed for each draw: a real handle
     CHECK_FALSE(VideoCommon::HandleIsStoragePointer(info, desc, 0));
+}
+
+TEST_CASE("Each word of a 64-bit constant buffer read binds its own texture",
+          "[video_core][texture_handles]") {
+    // ULDC.64 UR10, c[0][0x298]; UMOV UR4, UR11: The Duskbloods' DLSS prepass samples the second
+    // word, which used to be bound from the first.
+    HandleProgram shader;
+    shader.env.cbuf_values = {{{0, 0x298}, 0x20020b}, {{0, 0x29c}, 0x20034a}};
+    shader.env.expected_handle = ~0U;
+    const Value pair{shader.Emit(Opcode::GetCbufU32x2, {Value{0U}, Value{0x298U}})};
+    const Value low{shader.Emit(Opcode::CompositeExtractU32x2, {pair, Value{0U}})};
+    const Value high{shader.Emit(Opcode::CompositeExtractU32x2, {pair, Value{1U}})};
+    auto& first{shader.Sample(shader.Emit(Opcode::Identity, {low}))};
+    auto& second{shader.Sample(shader.Emit(Opcode::Identity, {high}))};
+    shader.Run();
+
+    REQUIRE(shader.program.info.texture_descriptors.size() == 2);
+    CHECK(shader.Descriptor(first).cbuf_index == 0);
+    CHECK(shader.Descriptor(first).cbuf_offset == 0x298);
+    CHECK(shader.Descriptor(second).cbuf_index == 0);
+    CHECK(shader.Descriptor(second).cbuf_offset == 0x29c);
+    CHECK(shader.Descriptor(first).handle_program == ~0U);
+    CHECK(shader.Descriptor(second).handle_program == ~0U);
 }
 
 TEST_CASE("A handle word the translation saw dereferenced is not a handle without a storage buffer",

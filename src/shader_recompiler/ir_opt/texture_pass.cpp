@@ -1238,6 +1238,23 @@ std::optional<ConstBufferAddr> TryGetConstBuffer(const IR::Inst* inst, Environme
         return lhs;
         break;
     }
+    case IR::Opcode::CompositeExtractU32x2: {
+        // One word of a 64-bit constant buffer read (LDC.64, ULDC.64): the second is the word at
+        // +4. The Duskbloods' DLSS prepass loads two handles at once and samples the second
+        // (ULDC.64 UR10, c[0][0x298]; UMOV UR4, UR11); the search used to go on to the read
+        // itself and bind the first word's texture in its place.
+        const IR::Value vector{inst->Arg(0)};
+        const IR::Value element{inst->Arg(1)};
+        if (vector.IsImmediate() || !element.IsImmediate() ||
+            vector.InstRecursive()->GetOpcode() != IR::Opcode::GetCbufU32x2) {
+            return std::nullopt;
+        }
+        std::optional result{TryGetConstBuffer(vector.InstRecursive(), env, host_info, block)};
+        if (result) {
+            result->offset += element.U32() * static_cast<u32>(sizeof(u32));
+        }
+        return result;
+    }
     case IR::Opcode::GetCbufU32x2:
     case IR::Opcode::GetCbufU32:
         break;
