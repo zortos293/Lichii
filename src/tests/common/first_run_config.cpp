@@ -313,6 +313,14 @@ std::string ReadText(const std::filesystem::path& path) {
     return {std::istreambuf_iterator<char>{file}, std::istreambuf_iterator<char>{}};
 }
 
+/// Temporary files a save left in the directory (qt-config.ini.tmp.<pid>.<n>).
+size_t SaveTemporaries(const std::filesystem::path& directory) {
+    return static_cast<size_t>(std::ranges::count_if(
+        std::filesystem::directory_iterator{directory}, [](const auto& entry) {
+            return entry.path().filename().string().starts_with("qt-config.ini.tmp.");
+        }));
+}
+
 constexpr const char* SharpeningConfig =
     "[Renderer]\nfsr_sharpening_slider=83\nfsr_sharpening_slider\\default=false\n";
 
@@ -326,7 +334,8 @@ TEST_CASE("A config save replaces the file and ignores a leftover temporary file
     config.SaveValues();
     CHECK(ReadText(directory.path / "qt-config.ini").find("fsr_sharpening_slider=83") !=
           std::string::npos);
-    CHECK_FALSE(std::filesystem::exists(directory.path / "qt-config.ini.tmp"));
+    CHECK(ReadText(directory.path / "qt-config.ini.tmp") == "left by a save that was killed");
+    CHECK(SaveTemporaries(directory.path) == 0);
 }
 
 #ifndef _WIN32
@@ -357,7 +366,7 @@ TEST_CASE("A config save keeps a read-only config", "[config]") {
     std::filesystem::permissions(filename, std::filesystem::perms::owner_read |
                                                std::filesystem::perms::owner_write);
     CHECK(ReadText(filename) == SharpeningConfig);
-    CHECK_FALSE(std::filesystem::exists(directory.path / "qt-config.ini.tmp"));
+    CHECK(SaveTemporaries(directory.path) == 0);
 }
 
 TEST_CASE("A dangling config symlink is not a new user", "[config]") {
