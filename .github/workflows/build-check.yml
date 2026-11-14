@@ -4,7 +4,7 @@ on:
   pull_request:
     branches: [nx2]
   push:
-    branches: [nx2]
+    branches: [nx2, feature/intel-arc-a750-optimization-xess]
   workflow_dispatch:
 
 permissions:
