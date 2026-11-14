@@ -4,6 +4,7 @@
 // SPDX-FileCopyrightText: 2014 Citra Emulator Project
 // SPDX-License-Identifier: GPL-2.0-or-later
 
+#include <new>
 #include <atomic>
 #include <chrono>
 #include <climits>
@@ -88,11 +89,16 @@ const char* GetLevelName(Level log_level) {
 // Some IDEs prefer <file>:<line> instead, so let's just do that :)
 std::string FormatLogMessage(const Entry& entry) noexcept {
     if (!entry.filename) return "";
-    auto const time_seconds = uint32_t(entry.timestamp.count() / 1000000);
-    auto const time_fractional = uint32_t(entry.timestamp.count() % 1000000);
-    auto const class_name = GetLogClassName(entry.log_class);
-    auto const level_name = GetLevelName(entry.log_level);
-    return fmt::format("[{:4d}.{:06d}] {} <{}> {}:{}:{}: {}\n", time_seconds, time_fractional, class_name, level_name, entry.filename, entry.line_num, entry.function, entry.message);
+    try {
+        auto const time_seconds = uint32_t(entry.timestamp.count() / 1000000);
+        auto const time_fractional = uint32_t(entry.timestamp.count() % 1000000);
+        auto const class_name = GetLogClassName(entry.log_class);
+        auto const level_name = GetLevelName(entry.log_level);
+        return fmt::format("[{:4d}.{:06d}] {} <{}> {}:{}:{}: {}\n", time_seconds, time_fractional, class_name, level_name, entry.filename, entry.line_num, entry.function, entry.message);
+    } catch (const std::bad_alloc&) {
+        // This function is noexcept; an allocation failure must not end the emulator.
+        return {};
+    }
 }
 
 template <typename It>
