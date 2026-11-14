@@ -13,6 +13,8 @@
 #include <mutex>
 #include <span>
 #include <thread>
+#include <unordered_map>
+#include <unordered_set>
 #include <vector>
 #include <catch2/catch_test_macros.hpp>
 #include <catch2/generators/catch_generators.hpp>
@@ -36,13 +38,12 @@ namespace {
 struct Runtime;
 
 struct Buffer : VideoCommon::BufferBase {
-    Buffer(Runtime&, VideoCommon::NullBufferParams params) : BufferBase{params} {}
-    Buffer(Runtime&, DAddr address, u32 size, bool mapped)
-        : BufferBase{address, size}, bytes(size), host_mapped{mapped} {}
+    Buffer(Runtime& runtime, VideoCommon::NullBufferParams params)
+        : BufferBase{params}, owner{&runtime} {}
+    Buffer(Runtime& runtime, DAddr address, u32 size, bool mapped)
+        : BufferBase{address, size}, bytes(size), host_mapped{mapped}, owner{&runtime} {}
 
-    void MarkUsage(u64 offset, u64 size) {
-        REQUIRE(offset + size <= bytes.size());
-    }
+    void MarkUsage(u64 offset, u64 size);
     std::span<u8> Mapped() {
         return host_mapped ? std::span{bytes} : std::span<u8>{};
     }
@@ -53,6 +54,8 @@ struct Buffer : VideoCommon::BufferBase {
     std::vector<u8> bytes;
     bool host_mapped{};
     u64 tick{};
+    Runtime* owner;
+    std::shared_ptr<u8> lifetime = std::make_shared<u8>();
 };
 
 struct Staging {
@@ -93,25 +96,38 @@ struct Runtime {
     bool CanReorderUpload(const Buffer&, std::span<VideoCommon::BufferCopy>) const {
         return false;
     }
-    Staging DownloadStagingBuffer(u64 size, bool = false) {
+    Staging DownloadStagingBuffer(u64 size, bool deferred = false) {
         // Kept until the end: read downloads hold theirs past the next request.
         stagings.push_back(std::make_unique<Buffer>(*this, 0, size + 128, false));
         ++allocations;
         Buffer* const staging = stagings.back().get();
+        if (deferred) {
+            deferred_stagings.insert(staging);
+        }
+        if (deferred && noncoherent_downloads) {
+            auto& visible = staging_host_views[staging];
+            visible.assign(size, 0xa5);
+            return {staging, 128, visible};
+        }
         return {staging, 128, std::span{staging->bytes}.subspan(128)};
     }
     Staging UploadStagingBuffer(u64 size) {
         return DownloadStagingBuffer(size);
     }
-    void FreeDeferredStagingBuffer(Staging&) {}
+    void FreeDeferredStagingBuffer(Staging& staging) {
+        REQUIRE(deferred_stagings.erase(staging.buffer) == 1);
+        ++freed_stagings;
+    }
     void CopyBuffer(Buffer* dst, Buffer& src, std::span<const VideoCommon::BufferCopy> copies,
                     bool) {
         for (const auto& copy : copies) {
             REQUIRE(copy.src_offset + copy.size <= src.bytes.size());
             REQUIRE(copy.dst_offset + copy.size <= dst->bytes.size());
-            pending.push_back([dst, &src, copy] {
-                std::memcpy(dst->bytes.data() + copy.dst_offset, src.bytes.data() + copy.src_offset,
-                            copy.size);
+            // Moving a Buffer transfers its storage and handle, as Vulkan deletion retirement does.
+            pending.push_back([dst_bytes = dst->bytes.data(), src_bytes = src.bytes.data(), copy,
+                               source = std::weak_ptr{src.lifetime}] {
+                REQUIRE_FALSE(source.expired());
+                std::memcpy(dst_bytes + copy.dst_offset, src_bytes + copy.src_offset, copy.size);
             });
             ++downloads;
         }
@@ -135,18 +151,17 @@ struct Runtime {
         if (before_completion) {
             before_completion();
         }
-        Complete(submitted_tick);
-        for (auto& copy : pending) {
-            copy();
-        }
-        pending.clear();
+        Complete(Submit());
         ++finishes;
     }
-    u64 SubmitForHostRead() {
-        ++host_read_barriers;
+    u64 Submit() {
         submitted.emplace_back(++submitted_tick, std::move(pending));
         pending.clear();
         return submitted_tick;
+    }
+    u64 SubmitForHostRead() {
+        ++host_read_barriers;
+        return Submit();
     }
     u64 QueueForHostRead() {
         ++queued_host_reads;
@@ -154,7 +169,23 @@ struct Runtime {
         pending.clear();
         return submitted_tick;
     }
+    u64 QueueCommandSnapshot() {
+        ++private_host_read_barriers;
+        return CurrentTick();
+    }
+    void InvalidateCommandSnapshot(const Staging& staging) {
+        REQUIRE(deferred_stagings.contains(staging.buffer));
+        ++snapshot_invalidations;
+        if (staging_host_views.contains(staging.buffer)) {
+            std::memcpy(staging.mapped_span.data(), staging.buffer->bytes.data() + staging.offset,
+                        staging.mapped_span.size());
+        }
+    }
+    bool IsHostReadSubmitted(u64 tick) const {
+        return tick <= submitted_tick;
+    }
     bool IsFreeNow(u64 tick) const {
+        ++completion_refreshes;
         return IsFree(tick);
     }
     void WaitForHostRead(u64 tick) {
@@ -196,6 +227,11 @@ struct Runtime {
     u32 alignment{256};
     u32 allocations{}, downloads{}, uploads{}, finishes{}, waits{};
     u32 host_read_barriers{}, host_read_waits{}, queued_host_reads{};
+    u32 private_host_read_barriers{}, freed_stagings{}, snapshot_invalidations{};
+    bool noncoherent_downloads{};
+    std::unordered_map<Buffer*, std::vector<u8>> staging_host_views;
+    mutable u32 completion_refreshes{};
+    std::unordered_set<Buffer*> deferred_stagings;
     u64 upload_bytes{}, waited_tick{};
     u64 submitted_tick{}, completed_tick{};
     std::vector<std::unique_ptr<Buffer>> stagings;
@@ -204,6 +240,11 @@ struct Runtime {
     std::deque<std::pair<u64, std::vector<std::function<void()>>>> submitted;
     std::function<void()> before_completion;
 };
+
+void Buffer::MarkUsage(u64 offset, u64 size) {
+    REQUIRE(offset + size <= bytes.size());
+    tick = owner->CurrentTick();
+}
 
 struct Tracker : VideoCommon::MemoryTrackerBase<Tegra::MaxwellDeviceMemoryManager> {
     using MemoryTrackerBase::MemoryTrackerBase;
@@ -319,6 +360,40 @@ struct BufferCacheTestAccess {
     }
     static void Download(Cache& cache, std::span<const std::pair<DAddr, u64>> ranges) {
         cache.DownloadRangesMemory(ranges);
+    }
+    static auto SnapshotCounts(const Cache& cache) {
+        return cache.command_snapshots.counters;
+    }
+    static void VerifySnapshots(Cache& cache, bool verify) {
+        cache.verify_command_snapshots = verify;
+    }
+    static size_t PendingSnapshots(const Cache& cache) {
+        return cache.pending_command_snapshots.size();
+    }
+    static size_t RetiredSnapshotSources(const Cache& cache) {
+        return cache.retired_command_snapshot_sources.size();
+    }
+    static void CompleteSnapshots(Cache& cache) {
+        cache.CompleteCommandSnapshots(false);
+    }
+    static void TickDestructionRing(Cache& cache) {
+        cache.delayed_destruction_ring.Tick();
+    }
+    static void Attach(Cache& cache, BufferCacheChannelInfo& channel) {
+        cache.channel_state = &channel;
+        cache.maxwell3d = &channel.maxwell3d;
+        cache.gpu_memory = &channel.gpu_memory;
+    }
+    static void BumpDeletionEpoch(Cache& cache) {
+        ++cache.buffer_deletions;
+    }
+    static void GpuWrite(Cache& cache, BufferId id, DAddr address, u32 size) {
+        cache.MarkWrittenBuffer(id, address, size);
+    }
+    static void UploadDirect(Cache& cache, BufferId id, DAddr address, u32 size) {
+        BufferCopy copy{.src_offset = 0,
+                        .dst_offset = address - cache.slot_buffers[id].CpuAddr(), .size = size};
+        cache.UploadMemory(cache.slot_buffers[id], size, size, std::span{&copy, 1});
     }
     /// A draw or dispatch binds [address, address + size) of buffer `id`: its CPU-modified bytes
     /// are uploaded.
@@ -2183,6 +2258,485 @@ TEST_CASE("Synchronous downloads keep guest writes collected while they wait for
     REQUIRE(f.bytes[0x10240] == 0x12);
 }
 
+namespace {
+struct SnapshotFixture : Fixture {
+    static constexpr DAddr A = 0x20000;
+    static constexpr DAddr B = 0x30000;
+    static constexpr u64 Page = 4096;
+    Tegra::Control::ChannelState state{0};
+    std::optional<VideoCommon::BufferCacheChannelInfo> channel;
+    VideoCommon::BufferId first, second;
+
+    SnapshotFixture(bool mapped_a, bool mapped_b) {
+        Access::VerifySnapshots(*cache, false);
+        state.memory_manager = &*memory;
+        state.payload.emplace(system, *memory, state);
+        channel.emplace(state);
+        Access::Attach(*cache, *channel);
+        first = Access::Add(*cache, A, 0x10000, mapped_a);
+        second = Access::Add(*cache, B, 0x10000, mapped_b);
+        Fill(first, 0x11);
+        Fill(second, 0x22);
+        Access::Dirty(*cache, A, Page);
+        Access::Dirty(*cache, B, Page);
+        Read(A);
+        Read(B);
+    }
+    ~SnapshotFixture() {
+        cache.reset();
+    }
+    void Fill(VideoCommon::BufferId id, u8 value) {
+        std::ranges::fill(Access::Get(*cache, id).bytes, value);
+    }
+    void Read(DAddr address) {
+        const VideoCommon::CommandReadScope safe_command;
+        cache->DownloadMemory(address, Page);
+    }
+    void Rewrite() {
+        Fill(first, 0x33);
+        Fill(second, 0x44);
+        Access::GpuWrite(*cache, first, A, Page);
+        Access::GpuWrite(*cache, second, B, Page);
+    }
+    void Capture() {
+        Rewrite();
+        Read(A);
+        REQUIRE(bytes[B - 0x10000] == 0x22);
+        REQUIRE(cache->IsRegionGpuModified(B, Page));
+    }
+    bool HitAvoidsWait() const {
+        return !verification;
+    }
+    void EnableVerification() {
+        verification = true;
+        Access::VerifySnapshots(*cache, true);
+    }
+    bool verification{};
+};
+} // Anonymous namespace
+
+TEST_CASE("Command snapshots keep prefetched bytes private until the requested buffer phase",
+          "[buffer_ports][command_prefetch]") {
+    const bool mapped_a = GENERATE(false, true);
+    const bool mapped_b = GENERATE(false, true);
+    SnapshotFixture f{mapped_a, mapped_b};
+    f.Capture();
+    const u32 finishes = f.runtime.finishes;
+    // A preceding texture phase may overwrite guest bytes. The buffer phase must still win,
+    // and a following query phase must remain last, as with an ordinary synchronous download.
+    std::memset(f.bytes + SnapshotFixture::B - 0x10000, 0x77, SnapshotFixture::Page);
+    f.Read(SnapshotFixture::B);
+    REQUIRE(f.runtime.finishes == finishes + (f.HitAvoidsWait() ? 0 : 1));
+    REQUIRE(f.bytes[SnapshotFixture::B - 0x10000] == 0x44);
+    REQUIRE_FALSE(f.cache->IsRegionGpuModified(SnapshotFixture::B, SnapshotFixture::Page));
+    std::memset(f.bytes + SnapshotFixture::B - 0x10000, 0x99, 4);
+    REQUIRE(f.bytes[SnapshotFixture::B - 0x10000] == 0x99);
+    f.Read(SnapshotFixture::B);
+    REQUIRE(f.bytes[SnapshotFixture::B - 0x10000] == 0x99);
+    REQUIRE(f.runtime.finishes == finishes + (f.HitAvoidsWait() ? 0 : 1));
+}
+
+TEST_CASE("Command snapshots reject newer GPU query upload unmap and buffer generations",
+          "[buffer_ports][command_prefetch]") {
+    const bool mapped = GENERATE(false, true);
+    SnapshotFixture f{mapped, mapped};
+    f.Capture();
+    SECTION("Recorded GPU write") {
+        f.Fill(f.second, 0x55);
+        Access::GpuWrite(*f.cache, f.second, SnapshotFixture::B, SnapshotFixture::Page);
+    }
+    SECTION("Query SyncValues write") {
+        f.cache->OutdateReadDownloads(SnapshotFixture::B, SnapshotFixture::Page);
+        f.Fill(f.second, 0x55);
+    }
+    SECTION("Deferred upload changes the host buffer") {
+        std::memset(f.bytes + SnapshotFixture::B - 0x10000, 0x55, SnapshotFixture::Page);
+        Access::UploadDirect(*f.cache, f.second, SnapshotFixture::B, SnapshotFixture::Page);
+        std::memset(f.bytes + SnapshotFixture::B - 0x10000, 0x22, SnapshotFixture::Page);
+    }
+    SECTION("Physical unmap and a later GPU write") {
+        f.cache->WriteMemory(SnapshotFixture::B, SnapshotFixture::Page, false);
+        REQUIRE(f.cache->IsRegionCpuModified(SnapshotFixture::B, SnapshotFixture::Page));
+        // Binding it again uploads the CPU/untracked page before the next GPU writer uses it.
+        Access::Upload(*f.cache, f.second, SnapshotFixture::B, SnapshotFixture::Page);
+        REQUIRE_FALSE(f.cache->IsRegionCpuModified(SnapshotFixture::B, SnapshotFixture::Page));
+        f.Fill(f.second, 0x55);
+        Access::GpuWrite(*f.cache, f.second, SnapshotFixture::B, SnapshotFixture::Page);
+    }
+    SECTION("Deleted buffer id is reused") {
+        Access::Delete(*f.cache, f.second);
+        f.second = Access::Add(*f.cache, SnapshotFixture::B, 0x10000, mapped);
+        f.Fill(f.second, 0x55);
+        Access::Dirty(*f.cache, SnapshotFixture::B, SnapshotFixture::Page);
+    }
+    const u32 finishes = f.runtime.finishes;
+    f.Read(SnapshotFixture::B);
+    REQUIRE(f.runtime.finishes == finishes + 1);
+    REQUIRE(f.bytes[SnapshotFixture::B - 0x10000] == 0x55);
+}
+
+TEST_CASE("Command snapshots leave partially GPU-dirty pages to the original download",
+          "[buffer_ports][command_prefetch]") {
+    SnapshotFixture f{false, false};
+    f.Fill(f.first, 0x33);
+    f.Fill(f.second, 0x44);
+    Access::GpuWrite(*f.cache, f.first, SnapshotFixture::A, SnapshotFixture::Page);
+    Access::GpuWrite(*f.cache, f.second, SnapshotFixture::B, SnapshotFixture::Page / 2);
+    f.Read(SnapshotFixture::A);
+    REQUIRE(Access::SnapshotCounts(*f.cache).prefetched == 0);
+    REQUIRE(f.bytes[SnapshotFixture::B - 0x10000] == 0x22);
+    const u32 finishes = f.runtime.finishes;
+    f.Read(SnapshotFixture::B);
+    REQUIRE(f.runtime.finishes == finishes + 1);
+    REQUIRE(f.bytes[SnapshotFixture::B - 0x10000] == 0x44);
+    REQUIRE(f.bytes[SnapshotFixture::B - 0x10000 + SnapshotFixture::Page / 2] == 0x22);
+}
+
+TEST_CASE("Command snapshots discard a candidate invalidated during the existing wait",
+          "[buffer_ports][command_prefetch]") {
+    SnapshotFixture f{false, true};
+    const bool deletion = GENERATE(false, true);
+    f.Rewrite();
+    bool waiting = true;
+    f.runtime.before_completion = [&] {
+        if (waiting) {
+            waiting = false;
+            if (deletion) {
+                Access::BumpDeletionEpoch(*f.cache);
+            } else {
+                f.cache->OutdateReadDownloads(SnapshotFixture::B, SnapshotFixture::Page);
+            }
+        }
+    };
+    f.Read(SnapshotFixture::A);
+    f.runtime.before_completion = {};
+    REQUIRE(Access::SnapshotCounts(*f.cache).discarded != 0);
+    const u32 finishes = f.runtime.finishes;
+    f.Read(SnapshotFixture::B);
+    REQUIRE(f.runtime.finishes == finishes + 1);
+    REQUIRE(f.bytes[SnapshotFixture::B - 0x10000] == 0x44);
+}
+
+TEST_CASE("Command snapshots retain pending CPU writes at capture and consumption",
+          "[buffer_ports][command_prefetch]") {
+    const bool mapped = GENERATE(false, true);
+    SnapshotFixture f{mapped, mapped};
+    GuestCpuWrites writes{*f.cache};
+    bool wrote_during_wait = false;
+    SECTION("Writes arrive during capture wait") {
+        bool waiting = true;
+        f.runtime.before_completion = [&] {
+            if (waiting) {
+                waiting = false;
+                writes.Write(f.bytes + SnapshotFixture::A - 0x10000 + 0x100,
+                             SnapshotFixture::A + 0x100, NewGuestValue);
+                writes.Write(f.bytes + SnapshotFixture::B - 0x10000 + 0x100,
+                             SnapshotFixture::B + 0x100, NewGuestValue);
+            }
+        };
+        f.Capture();
+        f.runtime.before_completion = {};
+        wrote_during_wait = true;
+        REQUIRE(GuestHolds(f, SnapshotFixture::A + 0x100, NewGuestValue));
+    }
+    SECTION("Write arrives after capture") {
+        f.Capture();
+        writes.Write(f.bytes + SnapshotFixture::B - 0x10000 + 0x100,
+                     SnapshotFixture::B + 0x100, NewGuestValue);
+    }
+    const u32 finishes = f.runtime.finishes;
+    f.Read(SnapshotFixture::B);
+    const bool hit = f.HitAvoidsWait() && !wrote_during_wait;
+    REQUIRE(f.runtime.finishes == finishes + (hit ? 0 : 1));
+    REQUIRE(GuestHolds(f, SnapshotFixture::B + 0x100, NewGuestValue));
+    REQUIRE(f.bytes[SnapshotFixture::B - 0x10000 + 0xff] == 0x44);
+    REQUIRE(f.bytes[SnapshotFixture::B - 0x10000 + 0x140] == 0x44);
+}
+
+TEST_CASE("Command snapshot verification detects an unrecorded write and lands fresh bytes",
+          "[buffer_ports][command_prefetch]") {
+    const bool mapped = GENERATE(false, true);
+    SnapshotFixture f{mapped, mapped};
+    f.EnableVerification();
+    f.Capture();
+    f.Fill(f.second, 0x66); // Deliberately bypass invalidation to test the verification backstop.
+    const u32 finishes = f.runtime.finishes;
+    f.Read(SnapshotFixture::B);
+    REQUIRE(f.runtime.finishes == finishes + 1);
+    REQUIRE(f.bytes[SnapshotFixture::B - 0x10000] == 0x66);
+    const auto counts = Access::SnapshotCounts(*f.cache);
+    REQUIRE(counts.verified == 1);
+    REQUIRE(counts.verified_bytes == SnapshotFixture::Page);
+    REQUIRE(counts.mismatch_bytes == SnapshotFixture::Page);
+    REQUIRE(counts.fallbacks == 1);
+}
+
+namespace {
+struct AsyncSnapshotFixture : SnapshotFixture {
+    using SnapshotFixture::SnapshotFixture;
+
+    void RecordWrite(VideoCommon::BufferId id, DAddr address, u64 size, u8 value) {
+        auto& buffer = Access::Get(*cache, id);
+        Access::GpuWrite(*cache, id, address, static_cast<u32>(size));
+        buffer.MarkUsage(address - buffer.CpuAddr(), size);
+        runtime.pending.push_back([data = buffer.bytes.data() + address - buffer.CpuAddr(), size,
+                                   value, source = std::weak_ptr{buffer.lifetime}] {
+            REQUIRE_FALSE(source.expired());
+            std::memset(data, value, size);
+        });
+    }
+    void Queue(u64 size = Page, u8 value = 0x44) {
+        RecordWrite(first, A, size, 0x33);
+        RecordWrite(second, B, size, value);
+        cache->NoteWorkRecorded(true);
+    }
+    void RunSubmission() {
+        runtime.Complete(runtime.Submit());
+    }
+};
+} // Anonymous namespace
+
+TEST_CASE("Async command snapshots use normal submissions and publish only at the buffer phase",
+          "[buffer_ports][command_prefetch_async]") {
+    const bool mapped_a = GENERATE(false, true);
+    const bool mapped_b = GENERATE(false, true);
+    AsyncSnapshotFixture f{mapped_a, mapped_b};
+    f.runtime.noncoherent_downloads = GENERATE(false, true);
+    const auto submitted = f.runtime.submitted_tick;
+    const auto finishes = f.runtime.finishes;
+    const auto downloads = f.runtime.downloads;
+    f.Queue();
+    REQUIRE(f.runtime.submitted_tick == submitted);
+    REQUIRE(f.runtime.finishes == finishes);
+    REQUIRE(f.runtime.host_read_waits == 0);
+    REQUIRE(f.runtime.downloads == downloads + 2); // Mapped sources also get private staging.
+    REQUIRE(f.runtime.private_host_read_barriers == 1);
+    Access::CompleteSnapshots(*f.cache);
+    REQUIRE(f.runtime.snapshot_invalidations == 0);
+    REQUIRE(Access::PendingSnapshots(*f.cache) == 1);
+    REQUIRE(f.bytes[SnapshotFixture::B - 0x10000] == 0x22);
+    REQUIRE(f.cache->IsRegionGpuModified(SnapshotFixture::B, SnapshotFixture::Page));
+    f.RunSubmission();
+    Access::CompleteSnapshots(*f.cache);
+    REQUIRE(Access::PendingSnapshots(*f.cache) == 0);
+    REQUIRE(f.runtime.freed_stagings == 1);
+    REQUIRE(f.runtime.snapshot_invalidations == 1);
+    REQUIRE(Access::SnapshotCounts(*f.cache).async_ready == 2);
+    REQUIRE(f.bytes[SnapshotFixture::B - 0x10000] == 0x22);
+    REQUIRE(f.cache->IsRegionGpuModified(SnapshotFixture::B, SnapshotFixture::Page));
+    // The preceding texture phase still runs first; the normal B phase must overwrite it.
+    std::memset(f.bytes + SnapshotFixture::B - 0x10000, 0x77, SnapshotFixture::Page);
+    const auto refreshes = f.runtime.completion_refreshes;
+    f.Read(SnapshotFixture::B);
+    REQUIRE(f.runtime.finishes == finishes + (f.HitAvoidsWait() ? 0 : 1));
+    REQUIRE(f.runtime.completion_refreshes == refreshes);
+    REQUIRE(f.runtime.host_read_waits == 0);
+    REQUIRE(Access::SnapshotCounts(*f.cache).async_hits == 1);
+    REQUIRE(f.bytes[SnapshotFixture::B - 0x10000] == 0x44);
+    REQUIRE_FALSE(f.cache->IsRegionGpuModified(SnapshotFixture::B, SnapshotFixture::Page));
+    // A later query phase remains last and the next clean read does not republish the snapshot.
+    std::memset(f.bytes + SnapshotFixture::B - 0x10000, 0x99, 4);
+    f.Read(SnapshotFixture::B);
+    REQUIRE(f.bytes[SnapshotFixture::B - 0x10000] == 0x99);
+    REQUIRE(f.runtime.finishes == finishes + (f.HitAvoidsWait() ? 0 : 1));
+}
+
+TEST_CASE("Async command snapshot verification checks fresh bytes from the same buffer",
+          "[buffer_ports][command_prefetch_async]") {
+    const bool mapped = GENERATE(false, true);
+    AsyncSnapshotFixture f{mapped, mapped};
+    f.EnableVerification();
+    f.Queue();
+    f.RunSubmission();
+    Access::CompleteSnapshots(*f.cache);
+    f.Fill(f.second, 0x66); // Bypass invalidation deliberately to check the verification backstop.
+    f.Read(SnapshotFixture::B);
+    REQUIRE(f.bytes[SnapshotFixture::B - 0x10000] == 0x66);
+    REQUIRE(Access::SnapshotCounts(*f.cache).async_hits == 1);
+    REQUIRE(Access::SnapshotCounts(*f.cache).verified_bytes == SnapshotFixture::Page);
+    REQUIRE(Access::SnapshotCounts(*f.cache).mismatch_bytes == SnapshotFixture::Page);
+    REQUIRE(Access::SnapshotCounts(*f.cache).fallbacks == 1);
+}
+
+TEST_CASE("Async command snapshots fall back without waiting or polling pending copies",
+          "[buffer_ports][command_prefetch_async]") {
+    const bool mapped = GENERATE(false, true);
+    const bool submitted = GENERATE(false, true);
+    AsyncSnapshotFixture f{mapped, mapped};
+    f.Queue();
+    if (submitted) {
+        f.runtime.Submit();
+    }
+    const auto finishes = f.runtime.finishes;
+    const auto refreshes = f.runtime.completion_refreshes;
+    f.Read(SnapshotFixture::B);
+    REQUIRE(f.runtime.finishes == finishes + 1);
+    REQUIRE(f.runtime.completion_refreshes == refreshes);
+    REQUIRE(f.runtime.host_read_waits == 0);
+    REQUIRE(f.bytes[SnapshotFixture::B - 0x10000] == 0x44);
+    REQUIRE(Access::SnapshotCounts(*f.cache).async_pending_misses == 1);
+    REQUIRE(Access::SnapshotCounts(*f.cache).async_unsubmitted_misses == (submitted ? 0 : 1));
+    Access::CompleteSnapshots(*f.cache);
+    REQUIRE(Access::PendingSnapshots(*f.cache) == 0);
+    REQUIRE(f.runtime.freed_stagings == 1);
+}
+
+TEST_CASE("Async command snapshots reject writes and replacement before or after completion",
+          "[buffer_ports][command_prefetch_async]") {
+    const bool mapped = GENERATE(false, true);
+    const bool completed = GENERATE(false, true);
+    AsyncSnapshotFixture f{mapped, mapped};
+    f.Queue();
+    if (completed) {
+        f.RunSubmission();
+        Access::CompleteSnapshots(*f.cache);
+    }
+    SECTION("Newer GPU writer") {
+        f.RecordWrite(f.second, SnapshotFixture::B, SnapshotFixture::Page, 0x55);
+    }
+    SECTION("Query SyncValues") {
+        f.cache->OutdateReadDownloads(SnapshotFixture::B, SnapshotFixture::Page);
+        auto* data = Access::Get(*f.cache, f.second).bytes.data();
+        f.runtime.pending.push_back([data] { std::memset(data, 0x55, SnapshotFixture::Page); });
+    }
+    SECTION("Deferred CPU upload") {
+        std::memset(f.bytes + SnapshotFixture::B - 0x10000, 0x55, SnapshotFixture::Page);
+        Access::UploadDirect(*f.cache, f.second, SnapshotFixture::B, SnapshotFixture::Page);
+        // Model the submitted upload after the pending snapshot copy too.
+        auto* data = Access::Get(*f.cache, f.second).bytes.data();
+        f.runtime.pending.push_back([data] { std::memset(data, 0x55, SnapshotFixture::Page); });
+        std::memset(f.bytes + SnapshotFixture::B - 0x10000, 0x22, SnapshotFixture::Page);
+    }
+    SECTION("Physical unmap followed by rebinding") {
+        f.cache->WriteMemory(SnapshotFixture::B, SnapshotFixture::Page, false);
+        Access::Upload(*f.cache, f.second, SnapshotFixture::B, SnapshotFixture::Page);
+        f.RecordWrite(f.second, SnapshotFixture::B, SnapshotFixture::Page, 0x55);
+    }
+    SECTION("Buffer deletion and slot reuse") {
+        Access::Delete(*f.cache, f.second);
+        f.second = Access::Add(*f.cache, SnapshotFixture::B, 0x10000, mapped);
+        f.RecordWrite(f.second, SnapshotFixture::B, SnapshotFixture::Page, 0x55);
+    }
+    f.RunSubmission();
+    Access::CompleteSnapshots(*f.cache);
+    if (!completed) {
+        REQUIRE(Access::SnapshotCounts(*f.cache).async_discarded != 0);
+    }
+    const auto finishes = f.runtime.finishes;
+    f.Read(SnapshotFixture::B);
+    REQUIRE(f.runtime.finishes == finishes + 1);
+    REQUIRE(f.bytes[SnapshotFixture::B - 0x10000] == 0x55);
+}
+
+TEST_CASE("Async command snapshots preserve CPU writes at completion and publication",
+          "[buffer_ports][command_prefetch_async]") {
+    const bool mapped = GENERATE(false, true);
+    const bool before_completion = GENERATE(false, true);
+    AsyncSnapshotFixture f{mapped, mapped};
+    GuestCpuWrites writes{*f.cache};
+    f.Queue();
+    f.RunSubmission();
+    if (!before_completion) {
+        Access::CompleteSnapshots(*f.cache);
+    }
+    writes.Write(f.bytes + SnapshotFixture::B - 0x10000 + 0x100,
+                 SnapshotFixture::B + 0x100, NewGuestValue);
+    Access::CompleteSnapshots(*f.cache);
+    REQUIRE(Access::SnapshotCounts(*f.cache).async_cpu_discarded == (before_completion ? 1 : 0));
+    const auto finishes = f.runtime.finishes;
+    f.Read(SnapshotFixture::B);
+    const bool hit = !before_completion && f.HitAvoidsWait();
+    REQUIRE(f.runtime.finishes == finishes + (hit ? 0 : 1));
+    REQUIRE(GuestHolds(f, SnapshotFixture::B + 0x100, NewGuestValue));
+    REQUIRE(f.bytes[SnapshotFixture::B - 0x10000 + 0xff] == 0x44);
+    REQUIRE(f.bytes[SnapshotFixture::B - 0x10000 + 0x140] == 0x44);
+}
+
+TEST_CASE("Async command snapshots keep invalidated staging bounded until GPU completion",
+          "[buffer_ports][command_prefetch_async]") {
+    AsyncSnapshotFixture f{false, true};
+    using Snapshots = VideoCommon::CommandReadSnapshots;
+    // Learn 32 pages through the real safe-read path, then overwrite all of them per dispatch.
+    for (DAddr page = SnapshotFixture::A; page < SnapshotFixture::B + 0x10000;
+         page += SnapshotFixture::Page) {
+        Access::Dirty(*f.cache, page, SnapshotFixture::Page);
+        f.Read(page);
+    }
+    const auto submitted = f.runtime.submitted_tick;
+    const auto finishes = f.runtime.finishes;
+    for (size_t batch = 0; batch < Snapshots::MaxPendingBatches; ++batch) {
+        f.Queue(0x10000, static_cast<u8>(batch + 0x40));
+    }
+    REQUIRE(Access::PendingSnapshots(*f.cache) == Snapshots::MaxPendingBatches);
+    REQUIRE(f.runtime.deferred_stagings.size() == Snapshots::MaxPendingBatches);
+    REQUIRE(Access::SnapshotCounts(*f.cache).async_peak_pages == Snapshots::MaxPendingPages);
+    REQUIRE(Access::SnapshotCounts(*f.cache).async_pages == Snapshots::MaxPendingPages);
+    const auto allocations = f.runtime.allocations;
+    f.Queue(0x10000, 0x88);
+    REQUIRE(f.runtime.allocations == allocations);
+    REQUIRE(f.runtime.freed_stagings == 0);
+    REQUIRE(f.runtime.submitted_tick == submitted);
+    REQUIRE(f.runtime.finishes == finishes);
+    REQUIRE(Access::SnapshotCounts(*f.cache).async_capacity_skips != 0);
+    f.RunSubmission();
+    Access::CompleteSnapshots(*f.cache);
+    REQUIRE(Access::PendingSnapshots(*f.cache) == 0);
+    REQUIRE(f.runtime.deferred_stagings.empty());
+    REQUIRE(f.runtime.freed_stagings == Snapshots::MaxPendingBatches);
+    REQUIRE(Access::SnapshotCounts(*f.cache).async_discarded == Snapshots::MaxPendingPages);
+    // A later dispatch can use the released budget.
+    f.cache->NoteWorkRecorded(true);
+    REQUIRE(Access::PendingSnapshots(*f.cache) == 1);
+}
+
+TEST_CASE("Async command snapshots suppress duplicates and retain deleted source handles",
+          "[buffer_ports][command_prefetch_async]") {
+    AsyncSnapshotFixture f{false, true};
+    f.Queue();
+    f.cache->NoteWorkRecorded(true);
+    REQUIRE(Access::PendingSnapshots(*f.cache) == 1);
+    REQUIRE(f.runtime.private_host_read_barriers == 1);
+    REQUIRE(Access::SnapshotCounts(*f.cache).async_duplicate_skips >= 2);
+    const bool later_use = GENERATE(false, true);
+    if (later_use) {
+        f.runtime.Submit();
+        f.RecordWrite(f.second, SnapshotFixture::B, SnapshotFixture::Page, 0x55);
+    }
+    const std::weak_ptr source = Access::Get(*f.cache, f.second).lifetime;
+    Access::Delete(*f.cache, f.second);
+    REQUIRE(Access::RetiredSnapshotSources(*f.cache) == 1);
+    // The ordinary frame-count destruction delay is insufficient for this unsubmitted copy.
+    for (size_t frame = 0; frame < 16; ++frame) {
+        Access::TickDestructionRing(*f.cache);
+        Access::CompleteSnapshots(*f.cache);
+    }
+    REQUIRE_FALSE(source.expired());
+    REQUIRE(f.runtime.freed_stagings == 0);
+    // Reusing the slot must not make a second deleted buffer a source of the old copy.
+    f.second = Access::Add(*f.cache, SnapshotFixture::B, 0x10000, true);
+    Access::Delete(*f.cache, f.second);
+    REQUIRE(Access::RetiredSnapshotSources(*f.cache) == 1);
+    if (later_use) {
+        f.runtime.Complete(f.runtime.submitted_tick);
+        Access::CompleteSnapshots(*f.cache);
+        REQUIRE(Access::PendingSnapshots(*f.cache) == 0);
+        REQUIRE(Access::RetiredSnapshotSources(*f.cache) == 1);
+        for (size_t frame = 0; frame < 16; ++frame) {
+            Access::TickDestructionRing(*f.cache);
+        }
+        REQUIRE_FALSE(source.expired());
+    }
+    f.RunSubmission(); // Uses the deleted source's still-live storage.
+    Access::CompleteSnapshots(*f.cache);
+    REQUIRE(Access::RetiredSnapshotSources(*f.cache) == 0);
+    REQUIRE(f.runtime.freed_stagings == 1);
+    REQUIRE_FALSE(source.expired());
+    for (size_t frame = 0; frame < 16; ++frame) {
+        Access::TickDestructionRing(*f.cache);
+    }
+    REQUIRE(source.expired());
+}
+
 TEST_CASE("Guest writes racing read downloads keep their bytes", "[buffer_ports]") {
     Fixture f;
     const auto id = Access::Add(*f.cache, 0x20000, 0x10000);
@@ -2558,4 +3112,21 @@ TEST_CASE("Claimed CPU writes keep their bytes when an earlier one downloads the
     REQUIRE(f.bytes[0x10800] == 0xbb);
     REQUIRE(f.bytes[0x1080f] == 0xbb);
     REQUIRE(f.bytes[0x10810] == 0x12);
+}
+
+TEST_CASE("Completed command snapshots do not replace ordinary buffer reads",
+          "[buffer_ports][command_prefetch_async]") {
+    const bool mapped = GENERATE(false, true);
+    AsyncSnapshotFixture f{mapped, mapped};
+    f.Queue();
+    f.RunSubmission();
+    Access::CompleteSnapshots(*f.cache);
+    REQUIRE(Access::SnapshotCounts(*f.cache).async_ready == 2);
+    const auto finishes = f.runtime.finishes;
+    const auto served = Access::SnapshotCounts(*f.cache).served;
+    REQUIRE_FALSE(VideoCommon::CommandReadScope::IsActive());
+    f.cache->DownloadMemory(SnapshotFixture::B, SnapshotFixture::Page);
+    REQUIRE(f.runtime.finishes == finishes + 1);
+    REQUIRE(Access::SnapshotCounts(*f.cache).served == served);
+    REQUIRE(f.bytes[SnapshotFixture::B - 0x10000] == 0x44);
 }

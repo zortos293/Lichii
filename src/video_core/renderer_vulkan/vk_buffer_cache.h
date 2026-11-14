@@ -149,6 +149,11 @@ public:
     /// a fence's do (Scheduler::DeferFlush). Returns the tick they go in.
     u64 QueueForHostRead();
 
+    /// Private copies use the next normal submission; this records only the host-read barrier.
+    u64 QueueCommandSnapshot();
+    void InvalidateCommandSnapshot(const StagingBufferRef& ref);
+    [[nodiscard]] bool IsHostReadSubmitted(u64 tick) const;
+
     /// Waits for a SubmitForHostRead or QueueForHostRead tick, on any thread.
     void WaitForHostRead(u64 tick);
 

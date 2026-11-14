@@ -551,6 +551,20 @@ u64 BufferCacheRuntime::QueueForHostRead() {
     return tick;
 }
 
+u64 BufferCacheRuntime::QueueCommandSnapshot() {
+    scheduler.RequestOutsideRenderPassOperationContext();
+    scheduler.Record(HostReadBarrier);
+    return scheduler.CurrentTick();
+}
+
+void BufferCacheRuntime::InvalidateCommandSnapshot(const StagingBufferRef& ref) {
+    staging_pool.InvalidateDeferredDownload(ref);
+}
+
+bool BufferCacheRuntime::IsHostReadSubmitted(u64 tick) const {
+    return scheduler.IsSubmitted(tick);
+}
+
 void BufferCacheRuntime::WaitForHostRead(u64 tick) {
     if (scheduler.IsFree(tick)) {
         return;

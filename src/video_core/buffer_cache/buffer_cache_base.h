@@ -37,8 +37,10 @@
 #include "common/slot_vector.h"
 #include "shader_recompiler/shader_info.h"
 #include "video_core/buffer_cache/buffer_base.h"
+#include "video_core/buffer_cache/command_read_snapshots.h"
 #include "video_core/buffer_cache/read_trap_tracker.h"
 #include "video_core/buffer_cache/virtual_range_cache.h"
+#include "video_core/command_read_scope.h"
 #include "video_core/control/channel_state_cache.h"
 #include "video_core/delayed_destruction_ring.h"
 #include "video_core/dirty_flags.h"
@@ -715,6 +717,10 @@ private:
     /// WriteReadDownloads for those the host GPU has completed: nothing waits.
     void WriteCompletedReadDownloads();
 
+    /// Private command copies are recorded only after their GPU writers, and never land early.
+    void RecordCommandSnapshots();
+    void CompleteCommandSnapshots(bool refresh);
+
     /// WriteReadDownloads up to the newest read download over the range, if the host GPU ran it.
     /// Returns whether it did.
     bool WriteFinishedReadDownloads(DAddr device_addr, u64 size);
@@ -1064,6 +1070,27 @@ private:
     /// All the read downloads' clean_ranges (they don't overlap): GPU-modified bytes already on
     /// their way, which later reads wait for rather than download again.
     Common::RangeSet<DAddr> read_download_ranges;
+    CommandReadSnapshots command_snapshots;
+    bool verify_command_snapshots{CommandReadSnapshots::Verify()};
+    u64 command_snapshot_deletions{};
+    struct CommandSnapshotCopy {
+        CommandReadSnapshots::Token token;
+        BufferId buffer_id;
+    };
+    struct PendingCommandSnapshots {
+        u64 tick{};
+        u64 deletions{};
+        Async_Buffer staging{};
+        boost::container::small_vector<CommandSnapshotCopy, CommandReadSnapshots::BatchPages> copies;
+    };
+    std::deque<PendingCommandSnapshots> pending_command_snapshots;
+    size_t command_snapshot_pending_pages{};
+    struct RetiredCommandSnapshotSource {
+        u64 tick;
+        Buffer buffer;
+    };
+    std::deque<RetiredCommandSnapshotSource> retired_command_snapshot_sources;
+    u64 command_snapshot_retired_bytes{};
 
     /// EDEN_NX2_READ_CHECK: the bytes early downloads brought to a page's guest memory, and
     /// what guest memory held there as they landed, until newer downloaded bytes or values replace

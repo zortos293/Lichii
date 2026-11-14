@@ -26,6 +26,7 @@
 #include "video_core/nx2_profile.h"
 #include "video_core/dma_pusher.h"
 #include "video_core/command_fetch_order.h"
+#include "video_core/command_read_scope.h"
 #include "video_core/control/channel_state.h"
 #include "video_core/engines/kepler_compute.h"
 #include "video_core/engines/maxwell_3d.h"
@@ -625,7 +626,12 @@ bool DmaPusher::Step() {
             Nx2CmdPageDiag::CountEntry(Nx2CmdPageDiag::Path::Submitted);
             command_resume_offset += ProcessCommands(commands, 0);
         } else if (use_safe) {
-            Tegra::Memory::GpuGuestMemory<Tegra::CommandHeader, Tegra::Memory::GuestMemoryFlags::SafeRead>headers(memory_manager, dma_state.dma_get, header.size, &command_headers);
+            auto headers = [&] {
+                const VideoCommon::CommandReadScope command_read;
+                return Tegra::Memory::GpuGuestMemory<
+                    Tegra::CommandHeader, Tegra::Memory::GuestMemoryFlags::SafeRead>{
+                    memory_manager, dma_state.dma_get, header.size, &command_headers};
+            }();
             const std::span<const CommandHeader> commands{headers.data(), headers.size()};
             RecordParsedEntry(header, commands);
             if (submitted_copy != nullptr) {

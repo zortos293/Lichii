@@ -213,6 +213,7 @@ void BufferCache<P>::TickFrame() {
         RunGarbageCollector(total_used_memory >= critical_memory);
     }
     ++frame_tick;
+    CompleteCommandSnapshots(true);
     delayed_destruction_ring.Tick();
 
     // Pages draws wrote: their early downloads, now that the frame's work is recorded.
@@ -241,6 +242,7 @@ void BufferCache<P>::UnmapGPUMemory(size_t as_id, GPUVAddr gpu_addr, size_t size
 template <class P>
 void BufferCache<P>::WriteMemory(DAddr device_addr, u64 size, bool keep_page_gpu_data,
                                  bool engine_write) {
+    command_snapshots.Invalidate(device_addr, size);
     Nx2NoteListHostWrite(device_addr, size);
     NoteUniformWrite(device_addr, size);
     // EDEN_NX2_READ_CHECK: a newer value where an early download landed, as ClearDownload
@@ -852,6 +854,7 @@ std::optional<u64> BufferCache<P>::FinishReadDownloads(DAddr device_addr, u64 si
 
 template <class P>
 void BufferCache<P>::OutdateReadDownloads(DAddr device_addr, u64 size) {
+    command_snapshots.Invalidate(device_addr, size);
     // EDEN_NX2_READ_CHECK: the GPU's copy gets newer bytes where an early download landed,
     // which no read compares. A query result copy (SyncValues) is no GPU write the cache records:
     // a synchronous flush doesn't download it, and guest memory gets the result once the query
@@ -893,6 +896,8 @@ void BufferCache<P>::NoteWorkRecorded(bool dispatch) {
     if constexpr (!IS_OPENGL && USE_MEMORY_MAPS) {
         if (dispatch) {
             // Outside any render pass: the copies go right behind the dispatch.
+            CompleteCommandSnapshots(true);
+            RecordCommandSnapshots();
             RecordEarlyDownloads();
         }
         // Early downloads the host GPU ran go to guest memory, where their reads then find them.
@@ -901,6 +906,145 @@ void BufferCache<P>::NoteWorkRecorded(bool dispatch) {
             runtime.IsFreeNow(read_downloads.front().tick)) {
             WriteCompletedReadDownloads();
         }
+    }
+}
+
+template <class P>
+void BufferCache<P>::CompleteCommandSnapshots(bool refresh) {
+    if constexpr (!IS_OPENGL && USE_MEMORY_MAPS &&
+                  requires { runtime.QueueCommandSnapshot(); }) {
+        if (refresh) {
+            // Once per recorded dispatch, never once per safe command read.
+            if (!pending_command_snapshots.empty()) {
+                (void)runtime.IsFreeNow(pending_command_snapshots.front().tick);
+            } else if (!retired_command_snapshot_sources.empty()) {
+                (void)runtime.IsFreeNow(retired_command_snapshot_sources.front().tick);
+            }
+        }
+        while (!pending_command_snapshots.empty() &&
+               runtime.IsFree(pending_command_snapshots.front().tick)) {
+            auto& batch = pending_command_snapshots.front();
+            runtime.InvalidateCommandSnapshot(batch.staging);
+            const auto cpu_written = PendingCpuWriteRanges();
+            for (size_t i = 0; i < batch.copies.size(); ++i) {
+                const auto token = batch.copies[i].token;
+                const bool current = command_snapshots.EndPending(token);
+                if (!current || batch.deletions != buffer_deletions) {
+                    ++command_snapshots.counters.async_discarded;
+                    continue;
+                }
+                if (cpu_written.Intersects(token.page, CommandReadSnapshots::PageSize)) {
+                    ++command_snapshots.counters.async_cpu_discarded;
+                    continue;
+                }
+                if (command_snapshots.Store(
+                        token, batch.staging.mapped_span.subspan(
+                                   i * CommandReadSnapshots::PageSize, CommandReadSnapshots::PageSize),
+                        true)) {
+                    ++command_snapshots.counters.async_ready;
+                }
+            }
+            command_snapshot_pending_pages -= batch.copies.size();
+            runtime.FreeDeferredStagingBuffer(batch.staging);
+            pending_command_snapshots.pop_front();
+        }
+        for (auto it = retired_command_snapshot_sources.begin();
+             it != retired_command_snapshot_sources.end();) {
+            if (!runtime.IsFree(it->tick)) {
+                ++it;
+                continue;
+            }
+            command_snapshot_retired_bytes -= it->buffer.SizeBytes();
+            delayed_destruction_ring.Push(std::move(it->buffer));
+            it = retired_command_snapshot_sources.erase(it);
+        }
+    }
+}
+
+template <class P>
+void BufferCache<P>::RecordCommandSnapshots() {
+    if constexpr (!IS_OPENGL && USE_MEMORY_MAPS &&
+                  requires { runtime.QueueCommandSnapshot(); }) {
+        // The unsplit owner records and consumes under the buffer cache lock.
+        if (GpuSplit::Get().Active()) {
+            return;
+        }
+        if (command_snapshot_deletions != buffer_deletions) {
+            command_snapshots.InvalidateAll();
+            command_snapshot_deletions = buffer_deletions;
+        }
+        constexpr size_t max_pages = CommandReadSnapshots::MaxPendingPages;
+        const size_t occupied = command_snapshot_pending_pages +
+                                retired_command_snapshot_sources.size();
+        if (pending_command_snapshots.size() >= CommandReadSnapshots::MaxPendingBatches ||
+            occupied >= max_pages) {
+            ++command_snapshots.counters.async_capacity_skips;
+            return;
+        }
+        PendingCommandSnapshots batch;
+        batch.deletions = buffer_deletions;
+        command_snapshots.Candidates(0, 0, [&](CommandReadSnapshots::Token token) {
+            if (batch.copies.size() >= max_pages - occupied) {
+                return false;
+            }
+            constexpr u64 page_size = CommandReadSnapshots::PageSize;
+            u64 dirty_bytes = 0;
+            gpu_modified_ranges.ForEachInRange(token.page, page_size, [&](DAddr begin, DAddr end) {
+                dirty_bytes += end - begin;
+            });
+            if (dirty_bytes != page_size ||
+                !memory_tracker.IsRegionGpuModified(token.page, page_size)) {
+                ++command_snapshots.counters.async_partial_skips;
+                return false;
+            }
+            bool selected = false;
+            ForEachBufferInRange(token.page, page_size, [&](BufferId id, Buffer& source) {
+                if (source.CpuAddr() <= token.page &&
+                    token.page + page_size <= source.CpuAddr() + source.SizeBytes()) {
+                    batch.copies.push_back({token, id});
+                    selected = true;
+                }
+            });
+            return selected;
+        });
+        if (batch.copies.empty()) {
+            return;
+        }
+        batch.staging = runtime.DownloadStagingBuffer(
+            batch.copies.size() * CommandReadSnapshots::PageSize, true);
+        for (size_t i = 0; i < batch.copies.size(); ++i) {
+            const BufferId id = batch.copies[i].buffer_id;
+            if (std::any_of(batch.copies.begin(), batch.copies.begin() + i,
+                            [id](const auto& earlier) { return earlier.buffer_id == id; })) {
+                continue;
+            }
+            Buffer& source = slot_buffers[id];
+            boost::container::small_vector<BufferCopy, CommandReadSnapshots::BatchPages> copies;
+            for (size_t j = i; j < batch.copies.size(); ++j) {
+                if (batch.copies[j].buffer_id != id) {
+                    continue;
+                }
+                copies.push_back({
+                    .src_offset = batch.copies[j].token.page - source.CpuAddr(),
+                    .dst_offset = batch.staging.offset + j * CommandReadSnapshots::PageSize,
+                    .size = CommandReadSnapshots::PageSize,
+                });
+                source.MarkUsage(copies.back().src_offset, copies.back().size);
+            }
+            // Mapped sources must be copied too: later GPU writes can change their mapping.
+            runtime.CopyBuffer(batch.staging.buffer, source,
+                               std::span<const BufferCopy>{copies.data(), copies.size()}, true);
+        }
+        batch.tick = runtime.QueueCommandSnapshot();
+        for (const auto& copy : batch.copies) {
+            command_snapshots.BeginPending(copy.token, batch.tick);
+        }
+        ++command_snapshots.counters.async_batches;
+        command_snapshots.counters.async_pages += batch.copies.size();
+        command_snapshot_pending_pages += batch.copies.size();
+        command_snapshots.counters.async_peak_pages = (std::max<u64>)(
+            command_snapshots.counters.async_peak_pages, command_snapshot_pending_pages);
+        pending_command_snapshots.push_back(std::move(batch));
     }
 }
 
@@ -1413,6 +1557,7 @@ void BufferCache<P>::ClearDownload(DAddr device_addr, u64 size) {
 
 template <class P>
 void BufferCache<P>::ClearReplacedDownload(DAddr device_addr, u64 size) {
+    command_snapshots.Invalidate(device_addr, size);
     ClearFenceDownloads(device_addr, size);
     // EDEN_NX2_READ_CHECK: a newer value there, as without early downloads.
     if (!early_landed.empty()) {
@@ -3917,6 +4062,9 @@ void BufferCache<P>::SynchronizeGeometryBuffer(u32 slot, BufferId buffer_id, DAd
 template <class P>
 void BufferCache<P>::UploadMemory(Buffer& buffer, u64 total_size_bytes, u64 largest_copy,
                                   std::span<BufferCopy> copies) {
+    for (const BufferCopy& copy : copies) {
+        command_snapshots.Invalidate(buffer.CpuAddr() + copy.dst_offset, copy.size);
+    }
     if constexpr (USE_MEMORY_MAPS_FOR_UPLOADS) {
         MappedUploadMemory(buffer, total_size_bytes, copies);
     } else {
@@ -4084,6 +4232,33 @@ void BufferCache<P>::DownloadBuffersMemory(std::span<const BufferId> buffer_ids)
 
 template <class P>
 void BufferCache<P>::DownloadBufferMemory(Buffer& buffer, DAddr device_addr, u64 size) {
+    const bool prefetch = USE_MEMORY_MAPS && !IS_OPENGL &&
+                          CommandReadScope::IsActive();
+    if (prefetch && command_snapshot_deletions != buffer_deletions) {
+        command_snapshots.InvalidateAll();
+        command_snapshot_deletions = buffer_deletions;
+    }
+    SCOPE_EXIT {
+        if (prefetch) {
+            command_snapshots.Report(verify_command_snapshots, pending_command_snapshots.size(),
+                                     command_snapshot_pending_pages,
+                                     retired_command_snapshot_sources.size(),
+                                     command_snapshot_retired_bytes);
+        }
+    };
+    if (prefetch) {
+        CompleteCommandSnapshots(false);
+        if constexpr (requires { runtime.IsHostReadSubmitted(u64{}); }) {
+            if (const u64 tick = command_snapshots.PendingTick(device_addr, size); tick != 0) {
+                ++command_snapshots.counters.async_pending_misses;
+                command_snapshots.counters.async_unsubmitted_misses +=
+                    !runtime.IsHostReadSubmitted(tick);
+            }
+        }
+    }
+    bool snapshot_hit = prefetch;
+    bool snapshot_async = false;
+    std::vector<u8> snapshot_bytes;
     boost::container::small_vector<BufferCopy, 1> copies;
     u64 total_size_bytes = 0;
     u64 largest_copy = 0;
@@ -4093,6 +4268,15 @@ void BufferCache<P>::DownloadBufferMemory(Buffer& buffer, DAddr device_addr, u64
             const auto add_download = [&](DAddr start, DAddr end) {
                 const u64 new_offset = start - buffer_addr;
                 const u64 new_size = end - start;
+                // Preserve a hit before normal download bookkeeping invalidates its cache entry.
+                if (snapshot_hit) {
+                    snapshot_hit = command_snapshots.Covers(start, new_size);
+                    if (snapshot_hit) {
+                        snapshot_bytes.resize(total_size_bytes + new_size);
+                        snapshot_async |= command_snapshots.Copy(
+                            start, std::span{snapshot_bytes}.subspan(total_size_bytes, new_size));
+                    }
+                }
                 copies.push_back(BufferCopy{
                     .src_offset = new_offset,
                     .dst_offset = total_size_bytes,
@@ -4122,12 +4306,135 @@ void BufferCache<P>::DownloadBufferMemory(Buffer& buffer, DAddr device_addr, u64
         landing_end = (std::max)(landing_end, buffer.CpuAddr() + copy.src_offset + copy.size);
     }
 
+    if (prefetch) {
+        command_snapshots.Learn(device_addr, size);
+        ++(snapshot_hit ? command_snapshots.counters.hits : command_snapshots.counters.misses);
+        command_snapshots.counters.async_hits += snapshot_hit && snapshot_async;
+    }
+    const bool verify_snapshot = snapshot_hit && verify_command_snapshots;
+    bool verification_failed = false;
+    const auto verify_copy = [&](DAddr address, const u8* fresh, u64 offset, u64 bytes) {
+        if (!verify_snapshot) {
+            return;
+        }
+        command_snapshots.counters.verified_bytes += bytes;
+        u64 different = 0;
+        for (u64 i = 0; i < bytes; ++i) {
+            different += fresh[i] != snapshot_bytes[offset + i];
+        }
+        command_snapshots.counters.mismatch_bytes += different;
+        if (different != 0) {
+            if (!verification_failed) {
+                ++command_snapshots.counters.fallbacks;
+                verification_failed = true;
+            }
+            command_snapshots.Invalidate(address, bytes);
+            static u32 logged{};
+            if (logged++ < 8) {
+                LOG_ERROR(HW_GPU, "Command snapshot verification: {:#x}+{} differs in {} bytes; "
+                                  "using fresh synchronous bytes", address, bytes, different);
+            }
+        }
+    };
+    if (verify_snapshot) {
+        ++command_snapshots.counters.verified;
+    }
+    if (snapshot_hit && !verify_snapshot) {
+        const VideoCore::DownloadLanding landing{landing_begin, landing_end};
+        const Common::RangeSet<DAddr> cpu_written = PendingCpuWriteRanges();
+        for (const BufferCopy& copy : copies) {
+            WriteDownloadedMemory(cpu_written, buffer.CpuAddr() + copy.src_offset,
+                                  snapshot_bytes.data() + copy.dst_offset, copy.size);
+        }
+        ++command_snapshots.counters.served;
+        return;
+    }
+
+    struct Extra {
+        CommandReadSnapshots::Token token;
+        BufferId buffer_id;
+    };
+    boost::container::small_vector<Extra, CommandReadSnapshots::BatchPages> extra;
+    std::optional<Async_Buffer> extra_staging;
+    const u64 extra_deletions = buffer_deletions;
+    if constexpr (USE_MEMORY_MAPS && !IS_OPENGL) {
+        if (prefetch) {
+            command_snapshots.Candidates(device_addr, size, [&](CommandReadSnapshots::Token token) {
+                constexpr u64 page_size = CommandReadSnapshots::PageSize;
+                u64 dirty_bytes = 0;
+                gpu_modified_ranges.ForEachInRange(token.page, page_size, [&](DAddr begin, DAddr end) {
+                    dirty_bytes += end - begin;
+                });
+                if (dirty_bytes != page_size ||
+                    !memory_tracker.IsRegionGpuModified(token.page, page_size)) {
+                    return false;
+                }
+                bool selected = false;
+                ForEachBufferInRange(token.page, page_size, [&](BufferId id, Buffer& source) {
+                    if (source.CpuAddr() <= token.page &&
+                        token.page + page_size <= source.CpuAddr() + source.SizeBytes()) {
+                        extra.push_back({token, id});
+                        selected = true;
+                    }
+                });
+                return selected;
+            });
+            if (!extra.empty()) {
+                extra_staging = runtime.DownloadStagingBuffer(
+                    extra.size() * CommandReadSnapshots::PageSize);
+                for (size_t i = 0; i < extra.size(); ++i) {
+                    if (std::any_of(extra.begin(), extra.begin() + i, [&](const Extra& earlier) {
+                            return earlier.buffer_id == extra[i].buffer_id;
+                        })) {
+                        continue;
+                    }
+                    Buffer& source = slot_buffers[extra[i].buffer_id];
+                    boost::container::small_vector<BufferCopy, CommandReadSnapshots::BatchPages> batch;
+                    for (size_t j = i; j < extra.size(); ++j) {
+                        if (extra[j].buffer_id != extra[i].buffer_id) {
+                            continue;
+                        }
+                        batch.push_back({
+                            .src_offset = extra[j].token.page - source.CpuAddr(),
+                            .dst_offset = extra_staging->offset + j * CommandReadSnapshots::PageSize,
+                            .size = CommandReadSnapshots::PageSize,
+                        });
+                        source.MarkUsage(batch.back().src_offset, batch.back().size);
+                    }
+                    runtime.CopyBuffer(extra_staging->buffer, source,
+                                       std::span<const BufferCopy>{batch.data(), batch.size()}, true);
+                }
+            }
+        }
+    }
+    const auto freeze_extra = [&] {
+        if constexpr (USE_MEMORY_MAPS && !IS_OPENGL) {
+            if (!extra_staging) {
+                return;
+            }
+            const Common::RangeSet<DAddr> cpu_written = PendingCpuWriteRanges();
+            for (size_t i = 0; i < extra.size(); ++i) {
+                const auto token = extra[i].token;
+                if (buffer_deletions != extra_deletions ||
+                    cpu_written.Intersects(token.page, CommandReadSnapshots::PageSize)) {
+                    ++command_snapshots.counters.discarded;
+                    continue;
+                }
+                command_snapshots.Store(token, extra_staging->mapped_span.subspan(
+                    i * CommandReadSnapshots::PageSize, CommandReadSnapshots::PageSize));
+            }
+        }
+    };
+
     if constexpr (requires { buffer.Mapped(); }) {
         if (const auto mapped = buffer.Mapped(); !mapped.empty()) {
             runtime.FinishForHostRead();
+            freeze_extra();
             const VideoCore::DownloadLanding landing{landing_begin, landing_end};
             const Common::RangeSet<DAddr> cpu_written = PendingCpuWriteRanges();
             for (const BufferCopy& copy : copies) {
+                verify_copy(buffer.CpuAddr() + copy.src_offset, mapped.data() + copy.src_offset,
+                            copy.dst_offset, copy.size);
                 WriteDownloadedMemory(cpu_written, buffer.CpuAddr() + copy.src_offset,
                                       mapped.data() + copy.src_offset, copy.size);
             }
@@ -4145,6 +4452,7 @@ void BufferCache<P>::DownloadBufferMemory(Buffer& buffer, DAddr device_addr, u64
         }
         runtime.CopyBuffer(download_staging.buffer, buffer, copies_span, true);
         runtime.Finish();
+        freeze_extra();
         const VideoCore::DownloadLanding landing{landing_begin, landing_end};
         const Common::RangeSet<DAddr> cpu_written = PendingCpuWriteRanges();
         for (const BufferCopy& copy : copies) {
@@ -4152,6 +4460,7 @@ void BufferCache<P>::DownloadBufferMemory(Buffer& buffer, DAddr device_addr, u64
             // Undo the modified offset
             const u64 dst_offset = copy.dst_offset - download_staging.offset;
             const u8* copy_mapped_memory = mapped_memory + dst_offset;
+            verify_copy(copy_device_addr, copy_mapped_memory, dst_offset, copy.size);
             WriteDownloadedMemory(cpu_written, copy_device_addr, copy_mapped_memory, copy.size);
         }
     } else {
@@ -4169,6 +4478,7 @@ void BufferCache<P>::DownloadBufferMemory(Buffer& buffer, DAddr device_addr, u64
 
 template <class P>
 void BufferCache<P>::DeleteBuffer(BufferId buffer_id, bool do_not_mark) {
+    command_snapshots.InvalidateAll();
     const StutterTrace::SiteScope site{StutterTrace::Site::BufferDelete};
     ++buffer_deletions;
     if constexpr (requires { runtime.OnBufferDeleted(slot_buffers[buffer_id]); }) {
@@ -4240,10 +4550,30 @@ void BufferCache<P>::DeleteBuffer(BufferId buffer_id, bool do_not_mark) {
 
     Unregister(buffer_id);
 
+    u64 private_copy_tick = 0;
+    for (auto& batch : pending_command_snapshots) {
+        for (auto& copy : batch.copies) {
+            if (copy.buffer_id == buffer_id) {
+                private_copy_tick = (std::max)(private_copy_tick, batch.tick);
+                // The slot can be reused while this old copy is still in flight.
+                copy.buffer_id = {};
+            }
+        }
+    }
+    if (private_copy_tick != 0) {
+        if constexpr (requires { slot_buffers[buffer_id].LastUsageTick(); }) {
+            private_copy_tick = (std::max)(private_copy_tick,
+                                          slot_buffers[buffer_id].LastUsageTick());
+        }
+        command_snapshot_retired_bytes += slot_buffers[buffer_id].SizeBytes();
+        retired_command_snapshot_sources.push_back(
+            {private_copy_tick, std::move(slot_buffers[buffer_id])});
+    } else {
 #ifdef LICHII_LEGACY
-    if (!do_not_mark || !immediately_free)
+        if (!do_not_mark || !immediately_free)
 #endif
-        delayed_destruction_ring.Push(std::move(slot_buffers[buffer_id]));
+            delayed_destruction_ring.Push(std::move(slot_buffers[buffer_id]));
+    }
 
     slot_buffers.erase(buffer_id);
 }

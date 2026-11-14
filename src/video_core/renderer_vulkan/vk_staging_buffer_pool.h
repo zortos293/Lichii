@@ -38,6 +38,8 @@ public:
 
     StagingBufferRef Request(size_t size, MemoryUsage usage, bool deferred = false);
     void FreeDeferred(StagingBufferRef& ref);
+    /// Make a completed deferred download visible to the CPU, including non-coherent memory.
+    void InvalidateDeferredDownload(const StagingBufferRef& ref);
 
     [[nodiscard]] VkBuffer StreamBuf() const noexcept {
         return *stream_buffer;
