@@ -827,8 +827,11 @@ bool KeplerCompute::ProcessGameDlss(u64 program_id, u64 native_key) {
     if (dlss_chain.output_pass) {
         return replacement && !recheck_after_dispatch && FinishDlssEvaluation();
     }
-    return DlssNetworkDroppedForGood() && !passes->IsPrepass(native_key) &&
-           dlss_chain.programs.contains(native_key);
+    // An output-mismatch recheck validates this frame's network output: its passes all run.
+    const bool replacement_will_draw = replacement && !recheck_after_dispatch &&
+                                       dlss_chain.replacement_drew && fe_upscale_jitter.Has();
+    return (DlssNetworkDroppedForGood() || replacement_will_draw) &&
+           !passes->IsPrepass(native_key) && dlss_chain.programs.contains(native_key);
 }
 
 // The game's own DLSS network (its translated programs) is shown once every pass of an
@@ -1083,9 +1086,11 @@ bool KeplerCompute::FinishDlssEvaluation() {
         dlss_motion_vectors.reset();
         dlss_depth.reset();
         (void)fe_upscale_jitter.Take();
+        dlss_chain.replacement_drew = false;
         return false;
     }
-    return TryFireEmblemUpscale();
+    dlss_chain.replacement_drew = TryFireEmblemUpscale();
+    return dlss_chain.replacement_drew;
 }
 
 // Logs the images a rejected program's handles (constant bank 0, bytes 0x80-0x11c) point to, so a

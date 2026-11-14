@@ -78,6 +78,10 @@ public:
         sample = JitterSample{color, width, height, offset};
     }
 
+    bool Has() const {
+        return sample.has_value();
+    }
+
     // Consume on every output attempt, even if its resources cannot be used.
     std::optional<JitterSample> Take() {
         return std::exchange(sample, std::nullopt);
