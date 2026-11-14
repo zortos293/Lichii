@@ -346,6 +346,8 @@ struct Info {
     /// Set when a barrier in divergent control flow lost its execution barrier, see
     /// ConditionalBarrierPass.
     bool demoted_conditional_barrier{};
+    /// Set when ConditionalBarrierPass made barriers wait only while the workgroup's branches agree
+    bool uses_barrier_vote{};
     bool uses_subgroup_mask{};
     bool uses_fswzadd{};
     bool uses_derivatives{};
