@@ -615,6 +615,10 @@ endif()
 
 target_link_libraries(video_core PRIVATE sirit::sirit)
 
+if (ENABLE_LSFG)
+    target_link_libraries(video_core PRIVATE dxvk_dxbc)
+endif()
+
 # Header-only stuff needed by all dependent targets
 target_link_libraries(video_core PUBLIC Vulkan::Headers Vulkan::UtilityHeaders GPUOpen::VulkanMemoryAllocator)
 

@@ -280,6 +280,15 @@ if (WIN32 AND ARCHITECTURE_x86_64)
     target_link_libraries(event_wait_probe PRIVATE common)
 endif()
 
+if (ENABLE_LSFG)
+    add_executable(lossless_dll_tests
+        video_core/lossless_dll.cpp
+        ../video_core/frame_gen/lossless_dll.cpp
+        ../video_core/frame_gen/lsfg_translate.cpp)
+    target_link_libraries(lossless_dll_tests PRIVATE common dxvk_dxbc Catch2::Catch2WithMain)
+    add_test(NAME lossless_dll_tests COMMAND lossless_dll_tests)
+endif()
+
 add_executable(update_checker_tests
     common/update_checker.cpp
     common/update_installer.cpp

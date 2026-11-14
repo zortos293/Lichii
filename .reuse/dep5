@@ -194,3 +194,12 @@ License: GPL-3.0-or-later
 Comment: CPM.cmake has had additional modifications from crueter to better work with CPMUtil
          https://git.crueter.xyz/CMake/CPMUtil
          https://git.crueter.xyz/CMake/Modules
+
+Files: .patch/dxvk/*
+Copyright: 2017 Philip Rebohle
+           2019 Joshua Ashton
+           2019 Robin Kertels
+           2023 Jeffrey Ellison
+License: Zlib
+Comment: Patch to DXVK v2.6.2 (https://github.com/doitsujin/dxvk), modified for Lichii so its
+         DXBC to SPIR-V compiler builds on its own

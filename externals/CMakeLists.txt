@@ -255,6 +255,39 @@ if (ENABLE_RESHADE)
     endif()
 endif()
 
+# DXVK's DXBC to SPIR-V compiler, for Lossless.dll builds that ship only DXBC shaders
+if (ENABLE_LSFG)
+    AddJsonPackage(NAME dxvk DOWNLOAD_ONLY)
+
+    set(DXVK_DXBC_DIR ${dxvk_SOURCE_DIR}/src/dxbc)
+    add_library(dxvk_dxbc STATIC
+        ${DXVK_DXBC_DIR}/dxbc_analysis.cpp
+        ${DXVK_DXBC_DIR}/dxbc_chunk_isgn.cpp
+        ${DXVK_DXBC_DIR}/dxbc_chunk_shex.cpp
+        ${DXVK_DXBC_DIR}/dxbc_common.cpp
+        ${DXVK_DXBC_DIR}/dxbc_compiler.cpp
+        ${DXVK_DXBC_DIR}/dxbc_decoder.cpp
+        ${DXVK_DXBC_DIR}/dxbc_defs.cpp
+        ${DXVK_DXBC_DIR}/dxbc_header.cpp
+        ${DXVK_DXBC_DIR}/dxbc_module.cpp
+        ${DXVK_DXBC_DIR}/dxbc_names.cpp
+        ${DXVK_DXBC_DIR}/dxbc_options.cpp
+        ${DXVK_DXBC_DIR}/dxbc_reader.cpp
+        ${DXVK_DXBC_DIR}/dxbc_util.cpp
+        ${dxvk_SOURCE_DIR}/src/spirv/spirv_code_buffer.cpp
+        ${dxvk_SOURCE_DIR}/src/spirv/spirv_module.cpp
+    )
+
+    target_include_directories(dxvk_dxbc SYSTEM PUBLIC ${DXVK_DXBC_DIR})
+    target_link_libraries(dxvk_dxbc PUBLIC SPIRV-Headers::SPIRV-Headers Vulkan::Headers)
+
+    if (NOT MSVC)
+        target_compile_options(dxvk_dxbc PRIVATE -w)
+    else()
+        target_compile_options(dxvk_dxbc PRIVATE /w)
+    endif()
+endif()
+
 # Catch2
 if (LICHII_TESTS OR DYNARMIC_TESTS)
     AddJsonPackage(catch2)
