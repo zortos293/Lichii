@@ -339,6 +339,11 @@ if (ARCHITECTURE_arm64 AND (ANDROID OR LINUX))
     add_compile_definitions(HAS_NCE=1)
 endif()
 
+if (ARCHITECTURE_arm64 AND APPLE)
+    set(HAS_HYPERVISOR 1)
+    add_compile_definitions(HAS_HYPERVISOR=1)
+endif()
+
 if (LICHII_ROOM)
     add_compile_definitions(LICHII_ROOM)
 endif()

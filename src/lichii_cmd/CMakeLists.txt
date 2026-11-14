@@ -71,6 +71,14 @@ endif()
 
 create_target_directory_groups(lichii-cmd)
 
+# The Hypervisor CPU backend needs the hypervisor entitlement; an ad-hoc signature is enough.
+if (HAS_HYPERVISOR)
+    add_custom_command(TARGET lichii-cmd POST_BUILD
+        COMMAND codesign --force --sign - --entitlements
+                "${CMAKE_SOURCE_DIR}/dist/eglantine.entitlements" "$<TARGET_FILE:lichii-cmd>"
+        VERBATIM)
+endif()
+
 # needed for vma
 if (NOT MSVC)
     target_compile_options(lichii-cmd PRIVATE

@@ -264,7 +264,9 @@ struct Values {
                                                     CpuBackend::Dynarmic,
 #endif
                                                     CpuBackend::Dynarmic,
-#ifdef HAS_NCE
+#ifdef HAS_HYPERVISOR
+                                                    CpuBackend::Hypervisor,
+#elif defined(HAS_NCE)
                                                     CpuBackend::Nce,
 #else
                                                     CpuBackend::Dynarmic,
