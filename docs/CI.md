@@ -100,6 +100,18 @@ To retrain:
 3. Merge with that LLVM: `llvm-profdata merge -o lichii-windows.profdata <dir>/*.profraw`.
 4. Check that `llvm-profdata show --all-functions lichii-windows.profdata` lists names starting with `?`, then replace the file in the repository root.
 
+## Linux PGO profile
+
+`linux-x86_64-pgo` uses `lichii-linux.profdata`: the repository's `eglantine.profdata` (Mario Kart World) merged with about 2.5 minutes of Ocarina of Time gameplay in Kokiri Forest. Raw counts from the two runs differ by about 39x, so the Ocarina profile is weighted to count about as much as the Mario Kart one. `linux-aarch64-pgo` still uses `eglantine.profdata`.
+
+To retrain (clang of the same major as `PGO_LLVM_VERSION`):
+
+1. Configure a Release build as the `linux-x86_64` job does, adding `-fprofile-generate=<dir> -fprofile-update=atomic -mllvm -runtime-counter-relocation` to `CMAKE_C_FLAGS` and `CMAKE_CXX_FLAGS`. Without `-runtime-counter-relocation` the link fails (`relocation R_X86_64_PC32 out of range` in dynarmic): the counters push `.rodata` out of reach.
+2. Run the game with `LLVM_PROFILE_FILE=<dir>/lichii-%p.profraw` and exit normally (closing the window, or SIGTERM to `eden-cli`). Counters are written only at exit, and the instrumented build runs at about a third of the normal speed. The continuous mode (`%c`) wrote truncated files here.
+3. Merge the raw files into one profile: `llvm-profdata merge -o ocarina.profdata <dir>/*.profraw`.
+4. Merge that with `eglantine.profdata`, weighted so neither game dominates. `llvm-profdata` takes positive integer weights only: compare `Maximum function count` from `llvm-profdata show` for both profiles and round the ratio to an integer (37,200,479,256 / 950,361,642 gave 39 here):
+   `llvm-profdata merge -o lichii-linux.profdata --weighted-input=1,eglantine.profdata --weighted-input=39,ocarina.profdata`
+
 ## Release naming
 
 | Kind              | Tag                    | Release title                            | GitHub Release flag                |

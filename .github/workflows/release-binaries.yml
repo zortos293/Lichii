@@ -87,10 +87,13 @@ jobs:
           # Kart World ran at about half the speed of the normal build, with eglantine.profdata at
           # about the same speed. Both Windows builds are clang-cl with ThinLTO; windows-x86_64-pgo
           # adds lichii-windows.profdata, an MSVC-ABI profile trained on Ocarina of Time (see
+          # docs/CI.md). linux-x86_64-pgo uses lichii-linux.profdata: eglantine.profdata merged with an
+          # Ocarina of Time run, weighted so both games count about the same (see
           # docs/CI.md). MSVC still builds for development.
           - platform: linux-x86_64-pgo
             runner: ubuntu-24.04
             pgo: true
+            profile: lichii-linux.profdata
           - platform: windows-x86_64
             runner: windows-2022
           - platform: windows-x86_64-pgo
@@ -294,7 +297,7 @@ jobs:
           )
           if [ '${{ matrix.pgo }}' = 'true' ]; then
             # Same flags Eden's CI passes for its clang PGO build.
-            profile="-fprofile-use=$PWD/eglantine.profdata -Wno-backend-plugin \
+            profile="-fprofile-use=$PWD/${{ matrix.profile || 'eglantine.profdata' }} -Wno-backend-plugin \
               -Wno-profile-instr-unprofiled -Wno-profile-instr-out-of-date"
             flags+=(
               "-DCMAKE_C_COMPILER=clang-$PGO_LLVM_VERSION"
