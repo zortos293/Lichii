@@ -954,3 +954,86 @@ TEST_CASE("Built-in DLSS render scale follows the NVIDIA DLSS quality", "[patch_
         CHECK(patch.name.find("render scale") == std::string::npos);
     }
 }
+
+TEST_CASE("Built-in text speed is off until checked in Add-Ons", "[patch_manager]") {
+    constexpr size_t SiteOffset = sizeof(Loader::NSOHeader) + 0xAFE1B4;
+    constexpr size_t CaveOffset = sizeof(Loader::NSOHeader) + 0x3C46F00;
+    constexpr u32 LdrhInstruction = 0x7940DE69;
+    constexpr u32 BranchToCave = 0x14C52353;
+    constexpr std::string_view Double = "Text Speed 2x (built-in)";
+    constexpr std::string_view Quadruple = "Text Speed 4x (built-in)";
+    constexpr std::string_view Instant = "Text Speed Instant (built-in)";
+    PatchManagerTestContext context;
+    const auto manager = context.Manager();
+    auto nso = MakeDynamicMain();
+    std::memcpy(nso.data() + SiteOffset, &LdrhInstruction, sizeof(LdrhInstruction));
+
+    SECTION("Unchecked by default: listed off and not applied") {
+        for (const auto& patch : manager.GetPatches()) {
+            if (patch.name.starts_with("Text Speed")) {
+                REQUIRE_FALSE(patch.enabled);
+                REQUIRE(patch.off_by_default);
+            }
+        }
+        const auto patched = manager.PatchNSO(nso, "main");
+        REQUIRE(WordAt(patched, SiteOffset) == LdrhInstruction);
+        REQUIRE(WordAt(patched, CaveOffset) == 0);
+    }
+
+    SECTION("Each speed branches to the cave with its scale once checked") {
+        const std::array<std::pair<std::string_view, u32>, 3> speeds{{
+            {Double, 0x40000000},    // 2.0f
+            {Quadruple, 0x40800000}, // 4.0f
+            {Instant, 0x49742400},   // 1e6f
+        }};
+        for (const auto& [name, scale] : speeds) {
+            Settings::values.disabled_addons[OcarinaTitleId] = {FileSys::EnabledAddonKey(name)};
+            const auto patches = manager.GetPatches();
+            REQUIRE(std::ranges::any_of(patches, [&](const FileSys::Patch& patch) {
+                return patch.name == name && patch.enabled;
+            }));
+            const auto patched = manager.PatchNSO(nso, "main");
+            REQUIRE(WordAt(patched, SiteOffset) == BranchToCave);
+            REQUIRE(Common::HexToString(std::span{patched}.subspan(CaveOffset, 16)) ==
+                    "9000001C0008301E69DE4079ABDC3A17");
+            REQUIRE(WordAt(patched, CaveOffset + 16) == scale);
+        }
+    }
+
+    SECTION("With more than one checked, the fastest applies") {
+        Settings::values.disabled_addons[OcarinaTitleId] = {FileSys::EnabledAddonKey(Double),
+                                                            FileSys::EnabledAddonKey(Quadruple)};
+        const auto patched = manager.PatchNSO(nso, "main");
+        REQUIRE(WordAt(patched, CaveOffset + 16) == 0x40800000);
+    }
+
+    SECTION("Another word at the site skips") {
+        Settings::values.disabled_addons[OcarinaTitleId] = {FileSys::EnabledAddonKey(Double)};
+        std::memcpy(nso.data() + SiteOffset, &NopInstruction, sizeof(NopInstruction));
+        const auto patched = manager.PatchNSO(nso, "main");
+        REQUIRE(WordAt(patched, SiteOffset) == NopInstruction);
+        REQUIRE(WordAt(patched, CaveOffset) == 0);
+    }
+}
+
+TEST_CASE("Unchecked add-on lists store off-by-default built-ins when checked", "[patch_manager]") {
+    const std::string Double{"Text Speed 2x (built-in)"};
+    const std::string Quadruple{"Text Speed 4x (built-in)"};
+    const std::string Instant{"Text Speed Instant (built-in)"};
+    const std::string MaxResolutionName{MaxResolution};
+
+    SECTION("Unchecked off-by-default built-ins are not stored, checked ones get their key") {
+        auto stored = FileSys::StoredDisabledAddons(OcarinaTitleId,
+                                                    {MaxResolutionName, Double, Instant});
+        std::ranges::sort(stored);
+        std::vector<std::string> expected{MaxResolutionName,
+                                          FileSys::EnabledAddonKey(Quadruple)};
+        std::ranges::sort(expected);
+        REQUIRE(stored == expected);
+    }
+
+    SECTION("Other titles are stored as given") {
+        REQUIRE(FileSys::StoredDisabledAddons(OtherTitleId, {Double}) ==
+                std::vector<std::string>{Double});
+    }
+}
