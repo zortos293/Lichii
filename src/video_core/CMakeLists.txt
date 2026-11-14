@@ -8,11 +8,9 @@ if (WIN32)
     FetchContent_Declare(intel_xess_sdk
         GIT_REPOSITORY https://github.com/intel/xess.git
         GIT_TAG de0fb9c1c510661c571164e1418ceca8101dab69
-        GIT_SHALLOW FALSE)
-    FetchContent_GetProperties(intel_xess_sdk)
-    if (NOT intel_xess_sdk_POPULATED)
-        FetchContent_Populate(intel_xess_sdk)
-    endif()
+        GIT_SHALLOW FALSE
+        SOURCE_SUBDIR inc)
+    FetchContent_MakeAvailable(intel_xess_sdk)
 endif()
 
 add_subdirectory(host_shaders)
