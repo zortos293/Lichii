@@ -613,6 +613,11 @@ struct System::Impl {
         VideoCore::Nx2Debug::EndSession();
         debug_service.reset();
         SetShuttingDown(true);
+        {
+            // Waits for frontend reads of the application's memory in progress; later ones see
+            // the shutting down state and stop.
+            std::unique_lock wait_for_readers{guest_memory_readers};
+        }
         Common::ADPF::Shutdown();
 
         // Reset per-game flags
@@ -759,6 +764,7 @@ struct System::Impl {
     std::mutex general_channel_mutex;
     std::atomic_bool is_paused{};
     std::atomic_bool is_shutting_down{};
+    std::shared_mutex guest_memory_readers;
     std::atomic_bool is_powered_on{};
     bool is_multicore : 1 = false;
     Settings::MemoryLayout memory_layout{Settings::MemoryLayout::Memory_4Gb};
@@ -810,6 +816,10 @@ void System::ShutdownMainProcess() {
 
 bool System::IsShuttingDown() const {
     return impl->IsShuttingDown();
+}
+
+std::shared_lock<std::shared_mutex> System::LockGuestMemoryReaders() {
+    return std::shared_lock{impl->guest_memory_readers};
 }
 
 void System::SetShuttingDown(bool shutting_down) {

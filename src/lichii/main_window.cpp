@@ -15,6 +15,7 @@
 #include "common/settings_enums.h"
 #include "common/shutdown_progress.h"
 #include "frontend_common/settings_generator.h"
+#include "render/adventure_notes.h"
 #include "render/performance_overlay.h"
 #ifdef HAS_RESHADE
 #include "configuration/configure_post_processing.h"
@@ -1667,6 +1668,7 @@ void MainWindow::ConnectMenuEvents() {
     connect_menu(ui->action_Show_Filter_Bar, &MainWindow::OnToggleFilterBar);
     connect_menu(ui->action_Show_Status_Bar, &MainWindow::OnToggleStatusBar);
     connect_menu(ui->action_Show_Performance_Overlay, &MainWindow::OnTogglePerfOverlay);
+    connect_menu(ui->action_Show_Adventure_Notes, &MainWindow::OnToggleAdventureNotes);
 #ifdef HAS_RESHADE
     connect_menu(ui->action_Post_Processing_Shaders, &MainWindow::OnPostProcessingShaders);
 #else
@@ -2535,6 +2537,15 @@ bool MainWindow::OnShutdownBegin() {
 
     UndoSessionSpeedChanges();
 
+    // Before the shutdown guard, and deleted now rather than later: the panel's module stops
+    // following the game, and a heap search it started ends, before the game's memory goes away.
+    if (adventure_notes) {
+        delete adventure_notes;
+        adventure_notes = nullptr;
+        ui->action_Show_Adventure_Notes->setChecked(false);
+    }
+    ui->action_Show_Adventure_Notes->setEnabled(false);
+
     if (QtCommon::system->IsShuttingDown()) {
         status_bar_update_timer.stop();
         connect(QtCommon::emu_thread.get(), &QThread::finished, this,
@@ -2547,7 +2558,6 @@ bool MainWindow::OnShutdownBegin() {
         perf_overlay->deleteLater();
         perf_overlay = nullptr;
     }
-
     QtCommon::system->SetShuttingDown(true);
     status_bar_update_timer.stop();
     LOG_INFO(Frontend, "Shutdown requested; waiting for emulation thread");
@@ -3684,6 +3694,8 @@ bool MainWindow::ConfirmShutdownGame() {
 void MainWindow::OnLoadComplete() {
     loading_screen->OnLoadComplete();
 
+    ui->action_Show_Adventure_Notes->setEnabled(true);
+
     perf_overlay = new PerformanceOverlay(this);
     perf_overlay->setVisible(ui->action_Show_Performance_Overlay->isChecked());
 
@@ -4578,6 +4590,21 @@ void MainWindow::OnToggleFilterBar() {
 
 void MainWindow::OnToggleStatusBar() {
     statusBar()->setVisible(ui->action_Show_Status_Bar->isChecked());
+}
+
+void MainWindow::OnToggleAdventureNotes() {
+    if (ui->action_Show_Adventure_Notes->isChecked()) {
+        if (!adventure_notes) {
+            adventure_notes = new AdventureNotes(
+                this, QtCommon::system->GetApplicationProcessProgramID());
+            connect(adventure_notes, &AdventureNotes::closed, this, [this]() {
+                ui->action_Show_Adventure_Notes->setChecked(false);
+            });
+        }
+        adventure_notes->show();
+    } else if (adventure_notes) {
+        adventure_notes->hide();
+    }
 }
 
 void MainWindow::OnTogglePerfOverlay() {

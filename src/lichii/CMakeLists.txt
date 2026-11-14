@@ -253,6 +253,8 @@ add_executable(lichii
     configuration/system/profile_avatar_dialog.h configuration/system/profile_avatar_dialog.cpp
     configuration/addon/mod_select_dialog.h configuration/addon/mod_select_dialog.cpp configuration/addon/mod_select_dialog.ui
 
+    render/adventure_notes.h render/adventure_notes.cpp
+    render/adventure_script.h render/adventure_script.cpp
     render/performance_overlay.h render/performance_overlay.cpp
     updater/update_dialog.h updater/update_dialog.cpp updater/update_dialog.ui
     game/common.h
@@ -427,7 +429,7 @@ endif()
 
 target_link_libraries(lichii PRIVATE nlohmann_json::nlohmann_json)
 target_link_libraries(lichii PRIVATE common core input_common frontend_common network video_core qt_common)
-target_link_libraries(lichii PRIVATE Boost::headers Qt6::Widgets Qt6::Concurrent Qt6::Network)
+target_link_libraries(lichii PRIVATE Boost::headers Qt6::Widgets Qt6::Concurrent Qt6::Network Qt6::Qml)
 # Unpacks NVIDIA's files from the Streamline release (nvidia_dlss_panel.cpp).
 target_link_libraries(lichii PRIVATE ZLIB::ZLIB)
 if (WIN32)
@@ -457,7 +459,10 @@ if (LICHII_USE_QT_WEB_ENGINE)
 endif ()
 
 if(UNIX AND NOT APPLE)
+    include(GNUInstallDirs)
     install(TARGETS lichii)
+    # The shipped Adventure Notes modules, next to the program (ShippedDir).
+    install(DIRECTORY ${PROJECT_SOURCE_DIR}/dist/notes DESTINATION ${CMAKE_INSTALL_BINDIR})
 endif()
 
 if (WIN32 AND NOT LICHII_USE_BUNDLED_QT)
@@ -507,3 +512,12 @@ if (TARGET nxformat::static_nozstd)
     target_compile_definitions(lichii PRIVATE LICHII_NX_TOOLS)
 endif()
 create_target_directory_groups(lichii)
+
+# Adventure Notes modules shipped next to the program (render/adventure_notes.cpp, ShippedDir).
+# A target of its own, so that editing only a module file copies it again (a POST_BUILD step
+# runs only when the program itself is relinked).
+add_custom_target(lichii_notes ALL
+    COMMAND ${CMAKE_COMMAND} -E copy_directory ${PROJECT_SOURCE_DIR}/dist/notes $<TARGET_FILE_DIR:lichii>/notes
+    COMMENT "Copying the Adventure Notes modules")
+# Built with the program, also when only `lichii` is asked for (--target lichii).
+add_dependencies(lichii lichii_notes)
