@@ -15,6 +15,7 @@
 #include "common/assert.h"
 #include <bit>
 #include "common/common_types.h"
+#include "common/logging.h"
 
 #include "dynarmic/backend/exception_handler.h"
 #include "dynarmic/backend/x64/block_of_code.h"
@@ -189,17 +190,33 @@ struct ExceptionHandler::Impl final {
         code.cmp(code.rax, static_cast<u32>(code.GetTotalCodeSize()));
         code.ja(exception_handler_without_cb);
 
-        code.lea(code.rsp, code.ptr[code.rsp - 8]);
-        code.mov(code.ABI_PARAM1, std::bit_cast<u64>(&cb));
+        // Our 1st argument is the PEXCEPTION_RECORD, and rax holds Rip's offset in the code block.
+        // Alignment plus the callee's shadow space.
+        code.sub(code.rsp, 8 + 32);
+        code.mov(code.ABI_PARAM4, code.rax);
         code.mov(code.ABI_PARAM2, code.ABI_PARAM3);
-        code.CallLambda([](const std::function<FakeCall(u64)>& cb_, PCONTEXT ctx) {
-            FakeCall fc = cb_(ctx->Rip);
-            ctx->Rsp -= sizeof(u64);
-            *std::bit_cast<u64*>(ctx->Rsp) = fc.ret_rip;
-            ctx->Rip = fc.call_rip;
+        code.mov(code.ABI_PARAM3, code.ABI_PARAM1);
+        code.mov(code.ABI_PARAM1, std::bit_cast<u64>(&cb));
+        code.CallLambda([](const std::function<std::optional<FakeCall>(u64)>& cb_, PCONTEXT ctx,
+                           PEXCEPTION_RECORD record, u64 offset) -> EXCEPTION_DISPOSITION {
+            if (record->ExceptionCode == EXCEPTION_ACCESS_VIOLATION) {
+                if (const auto fc = cb_(ctx->Rip)) {
+                    ctx->Rsp -= sizeof(u64);
+                    *std::bit_cast<u64*>(ctx->Rsp) = fc->ret_rip;
+                    ctx->Rip = fc->call_rip;
+                    return ExceptionContinueExecution;
+                }
+            }
+            // Not a fastmem access: the crash handler reports it with the real exception record.
+            LOG_CRITICAL(Core,
+                         "Exception {:#010x} in JIT code at rip {:#018x} (code block +{:#x}) is not a "
+                         "fastmem access; info {:#x} {:#x}",
+                         record->ExceptionCode, ctx->Rip, offset,
+                         record->NumberParameters > 0 ? record->ExceptionInformation[0] : 0,
+                         record->NumberParameters > 1 ? record->ExceptionInformation[1] : 0);
+            return ExceptionContinueSearch;
         });
-        code.add(code.rsp, 8);
-        code.mov(code.eax, u32(ExceptionContinueExecution));
+        code.add(code.rsp, 8 + 32);
         code.ret();
 
         exception_handler_without_cb_offset = ULONG(exception_handler_without_cb - code.getCode<u8*>());
@@ -230,7 +247,7 @@ struct ExceptionHandler::Impl final {
         RtlAddFunctionTable(rfuncs, 1, reinterpret_cast<DWORD64>(code.getCode()));
     }
 
-    void SetCallback(std::function<FakeCall(u64)> new_cb) {
+    void SetCallback(std::function<std::optional<FakeCall>(u64)> new_cb) {
         cb = new_cb;
         except_info->ExceptionHandler = cb ? exception_handler_with_cb_offset : exception_handler_without_cb_offset;
     }
@@ -241,7 +258,7 @@ struct ExceptionHandler::Impl final {
 
 private:
     RUNTIME_FUNCTION* rfuncs;
-    std::function<FakeCall(u64)> cb;
+    std::function<std::optional<FakeCall>(u64)> cb;
     UNW_EXCEPTION_INFO* except_info;
     ULONG exception_handler_without_cb_offset;
     ULONG exception_handler_with_cb_offset;
@@ -258,7 +275,7 @@ bool ExceptionHandler::SupportsFastmem() const noexcept {
     return static_cast<bool>(impl);
 }
 
-void ExceptionHandler::SetFastmemCallback(std::function<FakeCall(u64)> cb) {
+void ExceptionHandler::SetFastmemCallback(std::function<std::optional<FakeCall>(u64)> cb) {
     impl->SetCallback(cb);
 }
 
