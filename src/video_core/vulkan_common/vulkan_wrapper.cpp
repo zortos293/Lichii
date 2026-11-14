@@ -122,6 +122,7 @@ void Load(VkDevice device, DeviceDispatch& dld) noexcept {
     X(vkCmdEndTransformFeedbackEXT);
     X(vkCmdEndDebugUtilsLabelEXT);
     X(vkCmdFillBuffer);
+    X(vkCmdWriteBufferMarkerAMD);
     X(vkCmdPipelineBarrier);
     X(vkCmdPipelineBarrier2);
     X(vkCmdPushConstants);

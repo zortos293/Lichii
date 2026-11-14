@@ -240,6 +240,7 @@ struct DeviceDispatch : InstanceDispatch {
     PFN_vkCmdEndRenderPass vkCmdEndRenderPass{};
     PFN_vkCmdEndTransformFeedbackEXT vkCmdEndTransformFeedbackEXT{};
     PFN_vkCmdFillBuffer vkCmdFillBuffer{};
+    PFN_vkCmdWriteBufferMarkerAMD vkCmdWriteBufferMarkerAMD{};
     PFN_vkCmdPipelineBarrier vkCmdPipelineBarrier{};
     PFN_vkCmdPipelineBarrier2 vkCmdPipelineBarrier2{};
     PFN_vkCmdPushConstants vkCmdPushConstants{};
@@ -1550,6 +1551,11 @@ public:
     void FillBuffer(VkBuffer dst_buffer, VkDeviceSize dst_offset, VkDeviceSize size,
                     u32 data) const noexcept {
         dld->vkCmdFillBuffer(handle, dst_buffer, dst_offset, size, data);
+    }
+
+    void WriteBufferMarkerAMD(VkPipelineStageFlagBits stage, VkBuffer dst_buffer,
+                              VkDeviceSize dst_offset, u32 marker) const noexcept {
+        dld->vkCmdWriteBufferMarkerAMD(handle, stage, dst_buffer, dst_offset, marker);
     }
 
     void PushConstants(VkPipelineLayout layout, VkShaderStageFlags flags, u32 offset, u32 size,

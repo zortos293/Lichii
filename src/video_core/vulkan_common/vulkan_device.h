@@ -8,6 +8,7 @@
 #include <array>
 #include <atomic>
 #include <cstdlib>
+#include <functional>
 #include <mutex>
 #include <optional>
 #include <set>
@@ -240,6 +241,12 @@ enum class NvidiaArchitecture {
     Arch_AmpereOrNewer,
 };
 
+/// EDEN_NX2_HANG_MARKERS: the rasterizer's report of the work a device loss left unfinished,
+/// called by Device::ReportLoss. Set and cleared under the mutex, which ReportLoss holds while it
+/// runs the report, so the rasterizer can't free the markers while a report reads them.
+inline std::mutex g_hang_marker_report_mutex;
+inline std::function<void()> g_hang_marker_report;
+
 /// Handles data specific to a physical device.
 class Device {
 public:
@@ -263,6 +270,11 @@ public:
 
     /// Reports a device loss.
     void ReportLoss() const;
+
+    /// Whether EDEN_NX2_HANG_MARKERS loaded VK_AMD_buffer_marker.
+    bool HasBufferMarker() const {
+        return has_buffer_marker;
+    }
 
     /// Logs what VK_EXT_device_fault reports about a device loss.
     void ReportDeviceFault() const;
@@ -1418,6 +1430,7 @@ private:
 
     VkPhysicalDeviceFeatures2 features2{};
     VkPhysicalDeviceFaultFeaturesEXT device_fault_features{};
+    bool has_buffer_marker{};
     /// Enabled as the driver reports them (VK_KHR_portability_subset devices only).
     VkPhysicalDevicePortabilitySubsetFeaturesKHR portability_subset_features{};
     VkPhysicalDeviceProperties2 properties2{};

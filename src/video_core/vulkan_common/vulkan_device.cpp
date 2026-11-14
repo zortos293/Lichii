@@ -1194,6 +1194,12 @@ VkFormat Device::GetSupportedFormat(VkFormat wanted_format, VkFormatFeatureFlags
 void Device::ReportLoss() const {
     LOG_CRITICAL(Render_Vulkan, "Device loss occurred!");
     ReportDeviceFault();
+    {
+        std::scoped_lock lock{g_hang_marker_report_mutex};
+        if (g_hang_marker_report) {
+            g_hang_marker_report();
+        }
+    }
 
     // Wait for the log to flush and for Nsight Aftermath to dump the results
     std::this_thread::sleep_for(std::chrono::seconds{15});
@@ -1575,6 +1581,15 @@ bool Device::GetSuitability(bool requires_swapchain) {
     if (has_device_fault_extension) {
         loaded_extensions.insert(VK_EXT_DEVICE_FAULT_EXTENSION_NAME);
         device_fault_features.deviceFaultVendorBinary = VK_FALSE;
+    }
+
+    // EDEN_NX2_HANG_MARKERS: VK_AMD_buffer_marker values around draws, indirect draws and
+    // dispatches, so a device loss can name the work that never finished
+    // (Scheduler::TraceGpuWork).
+    if (std::getenv("EDEN_NX2_HANG_MARKERS") != nullptr &&
+        supported_extensions.contains(VK_AMD_BUFFER_MARKER_EXTENSION_NAME)) {
+        loaded_extensions.insert(VK_AMD_BUFFER_MARKER_EXTENSION_NAME);
+        has_buffer_marker = true;
     }
 
     // Base Vulkan 1.0 features are always valid regardless of instance version.

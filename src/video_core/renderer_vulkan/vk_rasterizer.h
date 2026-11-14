@@ -287,6 +287,7 @@ private:
 
     const Device& device;
     MemoryAllocator& memory_allocator;
+    vk::Buffer hang_marker_buffer; ///< EDEN_NX2_HANG_MARKERS (Scheduler::SetHangMarkers)
     StateTracker& state_tracker;
     s32 bound_channel_id = -1;
     Scheduler& scheduler;
