@@ -31,6 +31,7 @@ void Put(std::vector<u8>& out, std::size_t offset, u64 value, std::size_t count 
 Fixture MakeSolid(std::size_t size = 0x3007, u64 crypto = 1);
 void CheckRead(const FileSys::VirtualFile& file, const std::vector<u8>& expected,
                std::size_t offset, std::size_t length);
+std::vector<u8> WideWindow(const std::vector<u8>& bytes, std::size_t payload = Payload);
 } // namespace
 
 TEST_CASE("NCZ discovery accepts solid headers without decoding payloads", "[ncz]") {
@@ -151,6 +152,18 @@ void CheckRead(const FileSys::VirtualFile& file, const std::vector<u8>& expected
     REQUIRE(file->Read(out.data(), length, offset) == want);
     CHECK(std::equal(out.begin(), out.begin() + want,
                      expected.begin() + std::min(offset, expected.size())));
+}
+
+// Keeps the genuine blocks, but declares an unknown-size frame with a 128 MiB window.
+std::vector<u8> WideWindow(const std::vector<u8>& bytes, std::size_t payload) {
+    const auto header_length =
+        ZSTD_frameHeaderSize(bytes.data() + payload, bytes.size() - payload);
+    REQUIRE_FALSE(ZSTD_isError(header_length));
+    std::vector<u8> patched(bytes.begin(), bytes.begin() + payload);
+    const std::array<u8, 6> header{0x28, 0xb5, 0x2f, 0xfd, 0x00, 0x88};
+    patched.insert(patched.end(), header.begin(), header.end());
+    patched.insert(patched.end(), bytes.begin() + payload + header_length, bytes.end());
+    return patched;
 }
 } // namespace
 
@@ -350,37 +363,81 @@ TEST_CASE("Solid NCZ handles unaligned encryption section transitions", "[ncz]")
     }
 }
 
-TEST_CASE("Solid NCZ decoder budget rejects excess readers and is released", "[ncz][resource]") {
+TEST_CASE("Solid NCZ idle readers give up their decoder budget", "[ncz][resource]") {
     auto fixture = MakeSolid(2 * 1024 * 1024);
-    auto bytes = fixture.source->ReadAllBytes();
-    const auto header_length = ZSTD_frameHeaderSize(bytes.data() + Payload, bytes.size() - Payload);
-    REQUIRE_FALSE(ZSTD_isError(header_length));
-    // Keep the genuine blocks, but declare an unknown-size frame with a 128 MiB window.
-    std::vector<u8> patched(bytes.begin(), bytes.begin() + Payload);
-    const std::array<u8, 6> header{0x28, 0xb5, 0x2f, 0xfd, 0x00, 0x88};
-    patched.insert(patched.end(), header.begin(), header.end());
-    patched.insert(patched.end(), bytes.begin() + Payload + header_length, bytes.end());
-    auto source = std::make_shared<FileSys::VectorVfsFile>(std::move(patched));
-    std::vector<FileSys::VirtualFile> held;
-    bool rejected = false;
-    for (unsigned i = 0; i < 8; ++i) {
-        auto file = Core::Crypto::DecompressNCZ(source, "synthetic.nca");
-        REQUIRE(file);
-        std::array<u8, 1> out{};
-        if (file->Read(out.data(), 1, Header) == 0) {
-            rejected = true;
-            break;
-        }
-        held.push_back(std::move(file));
+    auto source =
+        std::make_shared<FileSys::VectorVfsFile>(WideWindow(fixture.source->ReadAllBytes()));
+    // The budget holds three 128 MiB windows, so later readers release earlier ones.
+    std::vector<FileSys::VirtualFile> readers;
+    for (std::size_t i = 0; i < 8; ++i) {
+        readers.push_back(Core::Crypto::DecompressNCZ(source, "synthetic.nca"));
+        REQUIRE(readers.back());
+        CheckRead(readers.back(), fixture.expected, Header + i, 1);
     }
-    CHECK_FALSE(held.empty());
-    REQUIRE(rejected);
-    held.clear();
-    auto retry = Core::Crypto::DecompressNCZ(source, "synthetic.nca");
-    REQUIRE(retry);
-    std::array<u8, 1> out{};
-    REQUIRE(retry->Read(out.data(), 1, Header) == 1);
-    CHECK(out[0] == 11);
+    for (std::size_t i = 0; i < readers.size(); ++i) {
+        CHECK(readers[i]->IsReadable());
+        CheckRead(readers[i], fixture.expected, fixture.expected.size() - 1000 - i, 1000);
+    }
+}
+
+TEST_CASE("A released solid NCZ reader resumes with identical bytes", "[ncz][resource]") {
+    class StartCountingFile final : public FileSys::VectorVfsFile {
+    public:
+        using FileSys::VectorVfsFile::VectorVfsFile;
+        std::size_t Read(u8* data, std::size_t length, std::size_t offset) const override {
+            starts += offset == Payload + 64;
+            return FileSys::VectorVfsFile::Read(data, length, offset);
+        }
+        mutable std::size_t starts{};
+    };
+    // A plain section ending unaligned, then a CTR section, so the frontier lands mid-block.
+    constexpr std::size_t size = 0x200007;
+    constexpr std::size_t split = 0x100011;
+    auto fixture = MakeSolid(size);
+    auto bytes = fixture.source->ReadAllBytes();
+    bytes.insert(bytes.begin() + Payload, 64, 0);
+    Put(bytes, Header + 8, 2);
+    Put(bytes, Header + 24, split);
+    Put(bytes, Payload, Header + split);
+    Put(bytes, Payload + 8, size - split);
+    Put(bytes, Payload + 16, 3);
+    Core::Crypto::Key128 key{};
+    key.fill(0x2b);
+    std::copy(key.begin(), key.end(), bytes.begin() + Payload + 32);
+    Core::Crypto::Key128 iv{};
+    iv[13] = 0x01;
+    iv[14] = 0x04;
+    iv[15] = 0x01; // (0x4000 + 0x100011) / 16.
+    Core::Crypto::AESCipher<Core::Crypto::Key128> cipher(key, Core::Crypto::Mode::CTR);
+    cipher.SetIV(iv);
+    std::vector<u8> reference(1, 0);
+    reference.insert(reference.end(), fixture.expected.begin() + Header + split,
+                     fixture.expected.end());
+    cipher.Transcode(reference.data(), reference.size(), reference.data(),
+                     Core::Crypto::Op::Encrypt);
+    std::copy(reference.begin() + 1, reference.end(), fixture.expected.begin() + Header + split);
+    bytes = WideWindow(bytes, Payload + 64);
+
+    auto counted = std::make_shared<StartCountingFile>(bytes, "synthetic.ncz");
+    auto file = Core::Crypto::DecompressNCZ(counted, "synthetic.nca");
+    REQUIRE(file);
+    const auto opened = counted->starts;
+    CheckRead(file, fixture.expected, Header + 0x100000, 8);
+    REQUIRE(counted->starts == opened + 1);
+
+    auto source = std::make_shared<FileSys::VectorVfsFile>(std::move(bytes));
+    std::vector<FileSys::VirtualFile> others;
+    for (std::size_t i = 0; i < 3; ++i) {
+        others.push_back(Core::Crypto::DecompressNCZ(source, "synthetic.nca"));
+        REQUIRE(others.back());
+        CheckRead(others.back(), fixture.expected, Header, 1);
+    }
+    CHECK(file->IsReadable());
+    CheckRead(file, fixture.expected, Header + 3, split - 3);
+    CHECK(counted->starts == opened + 1);
+    CheckRead(file, fixture.expected, Header + split - 9, 0x100);
+    CHECK(counted->starts == opened + 2);
+    CheckRead(file, fixture.expected, fixture.expected.size() - 7, 7);
 }
 
 #ifdef _WIN32

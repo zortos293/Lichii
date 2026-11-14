@@ -498,12 +498,12 @@ IR::Program TranslateProgram(ObjectPool<IR::Inst>& inst_pool, ObjectPool<IR::Blo
     if (!normalized_host_info.support_int64) {
         Optimization::LowerInt64ToInt32(program);
     }
-    if (!normalized_host_info.support_conditional_barrier) {
-        Optimization::ConditionalBarrierPass(program);
-    }
     Optimization::SsaRewritePass(program);
 
     Optimization::ConstantPropagationPass(env, program);
+    if (!normalized_host_info.support_conditional_barrier) {
+        Optimization::ConditionalBarrierPass(program);
+    }
 
     Optimization::PositionPass(env, program);
     Optimization::BlitConstantsPass(env, program);
