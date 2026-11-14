@@ -351,7 +351,7 @@ std::string Report(const std::vector<Target>& targets, const std::vector<Sample>
         };
         text += fmt::format("=== thread \"{}\": {} samples ({} without a stack, {} walks stopped "
                             "by a fault)\n",
-                            targets[thread].name, total, empty, faulted);
+                            targets[thread].name, total + empty, empty, faulted);
         print("self (where the thread is)", self, 60);
         // The hottest instructions as module offsets, for llvm-symbolizer --relative-address
         // (which line of a function, inlined code included).
