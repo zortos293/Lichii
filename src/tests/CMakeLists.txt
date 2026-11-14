@@ -19,6 +19,7 @@ add_executable(tests
     video_core/gpu_timestamp.cpp
     video_core/semaphore_waiters.cpp
     video_core/hdr_output.cpp
+    core/mii_model.cpp
     core/nx2_streamplay.cpp
     core/nx2_video_ready.cpp
     core/nx2_thread_stats.cpp
@@ -61,11 +62,16 @@ add_executable(tests
     video_core/storage_buffer_pointer_tracking.cpp
     video_core/storage_write_extent.cpp
     video_core/storage_buffer_control_flow.cpp
+    video_core/conditional_barrier.cpp
     video_core/storage_buffer_shared_tracking.cpp
     core/nup_validation.cpp
     core/nx_archive.cpp
     frontend_common/nx_archive.cpp
     core/vfs_vector.cpp
+    core/ncz_cache.cpp
+    core/ncz_decompressor.cpp
+    core/ncz_io_guards.cpp
+    core/ncz_container.cpp
     core/file_sys_parsers.cpp
     input_common/calibration_lifetime.cpp
     video_core/ampere_logged_numeric.cpp
@@ -190,6 +196,7 @@ add_executable(tests
     common/unique_function.cpp
     common/zstd_compression.cpp
     core/core_timing.cpp
+    core/host_wait_margin.cpp
     core/local_redirect.cpp
     core/nextendo_redirect.cpp
     core/filesystem_rename.cpp
@@ -249,8 +256,25 @@ add_executable(tests
 
 create_target_directory_groups(tests)
 
-target_link_libraries(tests PRIVATE common core audio_core input_common video_core frontend_common)
+target_link_libraries(tests PRIVATE common core audio_core input_common video_core frontend_common ZLIB::ZLIB)
 target_link_libraries(tests PRIVATE ${PLATFORM_LIBRARIES} Catch2::Catch2WithMain Threads::Threads)
+
+add_executable(ncz_tests
+    core/ncz_cache.cpp
+    core/ncz_decompressor.cpp
+    core/ncz_io_guards.cpp
+    ../core/crypto/ncz_cache.cpp
+    ../core/crypto/ncz_decompressor.cpp
+    ../core/crypto/aes_util.cpp
+    ../core/file_sys/vfs/vfs.cpp
+    ../core/file_sys/vfs/vfs_vector.cpp)
+target_sources(ncz_tests PRIVATE
+    ../core/file_sys/fssystem/fssystem_utility.cpp
+    ../core/file_sys/fssystem/fssystem_aes_ctr_storage.cpp
+    ../core/file_sys/fssystem/fssystem_alignment_matching_storage_impl.cpp)
+target_link_libraries(ncz_tests PRIVATE common OpenSSL::Crypto zstd::zstd
+    ${PLATFORM_LIBRARIES} Catch2::Catch2WithMain Threads::Threads)
+add_test(NAME ncz_tests COMMAND ncz_tests)
 
 if (TARGET dynarmic::dynarmic)
     target_sources(tests PRIVATE core/jit_codegen_options.cpp core/jit_ordered_loads.cpp core/window_trace.cpp)

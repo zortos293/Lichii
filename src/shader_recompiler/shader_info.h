@@ -343,8 +343,9 @@ struct Info {
     bool uses_sparse_residency{};
     bool uses_demote_to_helper_invocation{};
     bool uses_subgroup_vote{};
-    /// Set when a barrier in conditional control flow was dropped, see ConditionalBarrierPass.
-    bool removed_conditional_barrier{};
+    /// Set when a barrier in divergent control flow lost its execution barrier, see
+    /// ConditionalBarrierPass.
+    bool demoted_conditional_barrier{};
     bool uses_subgroup_mask{};
     bool uses_fswzadd{};
     bool uses_derivatives{};

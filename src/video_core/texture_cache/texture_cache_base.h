@@ -186,10 +186,24 @@ class TextureCache : public VideoCommon::ChannelSetupCaches<TextureCacheChannelI
     u64 pressure_margin{};        ///< Extra room under the budget after images did not fit
     u64 pressure_quiet_frames{};  ///< Frames since the last such image
     u64 slack_margin{};           ///< Extra room for allocator block space the driver counts as used
+    // Device-local memory the allocator placed in host memory (heap over budget): see TickFrame.
+    u64 spill_margin{};           ///< Extra room for it, sized to what spilled (at most 768 MiB)
+    u64 spill_window_bytes{};     ///< Spilled in the current window
+    u64 spill_window_start{};     ///< frame_tick the current window began at
+    u64 spill_quiet_frames{};     ///< Frames since the last spill
+    u64 spill_collect_tick{};     ///< frame_tick of the first forced collect of this episode + 1
+    u32 spill_forced_collects{};  ///< Forced collects in this episode
+    u64 spill_last_collect{};     ///< frame_tick of the last forced collect
+    u64 spill_log_bytes{};        ///< Spilled since the last spill log line
+    u32 spill_log_collects{};     ///< Forced collects since the last spill log line
+    std::chrono::steady_clock::time_point spill_log_time{};
     u64 astc_opaque_images{};
     u64 astc_alpha_images{};
     Common::ScratchBuffer<u8> astc_scan_buffer;
     u64 images_deleted{};
+    /// Why the next DeleteImage happens, for EDEN_NX2_TC_TRACE: the collector (and its mode),
+    /// an unmap or a join. Read and reset by DeleteImage.
+    const char* trace_delete_reason = "other";
     u64 scale_epoch{};
     std::map<u64, std::pair<u32, GPUVAddr>> created_shapes;
     bool debug_stats{}; ///< Collect what only the debug statistics lines use
@@ -292,6 +306,10 @@ public:
 
     /// Fill image_view_ids with the graphics/compute images in indices
     void FillImageViews(std::span<ImageViewInOut> views, bool compute, bool blacklist = true);
+
+    /// Whether the handle words and descriptors `memo` was built from still match guest memory.
+    [[nodiscard]] bool TextureMemoStillHolds(const SampledTextureMemo& memo,
+                                             std::span<const GPUVAddr> handle_addresses) const;
 
     /// Fills views and samplers of a draw from the pipeline's memo when nothing they were
     /// resolved from has changed since (true), prepares the images as FillImageViews does.
@@ -402,7 +420,8 @@ public:
     /// Health check of a game's DLSS network output (dst) against its input (src); see the
     /// runtime's ProbeGameDlssOutput. Returns an earlier check's result when one is ready.
     std::optional<VideoCore::GameDlssProbe> ProbeGameDlssOutput(
-        const Tegra::Engines::Fermi2D::Surface& dst, const Tegra::Engines::Fermi2D::Surface& src);
+        const Tegra::Engines::Fermi2D::Surface& dst, const Tegra::Engines::Fermi2D::Surface& src,
+        std::optional<std::array<u32, 2>> src_region = std::nullopt);
 
     /// Try to find a cached image view in the given CPU address
     [[nodiscard]] std::pair<ImageView*, bool> TryFindFramebufferImageView(
