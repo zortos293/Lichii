@@ -4284,6 +4284,9 @@ void MainWindow::OpenPerGameConfiguration(u64 title_id, const std::string& file_
     Settings::SetConfiguringGlobal(false);
     ConfigurePerGame dialog(this, title_id, file_name, vk_device_records, *QtCommon::system);
     dialog.LoadFromFile(Core::GetGameFileFromPath(QtCommon::vfs, file_name));
+    // Artwork saved here wins over a SteamGridDB lookup still running for the game.
+    connect(&dialog, &ConfigurePerGame::CustomArtworkChanged, game_list,
+            &GameList::OnCustomArtworkChanged);
 
     const auto result = dialog.exec();
 
