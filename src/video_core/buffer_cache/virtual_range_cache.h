@@ -5,7 +5,9 @@
 
 #include <atomic>
 #include <limits>
+#include <map>
 #include <mutex>
+#include <utility>
 #include <optional>
 #include <vector>
 
@@ -41,6 +43,17 @@ public:
             entries.clear();
         }
         const size_t as_id = memory.GetID();
+        // A range inside a span known to map linearly is one segment; storage bindings move
+        // through large buffers at shifting offsets, and each new offset would walk the page table.
+        if (const auto span = FindSpan(as_id, gpu_addr, size)) {
+            span_result.clear();
+            span_result.push_back(VirtualSegment{
+                .gpu_addr = gpu_addr,
+                .device_addr = *span,
+                .size = size,
+            });
+            return &span_result;
+        }
         const u64 key = MakeKey(as_id, gpu_addr);
         const auto it = entries.find(key);
         if (it != entries.end() && it->second.as_id == as_id && it->second.gpu_addr == gpu_addr) {
@@ -82,6 +95,9 @@ public:
         }
         if (!contiguous || expected != gpu_addr + size) {
             entry.segments.clear();
+        }
+        if (IsLinear(entry.segments, gpu_addr, size)) {
+            AddSpan(as_id, gpu_addr, size, entry.segments.front().device_addr);
         }
         const auto result = entries.insert_or_assign(key, std::move(entry));
         return &result.first->second.segments;
@@ -129,6 +145,75 @@ private:
         u64 size;
     };
 
+    /// A range of GPU addresses that maps to one run of device addresses.
+    struct Span {
+        GPUVAddr end;
+        DAddr device_addr; ///< Device address of the span's first byte
+    };
+    using SpanKey = std::pair<size_t, GPUVAddr>; ///< Address space and first GPU address
+
+    /// Whether the segments map [gpu_addr, gpu_addr + size) to consecutive device addresses.
+    static bool IsLinear(const VirtualSegments& segments, GPUVAddr gpu_addr, u32 size) {
+        if (segments.empty()) {
+            return false;
+        }
+        const s64 delta = static_cast<s64>(segments.front().device_addr) - static_cast<s64>(gpu_addr);
+        GPUVAddr expected = gpu_addr;
+        for (const VirtualSegment& segment : segments) {
+            if (segment.gpu_addr != expected ||
+                static_cast<s64>(segment.device_addr) - static_cast<s64>(segment.gpu_addr) != delta) {
+                return false;
+            }
+            expected += segment.size;
+        }
+        return expected == gpu_addr + size;
+    }
+
+    /// The device address of gpu_addr if [gpu_addr, gpu_addr + size) lies inside a known span.
+    std::optional<DAddr> FindSpan(size_t as_id, GPUVAddr gpu_addr, u32 size) const {
+        auto it = spans.upper_bound(SpanKey{as_id, gpu_addr});
+        if (it == spans.begin()) {
+            return std::nullopt;
+        }
+        --it;
+        if (it->first.first != as_id || it->second.end < gpu_addr + size) {
+            return std::nullopt;
+        }
+        return it->second.device_addr + (gpu_addr - it->first.second);
+    }
+
+    /// Records a linear range, merged with the spans it overlaps or touches that map with the same
+    /// offset: their union maps linearly too.
+    void AddSpan(size_t as_id, GPUVAddr gpu_addr, u32 size, DAddr device_addr) {
+        if (spans.size() > MAX_ENTRIES) {
+            spans.clear();
+        }
+        GPUVAddr start = gpu_addr;
+        GPUVAddr end = gpu_addr + size;
+        DAddr start_device = device_addr;
+        const auto same_offset = [&](const SpanKey& key, const Span& span) {
+            return span.device_addr - key.second == device_addr - gpu_addr;
+        };
+        auto it = spans.lower_bound(SpanKey{as_id, gpu_addr});
+        if (it != spans.begin()) {
+            const auto previous = std::prev(it);
+            if (previous->first.first == as_id && previous->second.end >= start &&
+                same_offset(previous->first, previous->second)) {
+                it = previous;
+            }
+        }
+        while (it != spans.end() && it->first.first == as_id && it->first.second <= end &&
+               same_offset(it->first, it->second)) {
+            if (it->first.second < start) {
+                start = it->first.second;
+                start_device = it->second.device_addr;
+            }
+            end = (std::max)(end, it->second.end);
+            it = spans.erase(it);
+        }
+        spans.insert_or_assign(SpanKey{as_id, start}, Span{end, start_device});
+    }
+
     static u64 MakeKey(size_t as_id, GPUVAddr gpu_addr) {
         return (static_cast<u64>(as_id) << 48) ^ gpu_addr;
     }
@@ -145,7 +230,19 @@ private:
         }
         if (overflow) {
             entries.clear();
+            spans.clear();
             return;
+        }
+        for (auto it = spans.begin(); it != spans.end();) {
+            bool overlaps = false;
+            for (const DeferredUnmap& unmap : pending) {
+                if (unmap.as_id == it->first.first && it->first.second < unmap.gpu_addr + unmap.size &&
+                    unmap.gpu_addr < it->second.end) {
+                    overlaps = true;
+                    break;
+                }
+            }
+            it = overlaps ? spans.erase(it) : std::next(it);
         }
         if (pending.empty() || entries.empty()) {
             return;
@@ -172,6 +269,8 @@ private:
     }
 
     ::Common::unordered_map<u64, Entry> entries;
+    std::map<SpanKey, Span> spans;
+    VirtualSegments span_result; ///< The answer FindSpan's ranges return
     std::vector<DeferredUnmap> deferred;
     std::mutex deferred_mutex;
     std::atomic<bool> has_deferred{false};
