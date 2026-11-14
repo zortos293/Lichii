@@ -4538,11 +4538,96 @@ ImageView::ImageView(TextureCacheRuntime& runtime, const VideoCommon::NullImageV
     ImageInfo info{};
     info.format = PixelFormat::A8B8G8R8_UNORM;
 
-    null_image = MakeImage(*device, runtime.memory_allocator, info, {});
-    image_handle = *null_image;
-    for (u32 i = 0; i < Shader::NUM_TEXTURE_TYPES; i++) {
-        image_views[i] = MakeView(VK_FORMAT_A8B8G8R8_UNORM_PACK32, VK_IMAGE_ASPECT_COLOR_BIT);
+    null_images[0] = MakeImage(*device, runtime.memory_allocator, info, {});
+    image_handle = *null_images[0];
+    if (!device->IsMoltenVK()) {
+        for (u32 i = 0; i < Shader::NUM_TEXTURE_TYPES; i++) {
+            image_views[i] = MakeView(VK_FORMAT_A8B8G8R8_UNORM_PACK32, VK_IMAGE_ASPECT_COLOR_BIT);
+        }
+        return;
     }
+
+    info.type = ImageType::e2D;
+    info.resources.layers = 6;
+    null_images[1] = MakeImage(*device, runtime.memory_allocator, info, {});
+    info.type = ImageType::e3D;
+    info.resources.layers = 1;
+    null_images[2] = MakeImage(*device, runtime.memory_allocator, info, {});
+    null_images[0].SetObjectNameEXT("Lichii sampled null 1D");
+    null_images[1].SetObjectNameEXT("Lichii sampled null 2D cube-compatible");
+    null_images[2].SetObjectNameEXT("Lichii sampled null 3D");
+
+    using Shader::TextureType;
+    const auto create = [&](TextureType texture_type, size_t backing, u32 layers,
+                            const char* name) {
+        auto& view = image_views[static_cast<size_t>(texture_type)];
+        view = device->GetLogical().CreateImageView({
+            .sType = VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO,
+            .pNext = nullptr,
+            .flags = 0,
+            .image = *null_images[backing],
+            .viewType = ImageViewType(texture_type),
+            .format = VK_FORMAT_A8B8G8R8_UNORM_PACK32,
+            .components{
+                .r = VK_COMPONENT_SWIZZLE_IDENTITY,
+                .g = VK_COMPONENT_SWIZZLE_IDENTITY,
+                .b = VK_COMPONENT_SWIZZLE_IDENTITY,
+                .a = VK_COMPONENT_SWIZZLE_IDENTITY,
+            },
+            .subresourceRange{
+                .aspectMask = VK_IMAGE_ASPECT_COLOR_BIT,
+                .baseMipLevel = 0,
+                .levelCount = 1,
+                .baseArrayLayer = 0,
+                .layerCount = layers,
+            },
+        });
+        view.SetObjectNameEXT(name);
+    };
+    create(TextureType::Color1D, 0, 1, "Lichii sampled null view 1D");
+    create(TextureType::ColorArray1D, 0, 1, "Lichii sampled null view 1D array");
+    create(TextureType::Color2D, 1, 1, "Lichii sampled null view 2D");
+    create(TextureType::ColorArray2D, 1, 6, "Lichii sampled null view 2D array");
+    create(TextureType::Color3D, 2, 1, "Lichii sampled null view 3D");
+    create(TextureType::ColorCube, 1, 6, "Lichii sampled null view cube");
+    create(TextureType::ColorArrayCube, 1, 6, "Lichii sampled null view cube array");
+    create(TextureType::Color2DRect, 1, 1, "Lichii sampled null view 2D rect");
+
+    const std::array images{*null_images[0], *null_images[1], *null_images[2]};
+    runtime.scheduler.RequestOutsideRenderPassOperationContext();
+    runtime.scheduler.Record([images](vk::CommandBuffer cmdbuf) {
+        static constexpr VkImageSubresourceRange range{
+            .aspectMask = VK_IMAGE_ASPECT_COLOR_BIT,
+            .baseMipLevel = 0,
+            .levelCount = VK_REMAINING_MIP_LEVELS,
+            .baseArrayLayer = 0,
+            .layerCount = VK_REMAINING_ARRAY_LAYERS,
+        };
+        for (VkImage image : images) {
+            VkImageMemoryBarrier barrier{
+                .sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER,
+                .pNext = nullptr,
+                .srcAccessMask = 0,
+                .dstAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT,
+                .oldLayout = VK_IMAGE_LAYOUT_UNDEFINED,
+                .newLayout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
+                .srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
+                .dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
+                .image = image,
+                .subresourceRange = range,
+            };
+            cmdbuf.PipelineBarrier(VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT,
+                                   VK_PIPELINE_STAGE_TRANSFER_BIT, 0, barrier);
+            cmdbuf.ClearColorImage(image, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
+                                   VkClearColorValue{}, range);
+            barrier.srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
+            barrier.dstAccessMask = VK_ACCESS_SHADER_READ_BIT;
+            barrier.oldLayout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
+            barrier.newLayout = VK_IMAGE_LAYOUT_GENERAL;
+            cmdbuf.PipelineBarrier(VK_PIPELINE_STAGE_TRANSFER_BIT,
+                                   VK_PIPELINE_STAGE_ALL_COMMANDS_BIT, 0, barrier);
+        }
+    });
 }
 
 ImageView::~ImageView() = default;

@@ -798,13 +798,13 @@ private:
     const Device* device = nullptr;
     const SlotVector<Image>* slot_images = nullptr;
 
+    std::array<vk::Image, 3> null_images;
     std::array<vk::ImageView, Shader::NUM_TEXTURE_TYPES> image_views;
     std::optional<StorageViews> storage_views;
     vk::ImageView typeless_storage_view;
     vk::ImageView depth_view;
     vk::ImageView stencil_view;
     vk::ImageView color_view;
-    vk::Image null_image;
     VkImage image_handle = VK_NULL_HANDLE;
     VkImageView render_target = VK_NULL_HANDLE;
     VkSampleCountFlagBits samples = VK_SAMPLE_COUNT_1_BIT;
