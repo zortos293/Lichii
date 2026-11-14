@@ -28,6 +28,20 @@ Download Lichii only from this repository's [releases page](https://github.com/z
 
 On Windows, extract the entire build archive and run **lichii.exe**. Only use games and system files you have legally obtained. Games, keys and firmware are not included.
 
+Each release includes a `SHA256SUMS` manifest for its downloadable packages. Put the manifest and package in the same folder, then verify the package hash.
+
+On Linux:
+
+```sh
+sha256sum -c SHA256SUMS
+```
+
+On Windows PowerShell, compare this output with the package's line in `SHA256SUMS`:
+
+```powershell
+Get-FileHash .\lichii-windows-x86_64.zip -Algorithm SHA256
+```
+
 ### Existing saves and settings
 
 Lichii uses its own profile: `%APPDATA%\lichii` on Windows, and the `lichii` directories under `$XDG_DATA_HOME`, `$XDG_CONFIG_HOME` and `$XDG_CACHE_HOME` on Linux and macOS. Without XDG overrides, these are `~/.local/share/lichii`, `~/.config/lichii` and `~/.cache/lichii`. An existing portable `user/` directory still takes priority and is not imported or changed by the wizard.

@@ -654,6 +654,15 @@ jobs:
           done
           ls -la dist
 
+      - name: Generate package checksums
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd dist
+          find . -maxdepth 1 -type f ! -name SHA256SUMS -print0 \
+            | sort -z \
+            | xargs -0 sha256sum > SHA256SUMS
+
       - name: Create release
         shell: bash
         env:
@@ -698,6 +707,8 @@ jobs:
 
           cat > notes.md <<EOF
           Automatic build of \`${GITHUB_REF_NAME}\` at ${GITHUB_SHA}.
+
+          Verify a downloaded package with the [SHA-256 checksums](https://github.com/${GITHUB_REPOSITORY}/releases/download/${tag}/SHA256SUMS). On Linux, run \`sha256sum -c SHA256SUMS\` from the folder containing the package and manifest.
 
           ## Linux
 
