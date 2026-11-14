@@ -169,6 +169,10 @@ add_library(
     net/net.h net/net.cpp
     nextendo.cpp
     nextendo.h
+    npln_patch_catalog.cpp
+    npln_patch_catalog.h
+    npln_patch_manifest.cpp
+    npln_patch_manifest.h
     container/unordered_map.h container/unordered_set.h)
 
 # The ZBIC decoder runs once per module at load, so a profile buys it nothing, and the aarch64

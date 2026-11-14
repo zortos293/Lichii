@@ -6,12 +6,14 @@
 
 #include <algorithm>
 #include <array>
+#include <charconv>
 #include <mutex>
 #include <unordered_map>
 
 #include "common/logging.h"
 #include "common/nextendo.h"
 #include "common/settings.h"
+#include "common/string_util.h"
 #include "core/hle/service/sockets/nextendo_redirect.h"
 
 namespace Service::Sockets::Nextendo {
@@ -99,6 +101,23 @@ bool IsTitleHost(std::string_view host, u64 program_id) {
 std::mutex host_mutex;
 std::unordered_map<std::string, std::string> host_for_address;
 
+std::optional<Network::IPv4Address> ParseIPv4(std::string_view text) {
+    Network::IPv4Address ip{};
+    const char* position = text.data();
+    const char* const end = text.data() + text.size();
+    for (std::size_t i = 0; i < ip.size(); ++i) {
+        if (i > 0 && (position == end || *position++ != '.')) {
+            return std::nullopt;
+        }
+        const auto [next, error] = std::from_chars(position, end, ip[i]);
+        if (error != std::errc{}) {
+            return std::nullopt;
+        }
+        position = next;
+    }
+    return position == end ? std::optional{ip} : std::nullopt;
+}
+
 } // namespace
 
 std::optional<Target> Classify(std::string_view host, u64 program_id) {
@@ -157,6 +176,44 @@ std::string HostForAddress(const std::string& address) {
     std::scoped_lock lock{host_mutex};
     const auto it = host_for_address.find(address);
     return it == host_for_address.end() ? std::string{} : it->second;
+}
+
+std::vector<u8> AlpnProtocols(std::string_view host_in, std::span<const u8> requested) {
+    std::vector<u8> wire;
+    const std::string host = Common::ToLower(std::string{host_in});
+    if (!Common::Nextendo::OnlinePlayActive() ||
+        (host.find("npln") == std::string::npos && !IsDomainOrSubdomain(host, "gs.nintendo.net"))) {
+        return wire;
+    }
+    for (std::size_t i = 0; i < requested.size();) {
+        const std::size_t length = requested[i++];
+        if (length == 0 || length > requested.size() - i) {
+            break;
+        }
+        const std::string_view name{reinterpret_cast<const char*>(requested.data() + i), length};
+        if (name == "h2" || name == "http/1.1") {
+            wire.insert(wire.end(), requested.begin() + i - 1, requested.begin() + i + length);
+        }
+        i += length;
+    }
+    return wire;
+}
+
+std::optional<Network::SockAddrIn> RouteGamesync(u64 program_id, Network::SockAddrIn address) {
+    constexpr u16 GamesyncPort = 7575;
+    constexpr u16 NextendoGamesyncPort = 8463;
+    constexpr std::array PokemonScarletViolet{0x0100A3D008C5C000ULL, 0x01008F6008C5E000ULL};
+    if (!Common::Nextendo::OnlinePlayActive() || address.portno != GamesyncPort ||
+        std::ranges::find(PokemonScarletViolet, program_id) == PokemonScarletViolet.end()) {
+        return std::nullopt;
+    }
+    const auto server = ParseIPv4(Settings::values.nextendo_server_ip.GetValue());
+    if (!server || (address.ip != *server && address.ip != Network::IPv4Address{})) {
+        return std::nullopt;
+    }
+    address.ip = *server;
+    address.portno = NextendoGamesyncPort;
+    return address;
 }
 
 } // namespace Service::Sockets::Nextendo

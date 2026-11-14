@@ -184,6 +184,7 @@ add_executable(tests
     common/memory_detect.cpp
     common/multi_level_page_table.cpp
     common/nextendo.cpp
+    common/npln_patch_manifest.cpp
     common/page_table.cpp
     common/param_package.cpp
     common/poll_window.cpp
@@ -258,6 +259,7 @@ create_target_directory_groups(tests)
 
 target_link_libraries(tests PRIVATE common core audio_core input_common video_core frontend_common ZLIB::ZLIB)
 target_link_libraries(tests PRIVATE ${PLATFORM_LIBRARIES} Catch2::Catch2WithMain Threads::Threads)
+target_link_libraries(tests PRIVATE nlohmann_json::nlohmann_json OpenSSL::Crypto)
 
 add_executable(ncz_tests
     core/ncz_cache.cpp

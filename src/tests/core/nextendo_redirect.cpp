@@ -1,6 +1,9 @@
 // SPDX-FileCopyrightText: Copyright 2026 Eden Emulator Project
 // SPDX-License-Identifier: GPL-3.0-or-later
 
+#include <string>
+#include <vector>
+
 #include <catch2/catch_test_macros.hpp>
 
 #include "common/nextendo.h"
@@ -53,4 +56,35 @@ TEST_CASE("Nextendo: NSD host names", "[core]") {
     REQUIRE(Nextendo::ExpandNsdHost("g2b309e01-%.s.n.srv.nintendo.net") ==
             "g2b309e01-lp1.s.n.srv.nintendo.net");
     REQUIRE(Nextendo::ExpandNsdHost("example.org") == "example.org");
+}
+
+TEST_CASE("Nextendo: NPLN ALPN and Gamesync route only while online play is on", "[core]") {
+    const std::string wire = "\x02h2\x08http/1.1\x03"
+                             "foo";
+    const std::vector<u8> requested(wire.begin(), wire.end());
+    const Network::SockAddrIn gamesync{Network::Domain::INET, {192, 0, 2, 1}, 7575};
+    constexpr u64 Scarlet = 0x0100A3D008C5C000;
+    Settings::values.nextendo_server_ip = "192.0.2.1";
+
+    Settings::values.nextendo_enabled = false;
+    REQUIRE(Nextendo::AlpnProtocols("gamesync.npln.nintendo.net", requested).empty());
+    REQUIRE_FALSE(Nextendo::RouteGamesync(Scarlet, gamesync).has_value());
+
+    Settings::values.nextendo_enabled = true;
+    if constexpr (Common::Nextendo::OnlinePlayAvailable) {
+        REQUIRE(Nextendo::AlpnProtocols("gamesync.npln.nintendo.net", requested) ==
+                std::vector<u8>(requested.begin(), requested.begin() + 12));
+        REQUIRE(Nextendo::AlpnProtocols("gs.nintendo.net", requested).size() == 12);
+        REQUIRE(Nextendo::AlpnProtocols("dauth-lp1.ndas.srv.nintendo.net", requested).empty());
+        REQUIRE(Nextendo::RouteGamesync(Scarlet, gamesync)->portno == 8463);
+        REQUIRE(Nextendo::RouteGamesync(Scarlet, {Network::Domain::INET, {}, 7575})->ip ==
+                gamesync.ip);
+        REQUIRE_FALSE(Nextendo::RouteGamesync(0x0100C2500FC20000, gamesync).has_value());
+    } else {
+        REQUIRE(Nextendo::AlpnProtocols("gamesync.npln.nintendo.net", requested).empty());
+        REQUIRE_FALSE(Nextendo::RouteGamesync(Scarlet, gamesync).has_value());
+    }
+
+    Settings::values.nextendo_enabled = false;
+    Settings::values.nextendo_server_ip.SetValue(Settings::values.nextendo_server_ip.GetDefault());
 }

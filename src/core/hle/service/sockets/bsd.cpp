@@ -32,6 +32,7 @@
 #include "core/hle/service/ipc_helpers.h"
 #include "core/hle/service/server_manager.h"
 #include "core/hle/service/sockets/bsd.h"
+#include "core/hle/service/sockets/nextendo_redirect.h"
 #include "core/hle/service/sockets/sockets_translate.h"
 #include "core/internal_network/network.h"
 #include "core/internal_network/socket_proxy.h"
@@ -1771,9 +1772,16 @@ Errno BSD_USA::ConnectImpl(s32 fd, std::span<const u8> addr) {
 
     ASSERT(addr.size() >= 16);
 
-    auto addr_in = GetValue<SockAddrIn>(addr);
+    auto target = Translate(GetValue<SockAddrIn>(addr));
+    if (descriptor->is_connection_based) {
+        if (const auto routed =
+                Nextendo::RouteGamesync(system.GetApplicationProcessProgramID(), target)) {
+            LOG_INFO(Service, "Nextendo: Gamesync fd={} routed to port {}", fd, routed->portno);
+            target = *routed;
+        }
+    }
 
-    const Errno result = Translate(descriptor->socket->Connect(Translate(addr_in)));
+    const Errno result = Translate(descriptor->socket->Connect(target));
 
     if (result == Errno::ISCONN) {
         LOG_DEBUG(Service, "returned ISCONN - socket already connected");

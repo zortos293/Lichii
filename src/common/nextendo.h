@@ -6,6 +6,7 @@
 
 #pragma once
 
+#include <ctime>
 #include <functional>
 #include <map>
 #include <optional>
@@ -16,6 +17,10 @@
 #include <vector>
 
 #include "common/common_types.h"
+
+namespace httplib {
+class Client;
+}
 
 // Nextendo Network sign-in and the linked account, ported from citron-nextendo's
 // src/common/nextendo_account.cpp and src/web_service/nextendo_api.cpp (SignInWithBrowser).
@@ -58,6 +63,9 @@ struct Account {
 std::optional<Account> LoadAccount();
 void SaveAccount(const Account& account);
 void ClearAccount();
+
+// Timeouts, redirects and, with the bundled OpenSSL, the CA store for nextendo.network.
+void ConfigureClient(httplib::Client& client, time_t timeout_seconds);
 
 // Why Lichii last signed the account out by itself. None after a sign-in or a sign-out.
 enum class SignOutReason {

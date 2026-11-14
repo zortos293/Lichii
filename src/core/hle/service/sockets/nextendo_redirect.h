@@ -7,10 +7,13 @@
 #pragma once
 
 #include <optional>
+#include <span>
 #include <string>
 #include <string_view>
+#include <vector>
 
 #include "common/common_types.h"
+#include "common/socket_types.h"
 
 // Sends Nintendo's online host names to Nextendo Network while the Nextendo setting is on,
 // after citron-nextendo's GetNextendoRedirectIp (src/core/hle/service/sockets/sfdnsres.cpp).
@@ -36,5 +39,14 @@ std::string ExpandNsdHost(std::string host);
 // address still sends that name as SNI: Nextendo routes its auth servers on :443 by SNI.
 void RememberHost(const std::string& address, const std::string& host);
 std::string HostForAddress(const std::string& address);
+
+// The ALPN list a TLS connection to host offers, in wire format. NPLN is gRPC, which needs h2, so
+// its hosts offer the h2 and http/1.1 entries the game asked for; every other host, and every host
+// while Nextendo is off, offers none (Ryujinx-Nextendo and citron-nextendo scope h2 the same way).
+std::vector<u8> AlpnProtocols(std::string_view host, std::span<const u8> requested);
+
+// Scarlet and Violet reach Gamesync on 7575 like Splatoon 3, sometimes through a zeroed session
+// address, but Nextendo serves theirs on 8463 (citron-nextendo bsd.cpp ConnectImpl).
+std::optional<Network::SockAddrIn> RouteGamesync(u64 program_id, Network::SockAddrIn address);
 
 } // namespace Service::Sockets::Nextendo
