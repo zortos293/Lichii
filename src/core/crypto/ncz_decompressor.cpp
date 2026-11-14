@@ -259,7 +259,7 @@ private:
     u64 nca_size{};
 };
 
-// Shared by active solid readers, including Zstandard's internal allocations and I/O buffers.
+// Shared by solid readers' decoders, including Zstandard's internal allocations and I/O buffers.
 constexpr std::size_t SolidMemoryLimit = 512ULL * 1024 * 1024;
 constexpr int SolidWindowLogMax = 27; // 128 MiB, sufficient for ordinary nsz compression.
 std::atomic<std::size_t> solid_memory_used{};
@@ -343,22 +343,33 @@ bool SupportedSolidFrame(const FileSys::VirtualFile& source, u64 offset, u64 nca
             header.frameContentSize == nca_size - HeaderSize);
 }
 
+class SolidNczFile;
+// Live solid readers, so one refused for budget can take the decoders of idle ones (ZOR-286).
+std::mutex solid_readers_mutex;
+std::vector<const SolidNczFile*> solid_readers;
+
 // A single forward decode populates a private disk file; random/backward reads reuse it.
 class SolidNczFile final : public FileSys::VfsFile {
 public:
     SolidNczFile(std::string name_, FileSys::VirtualFile source_, std::vector<Section> sections_,
                  u64 payload_start_, u64 size_, std::unique_ptr<NczCache> backing)
         : name{std::move(name_)}, source{std::move(source_)}, sections{std::move(sections_)},
-          nca_size{size_}, read_pos{payload_start_} {
+          payload_start{payload_start_}, nca_size{size_}, read_pos{payload_start_} {
         solid_refused_size = 0;
         const auto raw_header = source->ReadBytes(HeaderSize, 0);
         cache = backing ? std::move(backing) : std::make_unique<NczCache>();
         if (raw_header.size() != HeaderSize || !cache->IsOpen() || !cache->Write(raw_header, 0)) {
             Fail("cannot create/write private temporary cache");
         }
+        std::scoped_lock registry{solid_readers_mutex};
+        solid_readers.push_back(this);
     }
 
     ~SolidNczFile() override {
+        {
+            std::scoped_lock registry{solid_readers_mutex};
+            std::erase(solid_readers, this);
+        }
         ReleaseDecoder();
     }
 
@@ -400,10 +411,26 @@ private:
         in = {nullptr, 0, 0};
     }
 
+    // Holding the registry lock keeps the others alive; try_lock never waits on a decoding one.
+    void ReleaseIdleReaders() const {
+        std::scoped_lock registry{solid_readers_mutex};
+        for (const auto* reader : solid_readers) {
+            if (reader == this)
+                continue;
+            std::unique_lock lock{reader->mutex, std::try_to_lock};
+            if (lock)
+                reader->ReleaseDecoder();
+        }
+    }
+
     bool Fail(const char* reason) const {
+        if (solid_refused_size != 0 && budget_retry) {
+            // DecodeTo takes the memory of idle readers and resumes from the frontier.
+            ReleaseDecoder();
+            return false;
+        }
         if (solid_refused_size != 0) {
-            // Each open solid reader keeps its decoder until it reaches the end, so a few large
-            // ones can hold the whole budget (ZOR-286).
+            // Idle readers were already released, so the budget is held by decoding ones.
             LOG_ERROR(Crypto,
                       "Solid NCZ {}: {}: the decoder memory budget is used up ({} KiB refused, {} "
                       "of {} MiB held by open solid readers)",
@@ -465,6 +492,38 @@ private:
 
     bool DecodeTo(u64 needed) const {
         solid_refused_size = 0;
+        budget_retry = true;
+        const bool decoded = Decode(needed);
+        budget_retry = false;
+        if (decoded || failed)
+            return decoded;
+        ReleaseIdleReaders();
+        solid_refused_size = 0;
+        return Decode(needed);
+    }
+
+    // The payload is one frame, so a new decoder restarts it and skips what the cache holds.
+    bool Resume() const {
+        read_pos = payload_start;
+        for (u64 skipped = HeaderSize; skipped < frontier;) {
+            if (!Refill())
+                return false;
+            const auto want = static_cast<std::size_t>(std::min<u64>(Chunk, frontier - skipped));
+            ZSTD_outBuffer out{output.get(), want, 0};
+            const auto previous_in = in.pos;
+            const auto result = ZSTD_decompressStream(stream, &out, &in);
+            if (ZSTD_isError(result))
+                return Fail("invalid frame, window limit or memory budget");
+            if (result == 0)
+                return Fail("frame ended before declared size");
+            if (previous_in == in.pos && out.pos == 0)
+                return Fail("truncated frame");
+            skipped += out.pos;
+        }
+        return true;
+    }
+
+    bool Decode(u64 needed) const {
         if (stream == nullptr) {
             input.reset(static_cast<u8*>(AllocateSolid(nullptr, Chunk)));
             output.reset(static_cast<u8*>(AllocateSolid(nullptr, Chunk)));
@@ -475,6 +534,8 @@ private:
                     ZSTD_DCtx_setParameter(stream, ZSTD_d_windowLogMax, SolidWindowLogMax))) {
                 return Fail("decoder memory budget exhausted");
             }
+            if (!Resume())
+                return false;
         }
         while (frontier < needed) {
             while (section_index < sections.size() &&
@@ -532,6 +593,7 @@ private:
     const std::string name;
     const FileSys::VirtualFile source;
     const std::vector<Section> sections;
+    const u64 payload_start;
     const u64 nca_size;
     mutable std::mutex mutex;
     mutable std::unique_ptr<NczCache> cache;
@@ -543,6 +605,7 @@ private:
     mutable std::size_t section_index{};
     mutable bool frame_ended{};
     mutable bool failed{};
+    mutable bool budget_retry{};
     mutable ZSTD_inBuffer in{nullptr, 0, 0};
 };
 
