@@ -502,7 +502,8 @@ IR::Program TranslateProgram(ObjectPool<IR::Inst>& inst_pool, ObjectPool<IR::Blo
 
     Optimization::ConstantPropagationPass(env, program);
     if (!normalized_host_info.support_conditional_barrier) {
-        Optimization::ConditionalBarrierPass(program);
+        Optimization::ConditionalBarrierPass(program,
+                                             normalized_host_info.max_compute_shared_memory_size);
     }
 
     Optimization::PositionPass(env, program);
