@@ -1488,7 +1488,11 @@ bool GraphicsPipeline::ConfigureDraw(const RescalingPushConstant& rescaling,
         // triangles the draw then reads; both use the descriptor set committed here.
         scheduler.RequestOutsideRenderPassOperationContext();
         if (!IsBuilt()) {
-            scheduler.Record([this](vk::CommandBuffer) { build->Wait(!worker_only_build); });
+            scheduler.Record([this](vk::CommandBuffer) {
+                const VideoCommon::Nx2Profile::Scope scope{
+                    VideoCommon::Nx2Profile::Zone::PipelineWait};
+                build->Wait(!worker_only_build);
+            });
         }
         scheduler.Record([this, descriptor_data, groups = mesh_groups, capacity = mesh_capacity,
                           task_buffers = mesh_task_buffers,
