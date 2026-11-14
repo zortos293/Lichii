@@ -15,6 +15,7 @@
 #include <optional>
 #include <bit>
 #include <string>
+#include <string_view>
 #include <utility>
 #include "common/container/unordered_map.h"
 #include <boost/container/small_vector.hpp>
@@ -578,8 +579,19 @@ void TextureCache<P>::TickFrame() {
                     critical_memory = (std::min)(critical_memory, host_critical);
                     const u64 room_margin = (std::min)(fit_margin + slack_margin, budget / 2);
                     retention_limit = (std::min)(budget - room_margin, host_critical);
+                    // TEST ONLY (EGLA-211): EDEN_NX2_TC_RETENTION=off keeps the pre-#1435 ages;
+                    // =<MiB> caps the retention limit at the critical threshold plus that much.
+                    static const char* const retention_test = std::getenv("EDEN_NX2_TC_RETENTION");
                     expected_memory = critical_memory - (std::min)(margin, critical_memory / 2);
                     ApplyThresholdOverrides(false);
+                    if (retention_test != nullptr) {
+                        retention_limit =
+                            std::string_view{retention_test} == "off"
+                                ? 0
+                                : (std::min)(retention_limit,
+                                             critical_memory +
+                                                 (std::strtoull(retention_test, nullptr, 10) << 20));
+                    }
                     u64 other_memory = 0;
                     if constexpr (requires { runtime.GetDeviceHeapMemoryBudget(); }) {
                         // An integrated GPU's budget is the share of system memory it is capped
@@ -633,9 +645,9 @@ void TextureCache<P>::TickFrame() {
                         LogThresholds();
                         LOG_INFO(HW_GPU,
                                  "Memory margins: base {} MiB, out of memory {} MiB, host spill {} "
-                                 "MiB, block slack {} MiB, not textures {} MiB",
+                                 "MiB, block slack {} MiB, not textures {} MiB, retention {} MiB",
                                  margin >> 20, pressure_margin >> 20, spill_margin >> 20,
-                                 slack_margin >> 20, other_memory >> 20);
+                                 slack_margin >> 20, other_memory >> 20, retention_limit >> 20);
                         if (commit_room) {
                             LOG_INFO(HW_GPU, "Host memory: {} MiB of commit left, {}",
                                      *commit_room >> 20,
