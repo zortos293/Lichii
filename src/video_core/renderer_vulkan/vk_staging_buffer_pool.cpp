@@ -225,11 +225,16 @@ std::optional<StagingBufferRef> StagingBufferPool::TryGetReservedBuffer(size_t s
 StagingBufferRef StagingBufferPool::CreateStagingBuffer(size_t size, MemoryUsage usage, bool deferred) {
     const VideoCommon::StutterTrace::SiteScope site{VideoCommon::StutterTrace::Site::StagingCreate};
     auto const log2_size = Common::Log2Ceil<u32>(u32(size));
+    const VkDeviceSize logical_size = 1ULL << log2_size;
+    // Upload fallbacks can also back Metal's reflected 64 KiB constant-buffer arguments.
+    const VkDeviceSize allocation_size = device.IsMoltenVK() && usage == MemoryUsage::Upload
+                                            ? (std::max)(logical_size, STREAM_BUFFER_TAIL)
+                                            : logical_size;
     VkBufferCreateInfo buffer_ci = {
         .sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO,
         .pNext = nullptr,
         .flags = 0,
-        .size = 1ULL << log2_size,
+        .size = allocation_size,
         .usage = VK_BUFFER_USAGE_TRANSFER_SRC_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT |
                  VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT | VK_BUFFER_USAGE_STORAGE_BUFFER_BIT |
                  VK_BUFFER_USAGE_INDEX_BUFFER_BIT | VK_BUFFER_USAGE_VERTEX_BUFFER_BIT |
@@ -249,7 +254,9 @@ StagingBufferRef StagingBufferPool::CreateStagingBuffer(size_t size, MemoryUsage
         ++buffer_index;
         buffer.SetObjectNameEXT(fmt::format("Staging Buffer {}", buffer_index).c_str());
     }
-    const std::span<u8> mapped_span = buffer.Mapped();
+    const std::span<u8> mapped_span = buffer.Mapped().empty()
+                                          ? std::span<u8>{}
+                                          : buffer.Mapped().first(logical_size);
     const VkDeviceAddress buffer_address =
         device.IsBufferDeviceAddressSupported()
             ? device.GetLogical().GetBufferDeviceAddress(*buffer)
