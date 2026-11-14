@@ -531,7 +531,7 @@ Please note this may result in deadlocks and other race conditions.</source>
     <message>
         <location filename="../../src/qt_common/config/shared_translation.cpp" line="139"/>
         <source>API:</source>
-        <translation>API:</translation>
+        <translation>API：</translation>
     </message>
     <message>
         <location filename="../../src/qt_common/config/shared_translation.cpp" line="140"/>
@@ -634,7 +634,7 @@ Also controls the aspect ratio of captured screenshots.</source>
     <message>
         <location filename="../../src/qt_common/config/shared_translation.cpp" line="166"/>
         <source>Use persistent pipeline cache</source>
-        <translation>使用持久管道缓存</translation>
+        <translation>使用持久管线缓存</translation>
     </message>
     <message>
         <location filename="../../src/qt_common/config/shared_translation.cpp" line="167"/>
@@ -697,8 +697,8 @@ CPU 异步模拟：使用 CPU 在 ASTC 纹理到达时对其进行解码。
         <source>Most GPUs lack support for ASTC textures and must decompress to anintermediate format: RGBA8.
 BC1/BC3: The intermediate format will be recompressed to BC1 or BC3 format,
  saving VRAM but degrading image quality.</source>
-        <translation>大多数 GPU 不支持 ASTC 纹理,必须解压到中间格式: RGBA8。
-BC1/BC3: 中间格式将被重新压缩为 BC1 或 BC3 格式,从而节省显存,
+        <translation>大多数 GPU 不支持 ASTC 纹理，必须解压到中间格式：RGBA8。
+BC1/BC3：中间格式将被重新压缩为 BC1 或 BC3 格式,从而节省显存,
 但会降低图像质量。</translation>
     </message>
     <message>
@@ -1425,7 +1425,7 @@ Enabling it bypasses such prompts and directly exits the emulation.</source>
     <message>
         <location filename="../../src/qt_common/config/shared_translation.cpp" line="475"/>
         <source>1X (720p/1080p)</source>
-        <translation>1X (720p/1080p)</translation>
+        <translation>1X（720p/1080p）</translation>
     </message>
     <message>
         <location filename="../../src/qt_common/config/shared_translation.cpp" line="476"/>
@@ -1440,37 +1440,37 @@ Enabling it bypasses such prompts and directly exits the emulation.</source>
     <message>
         <location filename="../../src/qt_common/config/shared_translation.cpp" line="478"/>
         <source>2X (1440p/2160p)</source>
-        <translation>2X (1440p/2160p)</translation>
+        <translation>2X（1440p/2160p）</translation>
     </message>
     <message>
         <location filename="../../src/qt_common/config/shared_translation.cpp" line="479"/>
         <source>3X (2160p/3240p)</source>
-        <translation>3X (2160p/3240p)</translation>
+        <translation>3X（2160p/3240p）</translation>
     </message>
     <message>
         <location filename="../../src/qt_common/config/shared_translation.cpp" line="480"/>
         <source>4X (2880p/4320p)</source>
-        <translation>4X (2880p/4320p)</translation>
+        <translation>4X（2880p/4320p）</translation>
     </message>
     <message>
         <location filename="../../src/qt_common/config/shared_translation.cpp" line="481"/>
         <source>5X (3600p/5400p)</source>
-        <translation>5X (3600p/5400p)</translation>
+        <translation>5X（3600p/5400p）</translation>
     </message>
     <message>
         <location filename="../../src/qt_common/config/shared_translation.cpp" line="482"/>
         <source>6X (4320p/6480p)</source>
-        <translation>6X (4320p/6480p)</translation>
+        <translation>6X（4320p/6480p）</translation>
     </message>
     <message>
         <location filename="../../src/qt_common/config/shared_translation.cpp" line="483"/>
         <source>7X (5040p/7560p)</source>
-        <translation>7X (5040p/7560p)</translation>
+        <translation>7X（5040p/7560p）</translation>
     </message>
     <message>
         <location filename="../../src/qt_common/config/shared_translation.cpp" line="484"/>
         <source>8X (5760p/8640p)</source>
-        <translation>8X (5760p/8640p)</translation>
+        <translation>8X（5760p/8640p）</translation>
     </message>
     <message>
         <location filename="../../src/qt_common/config/shared_translation.cpp" line="488"/>
@@ -1525,7 +1525,7 @@ Enabling it bypasses such prompts and directly exits the emulation.</source>
     <message>
         <location filename="../../src/qt_common/config/shared_translation.cpp" line="498"/>
         <source>B-Spline</source>
-        <translation>B-Spline</translation>
+        <translation>B 样条</translation>
     </message>
     <message>
         <location filename="../../src/qt_common/config/shared_translation.cpp" line="499"/>
@@ -1535,7 +1535,7 @@ Enabling it bypasses such prompts and directly exits the emulation.</source>
     <message>
         <location filename="../../src/qt_common/config/shared_translation.cpp" line="500"/>
         <source>Spline-1</source>
-        <translation>Spline-1</translation>
+        <translation>样条-1</translation>
     </message>
     <message>
         <location filename="../../src/qt_common/config/shared_translation.cpp" line="501"/>
@@ -2003,7 +2003,7 @@ Enabling it bypasses such prompts and directly exits the emulation.</source>
     <message>
         <location filename="../../src/qt_common/config/shared_translation.cpp" line="626"/>
         <source>8GB DRAM</source>
-        <translation>8GB DRAM</translation>
+        <translation>8GB 内存</translation>
     </message>
     <message>
         <location filename="../../src/qt_common/config/shared_translation.cpp" line="627"/>
@@ -2158,6 +2158,325 @@ Enabling it bypasses such prompts and directly exits the emulation.</source>
         <source>Grid View</source>
         <translation>网格视图</translation>
     </message>
+    <message>
+            <location filename="../../src/qt_common/config/shared_translation.cpp" line="154"/>
+            <source>Use the game's own DLSS</source>
+            <translation>使用游戏自带的 DLSS</translation>
+        </message><message>
+            <location filename="../../src/qt_common/config/shared_translation.cpp" line="155"/>
+            <source>Runs a Switch 2 game's own DLSS (its upscaling network, translated for this GPU) instead of AMD FSR 3.1 in its place.
+    AMD FSR 3.1 still draws while the network is checked, when it can't run on this GPU, with resolution scaling, and for the rest of the session if its output fails Lichii's checks.
+    Takes effect when a game starts.</source>
+            <translation>在需要替代游戏原本上采样器的场合，改为运行 Switch 2 游戏自带的 DLSS（即它自己的超分网络，会针对当前显卡做转换），而不是 AMD FSR 3.1。
+    在校验该网络期间、该网络无法在本显卡上运行时、启用分辨率缩放时，以及其输出未通过 Lichii 检查后本局游戏剩余的运行时间里，仍由 AMD FSR 3.1 渲染。
+    在游戏启动时生效。</translation>
+        </message><message>
+            <location filename="../../src/qt_common/config/shared_translation.cpp" line="160"/>
+            <source>Frame rate limit (Switch 2):</source>
+            <translation>帧率上限（Switch 2）：</translation>
+        </message><message>
+            <location filename="../../src/qt_common/config/shared_translation.cpp" line="161"/>
+            <source>Rate of the Switch 2 VSync event that games start their frames on (default 60 Hz).
+    Above 60 Hz most games run too fast; use it with a game patch that follows real time, such as "FPS Unlock (built-in)" for Ocarina of Time.
+    Takes effect when a game starts.</source>
+            <translation>游戏开始每一帧所依据的 Switch 2 VSync 事件频率（默认 60 Hz）。
+    高于 60 Hz 时多数游戏会跑得过快；请配合按真实时间推进的游戏补丁使用，例如《时之笛》的 "FPS Unlock (built-in)"。
+    在游戏启动时生效。</translation>
+        </message><message>
+            <location filename="../../src/qt_common/config/shared_translation.cpp" line="165"/>
+            <source>RCAS Sharpness:</source>
+            <translation>RCAS 锐化强度：</translation>
+        </message><message>
+            <location filename="../../src/qt_common/config/shared_translation.cpp" line="166"/>
+            <source>Strength of RCAS (AMD's contrast-adaptive sharpening) on the upscaler used in place of a game's DLSS (AMD FSR 3.1); 0% turns it off.
+    Also sets the sharpening of the AMD FSR 1 and SGSR window adapting filters.</source>
+            <translation>用于替代游戏 DLSS 的上采样器（AMD FSR 3.1）上 RCAS（AMD 的对比度自适应锐化）的强度；0% 表示关闭。
+    同时决定 AMD FSR 1 与 SGSR 窗口自适应滤镜的锐化强度。</translation>
+        </message><message>
+            <location filename="../../src/qt_common/config/shared_translation.cpp" line="169"/>
+            <source>Use AMD FSR 3.1 upscaling in Ocarina of Time</source>
+            <translation>在《时之笛》中使用 AMD FSR 3.1 上采样</translation>
+        </message><message>
+            <location filename="../../src/qt_common/config/shared_translation.cpp" line="170"/>
+            <source>Replaces Ocarina of Time's native upscaler using scene depth and camera motion. Works on any supported Vulkan GPU. NVIDIA DLSS takes precedence when enabled and available. RCAS Sharpness controls sharpening. Takes effect when a game starts.</source>
+            <translation>使用场景深度与相机运动替代《时之笛》原生的上采样器。支持任意受支持的 Vulkan 显卡。启用且可用时 NVIDIA DLSS 优先。锐化强度由 RCAS Sharpness 控制。在游戏启动时生效。</translation>
+        </message><message>
+            <location filename="../../src/qt_common/config/shared_translation.cpp" line="173"/>
+            <source>Use AMD FSR 4 in place of FSR 3.1</source>
+            <translation>以 AMD FSR 4 替代 FSR 3.1</translation>
+        </message><message>
+            <location filename="../../src/qt_common/config/shared_translation.cpp" line="174"/>
+            <source>Uses AMD's ML-based FSR 4 where FSR replaces a game's upscaler (Ocarina of Time with the setting above). Radeon RX 6000 or newer, or a Ryzen AI processor, with a current AMD driver.
+    Needs AMD's FidelityFX runtime, which Lichii downloads from AMD when you ask. The files are AMD's, under AMD's licence. Without them, or if FSR 4 can't run, FSR 3.1 is used. Takes effect when a game starts.</source>
+            <translation>在 FSR 替代游戏上采样器的场合（配合上一项设置即《时之笛》）使用 AMD 基于机器学习的 FSR 4。需要 Radeon RX 6000 或更新型号，或 Ryzen AI 处理器，以及较新的 AMD 驱动。
+    需要 AMD 的 FidelityFX 运行库，在你按下按钮后由 Lichii 从 AMD 下载。这些文件归 AMD 所有，遵循 AMD 的许可协议。缺少该运行库或 FSR 4 无法运行时，改用 FSR 3.1。在游戏启动时生效。</translation>
+        </message><message>
+            <location filename="../../src/qt_common/config/shared_translation.cpp" line="179"/>
+            <source>Use NVIDIA DLSS in place of a game's DLSS (experimental)</source>
+            <translation>以 NVIDIA DLSS 替代游戏自带的 DLSS（实验性）</translation>
+        </message><message>
+            <location filename="../../src/qt_common/config/shared_translation.cpp" line="180"/>
+            <source>Uses NVIDIA DLSS on GeForce RTX cards in place of a Switch 2 game's own DLSS, instead of AMD FSR 3.1.
+    Needs NVIDIA's Streamline loader, and NVIDIA DLSS unless the NVIDIA app has downloaded it; Lichii does not ship NVIDIA's files. Use the download button below.
+    Fire Emblem: Fortune's Weave also needs EDEN_NX2_DLSS_REPLACEMENT=dlss. Without that override, its spatial workaround remains active.
+    In The Legend of Zelda: Ocarina of Time it replaces the game's upscaler at 1x resolution scale.
+    The window adapting filter (the FSR 1, Bilinear and similar button in the status bar) is separate and runs after DLSS. While DLSS runs, the status bar shows DLSS, its mode and its preset. If DLSS fails, it stays off until the game restarts and the log says why.
+    Takes effect when a game starts.</source>
+            <translation>在 GeForce RTX 显卡上用 NVIDIA DLSS 替代 Switch 2 游戏自带的 DLSS（而不是 AMD FSR 3.1）。
+    需要 NVIDIA 的 Streamline 加载器，以及 NVIDIA DLSS 运行库（除非 NVIDIA app 已经下载过）；Lichii 不附带 NVIDIA 的文件。请使用下方的下载按钮。
+    《火焰纹章 万缕千丝》还需设置环境变量 EDEN_NX2_DLSS_REPLACEMENT=dlss，否则它原有的空间算法替代方案仍然生效。
+    在《塞尔达传说 时之笛》中，它会在 1 倍分辨率缩放下替代游戏的上采样器。
+    窗口自适应滤镜（状态栏里的 FSR 1、双线性等按钮）是另一套，在 DLSS 之后运行。DLSS 运行时，状态栏显示 DLSS、其模式与预设。若 DLSS 失败，将持续关闭直到游戏重启，日志会说明原因。
+    在游戏启动时生效。</translation>
+        </message><message>
+            <location filename="../../src/qt_common/config/shared_translation.cpp" line="191"/>
+            <source>NVIDIA DLSS quality:</source>
+            <translation>NVIDIA DLSS 质量：</translation>
+        </message><message>
+            <location filename="../../src/qt_common/config/shared_translation.cpp" line="192"/>
+            <source>Applies only when a game uses its own DLSS.
+    Automatic selects a mode for the game's render/output sizes. Native (DLAA) applies anti-aliasing at the game's render resolution, then scales to its output; Ocarina's 1440p mode stays at 1440p instead of reconstructing to 4K.
+    Explicit modes only apply when the game's render size is within NVIDIA's supported range; otherwise Automatic is used and the fallback is logged. This does not change the game's render resolution. Apply/OK updates it while playing.</source>
+            <translation>仅在游戏使用自带 DLSS 时生效。
+    自动：按游戏的渲染/输出分辨率选择模式。原生（DLAA）：在游戏的渲染分辨率上做抗锯齿，再缩放到输出分辨率；《时之笛》的 1440p 模式会保持在 1440p，而不会重建到 4K。
+    显式模式仅在游戏渲染尺寸处于 NVIDIA 支持的范围内时生效；否则回落到自动，并记录日志。此项不会改变游戏的渲染分辨率。游戏进行中按“应用/确定”即生效。</translation>
+        </message><message>
+            <location filename="../../src/qt_common/config/shared_translation.cpp" line="201"/>
+            <source>NVIDIA DLSS model preset:</source>
+            <translation>NVIDIA DLSS 模型预设：</translation>
+        </message><message>
+            <location filename="../../src/qt_common/config/shared_translation.cpp" line="202"/>
+            <source>Applies only when a game uses its own DLSS.
+    M (DLSS 4.5) is Lichii's default for every quality mode. NVIDIA recommends K for DLAA/Quality/Balanced, M for Performance, and L for Ultra Performance.
+    L/M cost more on RTX 20/30 GPUs; consider K. J may reduce ghosting but flicker more. E/F are deprecated CNN models. NVIDIA default lets the runtime choose.
+    L/M require DLSS 310.5 or newer; the download button provides 310.9.16. If Fire Emblem shows horizontal lines with L/M at 2x, try K. NVIDIA app overrides may supersede this choice. Apply/OK updates it while playing.</source>
+            <translation>仅在游戏使用自带 DLSS 时生效。
+    Lichii 对每种质量模式都默认使用 M（DLSS 4.5）。NVIDIA 建议 DLAA/质量/平衡用 K，性能用 M，超高性能用 L。
+    在 RTX 20/30 系列上 L/M 开销更大，可考虑 K。J 可能减少拖影但闪烁更多。E/F 是已弃用的 CNN 模型。NVIDIA 默认则交给运行库决定。
+    L/M 需要 DLSS 310.5 或更新版本；下载按钮提供的是 310.9.16。若《火焰纹章》在 L/M 且 2 倍时出现横纹，请改用 K。NVIDIA app 的覆盖设置可能优于此选择。游戏进行中按“应用/确定”即生效。</translation>
+        </message><message>
+            <location filename="../../src/qt_common/config/shared_translation.cpp" line="213"/>
+            <source>Ocarina of Time anti-aliasing:</source>
+            <translation>《时之笛》抗锯齿：</translation>
+        </message><message>
+            <location filename="../../src/qt_common/config/shared_translation.cpp" line="214"/>
+            <source>The Legend of Zelda: Ocarina of Time only.
+    Game: the game's own anti-aliasing network, which sharpens heavily.
+    No sharpening: the image as the game renders it, without the network (faster; pairs well with a higher resolution). Has no effect while NVIDIA DLSS is on.
+    Takes effect when the game starts.</source>
+            <translation>仅适用于《塞尔达传说 时之笛》。
+    游戏：游戏自带的抗锯齿网络，锐化很强。
+    无锐化：游戏渲染出的原始画面，不经该网络（更快；适合搭配更高的分辨率）。NVIDIA DLSS 开启时此项无效。
+    在游戏启动时生效。</translation>
+        </message><message>
+            <location filename="../../src/qt_common/config/shared_translation.cpp" line="262"/>
+            <source>FPS Limit</source>
+            <translation>帧率上限</translation>
+        </message><message>
+            <location filename="../../src/qt_common/config/shared_translation.cpp" line="263"/>
+            <source>Caps how often the game presents, so the game itself runs at this rate. 0 leaves the frame rate to the game and the display.</source>
+            <translation>限制游戏呈现帧的频率，使游戏本身按此帧率运行。0 表示交由游戏与显示器决定。</translation>
+        </message><message>
+            <location filename="../../src/qt_common/config/shared_translation.cpp" line="275"/>
+            <source>Enable Frame Generation</source>
+            <translation>启用帧生成</translation>
+        </message><message>
+            <location filename="../../src/qt_common/config/shared_translation.cpp" line="276"/>
+            <source>Frame Generation Type</source>
+            <translation>帧生成方式</translation>
+        </message><message>
+            <location filename="../../src/qt_common/config/shared_translation.cpp" line="277"/>
+            <source>Frame Generation Multiplier</source>
+            <translation>帧生成倍数</translation>
+        </message><message>
+            <location filename="../../src/qt_common/config/shared_translation.cpp" line="278"/>
+            <source>Target Frame Rate</source>
+            <translation>目标帧率</translation>
+        </message><message>
+            <location filename="../../src/qt_common/config/shared_translation.cpp" line="279"/>
+            <source>Auto Flow Scale</source>
+            <translation>自动光流缩放</translation>
+        </message><message>
+            <location filename="../../src/qt_common/config/shared_translation.cpp" line="280"/>
+            <source>Flow Scale</source>
+            <translation>光流缩放</translation>
+        </message><message>
+            <location filename="../../src/qt_common/config/shared_translation.cpp" line="281"/>
+            <source>Queue Target</source>
+            <translation>队列目标</translation>
+        </message><message>
+            <location filename="../../src/qt_common/config/shared_translation.cpp" line="282"/>
+            <source>Dump Optical Flow</source>
+            <translation>导出光流数据</translation>
+        </message><message>
+            <location filename="../../src/qt_common/config/shared_translation.cpp" line="307"/>
+            <source>Native compute write mark:</source>
+            <translation>原生计算着色器写入范围：</translation>
+        </message><message>
+            <location filename="../../src/qt_common/config/shared_translation.cpp" line="308"/>
+            <source>How much of a Switch 2 compute shader's storage buffer is treated as written by the GPU after each dispatch.
+    Auto marks what the shader's stores can reach and falls back to Full when that cannot be proven.
+    Full marks the whole binding (up to 8 MiB), the original behaviour: it can delay the game's own writes to nearby memory (flickering effects) and copy far more data back from the GPU.</source>
+            <translation>每次派发后，把 Switch 2 计算着色器存储缓冲中多大范围视为已被 GPU 写入。
+    自动：标出着色器写入可能到达的范围，无法证明时回落到完整。
+    完整：标记整个绑定（最多 8 MiB），即原有行为：可能推迟游戏自身对邻近内存的写入（导致特效闪烁），并从 GPU 回读多得多的数据。</translation>
+        </message><message>
+            <location filename="../../src/qt_common/config/shared_translation.cpp" line="334"/>
+            <source>Pin GPU threads to their own cores</source>
+            <translation>将 GPU 线程绑定到独立核心</translation>
+        </message><message>
+            <location filename="../../src/qt_common/config/shared_translation.cpp" line="335"/>
+            <source>Pins the emulator's GPU threads to dedicated physical CPU cores and keeps the emulated CPU cores off them.
+    Can hurt performance on CPUs with few cores. Skipped on CPUs with fewer than 6 physical performance cores.
+    Windows and Linux only. Takes effect when a game starts.</source>
+            <translation>把模拟器的 GPU 线程绑定到专用的物理 CPU 核心，并让被模拟的 CPU 核心避开这些核心。
+    物理核心较少的 CPU 上可能反而降低性能。物理性能核心少于 6 个时跳过。
+    仅 Windows 与 Linux。在游戏启动时生效。</translation>
+        </message><message>
+            <location filename="../../src/qt_common/config/shared_translation.cpp" line="345"/>
+            <source>Precache shaders before game start:</source>
+            <translation>启动前预缓存着色器：</translation>
+        </message><message>
+            <location filename="../../src/qt_common/config/shared_translation.cpp" line="346"/>
+            <source>Builds shaders on the loading screen, on every CPU thread, so they don't stutter the first time the game uses them: the compute shaders found in the game files, and the shaders saved by earlier play sessions that the normal shader loading leaves for later. The first launch reads the game files and takes a few minutes; later launches only build what is new, until the GPU driver changes. The loading screen has a Skip button.
+    Ask asks at launch while the game has never been precached.</source>
+            <translation>在加载界面用所有 CPU 线程预先编译着色器，避免游戏首次使用时的卡顿：包括在游戏文件中找到的计算着色器，以及此前游玩保存、常规着色器加载会留到以后处理的着色器。首次启动需要读取游戏文件，耗时几分钟；之后只编译新增部分，直到显卡驱动发生变化。加载界面提供“跳过”按钮。
+    询问：仅在游戏从未预缓存过时，于启动时询问。</translation>
+        </message><message>
+            <location filename="../../src/qt_common/config/shared_translation.cpp" line="353"/>
+            <source>Switch 2 draws with unbuilt pipelines:</source>
+            <translation>Switch 2 绘制时管线尚未编译：</translation>
+        </message><message>
+            <location filename="../../src/qt_common/config/shared_translation.cpp" line="354"/>
+            <source>Only applies when asynchronous shader building is on. Decides what a Switch 2 draw does when its graphics pipeline is still building.
+    Wait stalls the GPU until the pipeline is ready (no missing effects, but long stalls on new content). Skip drops the draw, which can leave an effect missing for a few frames. Bounded waits up to the time below per frame, then skips. The EDEN_NX2_ASYNC_DISCARD=1 environment variable still forces Skip.</source>
+            <translation>仅在开启异步着色器编译时生效。决定 Switch 2 的绘制在图形管线仍在编译时如何处理。
+    等待：阻塞 GPU 直到管线就绪（不会缺特效，但遇到新内容会长时间卡住）。跳过：丢弃该次绘制，某些特效可能缺失几帧。有界等待：每帧最多等待下方设定的时间，随后跳过。设置环境变量 EDEN_NX2_ASYNC_DISCARD=1 仍会强制“跳过”。</translation>
+        </message><message>
+            <location filename="../../src/qt_common/config/shared_translation.cpp" line="360"/>
+            <source>Pipeline wait per frame (ms):</source>
+            <translation>每帧管线等待上限（毫秒）：</translation>
+        </message><message>
+            <location filename="../../src/qt_common/config/shared_translation.cpp" line="361"/>
+            <source>Used by the Bounded mode: the most time per frame that Switch 2 draws may wait in total for pipelines that are still building. Once spent, the remaining unbuilt draws of that frame are skipped.</source>
+            <translation>供“有界等待”模式使用：Switch 2 的绘制每帧为仍在编译的管线总共最多可等待的时间。用尽后，该帧剩余尚未就绪的绘制会被跳过。</translation>
+        </message><message>
+            <location filename="../../src/qt_common/config/shared_translation.cpp" line="375"/>
+            <source>Mario Kart World: 30 FPS mode</source>
+            <translation>《马力欧赛车 世界》：30 FPS 模式</translation>
+        </message><message>
+            <location filename="../../src/qt_common/config/shared_translation.cpp" line="376"/>
+            <source>Forces the game to use its native 30 FPS mode at normal game speed. Takes effect after restarting the game.</source>
+            <translation>强制游戏以原生 30 FPS 模式、正常游戏速度运行。重启游戏后生效。</translation>
+        </message><message>
+            <location filename="../../src/qt_common/config/shared_translation.cpp" line="378"/>
+            <source>Mario Kart World: dynamic FPS (experimental)</source>
+            <translation>《马力欧赛车 世界》：动态帧率（实验性）</translation>
+        </message><message>
+            <location filename="../../src/qt_common/config/shared_translation.cpp" line="379"/>
+            <source>Lets the game adjust between 30 and 60 FPS using whole-frame timing to maintain normal game speed. Takes effect after restarting the game and takes precedence over the 30 FPS mode.</source>
+            <translation>允许游戏在 30 与 60 FPS 之间以整帧计时调整，从而保持正常游戏速度。重启游戏后生效，且优先于 30 FPS 模式。</translation>
+        </message><message>
+            <location filename="../../src/qt_common/config/shared_translation.cpp" line="499"/>
+            <source>Automatic (game resolution)</source>
+            <translation>自动（游戏分辨率）</translation>
+        </message><message>
+            <location filename="../../src/qt_common/config/shared_translation.cpp" line="500"/>
+            <source>Native (DLAA)</source>
+            <translation>原生（DLAA）</translation>
+        </message><message>
+            <location filename="../../src/qt_common/config/shared_translation.cpp" line="501"/>
+            <source>Quality</source>
+            <translation>质量</translation>
+        </message><message>
+            <location filename="../../src/qt_common/config/shared_translation.cpp" line="503"/>
+            <source>Performance</source>
+            <translation>性能</translation>
+        </message><message>
+            <location filename="../../src/qt_common/config/shared_translation.cpp" line="504"/>
+            <source>Ultra Performance</source>
+            <translation>极致性能</translation>
+        </message><message>
+            <location filename="../../src/qt_common/config/shared_translation.cpp" line="507"/>
+            <source>M (DLSS 4.5, default)</source>
+            <translation>M（DLSS 4.5，默认）</translation>
+        </message><message>
+            <location filename="../../src/qt_common/config/shared_translation.cpp" line="508"/>
+            <source>NVIDIA default</source>
+            <translation>NVIDIA 默认</translation>
+        </message><message>
+            <location filename="../../src/qt_common/config/shared_translation.cpp" line="509"/>
+            <source>E (legacy CNN)</source>
+            <translation>E（旧版 CNN）</translation>
+        </message><message>
+            <location filename="../../src/qt_common/config/shared_translation.cpp" line="510"/>
+            <source>F (legacy CNN)</source>
+            <translation>F（旧版 CNN）</translation>
+        </message><message>
+            <location filename="../../src/qt_common/config/shared_translation.cpp" line="511"/>
+            <source>J (DLSS 4)</source>
+            <translation>J（DLSS 4）</translation>
+        </message><message>
+            <location filename="../../src/qt_common/config/shared_translation.cpp" line="511"/>
+            <source>K (DLSS 4)</source>
+            <translation>K（DLSS 4）</translation>
+        </message><message>
+            <location filename="../../src/qt_common/config/shared_translation.cpp" line="512"/>
+            <source>L (DLSS 4.5)</source>
+            <translation>L（DLSS 4.5）</translation>
+        </message><message>
+            <location filename="../../src/qt_common/config/shared_translation.cpp" line="561"/>
+            <source>Auto (shader extent)</source>
+            <translation>自动（着色器写入范围）</translation>
+        </message><message>
+            <location filename="../../src/qt_common/config/shared_translation.cpp" line="562"/>
+            <source>Full binding</source>
+            <translation>完整绑定</translation>
+        </message><message>
+            <location filename="../../src/qt_common/config/shared_translation.cpp" line="615"/>
+            <source>Lossless Scaling (LSFG)</source>
+            <translation>无损缩放（LSFG）</translation>
+        </message><message>
+            <location filename="../../src/qt_common/config/shared_translation.cpp" line="616"/>
+            <source>Optical Flow Interpolation (built-in)</source>
+            <translation>光流插帧（内置）</translation>
+        </message><message>
+            <location filename="../../src/qt_common/config/shared_translation.cpp" line="626"/>
+            <source>AMD FidelityFX Super Resolution 1 (FSR 1)</source>
+            <translation>AMD FidelityFX 超级分辨率 1（FSR 1）</translation>
+        </message><message>
+            <location filename="../../src/qt_common/config/shared_translation.cpp" line="635"/>
+            <source>AMD FidelityFX Super Resolution 1, softer sharpening</source>
+            <translation>AMD FidelityFX 超级分辨率 1，锐化更柔和</translation>
+        </message><message>
+            <location filename="../../src/qt_common/config/shared_translation.cpp" line="645"/>
+            <source>Game</source>
+            <translation>游戏</translation>
+        </message><message>
+            <location filename="../../src/qt_common/config/shared_translation.cpp" line="646"/>
+            <source>No sharpening</source>
+            <translation>无锐化</translation>
+        </message><message>
+            <location filename="../../src/qt_common/config/shared_translation.cpp" line="775"/>
+            <source>Off</source>
+            <translation>关闭</translation>
+        </message><message>
+            <location filename="../../src/qt_common/config/shared_translation.cpp" line="776"/>
+            <source>Ask</source>
+            <translation>询问</translation>
+        </message><message>
+            <location filename="../../src/qt_common/config/shared_translation.cpp" line="781"/>
+            <source>Wait</source>
+            <translation>等待</translation>
+        </message><message>
+            <location filename="../../src/qt_common/config/shared_translation.cpp" line="782"/>
+            <source>Bounded wait</source>
+            <translation>有界等待</translation>
+        </message><message>
+            <location filename="../../src/qt_common/config/shared_translation.cpp" line="783"/>
+            <source>Skip</source>
+            <translation>跳过</translation>
+        </message>
 </context>
 <context>
     <name>ConfigureApplets</name>
@@ -2606,7 +2925,7 @@ Enabling it bypasses such prompts and directly exits the emulation.</source>
     <message>
         <location filename="../../src/lichii/configuration/configure_debug.ui" line="364"/>
         <source>When checked, it enables Nsight Aftermath crash dumps</source>
-        <translation>启用后，Lichii 将会保存 Nsight Aftermath 格式的崩溃转储文件</translation>
+        <translation>启用后，Lichii 将会保存 Nsight Aftermath 格式的崩溃转储</translation>
     </message>
     <message>
         <location filename="../../src/lichii/configuration/configure_debug.ui" line="367"/>
@@ -2661,7 +2980,7 @@ Enabling it bypasses such prompts and directly exits the emulation.</source>
     <message>
         <location filename="../../src/lichii/configuration/configure_debug.ui" line="449"/>
         <source>When checked, Lichii will log statistics about the compiled pipeline cache</source>
-        <translation>选中时，Lichii 将记录有关已编译着色器缓存的统计信息。</translation>
+        <translation>启用后，Lichii 会记录已编译管线缓存的统计信息</translation>
     </message>
     <message>
         <location filename="../../src/lichii/configuration/configure_debug.ui" line="452"/>
@@ -2696,7 +3015,7 @@ Enabling it bypasses such prompts and directly exits the emulation.</source>
     <message>
         <location filename="../../src/lichii/configuration/configure_debug.ui" line="488"/>
         <source>Enables Lichii to check for a working Vulkan environment when the program starts up. Disable this if this is causing issues with external programs seeing Lichii.</source>
-        <translation>允许 Lichii 在启动时检查 Vulkan 环境是否正常工作。如果是其他程序导致 Lichii 出现相关问题，请禁用此选项。</translation>
+        <translation>启用后，Lichii 会在启动时检查 Vulkan 环境是否可用。如果这会导致其他程序无法识别 Lichii，请关闭此项。</translation>
     </message>
     <message>
         <location filename="../../src/lichii/configuration/configure_debug.ui" line="491"/>
@@ -2808,6 +3127,15 @@ Enabling it bypasses such prompts and directly exits the emulation.</source>
         <source>**This will be reset automatically when Eden closes.</source>
         <translation>**这会在 Eden 关闭时自动重置。</translation>
     </message>
+    <message>
+            <location filename="../../src/yuzu/configuration/configure_debug.ui" line="449"/>
+            <source>When checked, yuzu will log statistics about the compiled pipeline cache</source>
+            <translation>选中时，yuzu 将记录有关已编译着色器缓存的统计信息。</translation>
+        </message><message>
+            <location filename="../../src/yuzu/configuration/configure_debug.ui" line="488"/>
+            <source>Enables yuzu to check for a working Vulkan environment when the program starts up. Disable this if this is causing issues with external programs seeing yuzu.</source>
+            <translation>允许 yuzu 在启动时检查 Vulkan 环境是否正常工作。如果是其他程序导致 yuzu 出现相关问题，请禁用此选项。</translation>
+        </message>
 </context>
 <context>
     <name>ConfigureDebugController</name>
@@ -8268,6 +8596,35 @@ Would you like to bypass this and exit anyway?</source>
         <source>Null</source>
         <translation>空</translation>
     </message>
+    <message>
+            <location filename="../../src/yuzu/main.ui" line="14"/>
+            <source>yuzu</source>
+            <translation>yuzu</translation>
+        </message><message>
+            <location filename="../../src/yuzu/main.ui" line="62"/>
+            <source>Open &amp;Lichii Folders</source>
+            <translation>打开 Lichii 文件夹(&amp;L)</translation>
+        </message><message>
+            <location filename="../../src/yuzu/main.ui" line="298"/>
+            <source>&amp;About Lichii</source>
+            <translation>关于 Lichii(&amp;A)</translation>
+        </message><message>
+            <location filename="../../src/yuzu/main.ui" line="420"/>
+            <source>Apply Recommended &amp;Settings...</source>
+            <translation>应用推荐设置(&amp;S)...</translation>
+        </message><message>
+            <location filename="../../src/yuzu/main.ui" line="425"/>
+            <source>Restore My &amp;Previous Settings</source>
+            <translation>恢复原设置(&amp;P)</translation>
+        </message><message>
+            <location filename="../../src/yuzu/main.ui" line="571"/>
+            <source>&amp;Lichii Dependencies</source>
+            <translation>Lichii 依赖(&amp;L)</translation>
+        </message><message>
+            <location filename="../../src/lichii/main.ui" line="298"/>
+            <source>&amp;What&apos;s New in Lichii</source>
+            <translation>Lichii 新功能(&amp;W)</translation>
+        </message>
 </context>
 <context>
     <name>MigrationWorker</name>
@@ -11523,5 +11880,151 @@ Would you like to manually select a portable folder to use?</source>
         <source>Could not find Ryujinx save data</source>
         <translation>找不到 Ryujinx 的存档数据</translation>
     </message>
+</context>
+<context>
+    <name>RecommendedSettingsDialog</name>
+    <message>
+            <location filename="../../src/yuzu/recommended_settings_dialog.cpp" line="89"/>
+            <source>Recommended settings</source>
+            <translation>推荐设置</translation>
+        </message>
+    <message>
+            <location filename="../../src/yuzu/recommended_settings_dialog.cpp" line="90"/>
+            <source>Do you want to use the recommended settings from the Lichii developer?</source>
+            <translation>是否使用 Lichii 开发者提供的推荐设置？</translation>
+        </message>
+    <message>
+            <location filename="../../src/yuzu/recommended_settings_dialog.cpp" line="92"/>
+            <source>They improve performance for most games. Lichii keeps your own settings, so you can go back at any time with Help &gt; Restore My Previous Settings. Per-game settings do not change.</source>
+            <translation>这些设置可提升大多数游戏的性能。Lichii 会保留你原有的设置，你随时可以用「帮助 &gt; 恢复原设置」还原。单个游戏的设置不会改变。</translation>
+        </message>
+    <message>
+            <location filename="../../src/yuzu/recommended_settings_dialog.cpp" line="95"/>
+            <source>Use recommended settings</source>
+            <translation>使用推荐设置</translation>
+        </message>
+    <message>
+            <location filename="../../src/yuzu/recommended_settings_dialog.cpp" line="96"/>
+            <source>Not now</source>
+            <translation>以后再说</translation>
+        </message>
+    <message>
+            <location filename="../../src/yuzu/recommended_settings_dialog.cpp" line="107"/>
+            <source>Your settings already match the recommended settings. Nothing changed.</source>
+            <translation>你的设置已与推荐设置一致，未做任何更改。</translation>
+        </message>
+    <message>
+            <location filename="../../src/yuzu/recommended_settings_dialog.cpp" line="110"/>
+            <source>Lichii now uses the recommended settings.</source>
+            <translation>Lichii 现在使用推荐设置。</translation>
+        </message>
+    <message>
+            <location filename="../../src/yuzu/recommended_settings_dialog.cpp" line="111"/>
+            <source>On</source>
+            <translation>开启</translation>
+        </message>
+    <message>
+            <location filename="../../src/yuzu/recommended_settings_dialog.cpp" line="111"/>
+            <source>Off</source>
+            <translation>关闭</translation>
+        </message>
+    <message>
+            <location filename="../../src/yuzu/recommended_settings_dialog.cpp" line="112"/>
+            <source>To go back, use Help &gt; Restore My Previous Settings.</source>
+            <translation>如需还原，请使用「帮助 &gt; 恢复原设置」。</translation>
+        </message>
+    <message>
+            <location filename="../../src/yuzu/recommended_settings_dialog.cpp" line="119"/>
+            <source>Previous settings</source>
+            <translation>原设置</translation>
+        </message>
+    <message>
+            <location filename="../../src/yuzu/recommended_settings_dialog.cpp" line="120"/>
+            <source>Your settings already match your previous settings. Nothing changed.</source>
+            <translation>你的设置已与原设置一致，未做任何更改。</translation>
+        </message>
+    <message>
+            <location filename="../../src/yuzu/recommended_settings_dialog.cpp" line="123"/>
+            <source>Lichii uses your previous settings again.</source>
+            <translation>Lichii 已重新使用原设置。</translation>
+        </message>
+    <message>
+            <location filename="../../src/yuzu/recommended_settings_dialog.cpp" line="125"/>
+            <source>To use the recommended settings again, use Help &gt; Apply Recommended Settings.</source>
+            <translation>如需再次使用推荐设置，请使用「帮助 &gt; 应用推荐设置」。</translation>
+        </message>
+</context>
+<context>
+    <name>WhatsNewDialog</name>
+    <message>
+            <location filename="../../src/lichii/whats_new_dialog.cpp" line="53"/>
+            <source>What&apos;s New in Lichii</source>
+            <translation>Lichii 新功能</translation>
+        </message>
+    <message>
+            <location filename="../../src/lichii/whats_new_dialog.cpp" line="72"/>
+            <source>Lichii has a new look</source>
+            <translation>Lichii 焕然一新</translation>
+        </message>
+    <message>
+            <location filename="../../src/lichii/whats_new_dialog.cpp" line="79"/>
+            <source>Here is what changed. Menus and shortcuts are where they were.</source>
+            <translation>下面是这次的改动。菜单和快捷键的位置都没有变。</translation>
+        </message>
+    <message>
+            <location filename="../../src/lichii/whats_new_dialog.cpp" line="87"/>
+            <source>Lichii Dark theme</source>
+            <translation>Lichii 深色主题</translation>
+        </message>
+    <message>
+            <location filename="../../src/lichii/whats_new_dialog.cpp" line="88"/>
+            <source>A darker theme with the Lichii pink accent. The old themes are still in Configure &gt; General &gt; UI.</source>
+            <translation>更暗的主题，配上 Lichii 的粉色点缀。旧主题仍在「设置 &gt; 通用 &gt; 界面」里。</translation>
+        </message>
+    <message>
+            <location filename="../../src/lichii/whats_new_dialog.cpp" line="90"/>
+            <source>Settings that fit your screen</source>
+            <translation>设置窗口会适配你的屏幕</translation>
+        </message>
+    <message>
+            <location filename="../../src/lichii/whats_new_dialog.cpp" line="91"/>
+            <source>Configure and game Properties open at a size that fits your screen, can be resized, and every tab scrolls, so nothing is cut off at 150% or 200% scaling.</source>
+            <translation>「设置」和游戏「属性」窗口打开时会按屏幕大小显示，可以调整尺寸，每个标签页都能滚动，所以在 150% 或 200% 缩放下也不会被截断。</translation>
+        </message>
+    <message>
+            <location filename="../../src/lichii/whats_new_dialog.cpp" line="94"/>
+            <source>Per-game changes are marked</source>
+            <translation>单独为某个游戏改过的设置会标出来</translation>
+        </message>
+    <message>
+            <location filename="../../src/lichii/whats_new_dialog.cpp" line="95"/>
+            <source>In a game&apos;s Properties, a setting you changed for that game has a pink outline and a reset button. Settings that follow the global value say &quot;Use global&quot;.</source>
+            <translation>在游戏的「属性」里，你为它单独改过的设置会有粉色边框和重置按钮；跟随全局取值的设置则会显示「使用全局」。</translation>
+        </message>
+    <message>
+            <location filename="../../src/lichii/whats_new_dialog.cpp" line="98"/>
+            <source>Same places as before</source>
+            <translation>位置和以前一样</translation>
+        </message>
+    <message>
+            <location filename="../../src/lichii/whats_new_dialog.cpp" line="99"/>
+            <source>Configure is in Emulation &gt; Configure (Ctrl+,). Right-click a game and choose Properties for its own settings. Help &gt; What&apos;s New in Lichii shows this again.</source>
+            <translation>「设置」在「模拟 &gt; 设置」（Ctrl+,）。右键点击游戏并选「属性」，可以改它专属的设置。想再看这个页面，打开「帮助 &gt; Lichii 新功能」。</translation>
+        </message>
+    <message>
+            <location filename="../../src/lichii/whats_new_dialog.cpp" line="115"/>
+            <source>Don&apos;t show again</source>
+            <translation>不再显示</translation>
+        </message>
+    <message>
+            <location filename="../../src/lichii/whats_new_dialog.cpp" line="119"/>
+            <source>Open Configure</source>
+            <translation>打开设置</translation>
+        </message>
+    <message>
+            <location filename="../../src/lichii/whats_new_dialog.cpp" line="126"/>
+            <source>Got it</source>
+            <translation>知道了</translation>
+        </message>
 </context>
 </TS>
