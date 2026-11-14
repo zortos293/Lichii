@@ -81,6 +81,14 @@ struct Tracker {
     std::atomic<bool>& destroyed;
 };
 
+/// Thrown by a stage: opens the gate once its last copy is destroyed. A failed job keeps what it
+/// threw until its state goes, which a worker's pick does when it drops the job's last entry.
+struct OpensWhenReleased : std::runtime_error {
+    explicit OpensWhenReleased(Gate& gate)
+        : std::runtime_error{"failed"}, opener{&gate, [](Gate* opened) { opened->Open(); }} {}
+    std::shared_ptr<Gate> opener;
+};
+
 ShaderJobConfig Config(size_t cpu_threads, size_t driver_threads, u64 budget = 1ULL << 40) {
     return {.cpu_threads = cpu_threads,
             .driver_threads = driver_threads,
@@ -279,6 +287,136 @@ TEST_CASE("Shader jobs alternate an aged Background backlog with Soon jobs",
     const auto ids = order.Get();
     REQUIRE(ids.size() == 1002);
     REQUIRE(std::vector<int>(ids.begin(), ids.begin() + 5) == std::vector<int>{0, -1, 1, -2, 2});
+}
+
+TEST_CASE("Background shader stages stay within their limit", "[video_core][shader_jobs]") {
+    for (const size_t limit : {size_t{1}, size_t{2}}) {
+        auto config = Config(4, 4);
+        config.max_background_stages = limit;
+        ShaderJobScheduler scheduler{config};
+        std::atomic<size_t> running{};
+        std::atomic<size_t> peak{};
+        const auto stage{[&running, &peak] {
+            const size_t now = ++running;
+            size_t seen = peak.load();
+            while (now > seen && !peak.compare_exchange_weak(seen, now)) {
+            }
+            std::this_thread::sleep_for(2ms);
+            --running;
+        }};
+        std::vector<ShaderJobHandle> handles;
+        for (int id = 0; id < 16; ++id) {
+            handles.push_back(scheduler.Submit(
+                TwoStageJob(Background, [stage](ShaderJobContext&) { stage(); }, stage)));
+        }
+        for (const auto& handle : handles) {
+            handle.Wait();
+        }
+        const auto stats = scheduler.Stats();
+
+        for (const auto& handle : handles) {
+            REQUIRE(handle.Status() == ShaderJobStatus::Done);
+        }
+        REQUIRE(peak.load() <= limit);
+        REQUIRE(stats.peak_background_stages <= limit);
+        REQUIRE(stats.priorities[2].done == 16);
+    }
+}
+
+TEST_CASE("A Soon shader job finds a worker while Background stages hold their limit",
+          "[video_core][shader_jobs]") {
+    auto config = Config(2, 1);
+    config.max_background_stages = 1;
+    ShaderJobScheduler scheduler{config};
+    Gate gate;
+    std::promise<void> entered;
+    const auto background = scheduler.Submit(CpuJob(Background, [&] {
+        entered.set_value();
+        gate.Wait();
+    }));
+    entered.get_future().wait();
+    const auto second = scheduler.Submit(CpuJob(Background, [] {}));
+    const auto soon = scheduler.Submit(CpuJob(Soon, [] {}));
+    const bool soon_ran = soon.WaitFor(5s);
+    const bool second_queued = second.Status() == ShaderJobStatus::Queued;
+    gate.Open();
+    background.Wait();
+    second.Wait();
+
+    REQUIRE(soon_ran);
+    REQUIRE(second_queued);
+    REQUIRE(second.Status() == ShaderJobStatus::Done);
+}
+
+TEST_CASE("Background driver stages go before more Background translations",
+          "[video_core][shader_jobs]") {
+    auto config = Config(2, 2);
+    config.max_background_stages = 1;
+    ShaderJobScheduler scheduler{config};
+    Order order;
+    std::vector<ShaderJobHandle> handles;
+    for (int id = 0; id < 3; ++id) {
+        handles.push_back(scheduler.Submit(TwoStageJob(
+            Background, [&order, id](ShaderJobContext&) { order.Add(id * 2); },
+            [&order, id] { order.Add(id * 2 + 1); })));
+    }
+    for (const auto& handle : handles) {
+        handle.Wait();
+    }
+    REQUIRE(order.Get() == std::vector<int>{0, 1, 2, 3, 4, 5});
+}
+
+TEST_CASE("CPU workers left waiting for a Background driver job go on once it leaves the queue",
+          "[video_core][shader_jobs]") {
+    Gate driver_gate, cpu_gate, cpu_waits;
+    std::promise<void> driver_entered;
+    auto config = Config(1, 1);
+    config.max_background_stages = 1;
+    ShaderJobScheduler scheduler{config};
+    // The driver worker runs a NeedNow stage of no bytes: its end wakes no CPU worker.
+    ShaderJob need_now;
+    need_now.priority = NeedNow;
+    need_now.driver = [&] {
+        driver_entered.set_value();
+        driver_gate.Wait();
+    };
+    const auto driver_blocker = scheduler.Submit(std::move(need_now));
+    driver_entered.get_future().wait();
+    const auto cpu_blocker = Block(scheduler, cpu_gate);
+    {
+        // Once it failed, only its stale Background entry holds this job and what it threw: the
+        // CPU worker drops that entry, opening cpu_waits, in the pick that then leaves cpu_job
+        // alone for driver_job (BackgroundStageAllowed) and goes to sleep.
+        const auto failing = scheduler.Submit(
+            CpuJob(Background, [&cpu_waits] { throw OpensWhenReleased{cpu_waits}; }));
+        scheduler.Promote(failing, NeedNow);
+    }
+    auto batch = scheduler.CreateBatch();
+    ShaderJob background_driver;
+    background_driver.driver = [] {};
+    const auto driver_job = scheduler.Submit(std::move(background_driver), &batch);
+    const auto cpu_job = scheduler.Submit(CpuJob(Background, [] {}));
+    cpu_gate.Open();
+    cpu_waits.Wait();
+    SECTION("Cancelled") {
+        scheduler.Cancel(driver_job);
+    }
+    SECTION("Batch cancelled") {
+        scheduler.Cancel(batch);
+    }
+    SECTION("Promoted") {
+        scheduler.Promote(driver_job, Soon);
+    }
+    SECTION("Run by a waiting thread") {
+        scheduler.RunOrWait(driver_job);
+    }
+    const bool ran = cpu_job.WaitFor(5s);
+    driver_gate.Open();
+    driver_blocker.Wait();
+    cpu_blocker.Wait();
+
+    REQUIRE(ran);
+    REQUIRE(cpu_job.Status() == ShaderJobStatus::Done);
 }
 
 TEST_CASE("Shader job budget admits by in-flight bytes", "[video_core][shader_jobs]") {

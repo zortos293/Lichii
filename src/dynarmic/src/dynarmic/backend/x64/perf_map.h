@@ -33,18 +33,31 @@ inline void PerfMapClear(const void*, const void*) noexcept {
 /// PERF_BUILDID_DIR is set (read once): blocks need a perf map name.
 bool PerfMapEnabled() noexcept;
 #elif defined(_WIN32)
-// Windows has no perf; the names go to the nx2 sampler instead (common/jit_symbols.h).
+// Windows has no perf; the names go to the nx2 sampler (common/jit_symbols.h) and, with
+// EDEN_NX2_JIT_MAP=<folder>, to a map file like perf's (perf_map.cpp).
+namespace detail {
+void JitMapRegister(const void* start, const void* end, std::string_view friendly_name);
+void JitMapClear(const void* begin, const void* end);
+/// EDEN_NX2_JIT_MAP is set (read once).
+bool JitMapEnabled() noexcept;
+}  // namespace detail
 template<typename T>
 void PerfMapRegister(T start, const void* end, std::string_view friendly_name) noexcept {
     ::Common::JitSymbols::Register(std::bit_cast<const void*>(start), end, friendly_name);
+    if (detail::JitMapEnabled()) {
+        detail::JitMapRegister(std::bit_cast<const void*>(start), end, friendly_name);
+    }
 }
 /// Forgets the names of the blocks in one JIT's code buffer, [begin, end).
 inline void PerfMapClear(const void* begin, const void* end) noexcept {
     ::Common::JitSymbols::Clear(begin, end);
+    if (detail::JitMapEnabled()) {
+        detail::JitMapClear(begin, end);
+    }
 }
-/// EDEN_NX2_JIT_SYMBOLS=1: blocks need a name for the sampler.
+/// EDEN_NX2_JIT_SYMBOLS=1 (the sampler's names) or EDEN_NX2_JIT_MAP: blocks need a name.
 inline bool PerfMapEnabled() noexcept {
-    return ::Common::JitSymbols::Enabled();
+    return ::Common::JitSymbols::Enabled() || detail::JitMapEnabled();
 }
 #else
 // Resolve to no-op (compiler thinks fmt has side effects)

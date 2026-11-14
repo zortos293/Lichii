@@ -32,6 +32,14 @@ struct DmaPusherTestAccess {
     static size_t Process(DmaPusher& pusher, std::span<const CommandHeader> words) {
         return pusher.ProcessCommands(words);
     }
+
+    static u32 DmaRegister(const DmaPusher& pusher, u32 method) {
+        return pusher.dma_registers[method];
+    }
+
+    static u32 InlineToMemoryRegister(const DmaPusher& pusher, u32 method) {
+        return pusher.inline_to_memory_registers[method];
+    }
 };
 
 } // namespace Tegra
@@ -168,4 +176,48 @@ TEST_CASE("Unsplit command parser invalidates reuse before other engine state an
     process(increasing, true);
     process(execute, true);
     process(multi, true);
+}
+
+TEST_CASE("Unsplit command parser shadows copy and upload registers it batches",
+          "[video_core][command_writer]") {
+    // A split started later places copy launches and inline uploads from these shadows
+    // (DmaPusher::NoteEngineWrites): registers set before it must be there too.
+    REQUIRE_FALSE(VideoCommon::GpuSplit::Get().Active());
+    ScopedSystemTestContext context;
+    Core::System system;
+    Core::DeviceMemory physical;
+    Tegra::MaxwellDeviceMemoryManager device_memory{physical};
+    Tegra::MemoryManager memory{system, device_memory, 32, 1ULL << 31};
+    Tegra::Control::ChannelState channel{0};
+    Tegra::DmaPusher pusher{system, memory, channel};
+    SerialEngine copy;
+    SerialEngine upload;
+    copy.reports_fast_draw_breaks = true;
+    upload.reports_fast_draw_breaks = true;
+    pusher.BindSubchannel(&copy, 0, Tegra::Engines::EngineTypes::MaxwellDMA);
+    pusher.BindSubchannel(&upload, 1, Tegra::Engines::EngineTypes::KeplerMemory);
+    const auto header = [](u32 subchannel, u32 method, u32 count) {
+        auto result = Tegra::BuildCommandHeader(static_cast<Tegra::BufferMethods>(method), count,
+                                                Tegra::SubmissionMode::Increasing);
+        result.subchannel.Assign(subchannel);
+        return result;
+    };
+    const std::array words{header(0, 0x100, 3),
+                           Tegra::CommandHeader{.argument = 0x11},
+                           Tegra::CommandHeader{.argument = 0x22},
+                           Tegra::CommandHeader{.argument = 0x33},
+                           header(1, 0x60, 2),
+                           Tegra::CommandHeader{.argument = 0x44},
+                           Tegra::CommandHeader{.argument = 0x55}};
+    using Access = Tegra::DmaPusherTestAccess;
+    REQUIRE(Access::Process(pusher, words) == words.size());
+    // Batched into the engines' sinks, past CallMethod.
+    REQUIRE(copy.received.empty());
+    REQUIRE(copy.method_sink.size() == 3);
+    REQUIRE(upload.method_sink.size() == 2);
+    REQUIRE(Access::DmaRegister(pusher, 0x100) == 0x11);
+    REQUIRE(Access::DmaRegister(pusher, 0x101) == 0x22);
+    REQUIRE(Access::DmaRegister(pusher, 0x102) == 0x33);
+    REQUIRE(Access::InlineToMemoryRegister(pusher, 0x60) == 0x44);
+    REQUIRE(Access::InlineToMemoryRegister(pusher, 0x61) == 0x55);
 }
