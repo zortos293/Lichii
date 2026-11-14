@@ -84,8 +84,13 @@ std::optional<std::string> OpenGame(Core::System& system, const fs::path& game_p
     if (filesystem == nullptr) {
         filesystem = std::make_shared<FileSys::RealVfsFilesystem>();
     }
-    const auto file =
-        filesystem->OpenFile(Common::FS::PathToUTF8String(game_path), FileSys::OpenMode::Read);
+    // A game kept as a folder (exefs/main + romfs) opens through its main file, as the loader does.
+    std::string path = Common::FS::PathToUTF8String(game_path);
+    std::error_code ec;
+    if (fs::is_directory(game_path, ec)) {
+        path += "/main";
+    }
+    const auto file = filesystem->OpenFile(path, FileSys::OpenMode::Read);
     if (file == nullptr) {
         return "Cannot open the game file";
     }
