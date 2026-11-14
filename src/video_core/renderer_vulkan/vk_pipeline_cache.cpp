@@ -7,6 +7,7 @@
 #include <array>
 #include <atomic>
 #include <bit>
+#include <charconv>
 #include <chrono>
 #include <cstddef>
 #include <cstdlib>
@@ -104,8 +105,11 @@ using VideoCommon::GraphicsEnvironment;
 constexpr u32 CACHE_VERSION = VideoCommon::VulkanPipelineCacheVersion;
 const size_t VULKAN_CACHE_FLUSH_PIPELINES = []() -> size_t {
     if (const char* env = std::getenv("EDEN_NX2_VULKAN_CACHE_FLUSH")) {
-        if (const auto val = std::strtoull(env, nullptr, 10); val > 0) {
-            return static_cast<size_t>(val);
+        const std::string_view text{env};
+        size_t value = 0;
+        const auto [end, ec] = std::from_chars(text.data(), text.data() + text.size(), value);
+        if (ec == std::errc{} && end == text.data() + text.size() && value > 0) {
+            return value;
         }
     }
     return 128;
