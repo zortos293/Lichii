@@ -148,10 +148,10 @@ Scheduler::Scheduler(const Device& device_, StateTracker& state_tracker_)
                     .pNext = nullptr,
                     .flags = 0,
                     .queryType = VK_QUERY_TYPE_TIMESTAMP,
-                    .queryCount = TraceMaxSites,
+                    .queryCount = TraceMaxSites + 1,
                     .pipelineStatistics = 0,
                 });
-                trace_site_items.resize(TraceMaxSites);
+                trace_site_items.resize(TraceMaxSites + 1);
             }
         } catch (const vk::Exception& error) {
             LOG_WARNING(Render_Vulkan, "DKB gpu_timestamp unavailable: {}", error.what());
@@ -787,12 +787,12 @@ void Scheduler::RecordSiteMarker(std::source_location location) {
 }
 
 void Scheduler::TraceSite(vk::CommandBuffer cmdbuf, const char* file, u32 line) {
-    if (!trace_gpu_recording || !trace_site_pool || trace_site_count == TraceMaxSites) {
+    if (!trace_gpu_recording || !trace_site_pool || trace_site_count > TraceMaxSites) {
         return;
     }
-    // The last query marks where commands stop having markers (file nullptr), so the site
-    // before it keeps only its own time.
-    if (trace_site_count + 1 == TraceMaxSites) {
+    // One query past the sites marks where commands stop having markers (file nullptr), so
+    // every traced site keeps only its own time.
+    if (trace_site_count == TraceMaxSites) {
         file = nullptr;
         line = 0;
     }
@@ -874,7 +874,7 @@ void Scheduler::ReportSiteTimes(const std::vector<u64>& submission_begin,
                       [](const auto& entry) { return entry.second.ms; });
     LOG_INFO(Render_Vulkan,
              "DKB gpu_sites renderer_frame={} markers={}{} attributed_ms={:.3f} sites={}",
-             trace_sample_frame, count, count == TraceMaxSites ? " (full)" : "", total_ms,
+             trace_sample_frame, count, count > TraceMaxSites ? " (full)" : "", total_ms,
              sorted.size());
     for (size_t i = 0; i < sorted.size() && i < 25; ++i) {
         const auto& [site, totals] = sorted[i];
@@ -1007,7 +1007,7 @@ void Scheduler::TraceGpuSubmission() {
         current_upload_cmdbuf.ResetQueryPool(*trace_work_pool, 0, TraceMaxWork * 2);
     }
     if (trace_gpu_count == 0 && trace_site_pool) {
-        current_upload_cmdbuf.ResetQueryPool(*trace_site_pool, 0, TraceMaxSites);
+        current_upload_cmdbuf.ResetQueryPool(*trace_site_pool, 0, TraceMaxSites + 1);
         trace_site_count = 0;
     }
     current_upload_cmdbuf.WriteTimestamp(VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT, *trace_query_pool,
