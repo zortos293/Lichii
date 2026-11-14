@@ -48,6 +48,10 @@ struct ImageInfo {
     u32 num_samples = 1;
     u32 tile_width_spacing = 0;
     bool native_tiling = false;
+    // Switch 2 texture header word 2 bit 24: the surface keeps the Maxwell GOB layout. The
+    // Xenoblade Chronicles Switch 2 Editions set it on all their headers (LUTs, fonts and
+    // textures only decode that way).
+    bool maxwell_gobs = false;
     bool rescaleable = false;
     bool downscaleable = false;
     bool forced_flushed = false;

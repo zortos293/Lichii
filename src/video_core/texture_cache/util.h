@@ -35,6 +35,12 @@ struct OverlapResult {
     SubresourceExtent resources;
 };
 
+/// Switch 2 block-linear surfaces swap GOB offset bits 5 and 6, unless their texture header asks
+/// for the Maxwell GOB layout (ImageInfo::maxwell_gobs).
+[[nodiscard]] constexpr bool UsesNativeGobs(bool native_memory, const ImageInfo& info) {
+    return native_memory && !info.maxwell_gobs;
+}
+
 [[nodiscard]] u32 CalculateGuestSizeInBytes(const ImageInfo& info) noexcept;
 
 [[nodiscard]] u32 CalculateUnswizzledSizeBytes(const ImageInfo& info) noexcept;
@@ -90,6 +96,7 @@ struct UnswizzlePlan {
     size_t total_host_bytes{0};
     u32 bpp_log2{0};
     bool layout_valid{true};
+    bool maxwell_gobs{false};
 };
 
 /// Plans the unswizzle copies and runs for a 2D block-linear image overlapping `dirty_ranges`.

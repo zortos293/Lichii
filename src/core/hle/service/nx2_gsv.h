@@ -4508,8 +4508,24 @@ private:
     // size, u64 alignment; the client raises the alignment to at least 4 KiB and rounds the size.
     void CalculateRequirements(HLERequestContext& ctx) {
         const auto* w = ctx.CommandBuffer();
-        const auto layout = Nx2CalculateNativeImageRequirements(
-            std::span<const u32, 16>{w + 2, 16}, w[18]);
+        auto layout = Nx2CalculateNativeImageRequirements(std::span<const u32, 16>{w + 2, 16}, w[18]);
+        // The Xenoblade Switch 2 Editions place their window images at 4 KiB offsets: with the
+        // 8 KiB block alignment NativeWindow::Initialize fails and NativeWindow::Acquire then
+        // calls through a null window.
+        switch (system.GetApplicationProcessProgramID()) {
+        case 0x0400FF500E34A001ULL: // Xenoblade Chronicles: Definitive Edition
+        case 0x0400E95004038001ULL: // Xenoblade Chronicles 2
+        case 0x0400453019AA8001ULL: // Xenoblade Chronicles X: Definitive Edition
+            layout.alignment = 0x1000;
+            break;
+        default:
+            break;
+        }
+        LOG_INFO(Service,
+                 "nx2:gsv 1510 preference {:08x} {:08x} {:08x} {:08x} {:08x} {:08x} {:08x} {:08x} "
+                 "count={} -> size={:#x} align={:#x}",
+                 w[2], w[3], w[4], w[5], w[6], w[7], w[8], w[9], w[18], layout.size,
+                 layout.alignment);
         const auto trace = Core::WindowTrace::Enabled()
                                ? Core::WindowTrace::sessions.Find(ctx.GetThread().GetOwnerProcess())
                                : nullptr;

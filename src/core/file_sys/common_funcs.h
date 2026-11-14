@@ -51,4 +51,12 @@ constexpr u64 BASE_TITLE_ID_MASK = 0xFFFFFFFFFFFFE000;
     return aoc_title_id & AOC_TITLE_ID_MASK;
 }
 
+/**
+ * Gives a title ID the platform byte of a program ID. Switch 2 Editions (0400...) keep their
+ * Switch 1 application's add-on content (0100...).
+ */
+[[nodiscard]] constexpr u64 WithPlatformOf(u64 title_id, u64 program_id) {
+    return (title_id & 0x00FFFFFFFFFFFFFFULL) | (program_id & 0xFF00000000000000ULL);
+}
+
 } // namespace FileSys
