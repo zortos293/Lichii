@@ -195,8 +195,10 @@ static FileSys::VirtualFile VfsDirectoryCreateFileWrapper(const FileSys::Virtual
 
 #include <SDL3/SDL.h>
 
+#include <atomic>
 #include <chrono>
 #include <cstdlib>
+#include <mutex>
 #include <thread>
 #include <boost/container/flat_set.hpp>
 
@@ -2586,8 +2588,43 @@ void MainWindow::OnShutdownBeginDialog() {
     shutdown_dialog->open();
 }
 
+/// Ends the process at once: no destructors, no atexit handlers, no flush of C streams.
+[[noreturn]] static void EndProcessNow(int exit_code) {
+#ifdef _WIN32
+    TerminateProcess(GetCurrentProcess(), static_cast<UINT>(exit_code));
+#endif
+    std::_Exit(exit_code);
+}
+
+static s64 SteadyNowMs() {
+    return std::chrono::duration_cast<std::chrono::milliseconds>(
+               std::chrono::steady_clock::now().time_since_epoch())
+        .count();
+}
+
+/// When set (steady clock ms), the exit watchdog ends the process once it is reached.
+static std::atomic<s64> exit_deadline_ms{0};
+
+/// Started at the first forced stop, while no lock can be stuck yet: arming it later (see
+/// ExitIfEmulationThreadStuck) only stores a deadline and allocates nothing.
+static void StartExitWatchdog() {
+    static std::once_flag started;
+    std::call_once(started, [] {
+        std::thread([] {
+            for (;;) {
+                std::this_thread::sleep_for(std::chrono::milliseconds(100));
+                const s64 deadline = exit_deadline_ms.load(std::memory_order_relaxed);
+                if (deadline != 0 && SteadyNowMs() >= deadline) {
+                    EndProcessNow(1);
+                }
+            }
+        }).detach();
+    });
+}
+
 void MainWindow::OnEmulationStopTimeExpired() {
     if (QtCommon::emu_thread) {
+        StartExitWatchdog();
         QtCommon::emu_thread->ForceStop();
         emu_force_stop_clock.start();
         shutdown_progress_seen = Common::ShutdownProgress();
@@ -2620,14 +2657,6 @@ void MainWindow::OnEmulationStopTimeout() {
     OnEmulationStopped();
 }
 
-/// Ends the process at once: no destructors, no atexit handlers, no flush of C streams.
-[[noreturn]] static void EndProcessNow(int exit_code) {
-#ifdef _WIN32
-    TerminateProcess(GetCurrentProcess(), static_cast<UINT>(exit_code));
-#endif
-    std::_Exit(exit_code);
-}
-
 /// Called when the stop wait is over. Returns if the emulation thread has stopped. If it still
 /// runs, saves the settings and ends the process with all threads alive, so the program closes
 /// from Stop as well as from the window close. Terminating the thread instead can orphan a lock
@@ -2637,10 +2666,7 @@ void MainWindow::ExitIfEmulationThreadStuck() {
         return;
     }
     // The stuck thread can hold a lock that the save needs. The save gets this long.
-    std::thread([] {
-        std::this_thread::sleep_for(std::chrono::seconds(5));
-        EndProcessNow(1);
-    }).detach();
+    exit_deadline_ms.store(SteadyNowMs() + 5'000, std::memory_order_relaxed);
     LOG_ERROR(Frontend,
               "Emulation thread failed to stop after {} ms (shutdown progress {}); saving "
               "settings and exiting",

@@ -24,6 +24,7 @@
 #include "common/string_util.h"
 #else
 #include <fcntl.h>
+#include <sys/stat.h>
 #include <unistd.h>
 #endif
 
@@ -110,20 +111,29 @@ void Config::WriteToIni() const {
     }
     // A name of its own per save, created exclusively and owner-only, so overlapping saves don't
     // write into each other's file and the contents are never readable by others.
+    // A name left by an earlier process with the same id is skipped, not removed.
     static std::atomic<unsigned> save_serial{};
-    std::filesystem::path temporary = target;
+    std::filesystem::path temporary;
+    FILE* fp = nullptr;
+    for (int attempt = 0; attempt < 16 && fp == nullptr; ++attempt) {
+        temporary = target;
 #ifdef _WIN32
-    temporary += fmt::format(".tmp.{}.{}", _getpid(), save_serial++);
-    FILE* const fp = _wfopen(temporary.c_str(), L"wbx");
+        temporary += fmt::format(".tmp.{}.{}", _getpid(), save_serial++);
+        fp = _wfopen(temporary.c_str(), L"wbx");
 #else
-    temporary += fmt::format(".tmp.{}.{}", getpid(), save_serial++);
-    const int fd = open(temporary.c_str(), O_WRONLY | O_CREAT | O_EXCL | O_CLOEXEC, 0600);
-    FILE* const fp = fd < 0 ? nullptr : fdopen(fd, "wb");
-    if (fd >= 0 && fp == nullptr) {
-        close(fd);
-        std::filesystem::remove(temporary, error);
-    }
+        temporary += fmt::format(".tmp.{}.{}", getpid(), save_serial++);
+        const int fd = open(temporary.c_str(), O_WRONLY | O_CREAT | O_EXCL | O_CLOEXEC, 0600);
+        fp = fd < 0 ? nullptr : fdopen(fd, "wb");
+        if (fd >= 0 && fp == nullptr) {
+            close(fd);
+            std::filesystem::remove(temporary, error);
+            break;
+        }
 #endif
+        if (fp == nullptr && errno != EEXIST) {
+            break;
+        }
+    }
     if (fp == nullptr) {
         LOG_ERROR(Frontend, "Config file could not be saved!");
         return;
@@ -140,7 +150,19 @@ void Config::WriteToIni() const {
     }
     const auto status = std::filesystem::status(target, error);
     if (!error && std::filesystem::exists(status)) {
-        std::filesystem::permissions(temporary, status.permissions(), error);
+#ifndef _WIN32
+        // The replacement keeps the config's group, so the mode copied below means the same. If the
+        // group can't be kept, the replacement is owner-only rather than open to another group.
+        auto permissions = status.permissions();
+        struct stat target_stat {};
+        if (stat(target.c_str(), &target_stat) != 0 ||
+            chown(temporary.c_str(), static_cast<uid_t>(-1), target_stat.st_gid) != 0) {
+            permissions &= std::filesystem::perms::owner_all;
+        }
+#else
+        const auto permissions = status.permissions();
+#endif
+        std::filesystem::permissions(temporary, permissions, error);
         if (error) {
             LOG_ERROR(Frontend, "Config file could not be saved: {}", error.message());
             std::filesystem::remove(temporary, error);
