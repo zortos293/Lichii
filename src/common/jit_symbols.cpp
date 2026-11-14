@@ -23,10 +23,8 @@ std::map<std::uintptr_t, Range> ranges;
 
 bool Enabled() {
     static const bool enabled = [] {
-        if (const char* value = std::getenv("EDEN_NX2_JIT_SYMBOLS")) {
-            return value[0] == '1';
-        }
-        return std::getenv("EDEN_NX2_DEBUG_SERVER") != nullptr;
+        const char* value = std::getenv("EDEN_NX2_JIT_SYMBOLS");
+        return value != nullptr && value[0] == '1';
     }();
     return enabled;
 }

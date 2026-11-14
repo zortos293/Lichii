@@ -9,9 +9,8 @@
 
 // Host code ranges of JIT-compiled guest blocks, so the Windows sampler (nx2_sampler) can name
 // the guest code a guest CPU thread runs instead of "(jit)". Dynarmic's perf map feeds it on
-// Windows (on Linux the same names go to perf's /tmp/perf-<pid>.map). It records only while the
-// debug server is configured (EDEN_NX2_DEBUG_SERVER) or EDEN_NX2_JIT_SYMBOLS=1, and never with
-// EDEN_NX2_JIT_SYMBOLS=0.
+// Windows (on Linux the same names go to perf's /tmp/perf-<pid>.map). It records only with
+// EDEN_NX2_JIT_SYMBOLS=1: naming takes a process-wide lock per compiled block.
 namespace Common::JitSymbols {
 
 bool Enabled();
