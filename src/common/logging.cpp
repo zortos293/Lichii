@@ -305,7 +305,7 @@ struct FileBackend final : public Backend {
 
         // Option to log each line rather than 4k buffers
         if (Settings::values.log_flush_line.GetValue())
-            file->Flush();
+            Flush();
 
         using namespace Common::Literals;
         // Prevent logs from exceeding a set maximum size in the event that log entries are spammed.
@@ -316,12 +316,18 @@ struct FileBackend final : public Backend {
             // Don't close the file so we can print a stacktrace if necessary
             if (write_limit_exceeded)
                 enabled = false;
-            file->Flush();
+            Flush();
         }
     }
 
     void Flush() noexcept override {
+        // A failed flush logs an Error, whose own flush would fail and log again without end.
+        static thread_local bool flushing = false;
+        if (flushing)
+            return;
+        flushing = true;
         file->Flush();
+        flushing = false;
     }
 
     std::filesystem::path file_path;
