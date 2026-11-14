@@ -14,6 +14,7 @@
 
 #include <fmt/format.h>
 #include <algorithm>
+#include <filesystem>
 
 namespace PlayTime {
 
@@ -73,14 +74,6 @@ std::optional<std::filesystem::path> GetCurrentUserPlayTimePath() {
         return false;
     }
 
-    Common::FS::IOFile file{filename.value(), Common::FS::FileAccessMode::Write,
-                            Common::FS::FileType::BinaryFile};
-    if (!file.IsOpen()) {
-        LOG_ERROR(Frontend, "Failed to open play time file: {}",
-                  Common::FS::PathToUTF8String(filename.value()));
-        return false;
-    }
-
     std::vector<PlayTimeElement> elements;
     elements.reserve(play_time_db.size());
 
@@ -90,7 +83,35 @@ std::optional<std::filesystem::path> GetCurrentUserPlayTimePath() {
         }
     }
 
-    return file.WriteSpan<PlayTimeElement>(elements) == elements.size();
+    // Written beside the database and renamed over it once complete: a process that ends during
+    // the save (a stuck shutdown exits after 5 s) keeps the previous play times.
+    auto temporary = filename.value();
+    temporary += ".tmp";
+    bool written = false;
+    {
+        Common::FS::IOFile file{temporary, Common::FS::FileAccessMode::Write,
+                                Common::FS::FileType::BinaryFile};
+        if (!file.IsOpen()) {
+            LOG_ERROR(Frontend, "Failed to open play time file: {}",
+                      Common::FS::PathToUTF8String(temporary));
+            return false;
+        }
+        written = file.WriteSpan<PlayTimeElement>(elements) == elements.size() && file.Flush();
+    }
+    std::error_code error;
+    if (!written) {
+        LOG_ERROR(Frontend, "Failed to write play time file: {}",
+                  Common::FS::PathToUTF8String(temporary));
+        std::filesystem::remove(temporary, error);
+        return false;
+    }
+    std::filesystem::rename(temporary, filename.value(), error);
+    if (error) {
+        LOG_ERROR(Frontend, "Failed to replace play time file: {}", error.message());
+        std::filesystem::remove(temporary, error);
+        return false;
+    }
+    return true;
 }
 
 } // namespace

@@ -5,6 +5,7 @@
 
 #include <algorithm>
 #include <array>
+#include <atomic>
 #include <cerrno>
 #include <cstdio>
 #include <filesystem>
@@ -19,8 +20,10 @@
 
 #ifdef _WIN32
 #include <io.h>
+#include <process.h>
 #include "common/string_util.h"
 #else
+#include <fcntl.h>
 #include <unistd.h>
 #endif
 
@@ -105,13 +108,21 @@ void Config::WriteToIni() const {
         LOG_ERROR(Frontend, "Config file could not be saved: it can't be written");
         return;
     }
+    // A name of its own per save, created exclusively and owner-only, so overlapping saves don't
+    // write into each other's file and the contents are never readable by others.
+    static std::atomic<unsigned> save_serial{};
     std::filesystem::path temporary = target;
-    temporary += ".tmp";
-
 #ifdef _WIN32
-    FILE* const fp = _wfopen(temporary.c_str(), L"wb");
+    temporary += fmt::format(".tmp.{}.{}", _getpid(), save_serial++);
+    FILE* const fp = _wfopen(temporary.c_str(), L"wbx");
 #else
-    FILE* const fp = std::fopen(temporary.c_str(), "wb");
+    temporary += fmt::format(".tmp.{}.{}", getpid(), save_serial++);
+    const int fd = open(temporary.c_str(), O_WRONLY | O_CREAT | O_EXCL | O_CLOEXEC, 0600);
+    FILE* const fp = fd < 0 ? nullptr : fdopen(fd, "wb");
+    if (fd >= 0 && fp == nullptr) {
+        close(fd);
+        std::filesystem::remove(temporary, error);
+    }
 #endif
     if (fp == nullptr) {
         LOG_ERROR(Frontend, "Config file could not be saved!");
@@ -130,6 +141,11 @@ void Config::WriteToIni() const {
     const auto status = std::filesystem::status(target, error);
     if (!error && std::filesystem::exists(status)) {
         std::filesystem::permissions(temporary, status.permissions(), error);
+        if (error) {
+            LOG_ERROR(Frontend, "Config file could not be saved: {}", error.message());
+            std::filesystem::remove(temporary, error);
+            return;
+        }
     }
     // Replaces the target if it exists (MoveFileExW with MOVEFILE_REPLACE_EXISTING on Windows)
     std::filesystem::rename(temporary, target, error);
