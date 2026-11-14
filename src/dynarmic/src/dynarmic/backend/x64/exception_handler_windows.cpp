@@ -10,6 +10,8 @@
 #include <windows.h>
 
 #include <cstring>
+#include <iterator>
+#include <string>
 #include <vector>
 
 #include "common/assert.h"
@@ -208,12 +210,28 @@ struct ExceptionHandler::Impl final {
                 }
             }
             // Not a fastmem access: the crash handler reports it with the real exception record.
+            // The code bytes around Rip tell a miscompile from corrupted code; the minidump has none.
+            // ReadProcessMemory fails instead of faulting on uncommitted code cache pages.
+            u8 bytes[32];
+            SIZE_T read = 0;
+            u64 from = ctx->Rip - 16;
+            if (!ReadProcessMemory(GetCurrentProcess(), reinterpret_cast<void*>(from), bytes, sizeof(bytes), &read)) {
+                from = ctx->Rip;
+                if (!ReadProcessMemory(GetCurrentProcess(), reinterpret_cast<void*>(from), bytes, 16, &read)) {
+                    read = 0;
+                }
+            }
+            std::string hex;
+            for (SIZE_T i = 0; i < read; ++i) {
+                fmt::format_to(std::back_inserter(hex), "{}{:02x}", from + i == ctx->Rip ? " | " : i ? " " : "", bytes[i]);
+            }
             LOG_CRITICAL(Core,
                          "Exception {:#010x} in JIT code at rip {:#018x} (code block +{:#x}) is not a "
-                         "fastmem access; info {:#x} {:#x}",
+                         "fastmem access; info {:#x} {:#x}; code from rip-{}: {}",
                          record->ExceptionCode, ctx->Rip, offset,
                          record->NumberParameters > 0 ? record->ExceptionInformation[0] : 0,
-                         record->NumberParameters > 1 ? record->ExceptionInformation[1] : 0);
+                         record->NumberParameters > 1 ? record->ExceptionInformation[1] : 0,
+                         ctx->Rip - from, read ? hex : "unreadable");
             return ExceptionContinueSearch;
         });
         code.add(code.rsp, 8 + 32);
