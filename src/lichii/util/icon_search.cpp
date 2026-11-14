@@ -638,10 +638,11 @@ ArtworkLookupResult LookUpSteamGridDbArtwork(const std::string& title, const std
             const Entry* searched_name_in_year = nullptr;
             if (wanted_year != 0) {
                 for (const auto& entry : entries) {
-                    if (entry.year != wanted_year) {
+                    const std::string name = simple_name(entry.name);
+                    // Names with no ASCII letters or digits (Japanese-only) all match each other.
+                    if (entry.year != wanted_year || name.empty()) {
                         continue;
                     }
-                    const std::string name = simple_name(entry.name);
                     if (!same_name_in_year && name == best_name) {
                         same_name_in_year = &entry;
                     }
@@ -652,7 +653,7 @@ ArtworkLookupResult LookUpSteamGridDbArtwork(const std::string& title, const std
             }
             if (same_name_in_year || searched_name_in_year) {
                 chosen = same_name_in_year ? same_name_in_year : searched_name_in_year;
-            } else if (prefer_newest) {
+            } else if (prefer_newest && !best_name.empty()) {
                 for (const auto& entry : entries) {
                     if (simple_name(entry.name) == best_name && entry.release > chosen->release) {
                         chosen = &entry;

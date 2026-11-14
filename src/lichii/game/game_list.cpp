@@ -488,7 +488,11 @@ void GameList::StartArtworkLookups() {
             const bool artwork_added =
                 !lookup.forced &&
                 std::filesystem::exists(QtCommon::Game::CustomArtworkPath(lookup.program_id), ec);
-            if (result.status == ArtworkLookupStatus::Found && newest && !artwork_added) {
+            // A lookup whose key was cleared or replaced while it ran saves nothing.
+            const bool key_current =
+                lookup.key == UISettings::values.steamgriddb_api_key.GetValue();
+            if (result.status == ArtworkLookupStatus::Found && newest && !artwork_added &&
+                key_current) {
                 if (QtCommon::Game::SaveCustomArtwork(lookup.program_id, result.image)) {
                     LOG_INFO(Frontend, "SteamGridDB artwork saved for {:016X}", lookup.program_id);
                     artwork_saved.insert(lookup.program_id);
