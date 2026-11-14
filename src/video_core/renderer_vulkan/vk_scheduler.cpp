@@ -869,6 +869,16 @@ void Scheduler::ReportSiteTimes(const std::vector<u64>& submission_begin,
         add(site.file == nullptr ? SiteKey{"(after the marker limit)", 0} : site_key(site), ms);
         total_ms += ms;
     }
+    // Submissions after the one that ran out of markers have none: all of their time goes to the
+    // same entry.
+    if (count > TraceMaxSites) {
+        for (u32 s = trace_site_items[TraceMaxSites].submission + 1; s < submission_end.size();
+             ++s) {
+            const double ms = to_ms(submission_begin[s], submission_end[s]);
+            add(SiteKey{"(after the marker limit)", 0}, ms);
+            total_ms += ms;
+        }
+    }
     std::vector<std::pair<SiteKey, Totals>> sorted(by_site.begin(), by_site.end());
     std::ranges::sort(sorted, std::greater<>{},
                       [](const auto& entry) { return entry.second.ms; });
