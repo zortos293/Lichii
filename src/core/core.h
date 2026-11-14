@@ -123,6 +123,9 @@ extern std::atomic<u64> g_nx2_present_count;
 /// Steady-clock time of each guest present, by present count, for the debug server's frame_times
 /// tool and bug reports.
 extern std::array<std::atomic<u64>, 4096> g_nx2_present_times_ns;
+/// Called by RecordGuestPresent with each new count, right after the count, while set. Only the
+/// debug server's frame-step input sets it.
+extern std::atomic<void (*)(u64)> g_nx2_present_hook;
 void RecordGuestPresent();
 
 class CpuManager;

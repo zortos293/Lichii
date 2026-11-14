@@ -110,6 +110,9 @@ public:
 
     void UpdateControllers(std::chrono::nanoseconds ns_late);
     void UpdateNpad(std::chrono::nanoseconds ns_late);
+    /// One npad update that writes the current pad state without the turbo and forced-motion
+    /// step. The debug server's frame-step input calls it right after each present's count.
+    void PublishNpad();
     void UpdateMouseKeyboard(std::chrono::nanoseconds ns_late);
     void UpdateMotion(std::chrono::nanoseconds ns_late);
 
