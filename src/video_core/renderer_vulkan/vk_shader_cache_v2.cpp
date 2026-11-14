@@ -8,11 +8,16 @@
 #include <istream>
 #include <map>
 #include <unordered_map>
+#include <unordered_set>
 
 #include "common/fs/path_util.h"
 #include "common/logging.h"
 #include "common/unique_function.h"
+#include "shader_recompiler/program_header.h"
+#include "shader_recompiler/stage.h"
+#include "video_core/engines/maxwell_3d.h"
 #include "video_core/pipeline_cache_files.h"
+#include "video_core/pipeline_cache_policy.h"
 #include "video_core/renderer_vulkan/vk_graphics_pipeline.h"
 #include "video_core/renderer_vulkan/vk_pipeline_cache.h"
 #include "video_core/renderer_vulkan/vk_pipeline_cache_records.h"
@@ -361,6 +366,93 @@ std::vector<ShaderCacheV2::LogAppend> RelinkPipelineRecords(
     return appends;
 }
 
+std::unordered_map<u64, u64> ProgramAttributeMasks(std::span<const ShaderCacheV2::LogRecord> live) {
+    std::unordered_map<u64, u64> masks;
+    for (const ShaderCacheV2::LogRecord& record : live) {
+        if (record.kind != RecordKind::Program) {
+            continue;
+        }
+        const auto identity = ShaderCacheV2::ReadProgramIdentity(record.payload);
+        if (!identity) {
+            continue;
+        }
+        u64 mask = ~u64{0};
+        if (identity->stage == static_cast<u32>(Shader::Stage::VertexB)) {
+            Shader::ProgramHeader sph;
+            static_assert(sizeof(sph) == sizeof(identity->sph));
+            std::memcpy(&sph, identity->sph.data(), sizeof(sph));
+            std::array<std::array<bool, 4>, Tegra::Engines::Maxwell3D::Regs::NumVertexAttributes> input_generic{};
+            for (size_t index = 0; index < input_generic.size(); ++index) {
+                input_generic[index] = sph.vtg.InputGeneric(index);
+            }
+            mask = VideoCommon::VertexAttributeMask(input_generic);
+        }
+        masks.insert_or_assign(identity->unique_hash, mask);
+    }
+    return masks;
+}
+
+MaskedPipelineRecords MaskPipelineAttributeTypes(
+    std::span<const ShaderCacheV2::LogRecord* const> records,
+    const std::unordered_map<u64, u64>& masks, const std::function<bool()>& stop) {
+    MaskedPipelineRecords result;
+    if (masks.empty()) {
+        return result;
+    }
+    std::unordered_set<u64> graphics_keys;
+    for (const ShaderCacheV2::LogRecord* const record : records) {
+        if (record->kind == RecordKind::Graphics) {
+            graphics_keys.insert(record->key);
+        }
+    }
+    for (const ShaderCacheV2::LogRecord* const record : records) {
+        if (stop && stop()) {
+            break;
+        }
+        if (record->kind != RecordKind::Graphics) {
+            continue;
+        }
+        auto key = PipelineRecordKey<GraphicsPipelineCacheKey>(record->payload);
+        if (!key || key->state.dynamic_vertex_input == 0 || key->state.attribute_types == 0) {
+            continue;
+        }
+        std::array<u64, Tegra::Engines::Maxwell3D::Regs::MaxShaderProgram> attribute_masks{};
+        bool known = true;
+        for (size_t stage = 0; stage < key->unique_hashes.size(); ++stage) {
+            if (key->unique_hashes[stage] == 0) {
+                continue;
+            }
+            const auto it = masks.find(key->unique_hashes[stage]);
+            if (it == masks.end()) {
+                known = false;
+                break;
+            }
+            attribute_masks[stage] = it->second;
+        }
+        if (!known) {
+            continue;
+        }
+        const u64 attribute_types = VideoCommon::KeyedAttributeTypes(
+            key->state.attribute_types, key->unique_hashes, attribute_masks);
+        if (attribute_types == key->state.attribute_types) {
+            continue;
+        }
+        key->state.attribute_types = attribute_types;
+        const u64 new_key = GraphicsRecordKey(*key);
+        // Records that differed only in unread attribute types share the masked key
+        if (graphics_keys.insert(new_key).second) {
+            std::vector<u8> payload(record->payload.begin(), record->payload.end());
+            std::memcpy(payload.data() + payload.size() - sizeof(*key), &*key, sizeof(*key));
+            result.appends.push_back({RecordKind::Graphics, new_key, std::move(payload)});
+        }
+        result.appends.push_back({RecordKind::Tombstone, record->key,
+                                  ShaderCacheV2::TombstonePayload(record->kind)});
+        result.moves.push_back({RecordKind::Graphics, new_key, {}});
+        result.moves.push_back({RecordKind::Tombstone, record->key, {}});
+    }
+    return result;
+}
+
 namespace {
 struct UsedSession {
     u64 key;
@@ -417,9 +509,16 @@ std::vector<ShaderCacheV2::LogAppend> RelinkUsedPipelines(
     if (moved.empty()) {
         return result;
     }
+    // A record can move twice in one boot (to relowered programs, then to its attribute mask)
     const auto new_key = [&moved](u64 key) {
-        const auto it = moved.find(key);
-        return it == moved.end() ? key : it->second;
+        for (size_t step = 0; step < 2; ++step) {
+            const auto it = moved.find(key);
+            if (it == moved.end()) {
+                break;
+            }
+            key = it->second;
+        }
+        return key;
     };
     std::unordered_map<u64, u8> relinked_used;
     for (const auto& [key, age] : used) {

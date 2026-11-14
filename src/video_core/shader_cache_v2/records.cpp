@@ -230,6 +230,27 @@ std::optional<u64> ProgramStamp(std::span<const u8> payload) {
     return stamp;
 }
 
+std::optional<ProgramIdentity> ReadProgramIdentity(std::span<const u8> payload) {
+    // Laid out as EncodeProgram writes them
+    constexpr size_t StageOffset = 4 + 1 + 1 + 2;
+    constexpr size_t UniqueHashOffset = StageOffset + 7 * 4 + 3 * 8;
+    constexpr size_t SphOffset = UniqueHashOffset + 8;
+    ProgramIdentity identity;
+    u32 version{};
+    if (payload.size() < SphOffset + identity.sph.size()) {
+        return std::nullopt;
+    }
+    std::memcpy(&version, payload.data(), sizeof(version));
+    if (version != ProgramPayloadVersion) {
+        return std::nullopt;
+    }
+    std::memcpy(&identity.stage, payload.data() + StageOffset, sizeof(identity.stage));
+    std::memcpy(&identity.unique_hash, payload.data() + UniqueHashOffset,
+                sizeof(identity.unique_hash));
+    std::memcpy(identity.sph.data(), payload.data() + SphOffset, identity.sph.size());
+    return identity;
+}
+
 std::vector<u8> EncodeUsed(const UsedRecord& record) {
     PayloadWriter out;
     out.Put(record.session_time);

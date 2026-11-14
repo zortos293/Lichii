@@ -54,6 +54,7 @@
 #include "video_core/nx2_profile.h"
 #include "video_core/nx2_stutter_trace.h"
 #include "video_core/pipeline_cache_files.h"
+#include "video_core/pipeline_cache_policy.h"
 #include "video_core/renderer_vulkan/async_draw_policy.h"
 #include "video_core/renderer_vulkan/fixed_pipeline_state.h"
 #include "video_core/renderer_vulkan/maxwell_to_vk.h"
@@ -998,8 +999,25 @@ GraphicsPipeline* PipelineCache::CurrentGraphicsPipeline() {
         current_pipeline = nullptr;
         return nullptr;
     }
+    if (dynamic_features.has_dynamic_vertex_input) {
+        graphics_key.state.attribute_types = vertex_attribute_types;
+    }
     graphics_key.state.Refresh(*maxwell3d, dynamic_features);
-
+    if (dynamic_features.has_dynamic_vertex_input) {
+        // Refresh only rewrites the types when the vertex input changes, so the masked copy in the
+        // key must not carry over to the next program. Types of attributes the program doesn't
+        // read would split its pipelines by whatever the game left in those registers (Ocarina
+        // of Time: up to 20 keys for the same shaders, each built again in a later session).
+        vertex_attribute_types = graphics_key.state.attribute_types;
+        std::array<u64, Maxwell::MaxShaderProgram> attribute_masks{};
+        for (size_t stage = 0; stage < Maxwell::MaxShaderProgram; ++stage) {
+            if (graphics_key.unique_hashes[stage] != 0) {
+                attribute_masks[stage] = shader_infos[stage]->vertex_attribute_mask;
+            }
+        }
+        graphics_key.state.attribute_types = VideoCommon::KeyedAttributeTypes(
+            vertex_attribute_types, graphics_key.unique_hashes, attribute_masks);
+    }
     if (current_pipeline) {
         GraphicsPipeline* const next{current_pipeline->Next(graphics_key)};
         if (next) {
@@ -1469,6 +1487,10 @@ void PipelineCache::LoadPipelinesV2(u64 title_id,
     std::vector<CacheV2::LogAppend> relinked_appends;
     std::vector<CacheV2::LogRecord> relinked_records;
     std::unordered_set<u64> replaced_records;
+    std::unordered_map<u64, u64> attribute_masks;
+    if (dynamic_features.has_dynamic_vertex_input) {
+        attribute_masks = ProgramAttributeMasks(log->parsed.live);
+    }
     if (build_at_boot && !stale_programs.empty() && !stop_loading.stop_requested()) {
         const size_t stale_count = stale_programs.size();
         CacheV2::ForEach for_each = [&jobs](size_t count, const std::function<void(size_t)>& task) {
@@ -1492,21 +1514,21 @@ void PipelineCache::LoadPipelinesV2(u64 title_id,
                                             .offset = 0,
                                             .payload = append.payload});
             }
-            for (const CacheV2::LogAppend& append :
-                 RelinkUsedPipelines(log->parsed.live, relinked_appends, MaxUsedPipelineAge(device),
-                                     used_pipelines)) {
-                cache_v2->Writer().Append(append.kind, append.key, append.payload);
-            }
             for (const CacheV2::ProgramRecord& program : revalidated.unchanged) {
                 cache_v2->RecordProgram(program);
             }
             for (const auto& [hash, relinked] : revalidated.relinked) {
                 cache_v2->RecordProgram(relinked.program);
+                if (const auto mask = attribute_masks.find(hash); mask != attribute_masks.end()) {
+                    attribute_masks.insert_or_assign(relinked.program.unique_hash, mask->second);
+                }
             }
             LOG_INFO(Render_Vulkan,
                      "Shader cache v2: {} programs of another build lowered again, {} to other "
                      "code or texture bound buffer, {} pipeline records moved to it",
                      stale_count, revalidated.relinked.size(), relinked_records.size());
+        } else {
+            relinked_appends.clear();
         }
     }
     std::vector<const CacheV2::LogRecord*> plan;
@@ -1521,6 +1543,52 @@ void PipelineCache::LoadPipelinesV2(u64 title_id,
     }
     for (const CacheV2::LogRecord& record : relinked_records) {
         plan.push_back(&record);
+    }
+    // Records keyed with every attribute type move to the keys of the attributes their programs read
+    MaskedPipelineRecords masked;
+    std::vector<CacheV2::LogRecord> masked_records;
+    if (build_at_boot && !stop_loading.stop_requested()) {
+        masked = MaskPipelineAttributeTypes(
+            plan, attribute_masks, [&stop_loading] { return stop_loading.stop_requested(); });
+    }
+    if (!masked.appends.empty() && !stop_loading.stop_requested()) {
+        std::unordered_set<u64> masked_away;
+        for (const CacheV2::LogAppend& append : masked.appends) {
+            cache_v2->Writer().Append(append.kind, append.key, append.payload);
+            if (append.kind == RecordKind::Tombstone) {
+                masked_away.insert(append.key);
+                continue;
+            }
+            masked_records.push_back({.kind = append.kind,
+                                      .flags = 0,
+                                      .key = append.key,
+                                      .offset = 0,
+                                      .payload = append.payload});
+        }
+        std::erase_if(plan, [&masked_away](const CacheV2::LogRecord* record) {
+            return record->kind == RecordKind::Graphics && masked_away.contains(record->key);
+        });
+        for (const CacheV2::LogRecord& record : masked_records) {
+            plan.push_back(&record);
+        }
+        LOG_INFO(Render_Vulkan,
+                 "Shader cache v2: {} pipeline records moved to the vertex attributes they read",
+                 masked_away.size());
+    } else {
+        masked.moves.clear();
+    }
+    // Moves already written are relinked even when loading stops, or the used lists would keep
+    // the keys of tombstoned records
+    if (!relinked_appends.empty() || !masked.moves.empty()) {
+        std::vector<CacheV2::LogAppend> moves;
+        for (const CacheV2::LogAppend& append : relinked_appends) {
+            moves.push_back({append.kind, append.key, {}});
+        }
+        moves.insert(moves.end(), masked.moves.begin(), masked.moves.end());
+        for (const CacheV2::LogAppend& append : RelinkUsedPipelines(
+                 log->parsed.live, moves, MaxUsedPipelineAge(device), used_pipelines)) {
+            cache_v2->Writer().Append(append.kind, append.key, append.payload);
+        }
     }
 
     size_t graphics_records = 0;

@@ -1023,6 +1023,119 @@ TEST_CASE("Shader cache v2: a program whose texture bound buffer alone moved is 
     REQUIRE(Vulkan::PipelineRecordKey<Vulkan::ComputePipelineCacheKey>(appends[1].payload)
                 ->unique_hash == current.unique_hash);
 }
+
+TEST_CASE("Shader cache v2: graphics records move to the vertex attributes their programs read",
+          "[video_core][shader_cache_v2]") {
+    V2::ProgramRecord vertex = LowerTestProgram(PlainProgram, false, 0);
+    Shader::ProgramHeader sph{};
+    std::memset(&sph, 0, sizeof(sph));
+    sph.vtg.imap_generic_vector[0] = 0x10; // Attribute 1, x
+    std::memcpy(vertex.sph.data(), &sph, sizeof(sph));
+    const V2::ProgramRecord geometry = LowerTestProgram(ProgramCounterProgram, true, 0x40);
+    REQUIRE(vertex.unique_hash != geometry.unique_hash);
+
+    const auto identity = V2::ReadProgramIdentity(V2::EncodeProgram(vertex));
+    REQUIRE(identity.has_value());
+    REQUIRE(identity->stage == static_cast<u32>(Shader::Stage::VertexB));
+    REQUIRE(identity->unique_hash == vertex.unique_hash);
+    REQUIRE(identity->sph == vertex.sph);
+
+    const NativeTestEnvironment vertex_env{Shader::Stage::VertexB, vertex.lowered_code, 5};
+    const NativeTestEnvironment geometry_env{Shader::Stage::Geometry, geometry.lowered_code, 5};
+    const auto payload = [&](const Vulkan::GraphicsPipelineCacheKey& key) {
+        const std::array<const VideoCommon::GenericEnvironment*, 2> envs{&vertex_env,
+                                                                        &geometry_env};
+        return VideoCommon::SerializePipelinePayload(KeyBytes(key), envs, ReadProperties);
+    };
+    auto key = TestGraphicsKey(geometry.unique_hash, 0);
+    key.unique_hashes[1] = vertex.unique_hash;
+    key.state.dynamic_vertex_input.Assign(1);
+    key.state.attribute_types = 0b111111;
+    auto masked_key = key;
+    masked_key.state.attribute_types = 0b001100;
+    auto static_input = key;
+    static_input.state.dynamic_vertex_input.Assign(0);
+    auto mesh = key;
+    mesh.unique_hashes[1] ^= 0x77;
+    auto vertex_a = key;
+    vertex_a.unique_hashes[0] = vertex.unique_hash;
+
+    const auto header = V2::EncodeFileHeader(1);
+    std::vector<u8> bytes(header.begin(), header.end());
+    V2::EncodeRecord(bytes, RecordKind::Program, V2::ProgramKey(vertex), V2::EncodeProgram(vertex));
+    V2::EncodeRecord(bytes, RecordKind::Program, V2::ProgramKey(geometry),
+                     V2::EncodeProgram(geometry));
+    for (const auto& record_key : {key, masked_key, static_input, mesh, vertex_a}) {
+        V2::EncodeRecord(bytes, RecordKind::Graphics, Vulkan::GraphicsRecordKey(record_key),
+                         payload(record_key));
+    }
+    const V2::ParsedLog log = V2::ParseLog(bytes);
+    REQUIRE(log.live.size() == 7);
+
+    const auto masks = Vulkan::ProgramAttributeMasks(log.live);
+    REQUIRE(masks == std::unordered_map<u64, u64>{{vertex.unique_hash, 0b1100},
+                                                 {geometry.unique_hash, ~u64{0}}});
+    std::vector<const V2::LogRecord*> records;
+    for (const V2::LogRecord& record : log.live) {
+        records.push_back(&record);
+    }
+    // The masked key already has its own record, which is kept
+    const auto masked = Vulkan::MaskPipelineAttributeTypes(records, masks);
+    REQUIRE(masked.appends ==
+            std::vector<V2::LogAppend>{{RecordKind::Tombstone, Vulkan::GraphicsRecordKey(key),
+                                        V2::TombstonePayload(RecordKind::Graphics)}});
+    REQUIRE(masked.moves ==
+            std::vector<V2::LogAppend>{
+                {RecordKind::Graphics, Vulkan::GraphicsRecordKey(masked_key), {}},
+                {RecordKind::Tombstone, Vulkan::GraphicsRecordKey(key), {}}});
+    REQUIRE(
+        Vulkan::MaskPipelineAttributeTypes(records, masks, [] { return true; }).appends.empty());
+    REQUIRE(Vulkan::MaskPipelineAttributeTypes(records, {}).appends.empty());
+
+    // Two records that differ only in unread attribute types move to one record
+    auto other_unread = key;
+    other_unread.state.attribute_types = 0b011110;
+    std::vector<u8> merged_bytes(header.begin(), header.end());
+    for (const auto& record_key : {key, other_unread}) {
+        V2::EncodeRecord(merged_bytes, RecordKind::Graphics, Vulkan::GraphicsRecordKey(record_key),
+                         payload(record_key));
+    }
+    const V2::ParsedLog merged_log = V2::ParseLog(merged_bytes);
+    std::vector<const V2::LogRecord*> merged_records;
+    for (const V2::LogRecord& record : merged_log.live) {
+        merged_records.push_back(&record);
+    }
+    const auto merged = Vulkan::MaskPipelineAttributeTypes(merged_records, masks);
+    REQUIRE(merged.appends ==
+            std::vector<V2::LogAppend>{
+                {RecordKind::Graphics, Vulkan::GraphicsRecordKey(masked_key), payload(masked_key)},
+                {RecordKind::Tombstone, Vulkan::GraphicsRecordKey(key),
+                 V2::TombstonePayload(RecordKind::Graphics)},
+                {RecordKind::Tombstone, Vulkan::GraphicsRecordKey(other_unread),
+                 V2::TombstonePayload(RecordKind::Graphics)}});
+    REQUIRE(merged.moves ==
+            std::vector<V2::LogAppend>{
+                {RecordKind::Graphics, Vulkan::GraphicsRecordKey(masked_key), {}},
+                {RecordKind::Tombstone, Vulkan::GraphicsRecordKey(key), {}},
+                {RecordKind::Graphics, Vulkan::GraphicsRecordKey(masked_key), {}},
+                {RecordKind::Tombstone, Vulkan::GraphicsRecordKey(other_unread), {}}});
+
+    // A record moved by a relink and then by its mask in one boot
+    V2::EncodeRecord(bytes, RecordKind::Used, 100,
+                     V2::EncodeUsed({.session_time = 10, .pipelines = {1}}));
+    const V2::ParsedLog used_log = V2::ParseLog(bytes);
+    std::unordered_map<u64, u8> used{{1, 0}};
+    const std::vector<V2::LogAppend> moves{
+        {RecordKind::Graphics, 2, {}},
+        {RecordKind::Tombstone, 1, V2::TombstonePayload(RecordKind::Graphics)},
+        {RecordKind::Graphics, 3, {}},
+        {RecordKind::Tombstone, 2, V2::TombstonePayload(RecordKind::Graphics)},
+    };
+    REQUIRE(Vulkan::RelinkUsedPipelines(used_log.live, moves, 2, used) ==
+            std::vector<V2::LogAppend>{
+                {RecordKind::Used, 100, V2::EncodeUsed({.session_time = 10, .pipelines = {3}})}});
+    REQUIRE(used == std::unordered_map<u64, u8>{{3, 0}});
+}
 TEST_CASE("Shader cache v2: an older Vulkan cache and its used list are migrated",
           "[video_core][shader_cache_v2]") {
     TempDir temp;

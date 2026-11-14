@@ -104,6 +104,28 @@ struct RekeyedRecord {
     std::span<const VideoCommon::ShaderCacheV2::LogRecord> live, const RelinkedPrograms& programs,
     const std::function<bool()>& stop = {});
 
+/// The vertex attribute masks (VertexAttributeMask) of the programs among `live`'s Program records
+/// by unique hash, all attributes for stages other than VertexB
+[[nodiscard]] std::unordered_map<u64, u64> ProgramAttributeMasks(
+    std::span<const VideoCommon::ShaderCacheV2::LogRecord> live);
+
+struct MaskedPipelineRecords {
+    /// Each moved record's new record, unless a graphics record already holds its key, then a
+    /// tombstone for its old key
+    std::vector<VideoCommon::ShaderCacheV2::LogAppend> appends;
+    /// Each move as its new key's graphics record and its old key's tombstone, without payloads
+    /// (for RelinkUsedPipelines)
+    std::vector<VideoCommon::ShaderCacheV2::LogAppend> moves;
+};
+
+/// Moves the graphics records among `records` keyed with vertex attribute types their programs
+/// never read to the key the pipeline cache looks them up with (KeyedAttributeTypes). A record with
+/// a program missing from `masks` (task and mesh pipelines, whose keys mix in the mesh state) is
+/// left alone.
+[[nodiscard]] MaskedPipelineRecords MaskPipelineAttributeTypes(
+    std::span<const VideoCommon::ShaderCacheV2::LogRecord* const> records,
+    const std::unordered_map<u64, u64>& masks, const std::function<bool()>& stop = {});
+
 /// The used-list session key and time of a used list carried over: `age` sessions old
 [[nodiscard]] u64 MigratedUsedSessionKey(u8 age);
 [[nodiscard]] u64 MigratedUsedSessionTime(u8 age);
