@@ -171,6 +171,8 @@ Errno TranslateNativeError(int e, CallType call_type = CallType::Other) {
         return Errno::INPROGRESS;
     case WSAEISCONN:
         return Errno::ISCONN;
+    case WSAEADDRINUSE:
+        return Errno::ADDRINUSE;
     default:
         UNIMPLEMENTED_MSG("Unimplemented errno={}", e);
         return Errno::OTHER;
@@ -320,6 +322,8 @@ Errno TranslateNativeError(int e, CallType call_type = CallType::Other) {
         return Errno::INPROGRESS;
     case EISCONN:
         return Errno::ISCONN;
+    case EADDRINUSE:
+        return Errno::ADDRINUSE;
     default:
         UNIMPLEMENTED_MSG("Unimplemented errno={} ({})", e, strerror(e));
         return Errno::OTHER;
@@ -763,10 +767,8 @@ std::optional<IPv4Address> GetRoomIPv4Address() {
     }
     if (const auto room_member = GetRoomMember().lock()) {
         // The room host and moderators are in the Moderator state instead of Joined
-        const auto state = room_member->GetState();
-        if (state == RoomMember::State::Joined || state == RoomMember::State::Moderator) {
-            return room_member->GetFakeIpAddress();
-        }
+        if (const auto identity = room_member->GetENetIdentity())
+            return identity->ip;
     }
     return std::nullopt;
 }

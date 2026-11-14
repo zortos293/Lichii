@@ -5,6 +5,7 @@
 #pragma once
 
 #include <condition_variable>
+#include <functional>
 #include <mutex>
 #include <span>
 #include <vector>
@@ -18,7 +19,8 @@ namespace Network {
 
 class ProxySocket : public SocketBase {
 public:
-    explicit ProxySocket() noexcept;
+    using LocalAddressProvider = std::function<std::vector<IPv4Address>()>;
+    explicit ProxySocket(LocalAddressProvider addresses = {});
     ~ProxySocket() override;
 
     bool AcceptsProxyPacket(const ProxyPacket& packet) override;
@@ -57,7 +59,7 @@ public:
 
     std::pair<s32, Errno> Send(std::span<const u8> message, int flags) override;
 
-    void SendPacket(ProxyPacket& packet);
+    bool SendPacket(ProxyPacket& packet);
 
     std::pair<s32, Errno> SendTo(u32 flags, std::span<const u8> message,
                                  const SockAddrIn* addr) override;
@@ -106,9 +108,11 @@ private:
     bool reuse_addr = false;
     bool no_delay = false;
     bool closed = false;
+    LocalAddressProvider local_addresses;
     u32 send_timeout = 0;
     u32 receive_timeout = 0;
     bool is_bound = false;
+    bool room_local_bind = false;
     SockAddrIn local_endpoint{};
     bool blocking = true;
     std::queue<ProxyPacket> received_packets;

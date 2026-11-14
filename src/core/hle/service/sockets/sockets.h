@@ -26,6 +26,7 @@ enum class Errno : u32 {
     MSGSIZE = 90,
     OPNOTSUPP = 95,
     AFNOSUPPORT = 97,
+    ADDRINUSE = 98,
     CONNABORTED = 103,
     CONNRESET = 104,
     NOTCONN = 107,
