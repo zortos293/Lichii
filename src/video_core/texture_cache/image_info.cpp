@@ -49,6 +49,7 @@ ImageInfo::ImageInfo(const TICEntry& config) noexcept {
     }
     rescaleable = false;
     is_sparse = config.is_sparse != 0;
+    maxwell_gobs = config.load_store_hint != 0;
     tile_width_spacing = config.tile_width_spacing;
     if (config.texture_type != TextureType::Texture2D &&
         config.texture_type != TextureType::Texture2DNoMipmap) {
@@ -106,7 +107,6 @@ ImageInfo::ImageInfo(const TICEntry& config) noexcept {
         resources.layers = config.BaseLayer() + 6;
         break;
     case TextureType::TextureCubeArray:
-        UNIMPLEMENTED_IF(config.load_store_hint != 0);
         type = ImageType::e2D;
         size.width = config.Width();
         size.height = config.Height();

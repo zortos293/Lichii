@@ -17,6 +17,7 @@
 #include "common/settings.h"
 #include "common/string_util.h"
 #include "core/core.h"
+#include "core/file_sys/common_funcs.h"
 #include "core/file_sys/content_archive.h"
 #include "core/file_sys/errors.h"
 #include "core/file_sys/fs_directory.h"
@@ -554,6 +555,22 @@ Result FSP_SRV::OpenDataStorageWithProgramIndex(OutInterface<IStorage> out_inter
 
     auto patched_romfs = romfs_controller->OpenPatchedRomFSWithProgramIndex(
         program_id, program_index, FileSys::ContentRecordType::Program);
+
+    // NUP containers have no NCA in the content provider; the current program's own index still
+    // resolves to the RomFS the loader already opened. Some Switch 2 Edition dumps also ship
+    // without the Switch 1 program 0 (Xenoblade Chronicles 2 keeps all its data in an add-on);
+    // the game still opens it and panics without it, so the running program stands in.
+    if (!patched_romfs) {
+        const bool own_index =
+            FileSys::GetBaseTitleIDWithProgramIndex(program_id, program_index) == program_id;
+        if (own_index || (program_index == 0 && Settings::CurrentProgramIsSwitch2())) {
+            if (!own_index) {
+                LOG_WARNING(Service_FS, "No program 0 for {:016X}, using its own RomFS for it",
+                            program_id);
+            }
+            patched_romfs = romfs_controller->OpenRomFSCurrentProcess();
+        }
+    }
 
     if (!patched_romfs) {
         // TODO: Find the right error code to use here

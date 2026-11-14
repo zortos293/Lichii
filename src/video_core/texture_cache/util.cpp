@@ -569,7 +569,8 @@ void SwizzleBlockLinearImage(Tegra::MemoryManager& gpu_memory, GPUVAddr gpu_addr
                 dst(gpu_memory, gpu_addr + guest_offset, subresource_size, &tmp_buffer);
 
             SwizzleTexture(dst, src, bytes_per_block, num_tiles.width, num_tiles.height,
-                           num_tiles.depth, block.height, block.depth, 1, gpu_memory.UsesNativeTiling());
+                           num_tiles.depth, block.height, block.depth, 1,
+                           UsesNativeGobs(gpu_memory.UsesNativeTiling(), info));
         }
 
         host_offset += host_bytes_per_layer;
@@ -924,10 +925,11 @@ boost::container::small_vector<BufferImageCopy, 16> UnswizzleImage(
                 !worker->TryUnswizzle(
                     dst.first(host_bytes_per_layer), src.first(level_sizes[level]), 1U << bpp_log2,
                     num_tiles.width, num_tiles.height, num_tiles.depth, block.height, block.depth,
-                    stride_alignment, gpu_memory.UsesNativeTiling(), Nx2Perf::Verify())) {
+                    stride_alignment, UsesNativeGobs(gpu_memory.UsesNativeTiling(), info),
+                    Nx2Perf::Verify())) {
                 UnswizzleTexture(dst, src, 1U << bpp_log2, num_tiles.width, num_tiles.height,
                                  num_tiles.depth, block.height, block.depth, stride_alignment,
-                                 gpu_memory.UsesNativeTiling());
+                                 UsesNativeGobs(gpu_memory.UsesNativeTiling(), info));
             }
             guest_layer_offset += layer_stride;
             host_offset += host_bytes_per_layer;
@@ -1117,7 +1119,7 @@ std::vector<BufferImageCopy> UnswizzleImageRects(Tegra::MemoryManager& gpu_memor
             gpu_memory.ReadBlockUnsafe(row_addr, swizzled.data(), row_bytes);
             UnswizzleTexture(output.subspan(output_offset, bytes), swizzled, 1U << bpp_log2, width,
                              texel_rows, 1, level.block_height, 0, 0,
-                             gpu_memory.UsesNativeTiling());
+                             UsesNativeGobs(gpu_memory.UsesNativeTiling(), info));
             const u32 row_y = row * level.block_rows;
             const u32 y0 = (std::max)(rect.y, row_y);
             const u32 y1 = (std::min)(rect.y + rect.height, row_y + texel_rows);
@@ -1152,6 +1154,7 @@ UnswizzlePlan PlanUnswizzleImageRows(
     }
     const u32 bpp_log2 = BytesPerBlockLog2(info.format);
     plan.bpp_log2 = bpp_log2;
+    plan.maxwell_gobs = info.maxwell_gobs;
     const Extent2D tile_size = DefaultBlockSize(info.format);
     const LevelInfo level_info = MakeLevelInfo(info);
     const s32 num_levels = info.resources.levels;
@@ -1273,7 +1276,7 @@ void ExecuteUnswizzlePlan(Tegra::MemoryManager& gpu_memory, const UnswizzlePlan&
         Tegra::Texture::UnswizzleTexture(output.subspan(r.host_offset, r.host_bytes),
                                          run, 1U << plan.bpp_log2, r.run_tiles, r.tile_rows, 1,
                                          r.block.height, r.block.depth, r.run_alignment,
-                                         gpu_memory.UsesNativeTiling());
+                                         gpu_memory.UsesNativeTiling() && !plan.maxwell_gobs);
     }
 }
 
@@ -1657,6 +1660,11 @@ std::optional<SubresourceBase> FindSubresource(const ImageInfo& candidate, const
         return std::nullopt;
     }
     if (existing.type != candidate.type) {
+        return std::nullopt;
+    }
+    // On Switch 2 the load/store hint selects Maxwell GOBs: the same bytes hold other texels.
+    if (existing.maxwell_gobs != candidate.maxwell_gobs && existing.type != ImageType::Linear &&
+        existing.type != ImageType::Buffer && Settings::CurrentProgramIsSwitch2()) {
         return std::nullopt;
     }
     if (False(options & RelaxedOptions::Samples) && existing.num_samples != candidate.num_samples) {

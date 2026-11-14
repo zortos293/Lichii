@@ -16,6 +16,7 @@
 #include "core/file_sys/nca_metadata.h"
 #include "core/file_sys/patch_manager.h"
 #include "core/file_sys/registered_cache.h"
+#include "core/file_sys/romfs_factory.h"
 #include "core/hle/kernel/k_event.h"
 #include "core/hle/service/aoc/addon_content_manager.h"
 #include "core/hle/service/aoc/purchase_event_manager.h"
@@ -31,8 +32,26 @@ static bool CheckAOCTitleIDMatchesBase(u64 title_id, u64 base) {
     return FileSys::GetBaseTitleID(title_id) == base;
 }
 
+static u64 GetCallerAOCBaseTitleID(Core::System& system, const ClientProcessId& process_id) {
+    const u64 program_id = system.ResolveCallerProgramId(*process_id);
+    if (FileSys::GetBaseTitleID(program_id) ==
+        FileSys::GetBaseTitleID(system.GetApplicationProcessProgramID())) {
+        FileSys::NACP control;
+        if (system.GetAppLoader().ReadControlData(control) == Loader::ResultStatus::Success &&
+            control.GetDLCBaseTitleId() != 0) {
+            return control.GetDLCBaseTitleId();
+        }
+    }
+    const FileSys::PatchManager pm{program_id, system.GetFileSystemController(),
+                                   system.GetContentProvider()};
+    const auto metadata = pm.GetControlMetadata();
+    return metadata.first && metadata.first->GetDLCBaseTitleId() != 0
+               ? metadata.first->GetDLCBaseTitleId()
+               : FileSys::GetAOCBaseTitleID(program_id);
+}
+
 static u64 GetCallerBaseTitleID(Core::System& system, const ClientProcessId& process_id) {
-    return FileSys::GetBaseTitleID(system.ResolveCallerProgramId(*process_id));
+    return FileSys::GetBaseTitleID(GetCallerAOCBaseTitleID(system, process_id));
 }
 
 static std::vector<u64> AccumulateAOCTitleIDs(Core::System& system) {
@@ -50,6 +69,18 @@ static std::vector<u64> AccumulateAOCTitleIDs(Core::System& system) {
                        Loader::ResultStatus::Success;
             }),
         add_on_content.end());
+    return add_on_content;
+}
+
+// The service outlives a single boot; add the add-on content registered by the current load
+// (NUP containers) to the installed content listed at startup.
+static std::vector<u64> WithBootContent(const std::vector<u64>& installed) {
+    std::vector<u64> add_on_content = installed;
+    for (const u64 tid : FileSys::ListBootContent(FileSys::ContentRecordType::Data)) {
+        if (std::find(add_on_content.begin(), add_on_content.end(), tid) == add_on_content.end()) {
+            add_on_content.push_back(tid);
+        }
+    }
     return add_on_content;
 }
 
@@ -97,14 +128,14 @@ Result IAddOnContentManager::CountAddOnContent(Out<u32> out_count, ClientProcess
 
     const auto current = GetCallerBaseTitleID(system, process_id);
 
-    const auto& disabled = Settings::values.disabled_addons[current];
-    if (std::find(disabled.begin(), disabled.end(), "DLC") != disabled.end()) {
+    if (FileSys::IsAddOnContentDisabled(system.ResolveCallerProgramId(*process_id))) {
         *out_count = 0;
         R_SUCCEED();
     }
 
+    const auto available = WithBootContent(add_on_content);
     *out_count = static_cast<u32>(
-        std::count_if(add_on_content.begin(), add_on_content.end(),
+        std::count_if(available.begin(), available.end(),
                       [current](u64 tid) { return CheckAOCTitleIDMatchesBase(tid, current); }));
 
     R_SUCCEED();
@@ -119,9 +150,8 @@ Result IAddOnContentManager::ListAddOnContent(Out<u32> out_count,
     const auto current = GetCallerBaseTitleID(system, process_id);
 
     std::vector<u32> out;
-    const auto& disabled = Settings::values.disabled_addons[current];
-    if (std::find(disabled.begin(), disabled.end(), "DLC") == disabled.end()) {
-        for (u64 content_id : add_on_content) {
+    if (!FileSys::IsAddOnContentDisabled(system.ResolveCallerProgramId(*process_id))) {
+        for (u64 content_id : WithBootContent(add_on_content)) {
             if (FileSys::GetBaseTitleID(content_id) != current) {
                 continue;
             }
@@ -130,6 +160,7 @@ Result IAddOnContentManager::ListAddOnContent(Out<u32> out_count,
         }
     }
 
+    LOG_INFO(Service_AOC, "{} add-on content entries for {:016X}", out.size(), current);
     R_UNLESS(out.size() >= offset, AM::ResultApplicationRecordNotFound);
 
     *out_count = static_cast<u32>(std::min<size_t>(out.size() - offset, count));
@@ -144,17 +175,7 @@ Result IAddOnContentManager::GetAddOnContentBaseId(Out<u64> out_title_id,
                                                    ClientProcessId process_id) {
     LOG_DEBUG(Service_AOC, "called. process_id={}", process_id.pid);
 
-    const auto title_id = system.ResolveCallerProgramId(*process_id);
-    const FileSys::PatchManager pm{title_id, system.GetFileSystemController(),
-                                   system.GetContentProvider()};
-
-    const auto res = pm.GetControlMetadata();
-    if (res.first == nullptr) {
-        *out_title_id = FileSys::GetAOCBaseTitleID(title_id);
-        R_SUCCEED();
-    }
-
-    *out_title_id = res.first->GetDLCBaseTitleId();
+    *out_title_id = GetCallerAOCBaseTitleID(system, process_id);
 
     R_SUCCEED();
 }

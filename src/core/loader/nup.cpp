@@ -206,10 +206,7 @@ AppLoader_NUP::AppLoader_NUP(FileSys::VirtualFile file_)
                                                       NupContainer::PackageKind::Addon;
                                            });
     if (addon_count > 0) {
-        LOG_WARNING(Loader,
-                    "NUP container has {} add-on content package(s); AoC mounting is not "
-                    "supported yet",
-                    addon_count);
+        LOG_INFO(Loader, "NUP container has {} add-on content package(s)", addon_count);
     }
 }
 
@@ -234,6 +231,18 @@ AppLoader::LoadResult AppLoader_NUP::Load(Kernel::KProcess& process, Core::Syste
     if (result.first != ResultStatus::Success) {
         return result;
     }
+
+    // Publish the add-ons and sibling programs before the guest can enumerate or open them.
+    std::vector<FileSys::BootContent> boot_content;
+    if (!FileSys::IsAddOnContentDisabled(base_title_id)) {
+        for (auto& [id, romfs] : nup->GetAddonRomFS(base_title_id)) {
+            boot_content.push_back({id, FileSys::ContentRecordType::Data, std::move(romfs)});
+        }
+    }
+    for (auto& [id, romfs] : nup->GetSiblingProgramRomFS()) {
+        boot_content.push_back({id, FileSys::ContentRecordType::Program, std::move(romfs)});
+    }
+    FileSys::SetBootContent(std::move(boot_content));
 
     system.GetFileSystemController().RegisterProcess(
         process.GetProcessId(), base_title_id,
