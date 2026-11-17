@@ -7,9 +7,11 @@
 
 #include "common/algorithm.h"
 #include "common/assert.h"
+#include "common/logging.h"
 #include "video_core/engines/engine_upload.h"
 #include "video_core/guest_memory.h"
 #include "video_core/memory_manager.h"
+#include "video_core/nx2_trace_dst.h"
 #include "video_core/rasterizer_interface.h"
 #include "video_core/textures/decoders.h"
 
@@ -51,6 +53,15 @@ void State::BindRasterizer(VideoCore::RasterizerInterface* rasterizer_) {
 }
 
 void State::ProcessExec(const bool is_linear_) {
+    if (static std::atomic<u32> traced; VideoCommon::TraceDst(regs.dest.Address(), traced)) {
+        LOG_INFO(HW_GPU,
+                 "nx2 inline upload to traced dst: {:#x} linear={} lines={} length={} pitch={:#x} "
+                 "dst={}x{}x{} bh={} origin={},{} kind={}",
+                 regs.dest.Address(), is_linear_, regs.line_count, regs.line_length_in,
+                 regs.dest.pitch, regs.dest.width, regs.dest.height, regs.dest.depth,
+                 regs.dest.BlockHeight(), regs.dest.x, regs.dest.y,
+                 static_cast<u32>(memory_manager.GetPageKind(regs.dest.Address())));
+    }
     write_offset = 0;
     flushed_offset = 0;
     copy_size = regs.line_length_in * regs.line_count;

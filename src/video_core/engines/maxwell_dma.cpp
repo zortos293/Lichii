@@ -18,6 +18,7 @@
 #include "video_core/engines/maxwell_dma.h"
 #include "video_core/guest_memory.h"
 #include "video_core/memory_manager.h"
+#include "video_core/nx2_trace_dst.h"
 #include "video_core/renderer_base.h"
 #include "video_core/textures/decoders.h"
 
@@ -140,23 +141,26 @@ void MaxwellDMA::CallMultiMethod(Core::System& system, u32 method, const u32* ba
 
 void MaxwellDMA::Launch() {
     LOG_TRACE(Render_OpenGL, "DMA copy {:#x} -> {:#x}", static_cast<GPUVAddr>(regs.offset_in), GPUVAddr(regs.offset_out));
-    // EDEN_NX2_TRACE_DST=<hex>: also log copies writing within 32 MiB above that GPU address.
-    static const u64 trace_destination = [] {
-        const char* value = std::getenv("EDEN_NX2_TRACE_DST");
-        return value != nullptr ? std::strtoull(value, nullptr, 16) : 0ULL;
-    }();
-    if (trace_destination != 0 && GPUVAddr(regs.offset_out) >= trace_destination &&
-        GPUVAddr(regs.offset_out) < trace_destination + (32ULL << 20)) {
-        static u32 traced_destination{};
-        if (traced_destination++ < 40) {
-            LOG_INFO(HW_GPU,
-                     "nx2 DMA to traced dst: {:#x} -> {:#x} lines={} length={} pitch in={:#x} "
-                     "out={:#x} launch={:#x} src_layout={} dst_layout={}",
-                     static_cast<GPUVAddr>(regs.offset_in), GPUVAddr(regs.offset_out),
-                     regs.line_count, regs.line_length_in, regs.pitch_in, regs.pitch_out,
-                     regs.reg_array[0xc0], regs.launch_dma.src_memory_layout.Value() == LaunchDMA::MemoryLayout::PITCH ? "pitch" : "block",
-                     regs.launch_dma.dst_memory_layout.Value() == LaunchDMA::MemoryLayout::PITCH ? "pitch" : "block");
-        }
+    if (static std::atomic<u32> traced_destination; VideoCommon::TraceDst(regs.offset_out, traced_destination)) {
+        const auto& src = regs.src_params;
+        const auto& dst = regs.dst_params;
+        LOG_INFO(HW_GPU,
+                 "nx2 DMA to traced dst: {:#x} -> {:#x} lines={} length={} pitch in={:#x} "
+                 "out={:#x} launch={:#x} src_layout={} dst_layout={} multi_line={} remap={} "
+                 "comp_size={} dst_comps={} src={}x{}x{} bh={} origin={},{} dst={}x{}x{} bh={} "
+                 "origin={},{} kind in={} out={}",
+                 static_cast<GPUVAddr>(regs.offset_in), GPUVAddr(regs.offset_out),
+                 regs.line_count, regs.line_length_in, regs.pitch_in, regs.pitch_out,
+                 regs.reg_array[0xc0], regs.launch_dma.src_memory_layout.Value() == LaunchDMA::MemoryLayout::PITCH ? "pitch" : "block",
+                 regs.launch_dma.dst_memory_layout.Value() == LaunchDMA::MemoryLayout::PITCH ? "pitch" : "block",
+                 regs.launch_dma.multi_line_enable.Value(), regs.launch_dma.remap_enable.Value(),
+                 regs.remap_const.component_size_minus_one + 1,
+                 regs.remap_const.num_dst_components_minus_one + 1, src.width, src.height,
+                 src.depth, src.block_size.height.Value(), src.origin.x.Value(),
+                 src.origin.y.Value(), dst.width, dst.height, dst.depth,
+                 dst.block_size.height.Value(), dst.origin.x.Value(), dst.origin.y.Value(),
+                 static_cast<u32>(memory_manager.GetPageKind(regs.offset_in)),
+                 static_cast<u32>(memory_manager.GetPageKind(regs.offset_out)));
     }
     if (static const bool trace = std::getenv("EDEN_NX2_RT_TRACE") != nullptr; trace) {
         static u32 traced{};

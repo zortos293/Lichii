@@ -32,6 +32,7 @@
 #include "video_core/host1x/gpu_device_memory_manager.h"
 #include "video_core/nx2.h"
 #include "video_core/nx2_profile.h"
+#include "video_core/nx2_trace_dst.h"
 #include "video_core/render_trace.h"
 #include "video_core/texture_cache/conversion.h"
 #include "video_core/texture_cache/eviction_age.h"
@@ -2370,6 +2371,15 @@ void TextureCache<P>::RefreshContents(Image& image, ImageId image_id) {
     }
     VideoCommon::Nx2Profile::Scope profile_scope{VideoCommon::Nx2Profile::Zone::TextureUpload};
 
+    if (static std::atomic<u32> traced; VideoCommon::TraceDst(image.gpu_addr, traced)) {
+        LOG_INFO(HW_GPU,
+                 "nx2 refresh of traced image: {:#x} fmt={} {}x{} levels={} flags={:#x} "
+                 "dirty_layers={} stale={} gpu_written={} frame={}",
+                 image.gpu_addr, static_cast<u32>(image.info.format), image.info.size.width,
+                 image.info.size.height, image.info.resources.levels, static_cast<u32>(image.flags),
+                 image.dirty_layers.size(), stale_pages.IsAll(image.cpu_addr, image.guest_size_bytes),
+                 Tegra::Nx2MayBeGpuWritten(image.cpu_addr, image.guest_size_bytes), frame_tick);
+    }
     image.flags &= ~ImageFlagBits::CpuModified;
 
     // Images uploaded by layer stay tracked while some of their layers are dirty.
@@ -3313,6 +3323,19 @@ ImageId TextureCache<P>::InsertImage(const ImageInfo& info, GPUVAddr gpu_addr,
         return image_id;
     }
     const Image& image = slot_images[image_id];
+    if (static std::atomic<u32> traced; VideoCommon::TraceDst(image.gpu_addr, traced)) {
+        LOG_INFO(HW_GPU,
+                 "nx2 image at traced dst: {:#x} (asked {:#x}) type={} fmt={} {}x{}x{} levels={} "
+                 "layers={} block={}x{}x{} tile_width_spacing={} layer_stride={} guest={} "
+                 "sparse={} flags={:#x} joined={} frame={}",
+                 image.gpu_addr, gpu_addr, static_cast<u32>(image.info.type),
+                 static_cast<u32>(image.info.format), image.info.size.width,
+                 image.info.size.height, image.info.size.depth, image.info.resources.levels,
+                 image.info.resources.layers, image.info.block.width, image.info.block.height,
+                 image.info.block.depth, image.info.tile_width_spacing, image.info.layer_stride,
+                 image.guest_size_bytes, image.info.is_sparse, static_cast<u32>(image.flags),
+                 join_overlap_ids.size(), frame_tick);
+    }
     if (tc_trace) {
         const double ms = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - tc_t0).count();
         LOG_WARNING(HW_GPU,

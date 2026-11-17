@@ -11,6 +11,7 @@
 #include "video_core/engines/fermi_2d.h"
 #include "video_core/engines/sw_blitter/blitter.h"
 #include "video_core/memory_manager.h"
+#include "video_core/nx2_trace_dst.h"
 #include "video_core/rasterizer_interface.h"
 #include "video_core/surface.h"
 #include "video_core/textures/decoders.h"
@@ -61,18 +62,11 @@ void Fermi2D::ConsumeSinkImpl(Core::System& system) {
 }
 
 void Fermi2D::Blit() {
-    if (static const u64 trace_destination = [] {
-            const char* value = std::getenv("EDEN_NX2_TRACE_DST");
-            return value != nullptr ? std::strtoull(value, nullptr, 16) : 0ULL;
-        }();
-        trace_destination != 0 && regs.dst.Address() >= trace_destination &&
-        regs.dst.Address() < trace_destination + (32ULL << 20)) {
-        static u32 traced_destination{};
-        if (traced_destination++ < 40) {
-            LOG_INFO(HW_GPU, "nx2 2D blit to traced dst: {:#x} {}x{} -> {:#x} {}x{}",
-                     regs.src.Address(), regs.src.width, regs.src.height, regs.dst.Address(),
-                     regs.dst.width, regs.dst.height);
-        }
+    if (static std::atomic<u32> traced_destination;
+        VideoCommon::TraceDst(regs.dst.Address(), traced_destination)) {
+        LOG_INFO(HW_GPU, "nx2 2D blit to traced dst: {:#x} {}x{} -> {:#x} {}x{}",
+                 regs.src.Address(), regs.src.width, regs.src.height, regs.dst.Address(),
+                 regs.dst.width, regs.dst.height);
     }
     if (static const bool trace = std::getenv("EDEN_NX2_RT_TRACE") != nullptr; trace) {
         static u32 traced{};
