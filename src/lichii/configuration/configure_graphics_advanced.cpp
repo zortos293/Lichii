@@ -40,6 +40,12 @@ void ConfigureGraphicsAdvanced::Setup(const ConfigurationShared::Builder& builde
 
     for (auto setting :
          Settings::values.linkage.by_category[Settings::Category::RendererAdvanced]) {
+#ifndef LICHII_NVN_DIRECT
+        // Only Linux x86-64 builds have the NVN direct renderer.
+        if (setting->Id() == Settings::values.nvn_direct_renderer.Id()) {
+            continue;
+        }
+#endif
         ConfigurationShared::Widget* widget = builder.BuildWidget(setting, apply_funcs);
 
         if (widget == nullptr) {

@@ -13,6 +13,7 @@
 #include "core/core.h"
 #include "core/hle/kernel/k_process.h"
 #include "core/hle/kernel/svc.h"
+#include "core/nvn_hook.h"
 #include "core/hle/kernel/k_readable_event.h"
 #include "core/hle/service/kernel_helpers.h"
 
@@ -2568,6 +2569,9 @@ void Call(Core::System& system, u32 imm) {
         LOG_DEBUG(Kernel_SVC, "Switch 2 svc 0x80 addr={:#x} size={:#x} mask={:#x} attr={:#x} -> {:#x}",
                   address, size, mask, attr, result.raw);
         args[0] = result.raw;
+    } else if (imm == Core::NvnHook::HaltedCallSvc) {
+        // NVN2 direct mode: an NVN call that may block, out of the JIT (core/nvn_hook.h).
+        Core::NvnHook::RunHaltedCall(system, args);
     } else if (process.Is64Bit()) {
         Call64(system, imm, args);
     } else {

@@ -35,6 +35,15 @@ BlitScreen::~BlitScreen() = default;
 void BlitScreen::WaitIdle(const Device& device) {
     present_manager.WaitPresent();
     scheduler.Finish();
+    // NVN2 direct mode: the replay submits to the device's queues from its own
+    // threads, so vkDeviceWaitIdle here raced its vkQueueSubmit (a queue must be externally
+    // synchronised) and lost the device at boot (Xid 32/13/69: the queue's pushbuffer written by
+    // both). Under the submit lock it could wait forever instead: a replay queue may wait for an
+    // event that a later submission signals. What this pass destroys only Lichii's own
+    // submissions use, and Finish has waited for those.
+    if (device.IsNvnDirect()) {
+        return;
+    }
     device.GetLogical().WaitIdle();
 }
 

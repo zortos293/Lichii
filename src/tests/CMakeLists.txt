@@ -36,6 +36,7 @@ add_executable(tests
     core/nx2_zip.cpp
     core/nx2_present_pacer.cpp
     core/nx2_fence_action.cpp
+    core/nvn_direct_choice.cpp
     core/nx2_frame_interval.cpp
     core/ldn_lan_protocol.cpp
     core/perf_stats.cpp

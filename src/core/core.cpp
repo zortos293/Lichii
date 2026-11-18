@@ -25,6 +25,7 @@
 #include "common/string_util.h"
 #include "core/arm/exclusive_monitor.h"
 #include "core/core.h"
+#include "core/nvn_hook.h"
 
 #include "launch_timestamp_cache.h"
 #include "core/core_timing.h"
@@ -62,6 +63,7 @@
 #include "core/hle/service/filesystem/fsp/fs_read_trace.h"
 #include "core/hle/service/glue/glue_manager.h"
 #include "core/hle/service/glue/time/static.h"
+#include "core/hle/service/nx2_image_layout.h"
 #include "core/hle/service/psc/time/static.h"
 #include "core/hle/service/psc/time/steady_clock.h"
 #include "core/hle/service/psc/time/system_clock.h"
@@ -563,6 +565,7 @@ struct System::Impl {
 
         // Make the process created be the application
         kernel.SetApplicationProcess(process->GetHandle());
+        Core::NvnHook::Install(system, *process->GetHandle());
 
         // Set up the rest of the system.
         SystemResultStatus init_result{SetupForApplicationProcess(system, emu_window)};
@@ -645,6 +648,7 @@ struct System::Impl {
         exit_requested = false;
         if (gpu_core)
             gpu_core->NotifyShutdown();
+        Core::NvnHook::StopDirect();
 
         stop_event.request_stop();
         core_timing.SyncPause(false);
@@ -684,6 +688,9 @@ struct System::Impl {
             general_channel_context.reset();
         }
         kernel.Shutdown();
+        // After the services stop: a display HDR query still in flight stores its answer.
+        Service::g_nx2_told_hdr = false;
+        Core::NvnHook::Uninstall();
         stop_event = {};
         Network::RestartSocketOperations();
 

@@ -14,6 +14,9 @@ struct Bindings {
     u32 image{};
     u32 texture_scaling_index{};
     u32 image_scaling_index{};
+    /// Push-constant offset of the render area: 0 its own block, else a member at that offset,
+    /// in the rescaling block when the stage uses both (NVN direct mode's layout)
+    u32 render_area_offset{};
 };
 
 } // namespace Shader::Backend

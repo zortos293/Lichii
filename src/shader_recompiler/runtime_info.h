@@ -144,6 +144,10 @@ struct RuntimeInfo {
     u32 mesh_task_offsets_binding{~0U};
     u32 mesh_task_args_binding{~0U};
     u32 mesh_task_payload_stride{}; ///< payload buffer words per task workgroup
+
+    /// Storage buffer binding (set 0) whose first word a loop's safety check sets to 1 when it
+    /// ends the loop, ~0 for none: NVN2 direct mode reports such shaders.
+    u32 loop_guard_binding{~0U};
 };
 
 } // namespace Shader

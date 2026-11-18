@@ -122,6 +122,15 @@ option(ENABLE_LSFG "Enable frame generation (LSFG and FSR 3 Fluid Motion)" ON)
 
 option(ENABLE_RESHADE "Enable ReShade FX post-processing effects" ON)
 
+# The NVN direct renderer (src/video_core/nvn_direct) builds on Linux x86-64, and on Windows x86-64
+# with clang-cl (its C code is GNU C, which cl.exe does not take).
+if (ARCHITECTURE_x86_64 AND (CMAKE_SYSTEM_NAME STREQUAL "Linux" OR (WIN32 AND CMAKE_C_COMPILER_ID STREQUAL "Clang")))
+    set(ENABLE_NVN_DIRECT_DEFAULT ON)
+else()
+    set(ENABLE_NVN_DIRECT_DEFAULT OFF)
+endif()
+option(ENABLE_NVN_DIRECT "Build the NVN direct renderer (NVN2 games' NVN calls replayed in Vulkan)" ${ENABLE_NVN_DIRECT_DEFAULT})
+
 # non-linux bundled qt are static
 if (LICHII_USE_BUNDLED_QT AND (APPLE OR NOT UNIX))
     set(LICHII_STATIC_BUILD ON)

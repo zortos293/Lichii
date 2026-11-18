@@ -182,16 +182,6 @@ constexpr std::array<VkDescriptorUpdateTemplateEntry, ASTC_NUM_BINDINGS>
         },
     }};
 
-struct AstcPushConstants {
-    std::array<u32, 2> blocks_dims;
-    u32 layer_stride;
-    u32 block_size;
-    u32 x_shift;
-    u32 block_height;
-    u32 block_height_mask;
-    u32 native_tiling;
-};
-
 constexpr std::array<VkDescriptorSetLayoutBinding, 2> BC_ENCODER_DESCRIPTOR_SET_BINDINGS{{
     {
         .binding = 0,
@@ -227,15 +217,6 @@ constexpr std::array<VkDescriptorUpdateTemplateEntry, 2> BC_ENCODER_DESCRIPTOR_U
         .stride = sizeof(DescriptorUpdateEntry),
     },
 }};
-
-struct BcEncoderPushConstants {
-    u32 blocks_x;
-    u32 blocks_y;
-    u32 width;
-    u32 height;
-    u32 bc3;
-    u32 out_offset; // in 8-byte units
-};
 
 struct QueriesPrefixScanPushConstants {
     u32 min_accumulation_base;

@@ -132,6 +132,7 @@ void CheckUnchangedProfile() {
     CHECK_FALSE(values.renderer_force_max_clock.GetValue());
     CHECK(values.use_disk_shader_cache.GetValue());
     CHECK(values.use_vulkan_driver_pipeline_cache.GetValue());
+    CHECK_FALSE(values.nvn_direct_renderer.GetValue());
     CHECK_FALSE(values.use_video_framerate.GetValue());
     CHECK_FALSE(values.mkw_30fps.GetValue());
     CHECK_FALSE(values.mkw_60fps.GetValue());
@@ -295,6 +296,35 @@ TEST_CASE("Per-game overrides and use-global flags survive the new global profil
         CHECK(Settings::values.async_presentation.GetValue(true));
         CHECK(Settings::values.use_asynchronous_shaders.UsingGlobal());
         CHECK(Settings::values.use_asynchronous_shaders.GetValue());
+    }
+}
+
+TEST_CASE("A per-game NVN direct renderer value overrides the global one both ways", "[config]") {
+    ConfigDirectory directory;
+    for (const bool global_value : {false, true}) {
+        directory.Write("qt-config.ini",
+                        fmt::format("[Renderer]\nnvn_direct_renderer={}\n"
+                                    "nvn_direct_renderer\\default={}\n",
+                                    global_value, !global_value));
+        directory.Write("custom/game.ini",
+                        fmt::format("[Renderer]\nnvn_direct_renderer={}\n"
+                                    "nvn_direct_renderer\\default={}\n"
+                                    "nvn_direct_renderer\\use_global=false\n",
+                                    !global_value, global_value));
+        directory.Write("custom/other.ini", "[Renderer]\n");
+        FileConfig global{std::string{"qt-config"}};
+        CHECK(Settings::values.nvn_direct_renderer.GetValue() == global_value);
+        {
+            FileConfig game{std::string{"game"}, Config::ConfigType::PerGameConfig};
+            CHECK_FALSE(Settings::values.nvn_direct_renderer.UsingGlobal());
+            CHECK(Settings::values.nvn_direct_renderer.GetValue() == !global_value);
+            CHECK(Settings::values.nvn_direct_renderer.GetValue(true) == global_value);
+        }
+        Settings::RestoreGlobalState(false);
+        FileConfig other{std::string{"other"}, Config::ConfigType::PerGameConfig};
+        CHECK(Settings::values.nvn_direct_renderer.UsingGlobal());
+        CHECK(Settings::values.nvn_direct_renderer.GetValue() == global_value);
+        Settings::RestoreGlobalState(false);
     }
 }
 

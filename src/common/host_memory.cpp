@@ -301,6 +301,99 @@ public:
         return host_pointer_it->second + virtual_offset - it->lower();
     }
 
+    /// HostMemory::MapBackingView: a placeholder split piece by piece from its start, each piece
+    /// replaced by a view of the backing section (a run) or of a section of the view's own that
+    /// holds its zero pages. MapViewOfFile3 takes page-aligned pieces of a placeholder; VirtualAlloc2
+    /// documents no such exception for private memory.
+    u8* MapBackingView(size_t length, std::span<const HostMemory::BackingRun> runs) {
+        size_t zero_bytes = length;
+        for (const HostMemory::BackingRun& run : runs) {
+            zero_bytes -= run.length;
+        }
+        HANDLE zero_section = nullptr;
+        if (zero_bytes != 0) {
+            zero_section = pfn_CreateFileMapping2(INVALID_HANDLE_VALUE, nullptr, FILE_MAP_WRITE | FILE_MAP_READ, PAGE_READWRITE, SEC_COMMIT, zero_bytes, nullptr, nullptr, 0);
+            if (!zero_section) {
+                LOG_ERROR(HW_Memory, "Backing view: no section for its {:#x} zero bytes, error {}", zero_bytes, GetLastError());
+                return nullptr;
+            }
+        }
+        u8* const view = static_cast<u8*>(pfn_VirtualAlloc2(process, nullptr, length, MEM_RESERVE | MEM_RESERVE_PLACEHOLDER, PAGE_NOACCESS, nullptr, 0));
+        DWORD error = view ? 0 : GetLastError();
+        std::vector<u8*> pieces;
+        size_t mapped = 0; // the placeholder left is [mapped, length)
+        size_t split = 0;  // when past mapped: [mapped, split) and [split, length) are placeholders
+        const auto map_piece = [&](HANDLE section, size_t section_offset, size_t size) {
+            u8* const address = view + mapped;
+            if (mapped + size < length) {
+                if (!VirtualFreeEx(process, address, size, MEM_RELEASE | MEM_PRESERVE_PLACEHOLDER)) {
+                    error = GetLastError();
+                    return false;
+                }
+                split = mapped + size;
+            }
+            if (!pfn_MapViewOfFile3(section, process, address, section_offset, size, MEM_REPLACE_PLACEHOLDER, PAGE_READWRITE, nullptr, 0)) {
+                error = GetLastError();
+                return false;
+            }
+            pieces.push_back(address);
+            mapped += size;
+            return true;
+        };
+        bool ok = view != nullptr;
+        size_t zero_offset = 0;
+        for (const HostMemory::BackingRun& run : runs) {
+            if (ok && run.view_offset > mapped) {
+                const size_t size = run.view_offset - mapped;
+                ok = map_piece(zero_section, zero_offset, size);
+                zero_offset += size;
+            }
+            ok = ok && map_piece(backing_handle, run.host_offset, run.length);
+        }
+        if (ok && mapped < length) {
+            ok = map_piece(zero_section, zero_offset, length - mapped);
+        }
+        // The views keep the section.
+        if (zero_section) {
+            CloseHandle(zero_section);
+        }
+        if (!ok) {
+            LOG_ERROR(HW_Memory, "Backing view of {:#x} bytes: failed at its offset {:#x}, error {}", length, mapped, error);
+            for (u8* const piece : pieces) {
+                pfn_UnmapViewOfFile2(process, piece, 0);
+            }
+            if (view && mapped < length) {
+                VirtualFreeEx(process, view + mapped, 0, MEM_RELEASE);
+            }
+            if (view && split > mapped) {
+                VirtualFreeEx(process, view + split, 0, MEM_RELEASE);
+            }
+            return nullptr;
+        }
+        std::scoped_lock lock{view_mutex};
+        view_pieces.emplace(view, std::move(pieces));
+        return view;
+    }
+
+    void UnmapBackingView(u8* view) {
+        std::vector<u8*> pieces;
+        {
+            std::scoped_lock lock{view_mutex};
+            const auto it = view_pieces.find(view);
+            if (it == view_pieces.end()) {
+                LOG_ERROR(HW_Memory, "Backing view at {}: not a backing view", fmt::ptr(view));
+                return;
+            }
+            pieces = std::move(it->second);
+            view_pieces.erase(it);
+        }
+        for (u8* const piece : pieces) {
+            if (!pfn_UnmapViewOfFile2(process, piece, 0)) {
+                LOG_ERROR(HW_Memory, "Backing view at {}: unmapping its piece at {}, error {}", fmt::ptr(view), fmt::ptr(piece), GetLastError());
+            }
+        }
+    }
+
     void EnableDirectMappedAddress() {
         // TODO
         UNREACHABLE();
@@ -474,6 +567,9 @@ private:
     std::mutex placeholder_mutex;                                 ///< Mutex for placeholders
     boost::icl::separate_interval_set<size_t> placeholders;       ///< Mapped placeholders
     ::Common::unordered_map<size_t, size_t> placeholder_host_pointers; ///< Placeholder backing offset
+
+    std::mutex view_mutex;
+    ::Common::unordered_map<u8*, std::vector<u8*>> view_pieces; ///< MapBackingView's, by view
 };
 
 #elif defined(__OPENORBIS__) || defined(__managarm__)
@@ -594,6 +690,11 @@ static int shm_open_anon(int flags, mode_t mode) {
 
 class HostMemory::Impl {
 public:
+    /// The memfd behind the backing memory, -1 when there is none
+    int BackingFd() const noexcept {
+        return fd;
+    }
+
     explicit Impl(size_t backing_size_, size_t virtual_size_)
         : backing_size{backing_size_}
         , virtual_size{virtual_size_}
@@ -654,11 +755,15 @@ public:
         if (fd >= 0) {
             unlink(template_path);
         }
+#elif defined(MFD_ALLOW_SEALING)
+        // Sealable: sealed against shrinking below, because udmabuf takes only such memfds (the
+        // NVN direct renderer's pool imports on amdgpu, vka_mem.c import_seg)
+        fd = memfd_create("HostMemory", MFD_ALLOW_SEALING);
 #else
         fd = memfd_create("HostMemory", 0);
 #endif
         bool use_anon = false;
-        if (fd <= 0) {
+        if (fd < 0) {
             LOG_WARNING(Common_Memory, "memfd_create: {}", strerror(errno));
             use_anon = true;
         }
@@ -669,13 +774,18 @@ public:
                 LOG_WARNING(Common_Memory, "ftruncate: {} (likely out-of-emory)", strerror(errno));
                 use_anon = true;
             }
+#if defined(__linux__) && defined(F_SEAL_SHRINK)
+            if (!use_anon && fcntl(fd, F_ADD_SEALS, F_SEAL_SHRINK) != 0) {
+                LOG_WARNING(Common_Memory, "F_SEAL_SHRINK: {}", strerror(errno));
+            }
+#endif
         }
         if (use_anon) {
             LOG_WARNING(Common_Memory, "Using private mappings instead of shared ones");
             backing_base = static_cast<u8*>(mmap(nullptr, backing_size, PROT_READ | PROT_WRITE, MAP_ANONYMOUS | MAP_PRIVATE | MAP_NOCORE, -1, 0));
-            if (fd > 0) {
-                fd = -1;
+            if (fd >= 0) {
                 close(fd);
+                fd = -1;
             }
         } else {
             backing_base = static_cast<u8*>(mmap(nullptr, backing_size, PROT_READ | PROT_WRITE, MAP_SHARED | MAP_NOCORE, fd, 0));
@@ -834,6 +944,32 @@ public:
 #endif
         int ret = mprotect(virtual_base + virtual_offset, length, flags);
         ASSERT_MSG(ret == 0, "mprotect failed: {}", strerror(errno));
+    }
+
+    /// HostMemory::MapBackingView: anonymous zero pages with each run mapped from the file over
+    /// them, as Map maps the fastmem views.
+    u8* MapBackingView(size_t length, std::span<const HostMemory::BackingRun> runs) {
+        if (fd < 0 && !runs.empty()) {
+            LOG_ERROR(HW_Memory, "Backing view: private backing memory is not mapped twice");
+            return nullptr;
+        }
+        u8* const view = static_cast<u8*>(mmap(nullptr, length, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS | MAP_NORESERVE, -1, 0));
+        if (view == MAP_FAILED) {
+            LOG_ERROR(HW_Memory, "Backing view of {:#x} bytes: {}", length, strerror(errno));
+            return nullptr;
+        }
+        for (const HostMemory::BackingRun& run : runs) {
+            if (mmap(view + run.view_offset, run.length, PROT_READ | PROT_WRITE, MAP_SHARED | MAP_FIXED, fd, off_t(run.host_offset)) == MAP_FAILED) {
+                LOG_ERROR(HW_Memory, "Backing view of {:#x} bytes: backing {:#x}+{:#x} at its offset {:#x}: {}", length, run.host_offset, run.length, run.view_offset, strerror(errno));
+                munmap(view, length);
+                return nullptr;
+            }
+        }
+        return view;
+    }
+
+    void UnmapBackingView(u8* view, size_t length) {
+        munmap(view, length);
     }
 
     void EnableDirectMappedAddress() {
@@ -1068,6 +1204,41 @@ void HostMemory::Swap(HostMemory& other) noexcept {
     std::swap(granules, other.granules);
     std::swap(num_granules, other.num_granules);
     std::swap(fallback_buffer, other.fallback_buffer);
+}
+
+int HostMemory::BackingFd() const noexcept {
+#if defined(__linux__)
+    return impl ? impl->BackingFd() : -1;
+#else
+    return -1;
+#endif
+}
+
+u8* HostMemory::MapBackingView(size_t length, std::span<const BackingRun> runs) {
+    ASSERT(length != 0 && length % PageAlignment == 0);
+    size_t end = 0;
+    for (const BackingRun& run : runs) {
+        ASSERT(run.view_offset % PageAlignment == 0 && run.host_offset % PageAlignment == 0);
+        ASSERT(run.length != 0 && run.length % PageAlignment == 0);
+        ASSERT(run.view_offset >= end && run.host_offset + run.length <= backing_size);
+        end = run.view_offset + run.length;
+    }
+    ASSERT(end <= length);
+#if !(defined(__OPENORBIS__) || defined(__managarm__))
+    if (impl) {
+        return impl->MapBackingView(length, runs);
+    }
+#endif
+    LOG_ERROR(HW_Memory, "Backing view: the backing memory is mapped twice only with fastmem");
+    return nullptr;
+}
+
+void HostMemory::UnmapBackingView([[maybe_unused]] u8* view, [[maybe_unused]] size_t length) {
+#if defined(_WIN32)
+    impl->UnmapBackingView(view);
+#elif !(defined(__OPENORBIS__) || defined(__managarm__))
+    impl->UnmapBackingView(view, length);
+#endif
 }
 
 namespace {

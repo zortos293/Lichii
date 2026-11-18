@@ -8,6 +8,7 @@
 #include <atomic>
 #include <memory>
 #include <optional>
+#include <span>
 #include <utility>
 #include "common/common_funcs.h"
 #include "common/common_types.h"
@@ -87,6 +88,28 @@ public:
     [[nodiscard]] const u8* BackingBasePointer() const noexcept {
         return backing_base;
     }
+
+    /// The file behind the backing memory, -1 when there is none (Linux: the memfd; the backing
+    /// byte at p is its offset p - BackingBasePointer()).
+    [[nodiscard]] int BackingFd() const noexcept;
+
+    /// Backing memory [host_offset, host_offset + length) at view_offset in a backing view.
+    struct BackingRun {
+        size_t view_offset;
+        size_t host_offset;
+        size_t length;
+    };
+
+    /// Maps backing memory once more, at a host range of its own of `length` bytes: each run
+    /// read-write at its view offset, the rest zero pages of the view's own (read-write, shared
+    /// with nothing). Map, Unmap and Protect never touch it. Runs are page aligned, in view order
+    /// and do not overlap. nullptr (logged) without fastmem, when there are runs and private
+    /// memory is behind them (it cannot be mapped twice), or when a mapping fails. Given back with
+    /// UnmapBackingView.
+    [[nodiscard]] u8* MapBackingView(size_t length, std::span<const BackingRun> runs);
+
+    /// Takes down a view MapBackingView made, with its zero pages.
+    void UnmapBackingView(u8* view, size_t length);
 
     [[nodiscard]] size_t BackingSize() const noexcept {
         return backing_size;

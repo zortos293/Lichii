@@ -1,0 +1,36 @@
+// SPDX-FileCopyrightText: Copyright 2026 Eden Emulator Project
+// SPDX-License-Identifier: GPL-3.0-or-later
+
+// NVN2 direct mode: the shading-rate attachment of a pass from the game's
+// shading-rate image. NVN's image holds palette indices, one a 16x16-pixel tile; the attachment
+// holds VK_KHR_fragment_shading_rate rates. Texels past the index image shade at full rate.
+
+#version 450
+
+layout(local_size_x = 8, local_size_y = 8) in;
+
+layout(binding = 0) uniform usampler2D index_image;
+layout(binding = 1, r8ui) uniform writeonly uimage2D rate_image;
+
+layout(push_constant) uniform PushConstants {
+    // The palette as Vulkan rates, four entries a word.
+    uvec4 palette;
+    uvec2 rate_size;
+    // Index texel = rate texel * index_scale (the index image may lack the render scale).
+    float index_scale;
+    int index_level;
+};
+
+void main() {
+    const uvec2 texel = gl_GlobalInvocationID.xy;
+    if (any(greaterThanEqual(texel, rate_size))) {
+        return;
+    }
+    const ivec2 index_texel = ivec2(vec2(texel) * index_scale);
+    uint rate = 0;
+    if (all(lessThan(index_texel, textureSize(index_image, index_level)))) {
+        const uint index = texelFetch(index_image, index_texel, index_level).r & 15;
+        rate = (palette[index >> 2] >> ((index & 3) * 8)) & 0xff;
+    }
+    imageStore(rate_image, ivec2(texel), uvec4(rate));
+}

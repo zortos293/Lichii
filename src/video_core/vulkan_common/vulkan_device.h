@@ -331,6 +331,28 @@ public:
         return graphics_family;
     }
 
+    /// NVN2 direct mode: the device enables what the replay needs.
+    bool IsNvnDirect() const {
+        return nvn_direct;
+    }
+
+    /// NVN2 direct mode: the replay could not start on the device, which then serves GPU
+    /// emulation alone (Core::NvnHook::DirectFailed).
+    void EndNvnDirect() {
+        nvn_direct = false;
+    }
+
+    /// NVN2 direct mode: the graphics family's queues made for the replay (index 0 is
+    /// GetGraphicsQueue's).
+    std::span<const VkQueue> GetNvnDirectQueues() const {
+        return {nvn_direct_queues.data(), nvn_direct_queue_count};
+    }
+
+    /// Returns the extensions the device was created with.
+    const std::set<std::string, std::less<>>& GetLoadedExtensions() const {
+        return loaded_extensions;
+    }
+
     /// Returns main present queue family index.
     u32 GetPresentFamily() const {
         return present_family;
@@ -1403,6 +1425,10 @@ private:
     vk::PhysicalDevice physical; ///< Physical device.
     vk::Device logical;          ///< Logical device.
     vk::Queue graphics_queue;    ///< Main graphics queue.
+    static constexpr u32 NvnDirectMaxQueues = 16; ///< NVN_DIRECT_MAX_QUEUES (nvn_direct.h)
+    bool nvn_direct{};                                        ///< NVN2 direct mode
+    std::array<VkQueue, NvnDirectMaxQueues> nvn_direct_queues{}; ///< NVN2 direct mode
+    u32 nvn_direct_queue_count{};                             ///< NVN2 direct mode
     vk::Queue present_queue;     ///< Main present queue.
     vk::PipelineCache static_pipeline_cache;
     bool owns_static_pipeline_cache{};

@@ -321,8 +321,10 @@ Png CaptureScreenshot(System& system, u32 height, std::chrono::seconds timeout,
     const auto pixels = std::make_shared<std::vector<u8>>(size_t{layout.width} * layout.height * 4);
     const auto done = std::make_shared<std::promise<bool>>();
     auto future = done->get_future();
-    renderer.RequestScreenshot(
-        pixels->data(), [pixels, done](bool invert_y) { done->set_value(invert_y); }, layout);
+    if (!renderer.RequestScreenshot(
+            pixels->data(), [pixels, done](bool invert_y) { done->set_value(invert_y); }, layout)) {
+        throw std::runtime_error{"a screenshot is already pending: no frame was presented since"};
+    }
     if (!WaitReady(stop, future, timeout)) {
         throw std::runtime_error{fmt::format(
             "no frame was presented within {} s (paused or loading?)", timeout.count())};

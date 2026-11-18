@@ -218,6 +218,14 @@ void Traverse(EmitContext& ctx, IR::Program& program) {
 
                 const Id safety_cond{
                     ctx.OpSGreaterThanEqual(ctx.U1, new_counter, ctx.u32_zero_value)};
+                if (Sirit::ValidId(ctx.loop_guard_flag)) {
+                    // The check ends a loop that would go on: noted in a private flag (no block
+                    // of its own here: the loop header's phis name this one), stored at return
+                    const Id fired{ctx.OpLogicalAnd(ctx.U1, cond, ctx.OpLogicalNot(ctx.U1, safety_cond))};
+                    ctx.OpStore(ctx.loop_guard_flag,
+                                ctx.OpBitwiseOr(ctx.U32[1], ctx.OpLoad(ctx.U32[1], ctx.loop_guard_flag),
+                                                ctx.OpSelect(ctx.U32[1], fired, ctx.Const(1u), ctx.u32_zero_value)));
+                }
                 cond = ctx.OpLogicalAnd(ctx.U1, cond, safety_cond);
             }
             const Id loop_header_label{node.data.repeat.loop_header->Definition<Id>()};
@@ -226,6 +234,21 @@ void Traverse(EmitContext& ctx, IR::Program& program) {
             break;
         }
         case IR::AbstractSyntaxNode::Type::Return:
+            if (Sirit::ValidId(ctx.loop_guard_flag)) {
+                // RuntimeInfo::loop_guard_binding: set when a loop's safety check ended a loop
+                const Id fired{ctx.OpINotEqual(ctx.U1, ctx.OpLoad(ctx.U32[1], ctx.loop_guard_flag),
+                                               ctx.u32_zero_value)};
+                const Id note_label{ctx.OpLabel()};
+                const Id noted_label{ctx.OpLabel()};
+                ctx.OpSelectionMerge(noted_label, spv::SelectionControlMask::MaskNone);
+                ctx.OpBranchConditional(fired, note_label, noted_label);
+                ctx.AddLabel(note_label);
+                ctx.OpStore(ctx.OpAccessChain(ctx.loop_guard_word_pointer, ctx.loop_guard_buffer,
+                                              ctx.u32_zero_value, ctx.u32_zero_value),
+                            ctx.Const(1u));
+                ctx.OpBranch(noted_label);
+                ctx.AddLabel(noted_label);
+            }
             ctx.OpReturn();
             break;
         case IR::AbstractSyntaxNode::Type::Unreachable:

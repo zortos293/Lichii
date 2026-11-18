@@ -16,6 +16,9 @@ add_library(core STATIC
     constants.h
     core.cpp
     core.h
+    nvn_direct_choice.h
+    nvn_hook.cpp
+    nvn_hook.h
     game_settings.cpp
     game_settings.h
     core_timing.cpp

@@ -30,6 +30,7 @@
 #include <ranges>
 #include "common/settings.h"
 #include "common/settings_enums.h"
+#include "core/nvn_hook.h"
 #include "video_core/nx2_stutter_trace.h"
 #include "video_core/vulkan_common/nsight_aftermath_tracker.h"
 #include "video_core/vulkan_common/vma.h"
@@ -832,6 +833,33 @@ Device::Device(VkInstance instance_, vk::PhysicalDevice physical_, VkSurfaceKHR 
     }
 
     // Descriptors feature list
+    // NVN2 direct mode: the replay's descriptor tables are update-after-bind and
+    // partially bound arrays, and its pools use buffer device addresses; those stay enabled.
+    nvn_direct = Core::NvnHook::DirectMode();
+    const VkPhysicalDeviceDescriptorIndexingFeatures supported_descriptor_indexing =
+        features.descriptor_indexing;
+    // Before any of that reaches vkCreateDevice: the replay needs Vulkan 1.3 (dynamic rendering
+    // is core there), and buffer update-after-bind is invalid beside robustBufferAccess, which
+    // stays on, unless the device has robustBufferAccessUpdateAfterBind.
+    if (nvn_direct) {
+        const bool buffer_update_after_bind =
+            supported_descriptor_indexing.descriptorBindingStorageBufferUpdateAfterBind ||
+            supported_descriptor_indexing.descriptorBindingUniformBufferUpdateAfterBind;
+        if (properties.properties.apiVersion < VK_API_VERSION_1_3) {
+            LOG_WARNING(Render_Vulkan, "NVN2 direct mode: the device is Vulkan {}.{}, it needs 1.3",
+                        VK_API_VERSION_MAJOR(properties.properties.apiVersion),
+                        VK_API_VERSION_MINOR(properties.properties.apiVersion));
+            nvn_direct = false;
+        } else if (buffer_update_after_bind &&
+                   !properties.descriptor_indexing.robustBufferAccessUpdateAfterBind) {
+            LOG_WARNING(Render_Vulkan, "NVN2 direct mode: the device has buffer update-after-bind "
+                                       "but not robustBufferAccessUpdateAfterBind");
+            nvn_direct = false;
+        }
+        if (!nvn_direct) {
+            Core::NvnHook::DirectFailed();
+        }
+    }
     {
         auto& descriptor_indexing = features.descriptor_indexing;
         descriptor_indexing.shaderInputAttachmentArrayDynamicIndexing = false;
@@ -852,6 +880,23 @@ Device::Device(VkInstance instance_, vk::PhysicalDevice physical_, VkSurfaceKHR 
         descriptor_indexing.runtimeDescriptorArray =
             descriptor_indexing.runtimeDescriptorArray && WantsFsr4Port(driver_id);
     }
+    if (nvn_direct) {
+        auto& descriptor_indexing = features.descriptor_indexing;
+        descriptor_indexing.descriptorBindingSampledImageUpdateAfterBind =
+            supported_descriptor_indexing.descriptorBindingSampledImageUpdateAfterBind;
+        descriptor_indexing.descriptorBindingStorageImageUpdateAfterBind =
+            supported_descriptor_indexing.descriptorBindingStorageImageUpdateAfterBind;
+        descriptor_indexing.descriptorBindingStorageBufferUpdateAfterBind =
+            supported_descriptor_indexing.descriptorBindingStorageBufferUpdateAfterBind;
+        descriptor_indexing.descriptorBindingUniformBufferUpdateAfterBind =
+            supported_descriptor_indexing.descriptorBindingUniformBufferUpdateAfterBind;
+        descriptor_indexing.descriptorBindingUpdateUnusedWhilePending =
+            supported_descriptor_indexing.descriptorBindingUpdateUnusedWhilePending;
+        descriptor_indexing.descriptorBindingVariableDescriptorCount =
+            supported_descriptor_indexing.descriptorBindingVariableDescriptorCount;
+        descriptor_indexing.runtimeDescriptorArray =
+            supported_descriptor_indexing.runtimeDescriptorArray;
+    }
 
     // VK_EXT_descriptor_buffer requires VK_KHR_buffer_device_address
     if (extensions.descriptor_buffer && !features.buffer_device_address.bufferDeviceAddress) {
@@ -868,7 +913,7 @@ Device::Device(VkInstance instance_, vk::PhysicalDevice physical_, VkSurfaceKHR 
         extensions.buffer_device_address = false;
     } else
 #endif
-    if (!extensions.descriptor_buffer) {
+    if (!extensions.descriptor_buffer && !nvn_direct) {
         RemoveExtensionFeature(extensions.buffer_device_address, features.buffer_device_address,
                                VK_KHR_BUFFER_DEVICE_ADDRESS_EXTENSION_NAME);
     }
@@ -957,9 +1002,104 @@ Device::Device(VkInstance instance_, vk::PhysicalDevice physical_, VkSurfaceKHR 
         }
     }
 #endif
+    // NVN2 direct mode: what the replay (nvn_direct/bananative/dm/gfx/vk_android)
+    // needs beyond the emulator's device: dynamic rendering (it refuses to start without),
+    // graphics pipeline libraries, host memory import for the guest's memory pools, and up to
+    // 16 queues of the graphics family: one per NVN queue plus its own work on queue 0, which
+    // is Lichii's. robustBufferAccess stays on (Lichii requires it; the replay turns it off on
+    // its own device).
+    VkPhysicalDeviceDynamicRenderingFeatures direct_dynamic_rendering{
+        .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_DYNAMIC_RENDERING_FEATURES,
+    };
+    VkPhysicalDeviceGraphicsPipelineLibraryFeaturesEXT direct_pipeline_library{
+        .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_GRAPHICS_PIPELINE_LIBRARY_FEATURES_EXT,
+    };
+    VkPhysicalDeviceFragmentShadingRateFeaturesKHR direct_shading_rate{
+        .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FRAGMENT_SHADING_RATE_FEATURES_KHR,
+    };
+    VkPhysicalDeviceExclusiveScissorFeaturesNV direct_exclusive_scissor{
+        .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_EXCLUSIVE_SCISSOR_FEATURES_NV,
+    };
+    std::array<float, NvnDirectMaxQueues> direct_queue_priorities{};
+    if (nvn_direct) {
+        const bool pipeline_library =
+            supported_extensions.contains(VK_EXT_GRAPHICS_PIPELINE_LIBRARY_EXTENSION_NAME) &&
+            supported_extensions.contains(VK_KHR_PIPELINE_LIBRARY_EXTENSION_NAME);
+        direct_pipeline_library.pNext = &direct_dynamic_rendering;
+        VkPhysicalDeviceFeatures2 query{.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FEATURES_2,
+                                        .pNext = pipeline_library
+                                                     ? static_cast<void*>(&direct_pipeline_library)
+                                                     : static_cast<void*>(&direct_dynamic_rendering)};
+        physical.GetFeatures2(query);
+        direct_dynamic_rendering.pNext = const_cast<void*>(first_next);
+        first_next = query.pNext;
+        if (pipeline_library) {
+            loaded_extensions.insert(VK_KHR_PIPELINE_LIBRARY_EXTENSION_NAME);
+            loaded_extensions.insert(VK_EXT_GRAPHICS_PIPELINE_LIBRARY_EXTENSION_NAME);
+        }
+        if (supported_extensions.contains(VK_EXT_EXTERNAL_MEMORY_HOST_EXTENSION_NAME)) {
+            loaded_extensions.insert(VK_EXT_EXTERNAL_MEMORY_HOST_EXTENSION_NAME);
+        }
+        // Pools as udmabufs of guest memory where host-pointer imports of it are refused
+        // (amdgpu: vka_mem.c vka_mem_import_choose)
+        if (supported_extensions.contains(VK_KHR_EXTERNAL_MEMORY_FD_EXTENSION_NAME) &&
+            supported_extensions.contains(VK_EXT_EXTERNAL_MEMORY_DMA_BUF_EXTENSION_NAME)) {
+            loaded_extensions.insert(VK_KHR_EXTERNAL_MEMORY_FD_EXTENSION_NAME);
+            loaded_extensions.insert(VK_EXT_EXTERNAL_MEMORY_DMA_BUF_EXTENSION_NAME);
+        }
+        // Counter timestamps on the guest clock (vka_exec.c gpu_offset)
+        if (supported_extensions.contains(VK_KHR_CALIBRATED_TIMESTAMPS_EXTENSION_NAME)) {
+            loaded_extensions.insert(VK_KHR_CALIBRATED_TIMESTAMPS_EXTENSION_NAME);
+        } else if (supported_extensions.contains(VK_EXT_CALIBRATED_TIMESTAMPS_EXTENSION_NAME)) {
+            loaded_extensions.insert(VK_EXT_CALIBRATED_TIMESTAMPS_EXTENSION_NAME);
+        }
+        // NVN state the replay maps onto extensions Lichii's renderer does not use
+        //: shading-rate images as a fragment shading rate attachment, and
+        // exclusive scissors.
+        if (supported_extensions.contains(VK_KHR_FRAGMENT_SHADING_RATE_EXTENSION_NAME)) {
+            VkPhysicalDeviceFeatures2 shading_rate_query{
+                .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FEATURES_2, .pNext = &direct_shading_rate};
+            physical.GetFeatures2(shading_rate_query);
+            if (direct_shading_rate.attachmentFragmentShadingRate == VK_TRUE) {
+                direct_shading_rate.pipelineFragmentShadingRate = VK_FALSE;
+                direct_shading_rate.primitiveFragmentShadingRate = VK_FALSE;
+                direct_shading_rate.pNext = const_cast<void*>(first_next);
+                first_next = &direct_shading_rate;
+                loaded_extensions.insert(VK_KHR_FRAGMENT_SHADING_RATE_EXTENSION_NAME);
+            }
+        }
+        if (supported_extensions.contains(VK_NV_SCISSOR_EXCLUSIVE_EXTENSION_NAME)) {
+            VkPhysicalDeviceFeatures2 exclusive_scissor_query{
+                .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FEATURES_2,
+                .pNext = &direct_exclusive_scissor};
+            physical.GetFeatures2(exclusive_scissor_query);
+            if (direct_exclusive_scissor.exclusiveScissor == VK_TRUE) {
+                direct_exclusive_scissor.pNext = const_cast<void*>(first_next);
+                first_next = &direct_exclusive_scissor;
+                loaded_extensions.insert(VK_NV_SCISSOR_EXCLUSIVE_EXTENSION_NAME);
+            }
+        }
+        const auto ci = std::ranges::find(queue_cis, graphics_family,
+                                          &VkDeviceQueueCreateInfo::queueFamilyIndex);
+        const u32 available = physical.GetQueueFamilyProperties()[graphics_family].queueCount;
+        nvn_direct_queue_count = std::min(available, NvnDirectMaxQueues);
+        direct_queue_priorities.fill(1.0f);
+        ci->queueCount = nvn_direct_queue_count;
+        ci->pQueuePriorities = direct_queue_priorities.data();
+        LOG_INFO(Render_Vulkan,
+                 "NVN2 direct mode: dynamic rendering {}, graphics pipeline libraries {}, host "
+                 "memory import {}, {} of the graphics family's {} queues",
+                 direct_dynamic_rendering.dynamicRendering == VK_TRUE,
+                 direct_pipeline_library.graphicsPipelineLibrary == VK_TRUE,
+                 loaded_extensions.contains(VK_EXT_EXTERNAL_MEMORY_HOST_EXTENSION_NAME),
+                 nvn_direct_queue_count, available);
+    }
     logical = vk::Device::Create(physical, queue_cis, ExtensionListForVulkan(loaded_extensions), first_next, dld);
 
     graphics_queue = logical.GetQueue(graphics_family);
+    for (u32 index = 0; index < nvn_direct_queue_count; ++index) {
+        dld.vkGetDeviceQueue(*logical, graphics_family, index, &nvn_direct_queues[index]);
+    }
     present_queue = logical.GetQueue(present_family);
 
 #ifdef EGLANTINE_STREAMLINE

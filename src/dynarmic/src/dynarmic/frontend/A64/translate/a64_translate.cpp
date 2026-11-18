@@ -18,7 +18,17 @@ namespace Dynarmic::A64 {
 
 void Translate(IR::Block& block, LocationDescriptor descriptor, MemoryReadCodeFuncType memory_read_code, TranslationOptions options) {
     const bool single_step = descriptor.SingleStepping();
+    const BlockEntryHook hook =
+        options.block_entry_hook != nullptr ? options.block_entry_hook(descriptor.PC()) : BlockEntryHook::None;
     TranslatorVisitor visitor{block, descriptor, std::move(options)};
+    if (hook == BlockEntryHook::Thunk) {
+        visitor.ir.InstructionCacheOperationRaised(InstructionCacheOperation::BlockEntryHook, visitor.ir.Imm64(descriptor.PC()));
+        visitor.ir.SetPC(visitor.X(64, Reg::R16));
+        visitor.ir.SetTerm(IR::Term::FastDispatchHint{});
+        block.CycleCount()++;
+        block.SetEndLocation(descriptor.AdvancePC(4));
+        return;
+    }
 
     bool should_continue = true;
     do {

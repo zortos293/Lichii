@@ -133,6 +133,27 @@ private:
     ComputePassDescriptorQueue& compute_pass_descriptor_queue;
 };
 
+/// astc_decoder.comp's push constants.
+struct AstcPushConstants {
+    std::array<u32, 2> blocks_dims;
+    u32 layer_stride;
+    u32 block_size;
+    u32 x_shift;
+    u32 block_height;
+    u32 block_height_mask;
+    u32 native_tiling;
+};
+
+/// bc_encoder.comp's push constants.
+struct BcEncoderPushConstants {
+    u32 blocks_x;
+    u32 blocks_y;
+    u32 width;
+    u32 height;
+    u32 bc3;
+    u32 out_offset; // in 8-byte units
+};
+
 class ASTCDecoderPass final : public ComputePass {
 public:
     explicit ASTCDecoderPass(const Device& device_, Scheduler& scheduler_,

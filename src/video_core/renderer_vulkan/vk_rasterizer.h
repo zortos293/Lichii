@@ -94,6 +94,10 @@ public:
                               StateTracker& state_tracker_, Scheduler& scheduler_);
     ~RasterizerVulkan() override;
 
+    [[nodiscard]] const PipelineCache& GetPipelineCache() const noexcept {
+        return pipeline_cache;
+    }
+
     void Draw(bool is_indexed, u32 instance_count) override;
     void DrawIndirect() override;
     void DrawTexture() override;

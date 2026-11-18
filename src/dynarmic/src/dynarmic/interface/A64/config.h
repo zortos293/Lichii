@@ -81,7 +81,19 @@ enum class InstructionCacheOperation {
     /// IC IALLU
     InvalidateAllToPoU,
     /// IC IALLUIS
-    InvalidateAllToPoUInnerSharable
+    InvalidateAllToPoUInnerSharable,
+    /// Not an instruction: a block UserConfig::block_entry_hook named started (value: its PC)
+    BlockEntryHook
+};
+
+/// What UserConfig::block_entry_hook asks for a block's start address.
+enum class BlockEntryHook : std::uint8_t {
+    None,
+    /// Raise InstructionCacheOperationRaised(BlockEntryHook, pc), then branch to X16 without
+    /// reading any guest code: the address is a synthetic one the callback stands behind (it sets
+    /// X16 to where execution goes on). X16 (IP0) is free to clobber on a call to a function by
+    /// the AArch64 procedure call standard.
+    Thunk,
 };
 
 struct UserCallbacks {
@@ -238,6 +250,10 @@ struct UserConfig {
 
     /// Processor ID
     std::uint8_t processor_id = 0;
+
+    /// Asked for each block's start address when the block is translated (see BlockEntryHook).
+    /// Null: no hooks.
+    BlockEntryHook (*block_entry_hook)(std::uint64_t pc) = nullptr;
 
     /// This enables unsafe optimizations that reduce emulation accuracy in favour of speed.
     /// For safety, in order to enable unsafe optimizations you have to set BOTH this flag

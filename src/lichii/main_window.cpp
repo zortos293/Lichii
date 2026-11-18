@@ -179,6 +179,7 @@ static FileSys::VirtualFile VfsDirectoryCreateFileWrapper(const FileSys::Virtual
 #include "core/file_sys/romfs.h"
 #include "core/file_sys/savedata_factory.h"
 #include "core/loader/nx.h"
+#include "core/nvn_hook.h"
 
 #include "core/tools/renderdoc.h"
 
@@ -2491,6 +2492,29 @@ void MainWindow::BootGame(const QString& filename, Service::AM::FrontendAppletPa
     }
     LOG_INFO(Frontend, "Core load completed: elapsed_ms={}", load_timer.elapsed());
 
+    if (const auto choice = Core::NvnHook::Choice(); Core::NvnHook::IsFallback(choice)) {
+        using Core::NvnHook::RendererChoice;
+        const QString reason = [&] {
+            switch (choice) {
+            case RendererChoice::NotBuilt:
+                return tr("this build does not include it");
+            case RendererChoice::NotVulkan:
+                return tr("it needs the Vulkan graphics API");
+            case RendererChoice::Not64Bit:
+                return tr("the game is 32-bit");
+            case RendererChoice::NoNvn:
+                return tr("the game does not use NVN");
+            case RendererChoice::NotReset:
+                return tr("an earlier game used it and this build cannot reset it");
+            case RendererChoice::ReplayFailed:
+            default:
+                return tr("it could not start on this GPU");
+            }
+        }();
+        message_label->setText(
+            tr("NVN direct renderer not used (%1): normal renderer").arg(reason));
+    }
+
     const auto report_program_id = QtCommon::system->GetApplicationProcessProgramID();
     if (Settings::CurrentProgramIsSwitch2() && report_program_id != 0) {
         auto& session = report_session.emplace();
@@ -2950,6 +2974,7 @@ void MainWindow::OnEmulationStopped() {
     }
     game_list->SetFilterFocus();
     tas_label->clear();
+    message_label->clear();
     input_subsystem->GetTas()->Stop();
     OnTasStateChanged();
     render_window->FinalizeCamera();

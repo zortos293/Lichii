@@ -240,6 +240,7 @@ void Load(VkDevice device, DeviceDispatch& dld) noexcept {
     X(vkMapMemory);
     X(vkQueueBindSparse);
     X(vkQueueSubmit);
+    X(vkQueueWaitIdle);
     X(vkQueueSubmit2);
     X(vkResetFences);
     X(vkResetQueryPool);
