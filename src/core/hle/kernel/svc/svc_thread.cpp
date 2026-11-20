@@ -7,6 +7,7 @@
 #include <thread>
 
 #include "common/scope_exit.h"
+#include "common/settings.h"
 #include "core/core.h"
 #include "core/core_timing.h"
 #include "core/hle/kernel/k_hardware_timer.h"
@@ -19,6 +20,32 @@
 
 namespace Kernel::Svc {
 namespace {
+
+// A yield that finds nothing to switch to returns at once, and some games spin on it (Luigi's
+// Mansion 3's main thread makes ~4.7 million a second). Each one is a JIT exit and kernel round
+// trip that keeps a host core busy, which on hosts with a shared CPU/GPU power budget takes power
+// from the threads doing the work. After a streak of them, give the host core away for a moment:
+// hardware makes no timing promise for a yield, so the guest only reacts up to ~0.1 ms later.
+constexpr u32 NoOpYieldStreak = 64;
+constexpr auto NoOpYieldBackoff = std::chrono::microseconds{50};
+
+void BackOffAfterNoOpYields(KernelCore& kernel, bool no_op_yield) {
+    if (!Settings::values.yield_backoff.GetValue()) {
+        return;
+    }
+    thread_local const KThread* streak_thread = nullptr;
+    thread_local u32 streak = 0;
+    const KThread* const thread = GetCurrentThreadPointer(kernel);
+    if (!no_op_yield || thread != streak_thread) {
+        streak_thread = thread;
+        streak = 0;
+        return;
+    }
+    // In single-core mode one host thread runs every core, so sleeping would stall them all.
+    if (++streak >= NoOpYieldStreak && kernel.IsMulticore()) {
+        std::this_thread::sleep_for(NoOpYieldBackoff);
+    }
+}
 
 constexpr bool IsValidVirtualCoreId(int32_t core_id) {
     return (0 <= core_id && core_id < static_cast<int32_t>(Core::Hardware::NUM_CPU_CORES));
@@ -166,6 +193,10 @@ void SleepThread(Core::System& system, s64 ns) {
 
     LOG_TRACE(Kernel_SVC, "called nanoseconds={}", ns);
 
+    // The check the yields start with, made before they update the thread's yield count.
+    const bool no_op_yield = ns <= 0 && GetCurrentThread(kernel).GetYieldScheduleCount() ==
+                                            GetCurrentProcess(kernel).GetScheduledCount();
+
     // When the input tick is positive, sleep.
     if (ns > 0) {
         // Convert the timeout from nanoseconds to ticks.
@@ -194,6 +225,7 @@ void SleepThread(Core::System& system, s64 ns) {
     } else {
         // Nintendo does nothing at all if an otherwise invalid value is passed.
     }
+    BackOffAfterNoOpYields(kernel, no_op_yield);
 }
 
 /// Gets the thread context

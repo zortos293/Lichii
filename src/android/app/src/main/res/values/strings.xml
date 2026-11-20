@@ -531,6 +531,8 @@
     <string name="custom_cpu_ticks">Custom CPU Ticks</string>
     <string name="custom_cpu_ticks_description">Set a custom value of CPU ticks. Higher values can increase performance, but may also cause the game to freeze. A range of 77–21000 is recommended.</string>
     <string name="cpu_ticks">Ticks</string>
+    <string name="yield_backoff">Back off spinning threads</string>
+    <string name="yield_backoff_description">When a game thread keeps yielding with nothing else to run, briefly gives its host CPU core away instead of spinning. Saves CPU time and power, but on devices that lower their clocks with the load it can cost some frame pacing.</string>
     <string name="memory_layout">Memory Layout</string>
     <string name="memory_layout_description">(EXPERIMENTAL) Change the emulated memory layout. This setting will not increase performance, but may help with games utilizing high resolutions via mods. Do not use on phones with 8GB of RAM or less. Only works on the Dynarmic (JIT) backend.</string>
 

@@ -298,6 +298,9 @@ struct Values {
                                            true,
                                            &use_custom_cpu_ticks};
 
+    // Give the host core away while a guest thread spins on yields that find nothing to switch to.
+    SwitchableSetting<bool> yield_backoff{linkage, false, "yield_backoff", Category::Cpu};
+
     Setting<bool> cpuopt_page_tables{linkage, true, "cpuopt_page_tables", Category::CpuDebug};
     Setting<bool> cpuopt_block_linking{linkage, true, "cpuopt_block_linking", Category::CpuDebug};
     Setting<bool> cpuopt_return_stack_buffer{linkage, true, "cpuopt_return_stack_buffer",

@@ -862,6 +862,13 @@ abstract class SettingsItem(
             )
             put(
                 SwitchSetting(
+                    BooleanSetting.YIELD_BACKOFF,
+                    titleId = R.string.yield_backoff,
+                    descriptionId = R.string.yield_backoff_description
+                )
+            )
+            put(
+                SwitchSetting(
                     BooleanSetting.SKIP_CPU_INNER_INVALIDATION,
                     titleId = R.string.skip_cpu_inner_invalidation,
                     descriptionId = R.string.skip_cpu_inner_invalidation_description
