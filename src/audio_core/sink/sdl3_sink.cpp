@@ -3,6 +3,8 @@
 
 // SPDX-License-Identifier: GPL-2.0-or-later
 
+#include <atomic>
+#include <mutex>
 #include <span>
 #include <vector>
 
@@ -87,28 +89,36 @@ public:
         system_channels = system_channels_;
         device_channels = device_channels_;
 
-        SDL_AudioSpec spec{};
         spec.freq = TargetSampleRate;
         spec.channels = static_cast<u8>(device_channels);
         spec.format = SDL_AUDIO_S16;
 
-        std::string device_name{output_device};
-        bool capture{false};
-        if (type == StreamType::In) {
-            device_name = input_device;
-            capture = true;
-        }
+        configured_device_name = (type == StreamType::In) ? input_device : output_device;
 
-        const SDL_AudioDeviceID audio_device =
-            device_name.empty() ? (capture ? SDL_AUDIO_DEVICE_DEFAULT_RECORDING
-                                           : SDL_AUDIO_DEVICE_DEFAULT_PLAYBACK)
-                                : FindAudioDeviceByName(device_name, capture);
+        bound_device = configured_device_name.empty()
+                           ? (type == StreamType::In ? SDL_AUDIO_DEVICE_DEFAULT_RECORDING
+                                                     : SDL_AUDIO_DEVICE_DEFAULT_PLAYBACK)
+                           : FindAudioDeviceByName(configured_device_name,
+                                                   type == StreamType::In);
 
-        stream = SDL_OpenAudioDeviceStream(audio_device, &spec, &SDLSinkStream::DataCallback,
+        stream = SDL_OpenAudioDeviceStream(bound_device, &spec, &SDLSinkStream::DataCallback,
                                            this);
 
+        // A device the settings name can be absent at boot; note when we settled for less.
+        const SDL_AudioDeviceID default_device = (type == StreamType::In)
+                                                     ? SDL_AUDIO_DEVICE_DEFAULT_RECORDING
+                                                     : SDL_AUDIO_DEVICE_DEFAULT_PLAYBACK;
+        on_fallback = !configured_device_name.empty() && bound_device == default_device;
+
         if (stream == nullptr) {
+            // Not final: the ADDED watch below retries when a device shows up (#1448, #1089).
+            open_failed = true;
             LOG_CRITICAL(Audio_Sink, "Error opening SDL audio device: {}", SDL_GetError());
+        }
+
+        SDL_AddEventWatch(&SDLSinkStream::DeviceEventWatch, this);
+
+        if (stream == nullptr) {
             return;
         }
 
@@ -128,6 +138,7 @@ public:
      */
     ~SDLSinkStream() override {
         LOG_DEBUG(Service_Audio, "Destructing SDL stream {}", name);
+        SDL_RemoveEventWatch(&SDLSinkStream::DeviceEventWatch, this);
         Finalize();
     }
 
@@ -135,11 +146,12 @@ public:
      * Finalize the sink stream.
      */
     void Finalize() override {
+        std::scoped_lock lock{stream_mutex};
         if (stream == nullptr) {
             return;
         }
 
-        Stop();
+        StopLocked();
         SDL_ClearAudioStream(stream);
         SDL_DestroyAudioStream(stream);
         stream = nullptr;
@@ -152,7 +164,8 @@ public:
      *                 Default false.
      */
     void Start(bool resume = false) override {
-        if (!IsReady() || !paused) {
+        std::scoped_lock lock{stream_mutex};
+        if (stream == nullptr || failed || !paused) {
             return;
         }
 
@@ -165,21 +178,31 @@ public:
     }
 
     bool IsReady() const override {
+        std::scoped_lock lock{stream_mutex};
         return stream != nullptr && !failed;
+    }
+
+    /**
+     * Queue an audio buffer for output or input, reopening the stream first when the device
+     * watch asked for it. This is the steady per-buffer call from the audio systems, so the
+     * reopen happens on an emulator thread, not inside SDL's event dispatch.
+     *
+     * @param buffer  - Audio buffer information to be queued.
+     * @param samples - Samples in PCM16 format to be output or input.
+     */
+    void AppendBuffer(SinkBuffer& buffer, std::span<s16> samples) override {
+        if (reopen_requested.exchange(false, std::memory_order_relaxed)) {
+            ReopenStream();
+        }
+        SinkStream::AppendBuffer(buffer, samples);
     }
 
     /**
      * Stop the sink stream.
      */
     void Stop() override {
-        if (stream == nullptr || paused) {
-            return;
-        }
-        SignalPause();
-        if (!SDL_PauseAudioStreamDevice(stream)) {
-            failed = true;
-            LOG_CRITICAL(Audio_Sink, "Error stopping SDL audio stream: {}", SDL_GetError());
-        }
+        std::scoped_lock lock{stream_mutex};
+        StopLocked();
     }
 
 private:
@@ -234,8 +257,128 @@ private:
         }
     }
 
+    /**
+     * SDL event hook. Runs on whatever thread SDL dispatches events from, so it only flags the
+     * reopen; AppendBuffer does the work. Removal kills a stream bound to a device the settings
+     * name: SDL migrates default-bound streams on its own, but a named one dies with its device
+     * (#1448, #1089). Addition retries a stream that never opened, and takes a fallen-back
+     * stream back to its named device once that returns.
+     *
+     * @param userdata - Custom data pointer passed along, points to a SDLSinkStream.
+     * @param event    - The SDL event.
+     */
+    static bool SDLCALL DeviceEventWatch(void* userdata, SDL_Event* event) {
+        auto* impl = static_cast<SDLSinkStream*>(userdata);
+        if (impl == nullptr) {
+            return true;
+        }
+        const bool capture = impl->type == StreamType::In;
+        const SDL_AudioDeviceID default_device =
+            capture ? SDL_AUDIO_DEVICE_DEFAULT_RECORDING : SDL_AUDIO_DEVICE_DEFAULT_PLAYBACK;
+
+        if (event->type == SDL_EVENT_AUDIO_DEVICE_REMOVED) {
+            if (event->adevice.recording != capture) {
+                return true;
+            }
+            const SDL_AudioDeviceID bound = impl->bound_device.load(std::memory_order_relaxed);
+            if (bound != default_device && event->adevice.which == bound) {
+                impl->reopen_requested.store(true, std::memory_order_relaxed);
+            }
+            return true;
+        }
+
+        if (event->type == SDL_EVENT_AUDIO_DEVICE_ADDED) {
+            if (event->adevice.recording != capture) {
+                return true;
+            }
+            if (impl->open_failed.load(std::memory_order_relaxed)) {
+                impl->reopen_requested.store(true, std::memory_order_relaxed);
+                return true;
+            }
+            if (impl->on_fallback.load(std::memory_order_relaxed)) {
+                const char* added = SDL_GetAudioDeviceName(event->adevice.which);
+                if (added != nullptr && impl->configured_device_name == added) {
+                    impl->reopen_requested.store(true, std::memory_order_relaxed);
+                }
+            }
+        }
+        return true;
+    }
+
+    /**
+     * Reopen the stream on the configured device, or the default when it is absent. Carries the
+     * paused state over; the samples queued for the old device are dropped.
+     */
+    void ReopenStream() {
+        std::scoped_lock lock{stream_mutex};
+        const bool was_paused = paused.load(std::memory_order_relaxed);
+
+        if (stream != nullptr) {
+            SDL_ClearAudioStream(stream);
+            SDL_DestroyAudioStream(stream);
+            stream = nullptr;
+        }
+
+        const bool capture = type == StreamType::In;
+        const SDL_AudioDeviceID default_device =
+            capture ? SDL_AUDIO_DEVICE_DEFAULT_RECORDING : SDL_AUDIO_DEVICE_DEFAULT_PLAYBACK;
+        const SDL_AudioDeviceID device = configured_device_name.empty()
+                                             ? default_device
+                                             : FindAudioDeviceByName(configured_device_name,
+                                                                     capture);
+
+        SDL_AudioStream* new_stream =
+            SDL_OpenAudioDeviceStream(device, &spec, &SDLSinkStream::DataCallback, this);
+        if (new_stream == nullptr) {
+            open_failed = true;
+            LOG_CRITICAL(Audio_Sink, "Error reopening SDL audio device: {}", SDL_GetError());
+            return;
+        }
+
+        bound_device = device;
+        on_fallback = !configured_device_name.empty() && device == default_device;
+        open_failed = false;
+        stream = new_stream;
+
+        LOG_INFO(Service_Audio, "Reopened SDL stream on device {}",
+                 static_cast<u32>(device));
+
+        if (!was_paused && !SDL_ResumeAudioStreamDevice(stream)) {
+            failed = true;
+            LOG_CRITICAL(Audio_Sink, "Error resuming reopened SDL audio stream: {}",
+                         SDL_GetError());
+        }
+    }
+
+    /// Stop with stream_mutex already held.
+    void StopLocked() {
+        if (stream == nullptr || paused) {
+            return;
+        }
+        SignalPause();
+        if (!SDL_PauseAudioStreamDevice(stream)) {
+            failed = true;
+            LOG_CRITICAL(Audio_Sink, "Error stopping SDL audio stream: {}", SDL_GetError());
+        }
+    }
+
+    /// Serializes stream access between the audio-tick thread (AppendBuffer and ReopenStream)
+    /// and the service threads (Start, Stop, Finalize)
+    mutable std::mutex stream_mutex;
     /// SDL stream attached to an opened input/output device
     SDL_AudioStream* stream{};
+    /// Spec the stream was opened with, kept for a reopen
+    SDL_AudioSpec spec{};
+    /// Device name from settings; empty means the default device
+    std::string configured_device_name;
+    /// Device the stream is bound to; the default-device constant when unnamed
+    std::atomic<SDL_AudioDeviceID> bound_device{};
+    /// The last open attempt failed; retry when a device is added
+    std::atomic<bool> open_failed{};
+    /// Bound to the default device although settings name one (it was absent)
+    std::atomic<bool> on_fallback{};
+    /// Set by the event watch, consumed by AppendBuffer
+    std::atomic<bool> reopen_requested{};
 };
 
 /// Configure the selected device name for both playback and capture streams.
