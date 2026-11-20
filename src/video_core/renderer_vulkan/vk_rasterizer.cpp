@@ -1337,6 +1337,7 @@ void RasterizerVulkan::PrepareDraw(bool is_indexed, Func&& draw_func, bool is_in
             verify_kept ? buffer_cache.KeptGraphicsBindingsHash(false, false, true) : 0;
         if (fast_draw_on) {
             pipeline->CaptureNextDelta(verify_kept);
+            FastDraw::NoteHandlesRead();
         }
         if (Profile::Scope scope{Profile::Zone::Configure}; !pipeline->Configure(is_indexed, output)) {
             report_failure("configure failed");
