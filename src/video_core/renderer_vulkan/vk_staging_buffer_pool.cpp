@@ -374,7 +374,16 @@ void StagingBufferPool::ReleaseIdleBuffers() {
 }
 
 void StagingBufferPool::ReleaseCache(MemoryUsage usage) {
-    ReleaseLevel(GetCache(usage), current_delete_level);
+    StagingBuffersCache& cache = GetCache(usage);
+    if (usage == MemoryUsage::DeviceLocal) {
+        for (size_t level = 0; level < NUM_LEVELS; ++level) {
+            if (!cache[level].entries.empty()) {
+                ReleaseLevel(cache, level);
+            }
+        }
+        return;
+    }
+    ReleaseLevel(cache, current_delete_level);
 }
 
 void StagingBufferPool::ReleaseLevel(StagingBuffersCache& cache, size_t log2) {

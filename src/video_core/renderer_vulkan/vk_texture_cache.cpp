@@ -34,6 +34,7 @@
 #include "video_core/render_trace.h"
 #include "video_core/renderer_vulkan/vk_texture_cache.h"
 #include "video_core/texture_cache/host_mip_limits.h"
+#include "video_core/texture_cache/transcode_reaper.h"
 
 #include "video_core/engines/fermi_2d.h"
 #include "video_core/renderer_vulkan/blit_image.h"
@@ -392,7 +393,7 @@ constexpr std::array<VkFormat, 2> OpaqueAstcViewFormats{VK_FORMAT_BC1_RGBA_UNORM
 }
 
 // Finished decode images wait for the next texture of their shape, up to this much memory.
-constexpr u64 MaxFreeTranscodeBytes = u64{256} << 20;
+constexpr u64 MaxFreeTranscodeBytes = u64{64} << 20;
 
 // ASTC that the GPU decodes and re-compresses to BC1/BC3 itself (TranscodeAstcToBcn): no CPU
 // decode, so streamed textures are ready the frame they are first used instead of seconds later.
@@ -1309,6 +1310,7 @@ void UseBc3ForSwitch2OnSmallCards(const Device& device) {
                 memory >> 20);
     Settings::SetAstcRecompressionOverride(Settings::AstcRecompression::Bc3);
 }
+
 } // Anonymous namespace
 
 TextureCacheRuntime::TextureCacheRuntime(const Device& device_, Scheduler& scheduler_,
@@ -3178,27 +3180,8 @@ void TextureCacheRuntime::TickFrame() {
         pending_byte_addressed_shadows.pop_front();
     }
     static constexpr u32 MAX_UNUSED_SCRATCH_FRAMES = 60;
-    const auto decode_bytes = [](const PendingTranscode& t) {
-        u64 bytes{};
-        for (u32 level = 0; level < t.levels; ++level) {
-            bytes += u64{(std::max)(t.width >> level, 1U)} * (std::max)(t.height >> level, 1U) * 4;
-        }
-        return bytes * t.layers;
-    };
-    u64 free_bytes{};
-    for (const PendingTranscode& t : free_transcodes) {
-        free_bytes += decode_bytes(t);
-    }
-    while (!pending_transcodes.empty() && scheduler.IsFree(pending_transcodes.front().tick)) {
-        PendingTranscode& done = pending_transcodes.front();
-        const u64 bytes = decode_bytes(done);
-        if (free_bytes + bytes <= MaxFreeTranscodeBytes) {
-            done.unused_frames = 0;
-            free_bytes += bytes;
-            free_transcodes.push_back(std::move(done));
-        }
-        pending_transcodes.pop_front();
-    }
+    VideoCommon::ReapFinishedTranscodes(scheduler, pending_transcodes, free_transcodes,
+                                       MaxFreeTranscodeBytes);
     std::erase_if(free_transcodes, [](PendingTranscode& t) {
         return ++t.unused_frames > MAX_UNUSED_SCRATCH_FRAMES;
     });
@@ -5470,6 +5453,8 @@ void TextureCacheRuntime::TranscodeAstcToBcn(
     // A decode image of the same shape the GPU is done with: title 1's title screen decodes
     // dozens of textures a frame, mostly of a few shapes. Making one took 263 us; from VMA's
     // shared blocks 90 us, but freeing them there left ~1 GB of those blocks unused.
+    VideoCommon::ReapFinishedTranscodes(scheduler, pending_transcodes, free_transcodes,
+                                       MaxFreeTranscodeBytes);
     const auto take_free = [&](u32 batch_layers, PendingTranscode& out) {
         const auto reusable = std::ranges::find_if(free_transcodes, [&](const PendingTranscode& t) {
             return t.width == width && t.height == height && t.levels == levels &&
