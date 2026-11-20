@@ -19,6 +19,7 @@
 #include <openssl/evp.h>
 #include <zlib.h>
 
+#include "common/fs/file_lock.h"
 #include "common/fs/path_util.h"
 #include "common/hex_util.h"
 #include "common/httplib.h"
@@ -51,6 +52,9 @@ constexpr std::array Splatoon3Files{"summary.yml",    "base.pack.zs.enc", "bh.pa
                                     "wa.pack.zs.enc", "wb.pack.zs.enc",   "wc.pack.zs.enc"};
 
 std::mutex install_mutex;
+
+// Long enough for another process to finish writing a package it holds the lock for.
+constexpr std::chrono::seconds InstallLockWait{30};
 
 u16 Read16(std::span<const u8> data, std::size_t offset) {
     if (offset > data.size() || data.size() - offset < 2) {
@@ -144,6 +148,12 @@ fs::path StagePath(const fs::path& target) {
 fs::path BackupPath(const fs::path& target) {
     auto path = target;
     path += ".nextendo-backup";
+    return path;
+}
+
+fs::path InstallLockPath(const fs::path& target) {
+    auto path = target;
+    path += ".nextendo-install.lock";
     return path;
 }
 
@@ -411,7 +421,18 @@ void Install(const Contents& contents, const fs::path& target, std::string_view 
 }
 
 Outcome Update(u64 title_id, const fs::path& target, const Fetch& fetch) {
-    RecoverInterrupted(target);
+    // Recover under the same cross-process lock the install takes below: a second process can be
+    // mid-install when this one starts, and restoring the backup over its in-flight stage would
+    // clobber both. When the lock stays busy, skip recovery: the process holding it finishes the
+    // install and leaves a consistent cache, and a crash releases the lock for the next boot.
+    {
+        std::error_code ec;
+        fs::create_directories(target.parent_path(), ec);
+        const Common::FS::FileLock recovery_lock{InstallLockPath(target), InstallLockWait};
+        if (recovery_lock.Held()) {
+            RecoverInterrupted(target);
+        }
+    }
     auto response = fetch(title_id);
     // Scarlet and Violet share one event package, published under Violet's title ID.
     if (title_id == PokemonScarlet && response &&
@@ -436,6 +457,22 @@ Outcome Update(u64 title_id, const fs::path& target, const Fetch& fetch) {
     }
     const auto hash = Sha256Hex(response->body);
     try {
+        // Nothing enforces a single Lichii instance: a second process booting the same title
+        // downloads and installs into this same cache, and install_mutex only serializes this
+        // process (#2207). Hold a lock file across the check and the install so the loser waits,
+        // then finds the winner's package already installed instead of swapping a partial stage
+        // in over it.
+        // The cache may not exist yet on a first boot; the lock file's folder has to.
+        std::error_code ec;
+        fs::create_directories(target.parent_path(), ec);
+        const Common::FS::FileLock install_lock{InstallLockPath(target), InstallLockWait};
+        if (!install_lock.Held()) {
+            LOG_WARNING(Service_BCAT,
+                        "Nextendo BCAT: {:016X}: another Lichii is installing this package, "
+                        "keeping the local cache",
+                        title_id);
+            return Outcome::Failed;
+        }
         if (InstalledHash(target) == hash && HasDirectories(target)) {
             LOG_INFO(Service_BCAT, "Nextendo BCAT: {:016X}: package {} unchanged", title_id,
                      hash.substr(0, 12));
