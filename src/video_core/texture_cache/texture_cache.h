@@ -2168,6 +2168,12 @@ bool TextureCache<P>::RescaleRenderTargets() {
     bool rescaled = false;
     std::array<ImageId, NUM_RT> tmp_color_images{};
     ImageId tmp_depth_image{};
+    // A Switch 2 target padded to whole GOBs is looked up at the surface clip's width
+    // (ClipPaddedTarget): look every target up again when the clip's right edge moves, whether the
+    // targets were narrowed for the last edge or not.
+    const auto& clip = maxwell3d->regs.surface_clip;
+    const bool clip_moved = gpu_memory != nullptr && gpu_memory->UsesNativeTiling() &&
+                            render_target_clip.Update(clip.x.Value() + clip.width.Value());
     do {
         flags[Dirty::RenderTargets] = false;
 
@@ -2198,14 +2204,14 @@ bool TextureCache<P>::RescaleRenderTargets() {
         };
         for (size_t index = 0; index < NUM_RT; ++index) {
             ImageViewId& color_buffer_id = render_targets.color_buffer_ids[index];
-            if (flags[Dirty::ColorBuffer0 + index] || force) {
+            if (flags[Dirty::ColorBuffer0 + index] || force || clip_moved) {
                 flags[Dirty::ColorBuffer0 + index] = false;
                 BindRenderTarget(&color_buffer_id, FindColorBuffer(index));
             }
             check_rescale(color_buffer_id, tmp_color_images[index]);
         }
         // The surface clip, which a padded depth target's size depends on, has no flag of its own.
-        if (flags[Dirty::ZetaBuffer] || force || depth_target_padded) {
+        if (flags[Dirty::ZetaBuffer] || force || clip_moved || depth_target_padded) {
             flags[Dirty::ZetaBuffer] = false;
             BindRenderTarget(&render_targets.depth_buffer_id, FindDepthBuffer());
         }
@@ -2369,7 +2375,8 @@ bool TextureCache<P>::ColorTargetWrittenBeforeThisFrame(u32 index) noexcept {
         !maxwell3d->dirty.flags[Dirty::ColorBuffer0 + index]) {
         image_id = rt_image_id[index];
     } else {
-        const ImageInfo info(rt, regs.anti_alias_samples_mode);
+        ImageInfo info(rt, regs.anti_alias_samples_mode);
+        ClipPaddedTarget(info);
         if (info.format == PixelFormat::Invalid || info.size.width == 0 || info.size.height == 0 ||
             info.size.depth == 0 || info.size.width > 65536 || info.size.height > 65536 ||
             info.size.depth > 2048 || info.resources.layers <= 0 ||
@@ -4918,6 +4925,17 @@ std::optional<typename TextureCache<P>::BlitImages> TextureCache<P>::GetBlitImag
     const GPUVAddr src_addr = src.Address();
     ImageInfo dst_info(dst);
     ImageInfo src_info(src);
+    if (gpu_memory->UsesNativeTiling()) {
+        // As ClipPaddedTarget: a Switch 2 program gives a blit's surfaces padded to whole GOBs
+        // too. Donkey Kong Bananza copies the 8x8 level of a texture it rendered as a 16x8
+        // surface, which matched no image: the copy ran in software, on a download of the source.
+        if (src_info.type == ImageType::e2D) {
+            src_info.size.width = PaddedBlitWidth(src_info, copy.src_x0, copy.src_x1);
+        }
+        if (dst_info.type == ImageType::e2D) {
+            dst_info.size.width = PaddedBlitWidth(dst_info, copy.dst_x0, copy.dst_x1);
+        }
+    }
     const bool can_be_depth_blit =
         dst_info.format == src_info.format && copy.filter == Tegra::Engines::Fermi2D::Filter::Point;
     ImageId dst_id;
@@ -5090,8 +5108,26 @@ ImageViewId TextureCache<P>::FindColorBuffer(size_t index) {
     if (rt.format == Tegra::RenderTargetFormat::NONE) {
         return ImageViewId{};
     }
-    const ImageInfo info(regs.rt[index], regs.anti_alias_samples_mode);
+    ImageInfo info(regs.rt[index], regs.anti_alias_samples_mode);
+    ClipPaddedTarget(info);
     return FindRenderTargetView(info, gpu_addr);
+}
+
+template <class P>
+void TextureCache<P>::ClipPaddedTarget(ImageInfo& info) const {
+    // A Switch 2 program gives a target's width padded to whole GOBs and samples it at its own:
+    // Donkey Kong Bananza draws its characters into a 2112x1179 R16_FLOAT target (2 bytes a
+    // texel, 32 texels a GOB) and a 2096x1179 depth target, with a 2095x1179 surface clip, and
+    // their shader samples the first as a 2095x1179 texture at the same address. Image lookups
+    // compare sizes strictly, so the target and the texture were two images, and each of those
+    // draws copied the whole target to the texture first. Both take the same guest memory with
+    // the same layout, and the clip keeps rendering out of the padding.
+    if (gpu_memory == nullptr || !gpu_memory->UsesNativeTiling() ||
+        info.type != ImageType::e2D) {
+        return;
+    }
+    const auto& clip = maxwell3d->regs.surface_clip;
+    info.size.width = PaddedTargetWidth(info, clip.x.Value() + clip.width.Value());
 }
 
 template <class P>
@@ -5114,6 +5150,8 @@ ImageViewId TextureCache<P>::FindDepthBuffer() {
     const u32 clip_right = regs.surface_clip.x.Value() + regs.surface_clip.width.Value();
     if (depth_target_padded && clip_right <= info.size.height) {
         info.size.width = info.size.height;
+    } else {
+        ClipPaddedTarget(info);
     }
     return FindRenderTargetView(info, gpu_addr);
 }

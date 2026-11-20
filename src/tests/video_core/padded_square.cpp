@@ -50,3 +50,65 @@ TEST_CASE("Other depth targets are not padded squares", "[video_core][texture_ca
     volume.type = ImageType::e3D;
     REQUIRE_FALSE(VideoCommon::IsPaddedSquare(volume));
 }
+
+TEST_CASE("A target padded to whole GOBs is as wide as its clip", "[video_core][texture_cache]") {
+    // Donkey Kong Bananza's character targets, with a 2095x1179 surface clip.
+    REQUIRE(VideoCommon::IsPaddedWidth(Depth(PixelFormat::R16_FLOAT, 2112, 1179), 2095));
+    REQUIRE(VideoCommon::IsPaddedWidth(Depth(PixelFormat::D32_FLOAT, 2096, 1179), 2095));
+    REQUIRE(VideoCommon::IsPaddedWidth(Depth(PixelFormat::B10G11R11_FLOAT, 368, 204), 360));
+    // 2 bytes a texel: 2081 texels are the first of the last GOB column.
+    REQUIRE(VideoCommon::IsPaddedWidth(Depth(PixelFormat::R16_FLOAT, 2112, 1179), 2081));
+}
+
+TEST_CASE("A clip that ends before the last GOB column is no padding",
+          "[video_core][texture_cache]") {
+    REQUIRE_FALSE(VideoCommon::IsPaddedWidth(Depth(PixelFormat::R16_FLOAT, 2112, 1179), 2080));
+    REQUIRE_FALSE(VideoCommon::IsPaddedWidth(Depth(PixelFormat::D32_FLOAT, 2096, 1179), 1440));
+    // As wide as the target, wider, or empty
+    REQUIRE_FALSE(VideoCommon::IsPaddedWidth(Depth(PixelFormat::D32_FLOAT, 2096, 1179), 2096));
+    REQUIRE_FALSE(VideoCommon::IsPaddedWidth(Depth(PixelFormat::D32_FLOAT, 2096, 1179), 2100));
+    REQUIRE_FALSE(VideoCommon::IsPaddedWidth(Depth(PixelFormat::D32_FLOAT, 2096, 1179), 0));
+
+    ImageInfo multisampled = Depth(PixelFormat::D32_FLOAT, 2096, 1179);
+    multisampled.num_samples = 4;
+    REQUIRE_FALSE(VideoCommon::IsPaddedWidth(multisampled, 2095));
+}
+
+TEST_CASE("A padded target follows clip changes the RT registers do not make",
+          "[video_core][texture_cache]") {
+    // The RT registers stay as they are; only the surface clip changes between lookups.
+    const ImageInfo target = Depth(PixelFormat::R16_FLOAT, 2112, 1179);
+    VideoCommon::RenderTargetClip clip;
+    REQUIRE(clip.Update(2112));
+    REQUIRE(VideoCommon::PaddedTargetWidth(target, clip.right) == 2112);
+    REQUIRE_FALSE(clip.Update(2112));
+
+    // Full width -> narrow: the target was not narrowed for the last clip, and is looked up again.
+    REQUIRE(clip.Update(2095));
+    REQUIRE(VideoCommon::PaddedTargetWidth(target, clip.right) == 2095);
+    REQUIRE_FALSE(clip.Update(2095));
+
+    // Narrow -> full width
+    REQUIRE(clip.Update(2112));
+    REQUIRE(VideoCommon::PaddedTargetWidth(target, clip.right) == 2112);
+
+    // A clip inside the image proper keeps the target's own width.
+    REQUIRE(clip.Update(1920));
+    REQUIRE(VideoCommon::PaddedTargetWidth(target, clip.right) == 2112);
+}
+
+TEST_CASE("A blit surface is narrowed only for a forward span into the padding",
+          "[video_core][texture_cache]") {
+    // A mip level rendered as a 16x8 surface and copied as 8x8.
+    const ImageInfo surface = Depth(PixelFormat::A8B8G8R8_UNORM, 16, 8);
+    REQUIRE(VideoCommon::PaddedBlitWidth(surface, 0, 8) == 8);
+    REQUIRE(VideoCommon::PaddedBlitWidth(surface, 4, 8) == 8);
+    // Reversed spans keep the surface's width, whichever endpoint is the smaller one.
+    REQUIRE(VideoCommon::PaddedBlitWidth(surface, 8, 0) == 16);
+    REQUIRE(VideoCommon::PaddedBlitWidth(surface, 16, 8) == 16);
+    // Empty, negative or past the padding
+    REQUIRE(VideoCommon::PaddedBlitWidth(surface, 8, 8) == 16);
+    REQUIRE(VideoCommon::PaddedBlitWidth(surface, -4, 8) == 16);
+    REQUIRE(VideoCommon::PaddedBlitWidth(surface, 0, 16) == 16);
+    REQUIRE(VideoCommon::PaddedBlitWidth(surface, 0, 20) == 16);
+}

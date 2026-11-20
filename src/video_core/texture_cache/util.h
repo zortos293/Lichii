@@ -176,9 +176,33 @@ void SwizzleImage(Tegra::MemoryManager& gpu_memory, GPUVAddr gpu_addr, const Ima
                                    const Settings::ResolutionScalingInfo& resolution,
                                    u32 max_extent) noexcept;
 
-/// Whether a block-linear 2D image is wider than tall by padding only: made as wide as it is
-/// tall, it takes the same guest memory with the same layout.
+/// Whether a block-linear 2D image is wider than `width` by padding only: made `width` wide, it
+/// takes the same guest memory with the same layout.
+[[nodiscard]] bool IsPaddedWidth(const ImageInfo& info, u32 width) noexcept;
+
+/// Whether a block-linear 2D image is wider than tall by padding only.
 [[nodiscard]] bool IsPaddedSquare(const ImageInfo& info) noexcept;
+
+/// The width a Switch 2 render target is looked up at: the surface clip's right edge when the
+/// target is wider than that by padding only, else its own.
+[[nodiscard]] u32 PaddedTargetWidth(const ImageInfo& info, u32 clip_right) noexcept;
+
+/// The width a Switch 2 blit surface is looked up at for the copy span [x0, x1): x1 for a forward
+/// span from 0 or after that ends where the padding starts, else its own.
+[[nodiscard]] u32 PaddedBlitWidth(const ImageInfo& info, s32 x0, s32 x1) noexcept;
+
+/// The surface clip's right edge the bound render targets were looked up with. A padded target's
+/// lookup width depends on it, and the clip has no dirty flag of its own.
+struct RenderTargetClip {
+    /// Records `clip_right` and returns whether the targets must be looked up again for it.
+    bool Update(u32 clip_right) noexcept {
+        const bool moved = clip_right != right;
+        right = clip_right;
+        return moved;
+    }
+
+    u32 right = 0;
+};
 
 [[nodiscard]] bool IsPitchLinearSameSize(const ImageInfo& lhs, const ImageInfo& rhs,
                                          bool strict_size) noexcept;
