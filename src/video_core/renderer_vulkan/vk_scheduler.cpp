@@ -189,6 +189,10 @@ Scheduler::~Scheduler() {
 
 u64 Scheduler::Flush(VkSemaphore signal_semaphore, VkSemaphore wait_semaphore,
                      std::source_location location) {
+    return Flush(SemaphoreValue{signal_semaphore}, SemaphoreValue{wait_semaphore}, location);
+}
+
+u64 Scheduler::Flush(SemaphoreValue signal, SemaphoreValue wait, std::source_location location) {
     if (state.renderpass) {
         CountRenderPassEnd(location.file_name(), location.line());
     }
@@ -196,7 +200,7 @@ u64 Scheduler::Flush(VkSemaphore signal_semaphore, VkSemaphore wait_semaphore,
         VideoCommon::GpuSplit::CheckOwner("Scheduler::Flush");
     }
     // When flushing, we only send data to the worker thread; no waiting is necessary.
-    const u64 signal_value = SubmitExecution(signal_semaphore, wait_semaphore);
+    const u64 signal_value = SubmitExecution(signal, wait);
     AllocateNewContext();
     submitted_serial = record_serial;
     last_flush = std::chrono::steady_clock::now();
@@ -280,7 +284,7 @@ void Scheduler::Finish(VkSemaphore signal_semaphore, VkSemaphore wait_semaphore,
     const u64 presubmit_tick = CurrentTick();
     const bool profile = VideoCommon::Nx2Profile::Enabled();
     const u64 start = profile ? VideoCommon::Nx2Profile::Now() : 0;
-    SubmitExecution(signal_semaphore, wait_semaphore);
+    SubmitExecution(SemaphoreValue{signal_semaphore}, SemaphoreValue{wait_semaphore});
     Wait(presubmit_tick);
     AllocateNewContext();
     submitted_serial = record_serial;
@@ -1148,7 +1152,7 @@ void Scheduler::TraceGpuSubmission() {
     trace_gpu_recording = true;
 }
 
-u64 Scheduler::SubmitExecution(VkSemaphore signal_semaphore, VkSemaphore wait_semaphore) {
+u64 Scheduler::SubmitExecution(SemaphoreValue signal, SemaphoreValue wait) {
     if (uploads_pending) {
         // Keep the copies in the tick that protects their staging regions and buffer lifetimes.
         FlushUploads();
@@ -1161,7 +1165,7 @@ u64 Scheduler::SubmitExecution(VkSemaphore signal_semaphore, VkSemaphore wait_se
     InvalidateState();
 
     const u64 signal_value = master_semaphore->NextTick();
-    RecordWithUploadBuffer([signal_semaphore, wait_semaphore, signal_value,
+    RecordWithUploadBuffer([signal, wait, signal_value,
                             this](vk::CommandBuffer cmdbuf, vk::CommandBuffer upload_cmdbuf) {
         static constexpr VkMemoryBarrier WRITE_BARRIER{
             .sType = VK_STRUCTURE_TYPE_MEMORY_BARRIER,
@@ -1198,7 +1202,7 @@ u64 Scheduler::SubmitExecution(VkSemaphore signal_semaphore, VkSemaphore wait_se
 
         std::scoped_lock lock{submit_mutex};
         switch (const VkResult result = master_semaphore->SubmitQueue(
-                    cmdbuf, upload_cmdbuf, signal_semaphore, wait_semaphore, signal_value)) {
+                    cmdbuf, upload_cmdbuf, signal, wait, signal_value)) {
         case VK_SUCCESS:
             // Log successful queue submission
             if (GPU::Logging::IsActive() &&

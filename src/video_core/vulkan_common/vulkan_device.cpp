@@ -1523,6 +1523,24 @@ bool Device::GetSuitability(bool requires_swapchain) {
         extensions.robustness_2 = false;
     }
 
+#ifdef HAS_FLYHIGH
+    {
+#ifdef _WIN32
+        constexpr std::array interop{VK_KHR_EXTERNAL_MEMORY_WIN32_EXTENSION_NAME,
+                                     VK_KHR_EXTERNAL_SEMAPHORE_WIN32_EXTENSION_NAME};
+#else
+        constexpr std::array interop{VK_KHR_EXTERNAL_MEMORY_FD_EXTENSION_NAME,
+                                     VK_KHR_EXTERNAL_SEMAPHORE_FD_EXTENSION_NAME};
+#endif
+        external_interop = std::ranges::all_of(interop, [&](const char* name) {
+            return supported_extensions.contains(name);
+        });
+        if (external_interop) {
+            loaded_extensions.insert(interop.begin(), interop.end());
+        }
+    }
+#endif
+
 #ifdef EGLANTINE_STREAMLINE
     // The extensions NVIDIA's DLSS asks for, where the device has them all.
     if (Streamline::WantsDevice()) {

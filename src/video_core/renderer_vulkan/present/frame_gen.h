@@ -14,6 +14,10 @@
 #include "video_core/renderer_vulkan/present/lsfg_chain.h"
 #include "video_core/renderer_vulkan/present/lsfg_shaders.h"
 #include "video_core/renderer_vulkan/present/fsr3_frame_gen.h"
+#ifdef HAS_FLYHIGH
+#include "video_core/renderer_vulkan/present/flyhigh_frame_gen.h"
+#endif
+#include "video_core/renderer_vulkan/vk_master_semaphore.h"
 #include "video_core/vulkan_common/vulkan_memory_allocator.h"
 
 namespace Vulkan {
@@ -43,6 +47,10 @@ public:
 
     void GenerateInto(const Device& device, Frame* destination, size_t generation);
 
+    /// What the submission of the first generated frame waits for, when a generator on another
+    /// device (FlyHigh) wrote it. Empty otherwise and after it has been taken.
+    [[nodiscard]] SemaphoreValue TakeGeneratedWait();
+
     [[nodiscard]] VideoCore::FrameGenStatus CurrentStatus() const {
         return {.state = state.load(std::memory_order_relaxed),
                 .generated_frames = generated_frames.load(std::memory_order_relaxed)};
@@ -51,6 +59,12 @@ public:
 private:
     void Rebuild(const Device& device, VkExtent2D extent, VkFormat format, f32 flow_scale,
                  Settings::FrameGenType type);
+    [[nodiscard]] bool HasFlyHigh() const;
+    [[nodiscard]] bool FlyHighSettingsChanged() const;
+    /// FlyHigh can't run for frames of this size and format: no library in this build, no
+    /// model, or it failed there before.
+    [[nodiscard]] bool FlyHighBlocked(VkExtent2D extent, VkFormat format) const;
+    void ResetFlyHigh();
     /// Updates the status bar state and logs each change with its reason.
     void SetState(VideoCore::FrameGenState new_state, VkFormat format);
     /// Logs every 10 s how many frames were generated, when that changes.
@@ -63,6 +77,16 @@ private:
     std::optional<LsfgShaders> shaders;
     std::optional<LsfgChain> chain;
     std::optional<Fsr3FrameGen> fsr3_chain;
+#ifdef HAS_FLYHIGH
+    std::optional<FlyHighFrameGen> flyhigh;
+    struct FlyHighFailure {
+        VkExtent2D extent;
+        VkFormat format;
+    };
+    /// Where FlyHigh could not start or stopped; Optical Flow runs there instead.
+    std::optional<FlyHighFailure> flyhigh_failed;
+    bool built_protect_hud{};
+#endif
     FrameGenPacer pacer;
     FrameGenPlan plan{};
     VkExtent2D peak_guest_extent{};

@@ -134,25 +134,29 @@ void MasterSemaphore::Wait(u64 tick) {
 }
 
 VkResult MasterSemaphore::SubmitQueue(vk::CommandBuffer& cmdbuf, vk::CommandBuffer& upload_cmdbuf,
-                                      VkSemaphore signal_semaphore, VkSemaphore wait_semaphore,
-                                      u64 host_tick) {
+                                      SemaphoreValue signal, SemaphoreValue wait, u64 host_tick) {
     const VideoCommon::Nx2Profile::Scope scope{VideoCommon::Nx2Profile::Zone::QueueSubmit};
     if (semaphore) {
-        return SubmitQueueTimeline(cmdbuf, upload_cmdbuf, signal_semaphore, wait_semaphore,
-                                   host_tick);
+        return SubmitQueueTimeline(cmdbuf, upload_cmdbuf, signal, wait, host_tick);
     } else {
-        return SubmitQueueFence(cmdbuf, upload_cmdbuf, signal_semaphore, wait_semaphore, host_tick);
+        return SubmitQueueFence(cmdbuf, upload_cmdbuf, signal.semaphore, wait.semaphore, host_tick);
     }
 }
 
-static constexpr VkPipelineStageFlags wait_stage_mask = VK_PIPELINE_STAGE_VERTEX_SHADER_BIT | VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT |
-                                                        VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT;
+// Transfer and compute too: frame generation on another device hands its frames over through
+// copies, which must wait for that device as well.
+static constexpr VkPipelineStageFlags wait_stage_mask =
+    VK_PIPELINE_STAGE_VERTEX_SHADER_BIT | VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT |
+    VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT | VK_PIPELINE_STAGE_TRANSFER_BIT |
+    VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT;
 
 VkResult MasterSemaphore::SubmitQueueTimeline(vk::CommandBuffer& cmdbuf,
                                               vk::CommandBuffer& upload_cmdbuf,
-                                              VkSemaphore signal_semaphore,
-                                              VkSemaphore wait_semaphore, u64 host_tick) {
+                                              SemaphoreValue signal, SemaphoreValue wait,
+                                              u64 host_tick) {
     const VkSemaphore timeline_semaphore = *semaphore;
+    const VkSemaphore signal_semaphore = signal.semaphore;
+    const VkSemaphore wait_semaphore = wait.semaphore;
 
     if (device.HasSynchronization2()) {
         const std::array<VkCommandBufferSubmitInfo, 2> cmdbuffer_infos{{
@@ -187,7 +191,7 @@ VkResult MasterSemaphore::SubmitQueueTimeline(vk::CommandBuffer& cmdbuf,
                 .sType = VK_STRUCTURE_TYPE_SEMAPHORE_SUBMIT_INFO,
                 .pNext = nullptr,
                 .semaphore = signal_semaphore,
-                .value = 0,
+                .value = signal.value,
                 .stageMask = VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT,
                 .deviceIndex = 0,
             };
@@ -199,7 +203,7 @@ VkResult MasterSemaphore::SubmitQueueTimeline(vk::CommandBuffer& cmdbuf,
             .sType = VK_STRUCTURE_TYPE_SEMAPHORE_SUBMIT_INFO,
             .pNext = nullptr,
             .semaphore = wait_semaphore,
-            .value = 0,
+            .value = wait.value,
             .stageMask = static_cast<VkPipelineStageFlags2>(wait_stage_mask),
             .deviceIndex = 0,
         };
@@ -219,7 +223,7 @@ VkResult MasterSemaphore::SubmitQueueTimeline(vk::CommandBuffer& cmdbuf,
     }
 
     const u32 num_signal_semaphores = signal_semaphore ? 2 : 1;
-    const std::array signal_values{host_tick, u64(0)};
+    const std::array signal_values{host_tick, signal.value};
     const std::array signal_semaphores{timeline_semaphore, signal_semaphore};
 
     const std::array cmdbuffers{*upload_cmdbuf, *cmdbuf};
@@ -232,12 +236,12 @@ VkResult MasterSemaphore::SubmitQueueTimeline(vk::CommandBuffer& cmdbuf,
         (num_wait_semaphores > 0) ? &wait_stage_mask : nullptr;
     const VkSemaphore* p_signal_sems =
         (num_signal_semaphores > 0) ? signal_semaphores.data() : nullptr;
-    const u64 wait_zero = 0; // dummy for binary wait
+    const u64 wait_value = wait.value;
     const VkTimelineSemaphoreSubmitInfo timeline_si{
         .sType = VK_STRUCTURE_TYPE_TIMELINE_SEMAPHORE_SUBMIT_INFO,
         .pNext = nullptr,
         .waitSemaphoreValueCount = num_wait_semaphores,
-        .pWaitSemaphoreValues    = num_wait_semaphores ? &wait_zero : nullptr,
+        .pWaitSemaphoreValues    = num_wait_semaphores ? &wait_value : nullptr,
         .signalSemaphoreValueCount = num_signal_semaphores,
         .pSignalSemaphoreValues = signal_values.data(),
     };

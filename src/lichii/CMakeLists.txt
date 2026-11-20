@@ -466,6 +466,25 @@ if (UNIX AND NOT APPLE)
     target_link_libraries(lichii PRIVATE Qt6::DBus)
 endif()
 
+if (ENABLE_FLYHIGH)
+    target_sources(lichii PRIVATE
+        configuration/flyhigh_dialog.cpp
+        configuration/flyhigh_dialog.h
+        configuration/flyhigh_menu_row.cpp
+        configuration/flyhigh_menu_row.h
+        configuration/flyhigh_panel.cpp
+        configuration/flyhigh_panel.h
+    )
+endif()
+
+# FlyHigh frame generation loads its library from beside the executable.
+get_property(FLYHIGH_LIBRARY GLOBAL PROPERTY FLYHIGH_LIBRARY)
+if (FLYHIGH_LIBRARY)
+    add_custom_command(TARGET lichii POST_BUILD
+        COMMAND ${CMAKE_COMMAND} -E copy_if_different "${FLYHIGH_LIBRARY}" "$<TARGET_FILE_DIR:lichii>"
+        VERBATIM)
+endif()
+
 if (ENABLE_WEB_SERVICE)
     target_compile_definitions(lichii PRIVATE ENABLE_WEB_SERVICE)
 endif()

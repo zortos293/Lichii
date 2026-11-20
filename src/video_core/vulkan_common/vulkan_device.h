@@ -1094,6 +1094,11 @@ FN_MAX_LIMIT_LIST
 
     bool HasTimelineSemaphore() const;
 
+    /// Memory and semaphores can be exported to another Vulkan device (FlyHigh frame generation).
+    bool HasExternalInterop() const {
+        return external_interop;
+    }
+
     /// Returns true if the device supports VK_KHR_synchronization2.
     bool HasSynchronization2() const {
         return extensions.synchronization2;
@@ -1530,6 +1535,7 @@ private:
     std::set<std::string, std::less<>> supported_extensions; ///< Reported Vulkan extensions.
     std::set<std::string, std::less<>> loaded_extensions;    ///< Loaded Vulkan extensions.
     bool streamline_extensions{}; ///< NVIDIA DLSS's extensions are loaded.
+    bool external_interop{};      ///< External memory and semaphore extensions are loaded.
     bool streamline_attached{};   ///< Streamline has this device.
     std::vector<size_t> valid_heap_memory;                   ///< Heaps used.
     size_t main_heap{};       ///< Largest device-local heap, where images live.

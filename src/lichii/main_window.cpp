@@ -66,6 +66,11 @@
 #include "applets/qt_web_browser.h"
 
 #include "configuration/configure_dialog.h"
+#ifdef HAS_FLYHIGH
+#include "configuration/flyhigh_dialog.h"
+#include "configuration/flyhigh_menu_row.h"
+#include "configuration/flyhigh_panel.h"
+#endif
 #include "configuration/configure_input.h"
 #include "configuration/configure_network.h"
 #include "configuration/configure_per_game.h"
@@ -1296,26 +1301,65 @@ void MainWindow::InitializeWidgets() {
     frame_gen_status_button->setCheckable(true);
     connect(frame_gen_status_button, &QPushButton::clicked, this, [this] {
         Settings::values.frame_gen.SetValue(!Settings::values.frame_gen.GetValue());
+#ifdef HAS_FLYHIGH
+        if (Settings::values.frame_gen.GetValue() &&
+            Settings::values.frame_gen_type.GetValue() == Settings::FrameGenType::FlyHigh) {
+            OfferFlyHighModel(this);
+        }
+#endif
         UpdateFrameGenButton();
     });
     UpdateFrameGenButton();
     frame_gen_status_button->setContextMenuPolicy(Qt::CustomContextMenu);
     connect(frame_gen_status_button, &QPushButton::customContextMenuRequested,
             [this](const QPoint& menu_location) {
+#ifdef HAS_FLYHIGH
+                FlyHighTypeMenu context_menu;
+#else
                 QMenu context_menu;
-                for (auto const& [type, text] : ConfigurationShared::frame_gen_type_texts_map) {
+#endif
+                // FlyHigh first, as in the settings.
+                for (const Settings::FrameGenType type :
+                     {Settings::FrameGenType::FlyHigh, Settings::FrameGenType::Lsfg,
+                      Settings::FrameGenType::Fsr3, Settings::FrameGenType::NvidiaDlssG}) {
+                    const QString& text =
+                        ConfigurationShared::frame_gen_type_texts_map.at(type);
 #ifndef EGLANTINE_STREAMLINE
                     // Only builds with NVIDIA Streamline (Windows) have DLSS Frame Generation.
                     if (type == Settings::FrameGenType::NvidiaDlssG) {
                         continue;
                     }
 #endif
+#ifndef HAS_FLYHIGH
+                    if (type == Settings::FrameGenType::FlyHigh) {
+                        continue;
+                    }
+#endif
                     const QString label = ConfigurationShared::TranslateMapText(translator, text);
-                    context_menu.addAction(label, [this, type] {
+                    QAction* action = context_menu.addAction(label, [this, type] {
                         Settings::values.frame_gen_type.SetValue(type);
                         Settings::values.frame_gen.SetValue(true);
+#ifdef HAS_FLYHIGH
+                        if (type == Settings::FrameGenType::FlyHigh) {
+                            OfferFlyHighModel(this);
+                        }
+#endif
                         UpdateFrameGenButton();
                     });
+#ifdef HAS_FLYHIGH
+                    if (type == Settings::FrameGenType::FlyHigh) {
+                        context_menu.SetGear(action, [this] {
+                            FlyHighDialog dialog(this);
+                            if (dialog.exec() == QDialog::Accepted) {
+                                dialog.Apply();
+                                config->SaveAllValues();
+                                UpdateFrameGenButton();
+                            }
+                        });
+                    }
+#else
+                    (void)action;
+#endif
                 }
                 context_menu.exec(frame_gen_status_button->mapToGlobal(menu_location));
                 frame_gen_status_button->repaint();
@@ -2346,6 +2390,16 @@ bool MainWindow::ConfirmLowRamBoot(const QString& filename,
 
 void MainWindow::BootGame(const QString& filename, Service::AM::FrontendAppletParameters params,
                           StartGameType type) {
+#ifdef HAS_FLYHIGH
+    // Frame generation was turned on in the settings, where nothing offers the model: offer it
+    // once before the first game.
+    static bool flyhigh_offered = false;
+    if (!flyhigh_offered && Settings::values.frame_gen.GetValue() &&
+        Settings::values.frame_gen_type.GetValue() == Settings::FrameGenType::FlyHigh) {
+        flyhigh_offered = true;
+        OfferFlyHighModel(this);
+    }
+#endif
 #ifdef LICHII_NX_TOOLS
     if (nx_metadata_write_in_progress) {
         QMessageBox::information(this, tr("NX Archive"),
@@ -6044,6 +6098,7 @@ void MainWindow::UpdatePostShaderText() {
 
 void MainWindow::UpdateFrameGenButton() {
     const bool enabled = Settings::values.frame_gen.GetValue();
+
     frame_gen_status_button->setChecked(enabled);
     if (!enabled) {
         frame_gen_status_button->setText(tr("NO FG"));
@@ -6057,8 +6112,11 @@ void MainWindow::UpdateFrameGenButton() {
     const bool dlssg_fallback = selected_type == Settings::FrameGenType::NvidiaDlssG &&
                                 emulation_running &&
                                 frame_gen_state == VideoCore::FrameGenState::Running;
+    const bool flyhigh_fallback = selected_type == Settings::FrameGenType::FlyHigh &&
+                                  emulation_running &&
+                                  frame_gen_state == VideoCore::FrameGenState::MissingFlyHigh;
     const Settings::FrameGenType shown_type =
-        dlssg_fallback ? Settings::FrameGenType::Fsr3 : selected_type;
+        dlssg_fallback || flyhigh_fallback ? Settings::FrameGenType::Fsr3 : selected_type;
     const QString& type_text =
         ConfigurationShared::frame_gen_type_texts_map.find(shown_type)->second;
     const QString type = shown_type == Settings::FrameGenType::NvidiaDlssG
@@ -6107,6 +6165,8 @@ void MainWindow::UpdateFrameGenButton() {
         break;
     case VideoCore::FrameGenState::NvidiaFrameGen:
         break;
+    case VideoCore::FrameGenState::MissingFlyHigh:
+        break;
     }
 
     if (!unavailable.isEmpty()) {
@@ -6120,7 +6180,10 @@ void MainWindow::UpdateFrameGenButton() {
     const QString fallback =
         dlssg_fallback ? tr(" NVIDIA DLSS Frame Generation can't run for this game or setup, so "
                             "FSR3 runs instead; the log says why.")
-                       : QString();
+        : flyhigh_fallback
+            ? tr(" FlyHigh can't run yet (its model is not downloaded, or the log says why), so "
+                 "Optical Flow runs instead. Right-click to choose FlyHigh and download it.")
+            : QString();
     if (frame_gen_generating) {
         frame_gen_status_button->setText(mode);
         frame_gen_status_button->setToolTip(

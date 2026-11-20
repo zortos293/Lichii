@@ -60,6 +60,11 @@ public:
     u64 Flush(VkSemaphore signal_semaphore = {}, VkSemaphore wait_semaphore = {},
               std::source_location location = std::source_location::current());
 
+    /// Flush that signals and waits for timeline semaphore values, for work shared with another
+    /// Vulkan device. Needs the timeline semaphore path (Device::HasTimelineSemaphore).
+    u64 Flush(SemaphoreValue signal, SemaphoreValue wait,
+              std::source_location location = std::source_location::current());
+
     /// Sends the current execution context to the GPU and waits for it to complete.
     void Finish(VkSemaphore signal_semaphore = {}, VkSemaphore wait_semaphore = {},
                 std::source_location location = std::source_location::current());
@@ -499,7 +504,7 @@ private:
     void ReportPassTimes(const std::vector<u64>& submission_begin,
                          const std::vector<u64>& submission_end);
 
-    u64 SubmitExecution(VkSemaphore signal_semaphore, VkSemaphore wait_semaphore);
+    u64 SubmitExecution(SemaphoreValue signal, SemaphoreValue wait);
 
     void AllocateNewContext();
 

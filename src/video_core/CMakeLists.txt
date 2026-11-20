@@ -721,4 +721,44 @@ if (ENABLE_NVIDIA_DLSS)
     message(STATUS "NVIDIA DLSS through Streamline: ${STREAMLINE_INCLUDE_DIR}")
 endif()
 
+# FlyHigh frame generation (renderer_vulkan/present/flyhigh_frame_gen.cpp): a neural network in its
+# own Apache-2.0 library, flyhigh.dll / libflyhigh.so, loaded at run time from beside the
+# executable. Only its C header is compiled in; the model (CC BY-NC 4.0) is not shipped.
+cmake_dependent_option(ENABLE_FLYHIGH "Enable FlyHigh frame generation" ON
+                       "ENABLE_LSFG;ARCHITECTURE_x86_64;NOT APPLE;NOT ANDROID" OFF)
+set(LICHII_FLYHIGH_SDK "" CACHE PATH
+    "FlyHigh engine release directory with include/ and lib/ (empty: download the release)")
+if (ENABLE_FLYHIGH)
+    if (LICHII_FLYHIGH_SDK)
+        set(FLYHIGH_DIR "${LICHII_FLYHIGH_SDK}")
+        cpmutil_register_package(flyhigh "https://github.com/getflyhigh/flyhigh-engine"
+                                 "local (${LICHII_FLYHIGH_SDK})")
+    else()
+        # The engine's release archive for this platform: its header and library.
+        if (WIN32)
+            AddJsonPackage(NAME flyhigh-windows DOWNLOAD_ONLY)
+            set(FLYHIGH_DIR "${flyhigh-windows_SOURCE_DIR}")
+        else()
+            AddJsonPackage(NAME flyhigh-linux DOWNLOAD_ONLY)
+            set(FLYHIGH_DIR "${flyhigh-linux_SOURCE_DIR}")
+        endif()
+    endif()
+    if (WIN32)
+        set(FLYHIGH_LIBRARY "${FLYHIGH_DIR}/lib/flyhigh.dll")
+    else()
+        set(FLYHIGH_LIBRARY "${FLYHIGH_DIR}/lib/libflyhigh.so")
+    endif()
+    set_property(GLOBAL PROPERTY FLYHIGH_LIBRARY "${FLYHIGH_LIBRARY}")
+    target_sources(video_core PRIVATE
+        frame_gen/flyhigh_library.cpp
+        frame_gen/flyhigh_library.h
+        frame_gen/flyhigh_model.h
+        renderer_vulkan/present/flyhigh_frame_gen.cpp
+        renderer_vulkan/present/flyhigh_frame_gen.h
+    )
+    target_include_directories(video_core PRIVATE "${FLYHIGH_DIR}/include")
+    target_compile_definitions(video_core PUBLIC HAS_FLYHIGH)
+    message(STATUS "FlyHigh frame generation: ${FLYHIGH_LIBRARY}")
+endif()
+
 create_target_directory_groups(video_core)
