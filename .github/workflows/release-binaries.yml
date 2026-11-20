@@ -555,6 +555,30 @@ jobs:
             throw 'build/release/bin holds Nsight Aftermath files, which must not ship'
           }
 
+      # A per-user installer (dist/installer.nsi) with the zip's files, plus install-manifest.txt
+      # listing them in the updater's format: the uninstaller removes those files, and the in-place
+      # updater removes the ones a newer version drops.
+      - name: Build Windows installer
+        if: startsWith(matrix.platform, 'windows')
+        shell: pwsh
+        run: |
+          $makensis = Join-Path ${env:ProgramFiles(x86)} 'NSIS\makensis.exe'
+          if (-not (Test-Path $makensis)) {
+            choco install nsis -y --no-progress
+            if ($LASTEXITCODE -ne 0) { throw 'Could not install NSIS' }
+          }
+          $bin = (Resolve-Path build/release/bin).Path
+          $manifest = Join-Path $PWD 'build/release/install-manifest.txt'
+          $files = Get-ChildItem -Recurse -File $bin |
+            ForEach-Object { [IO.Path]::GetRelativePath($bin, $_.FullName).Replace('\', '/') } |
+            Sort-Object
+          [IO.File]::WriteAllText($manifest, (($files | ForEach-Object { "$_`n" }) -join ''))
+          $out = Join-Path $PWD "lichii-$env:GITHUB_SHA-${{ matrix.platform }}-installer.exe"
+          & $makensis /V2 /WX "/DPRODUCT_VERSION=build-$env:GITHUB_RUN_NUMBER" /DARCH=x86_64 `
+            "/DVARIANT=${{ matrix.pgo && 'pgo' || 'standard' }}" "/DBINARY_SOURCE_DIR=$bin" `
+            "/DMANIFEST_FILE=$manifest" "/DOUTPUT_FILE=$out" dist/installer.nsi
+          if ($LASTEXITCODE -ne 0) { throw "makensis failed with exit code $LASTEXITCODE" }
+
       # A self-contained app bundle: macdeployqt copies Qt and every other Homebrew library both
       # programs load into the bundle, then the leftover Homebrew and build-tree search paths are
       # removed so a machine with Homebrew still uses the bundled copies. Ad-hoc signed, not
@@ -639,6 +663,16 @@ jobs:
           if-no-files-found: error
           retention-days: 7
 
+      - name: Upload Windows installer
+        if: startsWith(matrix.platform, 'windows')
+        uses: actions/upload-artifact@v7
+        with:
+          name: lichii-${{ matrix.platform }}-installer${{ inputs.nsight_aftermath && '-aftermath' || '' }}-${{ github.sha }}
+          path: lichii-${{ github.sha }}-${{ matrix.platform }}-installer.exe
+          if-no-files-found: error
+          compression-level: 0
+          retention-days: 7
+
       - name: Upload Windows symbols
         if: startsWith(matrix.platform, 'windows')
         uses: actions/upload-artifact@v7
@@ -706,6 +740,10 @@ jobs:
               for file in "$artifact"*.AppImage "$artifact"*.tar.gz; do
                 cp "$file" "dist/$(strip_sha "$(basename "$file")")"
               done
+            elif compgen -G "$artifact*-installer.exe" > /dev/null; then
+              for file in "$artifact"*-installer.exe; do
+                cp "$file" "dist/$(strip_sha "$(basename "$file")")"
+              done
             elif compgen -G "$artifact*.zip" > /dev/null; then
               for file in "$artifact"*.zip "$artifact"*.dmg; do
                 [[ -e "$file" ]] && cp "$file" "dist/$(strip_sha "$(basename "$file")")"
@@ -736,6 +774,12 @@ jobs:
             appimage=$(link AppImage "$1.AppImage")
             tar=$(link tar.gz "$1.tar.gz")
             echo "${appimage}${appimage:+${tar:+ · }}${tar}"
+          }
+          zip_installer() {
+            local zip installer
+            zip=$(link "$1" "$2.zip")
+            installer=$(link installer "$2-installer.exe")
+            echo "${zip}${zip:+${installer:+ · }}${installer}"
           }
           has_pgo=$(compgen -G 'dist/*-pgo.*' || true)
           row() {
@@ -772,10 +816,10 @@ jobs:
 
           ## Windows
 
-          Windows packages are in-place zip files: extract and run \`lichii.exe\`, or \`eden-cli.exe\` from a terminal.
+          Windows packages come as a zip and an installer. Extract the zip and run \`lichii.exe\`, or \`eden-cli.exe\` from a terminal. The installer needs no administrator rights: it installs to \`%LOCALAPPDATA%\\Lichii\`, adds a Start menu shortcut and an uninstaller, and can add a desktop shortcut and open .nsp, .xci, .nro and .kip files with Lichii. Both update themselves in place.
 
           $({
-            row "amd64 / x86_64" "$(link zip lichii-windows-x86_64.zip)" "$(link "PGO zip" lichii-windows-x86_64-pgo.zip)" "Both built with clang-cl and ThinLTO; the PGO zip adds a profile trained on Ocarina of Time"
+            row "amd64 / x86_64" "$(zip_installer zip lichii-windows-x86_64)" "$(zip_installer "PGO zip" lichii-windows-x86_64-pgo)" "Both built with clang-cl and ThinLTO; the PGO build adds a profile trained on Ocarina of Time"
           } | table)
 
           ## macOS
