@@ -22,13 +22,14 @@ VideoCommon::OcarinaCameraBuffer Camera(f32 width = 2560.0f, f32 height = 1440.0
 }
 using VideoCommon::DecodeOcarinaCamera;
 using VideoCommon::OcarinaCameraIssue;
+using enum VideoCommon::OcarinaCameraPadding;
 } // namespace
 
 TEST_CASE("Ocarina camera needs only the bytes through its previous matrix",
           "[video_core][ocarina]") {
     const auto values = Camera();
     REQUIRE(sizeof(values) == 0x1c0);
-    const auto camera = DecodeOcarinaCamera(values, 2560, 1440, false);
+    const auto camera = DecodeOcarinaCamera(values, 2560, 1440, AlignedWidth);
     REQUIRE(camera.issue == OcarinaCameraIssue::None);
     CHECK(camera.width == 2560);
     CHECK(camera.height == 1440);
@@ -42,39 +43,49 @@ TEST_CASE("Ocarina camera refuses a buffer missing any part of its previous matr
           "[video_core][ocarina]") {
     const auto values = Camera();
     for (const size_t count : {size_t{0}, size_t{0x180 / sizeof(f32)}, values.size() - 1}) {
-        CHECK(DecodeOcarinaCamera(std::span{values}.first(count), 2560, 1440, false).issue ==
+        CHECK(DecodeOcarinaCamera(std::span{values}.first(count), 2560, 1440, AlignedWidth).issue ==
               OcarinaCameraIssue::ShortBuffer);
     }
 }
 
 TEST_CASE("Ocarina camera keeps scene extent and perspective checks", "[video_core][ocarina]") {
-    CHECK(DecodeOcarinaCamera(Camera(1280, 720), 2560, 1440, false).issue ==
+    CHECK(DecodeOcarinaCamera(Camera(1280, 720), 2560, 1440, AlignedWidth).issue ==
           OcarinaCameraIssue::Extent);
-    CHECK(DecodeOcarinaCamera(Camera(2561, 1440), 2560, 1440, true).issue ==
+    CHECK(DecodeOcarinaCamera(Camera(2561, 1440), 2560, 1440, Bounded).issue ==
           OcarinaCameraIssue::Extent);
-    CHECK(DecodeOcarinaCamera(Camera(2560.5f, 1440), 2561, 1440, true).issue ==
+    CHECK(DecodeOcarinaCamera(Camera(2560.5f, 1440), 2561, 1440, Bounded).issue ==
           OcarinaCameraIssue::Extent);
-    CHECK(DecodeOcarinaCamera(Camera(320, 180), 320, 180, false).issue ==
+    CHECK(DecodeOcarinaCamera(Camera(320, 180), 320, 180, AlignedWidth).issue ==
           OcarinaCameraIssue::Extent);
     for (const f32 invalid : {std::numeric_limits<f32>::quiet_NaN(),
                               std::numeric_limits<f32>::infinity(), -1.0f}) {
-        CHECK(DecodeOcarinaCamera(Camera(invalid, 1440), 2560, 1440, false).issue ==
+        CHECK(DecodeOcarinaCamera(Camera(invalid, 1440), 2560, 1440, AlignedWidth).issue ==
               OcarinaCameraIssue::Extent);
     }
     auto orthographic = Camera();
     orthographic[0xa8 / sizeof(f32)] = 0.0f;
     orthographic[0xac / sizeof(f32)] = 1.0f;
-    CHECK(DecodeOcarinaCamera(orthographic, 2560, 1440, false).issue ==
+    CHECK(DecodeOcarinaCamera(orthographic, 2560, 1440, AlignedWidth).issue ==
           OcarinaCameraIssue::Projection);
 }
 
-TEST_CASE("Ocarina camera accepts DLSS padding only within the existing tolerance",
+TEST_CASE("Ocarina camera keeps the logical scene size inside a padded target",
           "[video_core][ocarina]") {
-    CHECK(DecodeOcarinaCamera(Camera(2276, 1280), 2288, 1280, true).issue ==
+    CHECK(DecodeOcarinaCamera(Camera(2276, 1280), 2288, 1280, Bounded).issue ==
           OcarinaCameraIssue::None);
-    CHECK(DecodeOcarinaCamera(Camera(2276, 1280), 2288, 1280, false).issue ==
+    CHECK(DecodeOcarinaCamera(Camera(2276, 1280), 2292, 1280, Bounded).issue ==
           OcarinaCameraIssue::Extent);
-    CHECK(DecodeOcarinaCamera(Camera(2276, 1280), 2292, 1280, true).issue ==
+    const auto handheld = DecodeOcarinaCamera(Camera(854, 480), 864, 480, AlignedWidth);
+    REQUIRE(handheld.issue == OcarinaCameraIssue::None);
+    CHECK(handheld.width == 854);
+    CHECK(handheld.height == 480);
+    CHECK(DecodeOcarinaCamera(Camera(427, 240), 864, 480, AlignedWidth).issue ==
+          OcarinaCameraIssue::Extent);
+    CHECK(DecodeOcarinaCamera(Camera(0, 0), 864, 480, AlignedWidth).issue ==
+          OcarinaCameraIssue::Extent);
+    CHECK(DecodeOcarinaCamera(Camera(854, 480), 863, 480, AlignedWidth).issue ==
+          OcarinaCameraIssue::Extent);
+    CHECK(DecodeOcarinaCamera(Camera(854, 480), 864, 481, AlignedWidth).issue ==
           OcarinaCameraIssue::Extent);
 }
 

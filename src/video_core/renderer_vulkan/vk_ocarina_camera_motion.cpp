@@ -1025,6 +1025,10 @@ bool OcarinaUpscaler::Record(VkImageView color, VkImageView depth, VkImageView t
 #endif
     bool used_fsr4 = false;
     if (state.UsesFsr4()) {
+        constexpr VkExtent2D handheld_capacity{1440, 810};
+        const bool handheld_drs = target_extent.width == 1920 && target_extent.height == 1080 &&
+                                  extent.width <= handheld_capacity.width &&
+                                  extent.height <= handheld_capacity.height;
         const auto now = std::chrono::steady_clock::now();
         const f32 elapsed = state.last_evaluation
             ? std::chrono::duration<f32, std::milli>(now - *state.last_evaluation).count() : 16.67f;
@@ -1039,6 +1043,7 @@ bool OcarinaUpscaler::Record(VkImageView color, VkImageView depth, VkImageView t
                 bias_image, BIAS_FORMAT, COLOR_RANGE, VK_IMAGE_ASPECT_COLOR_BIT}} : std::nullopt,
             .render_size = extent,
             .upscale_size = output_extent,
+            .max_render_size = handheld_drs ? std::optional{handheld_capacity} : std::nullopt,
             .frame_time_ms = elapsed,
             .reset = reset || elapsed > 250.0f,
             .sharpen = sharpness > 0.0f,

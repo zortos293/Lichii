@@ -69,8 +69,14 @@ matched by shader hash, and stop matching when the lowering of their program cha
   or a DLSS render scale does (docked), it upscales with the scaled passes (native programs
   `d8efd9f0c95abd80`, shader `03bf0ffc7d2d0bed`, and `e4cda162ff6009e2`, shader
   `9302bc0d6d1d9bc1`; also shader `4c1ae2fe58f30a97`). Any 16:9 scene up to the pass's output
-  size is taken: FSR/DLSS writes 1920x1080 handheld, and the 3840x2160 image above docked. When the
-  scene size changes, the upscaler's images are recreated and its history starts over.
+  size is taken: FSR/DLSS writes 1920x1080 handheld, and the 3840x2160 image above docked.
+  For 1920x1080 output and scene sizes up to 1440x810, FSR 4 keeps one context across
+  resolution steps. It still sends the active size and the matching image dimensions on
+  each evaluation. The other upscaling paths recreate resources when the scene size changes.
+- At the handheld dynamic-resolution floor, the 854x480 scene is drawn into a target padded to
+  864x480. The temporal upscaler uses the camera's unpadded size. FSR replaces this padded pass
+  only when the sampled depth image is also 854x480, so it can pass the actual depth image size to
+  the FSR runtime.
 - The game has no motion vectors or jitter. Motion comes from the scene depth reprojected
   through this and the previous frame's camera (vertex constant buffer 3). Link's recognized
   skinned draw is replayed with both poses where his depth matches. Without his pose the frame
@@ -84,7 +90,8 @@ matched by shader hash, and stop matching when the lowering of their program cha
   one. While FSR replaced the previous frame's upscale, every draw that depth-tests against the
   scene depth at the scene size has its viewport offset by a Halton (2,3) sub-pixel amount
   (AMD's phase count, 8 x (output / render width)^2: 18 for 1440p -> 4K, 8 for native AA), and
-  FSR gets the same offset as the frame's jitter. Shadow maps, half-size passes, full-screen
+  FSR gets the same offset as the frame's jitter. A D32 depth attachment at the camera's padded
+  scene width also qualifies on the scene's channel. Shadow maps, half-size passes, full-screen
   passes and frames the game upscales itself are not offset. A full-screen pass with depth
   writes on but the test off writes no depth (Vulkan disables writes with the test), so the
   depth-write flag alone doesn't count. DLSS gets no jitter.

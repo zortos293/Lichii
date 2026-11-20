@@ -236,7 +236,8 @@ void Fsr4Upscaler::DestroyContext() {
     context = nullptr;
 }
 
-bool Fsr4Upscaler::CreateContext(VkExtent2D render_size, VkExtent2D upscale_size) {
+bool Fsr4Upscaler::CreateContext(VkExtent2D max_render_size, VkExtent2D upscale_size,
+                                bool dynamic_resolution) {
     DestroyContext();
     ffxCreateBackendVKDesc backend{};
     backend.header.type = FFX_API_CREATE_CONTEXT_DESC_TYPE_BACKEND_VK;
@@ -255,27 +256,30 @@ bool Fsr4Upscaler::CreateContext(VkExtent2D render_size, VkExtent2D upscale_size
     create.header.type = FFX_API_CREATE_CONTEXT_DESC_TYPE_UPSCALE;
     create.header.pNext = &api_version.header;
     // Tonemapped LDR colour, standard (not reversed) finite depth, exposure given (unit).
-    create.flags = 0;
-    create.maxRenderSize = {render_size.width, render_size.height};
+    create.flags = dynamic_resolution ? FFX_UPSCALE_ENABLE_DYNAMIC_RESOLUTION : 0;
+    create.maxRenderSize = {max_render_size.width, max_render_size.height};
     create.maxUpscaleSize = {upscale_size.width, upscale_size.height};
     create.fpMessage = Message;
     ffxContext ctx{};
     const ffxReturnCode_t result = api->create_context(&ctx, &create.header, nullptr);
     if (result != FFX_API_RETURN_OK) {
         LOG_ERROR(Render_Vulkan, "FSR 4: ffxCreateContext {}x{} -> {}x{} failed ({}); using FSR 3.1",
-                  render_size.width, render_size.height, upscale_size.width, upscale_size.height,
-                  result);
+                  max_render_size.width, max_render_size.height, upscale_size.width,
+                  upscale_size.height, result);
         return false;
     }
     context = ctx;
-    render_extent = render_size;
+    context_render_capacity = max_render_size;
     upscale_extent = upscale_size;
+    context_dynamic_resolution = dynamic_resolution;
 #if defined(__linux__) && !defined(__ANDROID__)
-    LOG_INFO(Render_Vulkan, "FSR 4: fsr4-vk {} context {}x{} -> {}x{}", provider_name,
-             render_size.width, render_size.height, upscale_size.width, upscale_size.height);
+    LOG_INFO(Render_Vulkan, "FSR 4: fsr4-vk {} context {}x{} -> {}x{}{}", provider_name,
+             max_render_size.width, max_render_size.height, upscale_size.width, upscale_size.height,
+             dynamic_resolution ? " (dynamic render size)" : "");
 #else
-    LOG_INFO(Render_Vulkan, "FSR 4: AMD FSR {} context {}x{} -> {}x{}", provider_name,
-             render_size.width, render_size.height, upscale_size.width, upscale_size.height);
+    LOG_INFO(Render_Vulkan, "FSR 4: AMD FSR {} context {}x{} -> {}x{}{}", provider_name,
+             max_render_size.width, max_render_size.height, upscale_size.width, upscale_size.height,
+             dynamic_resolution ? " (dynamic render size)" : "");
 #endif
     return true;
 }
@@ -362,12 +366,16 @@ bool Fsr4Upscaler::Upscale(const Inputs& in) {
     if (failed.load()) {
         return false;
     }
-    const bool new_context = context == nullptr || in.render_size.width != render_extent.width ||
-                             in.render_size.height != render_extent.height ||
+    const auto render_capacity = in.max_render_size.value_or(in.render_size);
+    const bool dynamic_resolution = in.max_render_size.has_value();
+    const bool new_context = context == nullptr ||
+                             render_capacity.width != context_render_capacity.width ||
+                             render_capacity.height != context_render_capacity.height ||
                              in.upscale_size.width != upscale_extent.width ||
-                             in.upscale_size.height != upscale_extent.height;
+                             in.upscale_size.height != upscale_extent.height ||
+                             dynamic_resolution != context_dynamic_resolution;
     if (new_context) {
-        if (!CreateContext(in.render_size, in.upscale_size)) {
+        if (!CreateContext(render_capacity, in.upscale_size, dynamic_resolution)) {
             failed = true;
             return false;
         }

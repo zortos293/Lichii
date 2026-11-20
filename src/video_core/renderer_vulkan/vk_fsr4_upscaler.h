@@ -43,6 +43,7 @@ public:
         std::optional<Image> reactive;
         VkExtent2D render_size;
         VkExtent2D upscale_size;
+        std::optional<VkExtent2D> max_render_size;
         f32 frame_time_ms;
         bool reset;
         bool sharpen;
@@ -78,7 +79,7 @@ public:
     }
 
 private:
-    bool CreateContext(VkExtent2D render_size, VkExtent2D upscale_size);
+    bool CreateContext(VkExtent2D max_render_size, VkExtent2D upscale_size, bool dynamic_resolution);
     void DestroyContext();
     void CreateOutput(VkExtent2D upscale_size);
     void CreateExposure();
@@ -90,8 +91,9 @@ private:
     u64 provider_id{};
     std::string provider_name;
     void* context{}; ///< ffxContext
-    VkExtent2D render_extent{};
+    VkExtent2D context_render_capacity{};
     VkExtent2D upscale_extent{};
+    bool context_dynamic_resolution{};
     vk::Image output_image;
     vk::ImageView output_view;
     vk::Image exposure_image; ///< 1x1 R32F holding 1 (the input is tonemapped, unit exposure)

@@ -17,6 +17,7 @@ inline constexpr size_t OcarinaCameraBytes = 0x1c0;
 using OcarinaCameraBuffer = std::array<f32, OcarinaCameraBytes / sizeof(f32)>;
 
 enum class OcarinaCameraIssue { None, ShortBuffer, Extent, Projection };
+enum class OcarinaCameraPadding { AlignedWidth, Bounded };
 
 struct OcarinaCamera {
     OcarinaCameraIssue issue{OcarinaCameraIssue::ShortBuffer};
@@ -25,7 +26,7 @@ struct OcarinaCamera {
 };
 
 inline OcarinaCamera DecodeOcarinaCamera(std::span<const f32> values, u32 target_width,
-                                        u32 target_height, bool allow_padding) {
+                                        u32 target_height, OcarinaCameraPadding padding) {
     OcarinaCamera camera;
     if (values.size_bytes() < OcarinaCameraBytes) {
         return camera;
@@ -39,11 +40,12 @@ inline OcarinaCamera DecodeOcarinaCamera(std::span<const f32> values, u32 target
     }
     camera.width = static_cast<u32>(width);
     camera.height = static_cast<u32>(height);
-    // DLSS Balanced draws 2276x1280 into 2288x1280 (QuincyForbes' f7d0938b5b).
-    // Only DLSS accepts that padding, with the existing limit of 15 pixels per dimension.
+    const u32 pad_x = target_width - camera.width;
+    const u32 pad_y = target_height - camera.height;
     if (static_cast<f32>(camera.width) != width || static_cast<f32>(camera.height) != height ||
-        target_width - camera.width >= 16 || target_height - camera.height >= 16 ||
-        (!allow_padding && (camera.width != target_width || camera.height != target_height))) {
+        pad_x >= 16 || pad_y >= 16 ||
+        (padding == OcarinaCameraPadding::AlignedWidth &&
+         (pad_y != 0 || (pad_x != 0 && target_width % 16 != 0)))) {
         return camera;
     }
     camera.issue = OcarinaCameraIssue::Projection;
