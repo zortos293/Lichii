@@ -3,9 +3,14 @@
 
 #include <algorithm>
 #include <cstring>
+#include <exception>
 #include <map>
 #include <tuple>
 
+#include <dxbc_module.h>
+#include <dxbc_reader.h>
+
+#include "common/logging.h"
 #include "video_core/frame_gen/lsfg_translate.h"
 
 namespace VideoCore::FrameGen {
@@ -13,6 +18,8 @@ namespace VideoCore::FrameGen {
 namespace {
 
 constexpr u32 SPIRV_MAGIC = 0x07230203;
+constexpr u32 DXBC_MAGIC = 0x43425844;
+constexpr size_t DXBC_HEADER_SIZE = 32;
 constexpr u32 SPIRV_WORD_COUNT_SHIFT = 16;
 constexpr u32 SPIRV_OPCODE_MASK = 0xffff;
 constexpr u32 SPIRV_OP_FUNCTION = 54;
@@ -67,6 +74,34 @@ void RenumberBindingsInOrder(std::vector<u32>& words) {
     }
 }
 
+void LogDxbcMessage(dxvk::LogLevel level, const std::string& message) {
+    if (level >= dxvk::LogLevel::Warn) {
+        LOG_WARNING(Render_Vulkan, "DXBC translation: {}", message);
+    }
+}
+
+[[nodiscard]] std::vector<u32> CompileDxbc(std::span<const u8> blob) {
+    dxvk::DxbcReader reader(reinterpret_cast<const char*>(blob.data()), blob.size());
+    dxvk::DxbcModule module(reader);
+    const auto program = module.programInfo();
+    if (!program || program->type() != dxvk::DxbcProgramType::ComputeShader) {
+        LOG_WARNING(Render_Vulkan, "DXBC translation: not a compute shader");
+        return {};
+    }
+
+    const dxvk::DxbcModuleInfo info{};
+    const auto shader = module.compile(info, "CS");
+    if (module.icbInfo().size != 0) {
+        LOG_WARNING(Render_Vulkan,
+                    "DXBC translation: needs a {} byte immediate constant buffer LSFG doesn't bind",
+                    module.icbInfo().size);
+        return {};
+    }
+
+    const dxvk::SpirvCodeBuffer& code = shader->code();
+    return std::vector<u32>(code.data(), code.data() + code.dwords());
+}
+
 } // Anonymous namespace
 
 bool IsSpirvModule(std::span<const u8> blob) {
@@ -78,6 +113,15 @@ bool IsSpirvModule(std::span<const u8> blob) {
     return magic == SPIRV_MAGIC;
 }
 
+bool IsDxbcModule(std::span<const u8> blob) {
+    if (blob.size() < DXBC_HEADER_SIZE) {
+        return false;
+    }
+    u32 magic{};
+    std::memcpy(&magic, blob.data(), sizeof(magic));
+    return magic == DXBC_MAGIC;
+}
+
 std::vector<u32> AdoptSpirvModule(std::span<const u8> blob) {
     if (!IsSpirvModule(blob)) {
         return {};
@@ -85,6 +129,28 @@ std::vector<u32> AdoptSpirvModule(std::span<const u8> blob) {
 
     std::vector<u32> words(blob.size() / sizeof(u32));
     std::memcpy(words.data(), blob.data(), blob.size());
+
+    RenumberBindingsInOrder(words);
+    return words;
+}
+
+std::vector<u32> TranslateDxbcModule(std::span<const u8> blob) {
+    if (!IsDxbcModule(blob)) {
+        return {};
+    }
+
+    dxvk::Logger::setSink(LogDxbcMessage);
+    std::vector<u32> words;
+    try {
+        words = CompileDxbc(blob);
+    } catch (const dxvk::DxvkError& error) {
+        LOG_WARNING(Render_Vulkan, "DXBC translation: {}", error.message());
+    } catch (const std::exception& error) {
+        LOG_WARNING(Render_Vulkan, "DXBC translation: {}", error.what());
+    }
+    if (words.empty()) {
+        return {};
+    }
 
     RenumberBindingsInOrder(words);
     return words;

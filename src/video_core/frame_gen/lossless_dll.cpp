@@ -45,7 +45,8 @@ constexpr u32 PERFORMANCE_SHADER_ID_FIRST = 280;
 constexpr u32 PERFORMANCE_SHADER_ID_LAST = 302;
 
 constexpr u32 CACHE_MAGIC = 0x4746534C;
-constexpr u32 CACHE_VERSION = 4;
+constexpr u32 CACHE_VERSION = 5;
+constexpr u32 SPIRV_HEADER_WORDS = 5;
 
 struct CacheHeader {
     u32 magic;
@@ -277,29 +278,48 @@ template <typename Map>
     return std::ranges::all_of(ids, [&](u32 id) { return resources.contains(id); });
 }
 
-template <typename Map>
-[[nodiscard]] bool HasNativeShaders(const Map& resources) {
+[[nodiscard]] bool HasShaderSet(const ResourceSpans& resources, u32 offset,
+                                bool (*is_format)(std::span<const u8>)) {
     return std::ranges::all_of(PerformanceShaderIds(), [&](u32 id) {
-        const auto hit = resources.find(id + PerformanceShader::NATIVE_FP16_OFFSET);
-        return hit != resources.end() && IsSpirvModule(hit->second);
+        const auto hit = resources.find(id + offset);
+        return hit != resources.end() && is_format(hit->second);
     });
 }
 
-[[nodiscard]] LosslessStatus TranslateAll(const ResourceSpans& resources, ShaderVariant variant,
+[[nodiscard]] std::optional<ShaderVariant> SelectVariant(const ResourceSpans& resources,
+                                                         bool fp16) {
+    if (fp16 && HasShaderSet(resources, PerformanceShader::NATIVE_FP16_OFFSET, IsSpirvModule)) {
+        return ShaderVariant::NativeFp16;
+    }
+    if (HasShaderSet(resources, PerformanceShader::NATIVE_FP32_OFFSET, IsSpirvModule)) {
+        return ShaderVariant::NativeFp32;
+    }
+    if (HasShaderSet(resources, 0, IsDxbcModule)) {
+        return ShaderVariant::TranslatedFp32;
+    }
+    return std::nullopt;
+}
+
+[[nodiscard]] LosslessStatus BuildModules(const ResourceSpans& resources, ShaderVariant variant,
                                           ShaderModules& out_modules) {
-    const u32 offset = variant == ShaderVariant::NativeFp16 ? PerformanceShader::NATIVE_FP16_OFFSET
-                                                            : PerformanceShader::NATIVE_FP32_OFFSET;
     out_modules.clear();
     for (const u32 id : PerformanceShaderIds()) {
-        const auto hit = resources.find(id + offset);
-        if (hit == resources.end()) {
-            return LosslessStatus::MissingShaders;
+        std::vector<u32> words;
+        switch (variant) {
+        case ShaderVariant::NativeFp16:
+            words = AdoptSpirvModule(resources.at(id + PerformanceShader::NATIVE_FP16_OFFSET));
+            break;
+        case ShaderVariant::NativeFp32:
+            words = AdoptSpirvModule(resources.at(id + PerformanceShader::NATIVE_FP32_OFFSET));
+            break;
+        case ShaderVariant::TranslatedFp32:
+            words = TranslateDxbcModule(resources.at(id));
+            break;
         }
-        std::vector<u32> adopted = AdoptSpirvModule(hit->second);
-        if (adopted.empty()) {
+        if (words.empty()) {
             return LosslessStatus::TranslationFailed;
         }
-        out_modules.emplace(id, std::move(adopted));
+        out_modules.emplace(id, std::move(words));
     }
     return LosslessStatus::Ok;
 }
@@ -345,7 +365,8 @@ template <typename Map>
     for (u32 i = 0; i < header.module_count; ++i) {
         u32 id{};
         u32 word_count{};
-        if (file.Read(id) != 1 || file.Read(word_count) != 1 || word_count == 0) {
+        if (file.Read(id) != 1 || file.Read(word_count) != 1 ||
+            word_count < SPIRV_HEADER_WORDS) {
             return false;
         }
 
@@ -414,7 +435,7 @@ template <typename Map>
         return LosslessStatus::MissingShaders;
     }
 
-    if (!HasNativeShaders(out_resources)) {
+    if (!SelectVariant(out_resources, true)) {
         return LosslessStatus::MissingShaders;
     }
     return LosslessStatus::Ok;
@@ -466,9 +487,11 @@ LosslessStatus GetInstalledLosslessStatus() {
     return ValidateLosslessDll(GetLosslessDllPath());
 }
 
-LosslessStatus LoadShaderModules(ShaderVariant variant, ShaderModules& out_modules) {
+LosslessStatus LoadShaderModules(const std::filesystem::path& dll_path,
+                                 const std::filesystem::path& cache_path, bool fp16,
+                                 LoadedShaders& out_shaders) {
     std::vector<u8> image;
-    const LosslessStatus read_status = ReadImageFile(GetLosslessDllPath(), image);
+    const LosslessStatus read_status = ReadImageFile(dll_path, image);
     if (read_status != LosslessStatus::Ok) {
         return read_status;
     }
@@ -476,7 +499,6 @@ LosslessStatus LoadShaderModules(ShaderVariant variant, ShaderModules& out_modul
     const u64 source_size = image.size();
     const u64 source_hash =
         Common::CityHash64(reinterpret_cast<const char*>(image.data()), image.size());
-    const std::filesystem::path cache_path = GetShaderCachePath();
 
     ResourceSpans spans;
     const LosslessStatus parse_status = ParseShaderSpans(image, spans);
@@ -484,13 +506,22 @@ LosslessStatus LoadShaderModules(ShaderVariant variant, ShaderModules& out_modul
         return parse_status;
     }
 
-    if (ReadShaderCache(cache_path, source_size, source_hash, variant, out_modules)) {
+    const std::optional<ShaderVariant> variant = SelectVariant(spans, fp16);
+    if (!variant) {
+        return LosslessStatus::MissingShaders;
+    }
+    out_shaders.variant = *variant;
+    ShaderModules& out_modules = out_shaders.modules;
+
+    out_shaders.from_cache =
+        ReadShaderCache(cache_path, source_size, source_hash, *variant, out_modules);
+    if (out_shaders.from_cache) {
         return LosslessStatus::Ok;
     }
 
-    const LosslessStatus translate_status = TranslateAll(spans, variant, out_modules);
-    if (translate_status != LosslessStatus::Ok) {
-        return translate_status;
+    const LosslessStatus build_status = BuildModules(spans, *variant, out_modules);
+    if (build_status != LosslessStatus::Ok) {
+        return build_status;
     }
 
     const CacheHeader header{
@@ -499,7 +530,7 @@ LosslessStatus LoadShaderModules(ShaderVariant variant, ShaderModules& out_modul
         .source_size = source_size,
         .source_hash = source_hash,
         .module_count = static_cast<u32>(out_modules.size()),
-        .variant = static_cast<u32>(variant),
+        .variant = static_cast<u32>(*variant),
     };
     if (!WriteShaderCache(cache_path, header, out_modules)) {
         void(Common::FS::RemoveFile(cache_path));
@@ -510,8 +541,8 @@ LosslessStatus LoadShaderModules(ShaderVariant variant, ShaderModules& out_modul
 }
 
 LosslessStatus BuildShaderCache() {
-    ShaderModules modules;
-    return LoadShaderModules(ShaderVariant::NativeFp16, modules);
+    LoadedShaders shaders;
+    return LoadShaderModules(GetLosslessDllPath(), GetShaderCachePath(), true, shaders);
 }
 
 bool RemoveInstalledLosslessDll() {

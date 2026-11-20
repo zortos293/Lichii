@@ -12,6 +12,10 @@ namespace VideoCore::FrameGen {
 
 [[nodiscard]] bool IsSpirvModule(std::span<const u8> blob);
 
+[[nodiscard]] bool IsDxbcModule(std::span<const u8> blob);
+
 [[nodiscard]] std::vector<u32> AdoptSpirvModule(std::span<const u8> blob);
+
+[[nodiscard]] std::vector<u32> TranslateDxbcModule(std::span<const u8> blob);
 
 } // namespace VideoCore::FrameGen

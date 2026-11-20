@@ -62,6 +62,14 @@
         "repo": "eden-emulator/discord-rpc",
         "version": "76616d8675"
     },
+    "dxvk": {
+        "hash": "fb1cf19138c5a9e31c3f6be32be71b431c1aabc8e0d8a303e2ccb957b65510f793cdfc07069a535568ec43d29d4ccea93e2489a811d352c62add923eb9a16523",
+        "patches": [
+            "0001-standalone-dxbc-compiler.patch"
+        ],
+        "repo": "doitsujin/dxvk",
+        "version": "v2.6.2"
+    },
     "enet": {
         "find_args": "MODULE",
         "hash": "a0d2fa8c957704dd49e00a726284ac5ca034b50b00d2b20a94fa1bbfbb80841467834bfdc84aa0ed0d6aab894608fd6c86c3b94eee46343f0e6d9c22e391dbf9",

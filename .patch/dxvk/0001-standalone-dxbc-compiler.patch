@@ -1,0 +1,460 @@
+Build DXVK v2.6.2 dxbc and spirv on their own, for translating Lossless.dll compute shaders.
+
+- dxbc_dxvk.h replaces dxvk_shader.h with the few types the compiler uses.
+- dxbc_options: drop the D3D11 device constructor.
+- dxbc_reader: readString stops at the end of the chunk instead of reading past it.
+- util/log/log.h: forward messages to a sink instead of DXVK log files.
+- util/util_string.h: drop the COM and wide string helpers.
+- util/util_bit.h: other CPUs take the generic paths instead of failing to build.
+
+diff --git a/src/dxbc/dxbc_dxvk.h b/src/dxbc/dxbc_dxvk.h
+new file mode 100644
+index 0000000..023282f
+--- /dev/null
++++ b/src/dxbc/dxbc_dxvk.h
+@@ -0,0 +1,108 @@
++// Lichii: the parts of dxvk_pipelayout.h and dxvk_shader.h (DXVK v2.6.2) that the DXBC
++// compiler uses, so it builds without the rest of DXVK. DxvkShader only keeps the SPIR-V.
++
++#pragma once
++
++#include <algorithm>
++#include <array>
++#include <atomic>
++#include <cstdint>
++#include <cstring>
++#include <iomanip>
++#include <memory>
++#include <optional>
++#include <ostream>
++#include <string>
++#include <unordered_map>
++#include <unordered_set>
++#include <vector>
++
++#include <vulkan/vulkan.h>
++
++#include "../spirv/spirv_code_buffer.h"
++#include "../util/rc/util_rc.h"
++#include "../util/rc/util_rc_ptr.h"
++#include "../util/util_small_vector.h"
++
++namespace dxvk {
++
++  constexpr uint32_t MaxNumXfbBuffers = 4;
++
++  struct DxvkAccessOp {
++    enum OpType : uint16_t {
++      None      = 0x0u,
++      Or        = 0x1u,
++      And       = 0x2u,
++      Xor       = 0x3u,
++      Add       = 0x4u,
++      IMin      = 0x5u,
++      IMax      = 0x6u,
++      UMin      = 0x7u,
++      UMax      = 0x8u,
++
++      StoreF    = 0xdu,
++      StoreUi   = 0xeu,
++      StoreSi   = 0xfu,
++    };
++
++    DxvkAccessOp() = default;
++    DxvkAccessOp(OpType t)
++    : op(uint16_t(t)) { }
++
++    DxvkAccessOp(OpType t, uint16_t constant)
++    : op(uint16_t(t) | (constant << 4u)) { }
++
++    uint16_t op = 0u;
++
++    bool operator == (const DxvkAccessOp& t) const { return op == t.op; }
++    bool operator != (const DxvkAccessOp& t) const { return op != t.op; }
++
++    template<typename T, std::enable_if_t<std::is_integral_v<T>, bool> = true>
++    explicit operator T() const { return op; }
++  };
++
++  struct DxvkBindingInfo {
++    VkDescriptorType      descriptorType  = VK_DESCRIPTOR_TYPE_MAX_ENUM;
++    uint32_t              resourceBinding = 0u;
++    VkImageViewType       viewType        = VK_IMAGE_VIEW_TYPE_MAX_ENUM;
++    VkShaderStageFlagBits stage           = VK_SHADER_STAGE_FLAG_BITS_MAX_ENUM;
++    VkAccessFlags         access          = 0u;
++    DxvkAccessOp          accessOp        = DxvkAccessOp::None;
++    bool                  uboSet          = false;
++    bool                  isMultisampled  = false;
++  };
++
++  struct DxvkShaderCreateInfo {
++    VkShaderStageFlagBits stage;
++    uint32_t bindingCount = 0;
++    const DxvkBindingInfo* bindings = nullptr;
++    uint32_t inputMask = 0;
++    uint32_t outputMask = 0;
++    uint32_t flatShadingInputs = 0;
++    VkShaderStageFlags pushConstStages = 0;
++    uint32_t pushConstSize = 0;
++    int32_t xfbRasterizedStream = 0;
++    uint32_t patchVertexCount = 0;
++    uint32_t xfbStrides[MaxNumXfbBuffers] = { };
++    VkPrimitiveTopology inputTopology = VK_PRIMITIVE_TOPOLOGY_MAX_ENUM;
++    VkPrimitiveTopology outputTopology = VK_PRIMITIVE_TOPOLOGY_MAX_ENUM;
++  };
++
++  class DxvkShader : public RcObject {
++
++  public:
++
++    DxvkShader(const DxvkShaderCreateInfo& info, SpirvCodeBuffer&& code)
++    : m_code(std::move(code)) { }
++
++    const SpirvCodeBuffer& code() const {
++      return m_code;
++    }
++
++  private:
++
++    SpirvCodeBuffer m_code;
++
++  };
++
++}
+diff --git a/src/dxbc/dxbc_include.h b/src/dxbc/dxbc_include.h
+index 9b86ade..93f520e 100644
+--- a/src/dxbc/dxbc_include.h
++++ b/src/dxbc/dxbc_include.h
+@@ -1,10 +1,6 @@
+ #pragma once
+ 
+-#include "../dxvk/dxvk_shader.h"
+-
+-#include "../util/com/com_guid.h"
+-#include "../util/com/com_object.h"
+-#include "../util/com/com_pointer.h"
++#include "dxbc_dxvk.h"
+ 
+ #include "../util/log/log.h"
+ #include "../util/log/log_debug.h"
+diff --git a/src/dxbc/dxbc_module.h b/src/dxbc/dxbc_module.h
+index e1a713a..386c171 100644
+--- a/src/dxbc/dxbc_module.h
++++ b/src/dxbc/dxbc_module.h
+@@ -1,6 +1,6 @@
+ #pragma once
+ 
+-#include "../dxvk/dxvk_shader.h"
++#include "dxbc_dxvk.h"
+ 
+ #include "dxbc_chunk_isgn.h"
+ #include "dxbc_chunk_shex.h"
+diff --git a/src/dxbc/dxbc_options.cpp b/src/dxbc/dxbc_options.cpp
+index 4b9f16e..2e6a278 100644
+--- a/src/dxbc/dxbc_options.cpp
++++ b/src/dxbc/dxbc_options.cpp
+@@ -1,5 +1,3 @@
+-#include "../d3d11/d3d11_options.h"
+-
+ #include "dxbc_options.h"
+ 
+ namespace dxvk {
+@@ -8,66 +6,4 @@ namespace dxvk {
+ 
+   }
+ 
+-
+-  DxbcOptions::DxbcOptions(const Rc<DxvkDevice>& device, const D3D11Options& options) {
+-    const Rc<DxvkAdapter> adapter = device->adapter();
+-
+-    const DxvkDeviceFeatures& devFeatures = device->features();
+-    const DxvkDeviceInfo& devInfo = adapter->devicePropertiesExt();
+-
+-    useDepthClipWorkaround
+-      = !devFeatures.extDepthClipEnable.depthClipEnable;
+-
+-    VkFormatFeatureFlags2 r32Features
+-      = device->getFormatFeatures(VK_FORMAT_R32_SFLOAT).optimal
+-      & device->getFormatFeatures(VK_FORMAT_R32_UINT).optimal
+-      & device->getFormatFeatures(VK_FORMAT_R32_SINT).optimal;
+-
+-    supportsTypedUavLoadR32 = (r32Features & VK_FORMAT_FEATURE_2_STORAGE_READ_WITHOUT_FORMAT_BIT);
+-    supportsRawAccessChains = device->features().nvRawAccessChains.shaderRawAccessChains;
+-
+-    switch (device->config().useRawSsbo) {
+-      case Tristate::Auto:  minSsboAlignment = devInfo.core.properties.limits.minStorageBufferOffsetAlignment; break;
+-      case Tristate::True:  minSsboAlignment =  4u; break;
+-      case Tristate::False: minSsboAlignment = ~0u; break;
+-    }
+-    
+-    invariantPosition        = options.invariantPosition;
+-    zeroInitWorkgroupMemory  = options.zeroInitWorkgroupMemory;
+-    forceVolatileTgsmAccess  = options.forceVolatileTgsmAccess;
+-    forceComputeUavBarriers  = options.forceComputeUavBarriers;
+-    disableMsaa              = options.disableMsaa;
+-    forceSampleRateShading   = options.forceSampleRateShading;
+-    enableSampleShadingInterlock = device->features().extFragmentShaderInterlock.fragmentShaderSampleInterlock;
+-    supportsTightIcbPacking  = device->features().vk12.uniformBufferStandardLayout;
+-
+-    // Qcom just breaks for no reason if we export point size,
+-    // even in an environment where doing so is required.
+-    needsPointSizeExport = !device->features().khrMaintenance5.maintenance5
+-                        && !device->adapter()->matchesDriver(VK_DRIVER_ID_QUALCOMM_PROPRIETARY);
+-
+-    // ANV up to mesa 25.0.2 breaks when we *don't* explicitly write point size
+-    needsPointSizeExport |= device->adapter()->matchesDriver(VK_DRIVER_ID_INTEL_OPEN_SOURCE_MESA, Version(), Version(25, 0, 3));
+-
+-    // Intel's hardware sin/cos is so inaccurate that it causes rendering issues in some games
+-    sincosEmulation = device->adapter()->matchesDriver(VK_DRIVER_ID_INTEL_OPEN_SOURCE_MESA)
+-                   || device->adapter()->matchesDriver(VK_DRIVER_ID_INTEL_PROPRIETARY_WINDOWS);
+-    applyTristate(sincosEmulation, options.sincosEmulation);
+-
+-    // Figure out float control flags to match D3D11 rules
+-    if (options.floatControls) {
+-      if (devInfo.vk12.shaderSignedZeroInfNanPreserveFloat32)
+-        floatControl.set(DxbcFloatControlFlag::PreserveNan32);
+-      if (devInfo.vk12.shaderSignedZeroInfNanPreserveFloat64)
+-        floatControl.set(DxbcFloatControlFlag::PreserveNan64);
+-
+-      if (devInfo.vk12.denormBehaviorIndependence != VK_SHADER_FLOAT_CONTROLS_INDEPENDENCE_NONE) {
+-        if (devInfo.vk12.shaderDenormFlushToZeroFloat32)
+-          floatControl.set(DxbcFloatControlFlag::DenormFlushToZero32);
+-        if (devInfo.vk12.shaderDenormPreserveFloat64)
+-          floatControl.set(DxbcFloatControlFlag::DenormPreserve64);
+-      }
+-    }
+-  }
+-  
+ }
+diff --git a/src/dxbc/dxbc_options.h b/src/dxbc/dxbc_options.h
+index 37fdbe9..78b7d20 100644
+--- a/src/dxbc/dxbc_options.h
++++ b/src/dxbc/dxbc_options.h
+@@ -1,9 +1,13 @@
+ #pragma once
+ 
+-#include "../dxvk/dxvk_device.h"
++#include <vulkan/vulkan.h>
++
++#include "../util/util_flags.h"
++#include "../util/rc/util_rc_ptr.h"
+ 
+ namespace dxvk {
+ 
++  class DxvkDevice;
+   struct D3D11Options;
+ 
+   enum class DxbcFloatControlFlag : uint32_t {
+diff --git a/src/dxbc/dxbc_reader.cpp b/src/dxbc/dxbc_reader.cpp
+index 9b9a340..a088b57 100644
+--- a/src/dxbc/dxbc_reader.cpp
++++ b/src/dxbc/dxbc_reader.cpp
+@@ -14,10 +14,17 @@ namespace dxvk {
+   std::string DxbcReader::readString() {
+     std::string result;
+     
+-    while (m_data[m_pos] != '\0')
+-      result.push_back(m_data[m_pos++]);
+-    
+-    m_pos++;
++    while (true) {
++      if (m_pos >= m_size)
++        throw DxvkError("DxbcReader::readString: Unterminated string");
++
++      const char c = m_data[m_pos++];
++      if (c == '\0')
++        break;
++
++      result.push_back(c);
++    }
++
+     return result;
+   }
+   
+diff --git a/src/util/log/log.h b/src/util/log/log.h
+index ddfdaad..ab64b65 100644
+--- a/src/util/log/log.h
++++ b/src/util/log/log.h
+@@ -1,14 +1,35 @@
++// Lichii: DXVK's file logger is replaced by a sink the embedding application sets. It keeps
++// the standard headers the original and its thread.h include, which the compiler relies on.
++
+ #pragma once
+ 
++#include <algorithm>
+ #include <array>
++#include <atomic>
++#include <chrono>
++#include <cmath>
++#include <condition_variable>
++#include <cstdint>
++#include <cstring>
+ #include <fstream>
++#include <functional>
+ #include <iostream>
++#include <iterator>
++#include <limits>
++#include <mutex>
++#include <optional>
++#include <queue>
++#include <sstream>
+ #include <string>
+-
+-#include "../thread.h"
++#include <string_view>
++#include <type_traits>
++#include <unordered_map>
++#include <unordered_set>
++#include <utility>
++#include <vector>
+ 
+ namespace dxvk {
+-  
++
+   enum class LogLevel : uint32_t {
+     Trace = 0,
+     Debug = 1,
+@@ -17,57 +38,34 @@ namespace dxvk {
+     Error = 4,
+     None  = 5,
+   };
+-  
+-#ifdef _WIN32
+-  using PFN_wineLogOutput = int (__cdecl *)(const char *);
+-#endif
+ 
+-  /**
+-   * \brief Logger
+-   * 
+-   * Logger for one DLL. Creates a text file and
+-   * writes all log messages to that file.
+-   */
+   class Logger {
+-    
++
+   public:
+-    
+-    Logger(const std::string& file_name);
+-    ~Logger();
+-    
+-    static void trace(const std::string& message);
+-    static void debug(const std::string& message);
+-    static void info (const std::string& message);
+-    static void warn (const std::string& message);
+-    static void err  (const std::string& message);
+-    static void log  (LogLevel level, const std::string& message);
+-    
+-    static LogLevel logLevel() {
+-      return s_instance.m_minLevel;
++
++    using Sink = void (*)(LogLevel level, const std::string& message);
++
++    static void setSink(Sink sink) { s_sink = sink; }
++
++    static void trace(const std::string& message) { log(LogLevel::Trace, message); }
++    static void debug(const std::string& message) { log(LogLevel::Debug, message); }
++    static void info (const std::string& message) { log(LogLevel::Info,  message); }
++    static void warn (const std::string& message) { log(LogLevel::Warn,  message); }
++    static void err  (const std::string& message) { log(LogLevel::Error, message); }
++
++    static void log(LogLevel level, const std::string& message) {
++      if (s_sink != nullptr)
++        s_sink(level, message);
+     }
+-    
+-  private:
+-    
+-    static Logger     s_instance;
+-    
+-    const LogLevel    m_minLevel;
+-    const std::string m_fileName;
+-    
+-    dxvk::mutex       m_mutex;
+-    std::ofstream     m_fileStream;
+ 
+-    bool              m_initialized = false;
+-#ifdef _WIN32
+-    PFN_wineLogOutput m_wineLogOutput = nullptr;
+-#endif
++    static LogLevel logLevel() {
++      return LogLevel::Info;
++    }
+ 
+-    void emitMsg(LogLevel level, const std::string& message);
+-    
+-    std::string getFileName(
+-      const std::string& base);
++  private:
+ 
+-    static LogLevel getMinLogLevel();
++    static inline Sink s_sink = nullptr;
+ 
+   };
+-  
++
+ }
+diff --git a/src/util/util_bit.h b/src/util/util_bit.h
+index 21ecfc0..1c09aed 100644
+--- a/src/util/util_bit.h
++++ b/src/util/util_bit.h
+@@ -8,8 +8,6 @@
+   #endif
+ #elif defined(__aarch64__) || defined(_M_ARM64) || defined(_M_ARM64EC)
+   #define DXVK_ARCH_ARM64
+-#else
+-#error "Unknown CPU Architecture"
+ #endif
+ 
+ #ifdef DXVK_ARCH_X86
+diff --git a/src/util/util_string.h b/src/util/util_string.h
+index 87b74af..c1c3573 100644
+--- a/src/util/util_string.h
++++ b/src/util/util_string.h
+@@ -5,8 +5,6 @@
+ #include <sstream>
+ #include <vector>
+ 
+-#include "./com/com_include.h"
+-
+ #include "util_bit.h"
+ #include "util_likely.h"
+ 
+@@ -161,38 +159,8 @@ namespace dxvk::str {
+     return totalLength;
+   }
+ 
+-  /**
+-   * \brief Creates string object from wide char array
+-   *
+-   * \param [in] ws Null-terminated wide string
+-   * \returns Regular string object
+-   */
+-  std::string fromws(const WCHAR* ws);
+-
+-  /**
+-   * \brief Creates wide string object from char array
+-   *
+-   * \param [in] mbs Null-terminated string
+-   * \returns Wide string object
+-   */
+-  std::wstring tows(const char* mbs);
+-
+-#ifdef _WIN32
+-  using path_string = std::wstring;
+-  inline path_string topath(const char* mbs) { return tows(mbs); }
+-#else
+-  using path_string = std::string;
+-  inline path_string topath(const char* mbs) { return std::string(mbs); }
+-#endif
+-  
+   inline void format1(std::stringstream&) { }
+ 
+-  template<typename... Tx>
+-  void format1(std::stringstream& str, const WCHAR *arg, const Tx&... args) {
+-    str << fromws(arg);
+-    format1(str, args...);
+-  }
+-
+   template<typename T, typename... Tx>
+   void format1(std::stringstream& str, const T& arg, const Tx&... args) {
+     str << arg;

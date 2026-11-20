@@ -31,6 +31,13 @@ using ShaderModules = std::map<u32, std::vector<u32>>;
 enum class ShaderVariant : u32 {
     NativeFp32 = 1,
     NativeFp16 = 2,
+    TranslatedFp32 = 3,
+};
+
+struct LoadedShaders {
+    ShaderModules modules;
+    ShaderVariant variant{};
+    bool from_cache{};
 };
 
 namespace PerformanceShader {
@@ -58,7 +65,9 @@ constexpr u32 NATIVE_FP32_OFFSET = 98;
 
 [[nodiscard]] LosslessStatus BuildShaderCache();
 
-[[nodiscard]] LosslessStatus LoadShaderModules(ShaderVariant variant, ShaderModules& out_modules);
+[[nodiscard]] LosslessStatus LoadShaderModules(const std::filesystem::path& dll_path,
+                                               const std::filesystem::path& cache_path, bool fp16,
+                                               LoadedShaders& out_shaders);
 
 bool RemoveInstalledLosslessDll();
 
