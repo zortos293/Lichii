@@ -54,7 +54,7 @@ namespace {
 
 struct CodeBlockInfo {
     u64 code_begin, code_end;
-    std::function<std::optional<FakeCall>(u64)> cb;
+    FastmemCallbackType cb;
 };
 
 struct MachMessage {
@@ -140,7 +140,7 @@ kern_return_t MachHandler::HandleRequest(x86_thread_state64_t* ts) {
         return KERN_FAILURE;
     }
 
-    const auto fc = iter->cb(ts->__rip);
+    const auto fc = iter->cb(ts->__rip, ts->__r15);
     if (!fc) {
         fmt::print(stderr, "EXC_BAD_ACCESS in JIT code at rip {:#016x} is not a fastmem access\n", ts->__rip);
         return KERN_FAILURE;
@@ -255,7 +255,7 @@ struct ExceptionHandler::Impl final {
         RegisterHandler();
     }
 
-    void SetCallback(std::function<std::optional<FakeCall>(u64)> cb) {
+    void SetCallback(FastmemCallbackType cb) {
         CodeBlockInfo cbi;
         cbi.code_begin = code_begin;
         cbi.code_end = code_end;
@@ -294,7 +294,7 @@ bool ExceptionHandler::SupportsFastmem() const noexcept {
     return static_cast<bool>(impl);
 }
 
-void ExceptionHandler::SetFastmemCallback(std::function<std::optional<FakeCall>(u64)> cb) {
+void ExceptionHandler::SetFastmemCallback(FastmemCallbackType cb) {
     impl->SetCallback(cb);
 }
 

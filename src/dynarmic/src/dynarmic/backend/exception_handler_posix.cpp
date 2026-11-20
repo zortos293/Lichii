@@ -45,7 +45,7 @@ namespace {
 
 struct CodeBlockInfo {
     u64 size;
-    std::function<std::optional<FakeCall>(u64)> cb;
+    FastmemCallbackType cb;
 };
 
 class SigHandler {
@@ -126,7 +126,12 @@ void SigHandler::SigAction(int sig, siginfo_t* info, void* raw_context) {
     {
         std::shared_lock guard(sig_handler->code_block_infos_mutex);
         if (auto const iter = sig_handler->FindCodeBlockInfo(CTX_PC); iter != sig_handler->code_block_infos.end()) {
-            if (const auto fc = iter->second.cb(CTX_PC)) {
+#if defined(ARCHITECTURE_x86_64)
+            const auto fc = iter->second.cb(CTX_PC, CTX_R15);
+#else
+            const auto fc = iter->second.cb(CTX_PC);
+#endif
+            if (fc) {
 #if defined(ARCHITECTURE_x86_64)
                 CTX_SP -= sizeof(u64);
                 *std::bit_cast<u64*>(CTX_SP) = fc->ret_rip;
@@ -173,7 +178,7 @@ struct ExceptionHandler::Impl final {
         SigHandler::RegisterHandler();
     }
 
-    void SetCallback(std::function<std::optional<FakeCall>(u64)> cb) {
+    void SetCallback(FastmemCallbackType cb) {
         sig_handler->AddCodeBlock(offset, CodeBlockInfo{
             .size = size,
             .cb = cb
@@ -216,7 +221,7 @@ bool ExceptionHandler::SupportsFastmem() const noexcept {
     return bool(impl) && sig_handler->SupportsFastmem();
 }
 
-void ExceptionHandler::SetFastmemCallback(std::function<std::optional<FakeCall>(u64)> cb) {
+void ExceptionHandler::SetFastmemCallback(FastmemCallbackType cb) {
     impl->SetCallback(cb);
 }
 

@@ -5,6 +5,7 @@
 // (Run) must give the result single-stepping gives, without the emitter throwing.
 
 #include <catch2/catch_test_macros.hpp>
+#include <catch2/generators/catch_generators.hpp>
 #include <oaknut/oaknut.hpp>
 
 #include "./testenv.h"
@@ -70,7 +71,7 @@ TEST_CASE("A64: inline CNTPCT applies live clock changes to compiled code",
             ++reads;
             return last_read = callback_ticks;
         }
-    } env;
+    } env, second_env;
 
     oaknut::VectorCodeGenerator code{env.code_mem, nullptr};
     oaknut::Label read;
@@ -94,21 +95,34 @@ TEST_CASE("A64: inline CNTPCT applies live clock changes to compiled code",
     config.inline_cntpct_mode = &mode;
     config.inline_cntpct_last = &env.last_read;
     config.inline_cntpct_spin_ticks = 52;
-    config.omit_block_frame = config.host_call_return = true;
+    config.omit_block_frame = config.host_call_return = config.compact_block_exits = true;
+    const bool shared = GENERATE(false, true);
+    if (shared) {
+        config.shared_code_cache = A64::MakeSharedCodeCache();
+    }
     A64::Jit jit{config};
     env.jit = &jit;
+    std::optional<A64::Jit> second_jit;
+    if (shared) {
+        second_env.code_mem = env.code_mem;
+        config.callbacks = &second_env;
+        config.inline_cntpct_last = &second_env.last_read;
+        second_jit.emplace(config);
+        second_env.jit = &*second_jit;
+    }
 
-    const auto run = [&] {
-        jit.SetPC(0);
-        jit.SetRegister(2, 100);
-        jit.SetRegister(3, 200);
-        jit.SetVector(2, {10, 20});
-        jit.SetVector(3, {30, 40});
-        jit.Run();
-        CHECK(jit.GetRegister(5) == 500);
-        CHECK(jit.GetVector(5) == Vector{70, 100});
-        CHECK(jit.GetRegister(1) == env.last_read);
-        return jit.GetRegister(1);
+    const auto run = [](CounterEnv& active) {
+        auto& runner = *active.jit;
+        runner.SetPC(0);
+        runner.SetRegister(2, 100);
+        runner.SetRegister(3, 200);
+        runner.SetVector(2, {10, 20});
+        runner.SetVector(3, {30, 40});
+        runner.Run();
+        CHECK(runner.GetRegister(5) == 500);
+        CHECK(runner.GetVector(5) == Vector{70, 100});
+        CHECK(runner.GetRegister(1) == active.last_read);
+        return runner.GetRegister(1);
     };
 
     for (const auto guest_hz : {19'200'000, 31'250'000}) {
@@ -116,15 +130,26 @@ TEST_CASE("A64: inline CNTPCT applies live clock changes to compiled code",
         factor.store(scale, std::memory_order_relaxed);
         mode.store(0, std::memory_order_relaxed);
         const u64 before = Common::MultiplyHigh(Common::X64::FencedRDTSC(), scale);
-        const u64 ticks = run();
+        const u64 ticks = run(env);
         const u64 after = Common::MultiplyHigh(Common::X64::FencedRDTSC(), scale);
         CHECK(ticks >= before);
         CHECK(ticks <= after);
+        if (shared) {
+            const u64 second_ticks = run(second_env);
+            CHECK(second_ticks >= ticks);
+            CHECK(env.last_read == ticks);
+            CHECK(second_env.reads == env.reads);
+        }
 
         const unsigned old_reads = env.reads;
         mode.store(1, std::memory_order_relaxed);
-        CHECK(run() == callback_ticks);
+        CHECK(run(env) == callback_ticks);
         CHECK(env.reads == old_reads + 1);
+        if (shared) {
+            CHECK(run(second_env) == callback_ticks);
+            CHECK(second_env.reads == old_reads + 1);
+            CHECK(env.reads == old_reads + 1);
+        }
     }
     CHECK(env.reads == 2);
 }

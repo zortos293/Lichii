@@ -57,6 +57,12 @@ struct FakeCall {
 #    error "Invalid architecture"
 #endif
 
+#if defined(ARCHITECTURE_x86_64)
+using FastmemCallbackType = std::function<std::optional<FakeCall>(u64 rip, u64 jit_state)>;
+#else
+using FastmemCallbackType = std::function<std::optional<FakeCall>(u64 pc)>;
+#endif
+
 class ExceptionHandler final {
 public:
     ExceptionHandler();
@@ -76,7 +82,7 @@ public:
 
     bool SupportsFastmem() const noexcept;
     /// The callback returns nullopt when the faulting PC is not a fastmem access.
-    void SetFastmemCallback(std::function<std::optional<FakeCall>(u64)> cb);
+    void SetFastmemCallback(FastmemCallbackType cb);
 
 private:
     struct Impl;

@@ -199,10 +199,10 @@ struct ExceptionHandler::Impl final {
         code.mov(code.ABI_PARAM2, code.ABI_PARAM3);
         code.mov(code.ABI_PARAM3, code.ABI_PARAM1);
         code.mov(code.ABI_PARAM1, std::bit_cast<u64>(&cb));
-        code.CallLambda([](const std::function<std::optional<FakeCall>(u64)>& cb_, PCONTEXT ctx,
+        code.CallLambda([](const FastmemCallbackType& cb_, PCONTEXT ctx,
                            PEXCEPTION_RECORD record, u64 offset) -> EXCEPTION_DISPOSITION {
             if (record->ExceptionCode == EXCEPTION_ACCESS_VIOLATION) {
-                if (const auto fc = cb_(ctx->Rip)) {
+                if (const auto fc = cb_(ctx->Rip, ctx->R15)) {
                     ctx->Rsp -= sizeof(u64);
                     *std::bit_cast<u64*>(ctx->Rsp) = fc->ret_rip;
                     ctx->Rip = fc->call_rip;
@@ -265,7 +265,7 @@ struct ExceptionHandler::Impl final {
         RtlAddFunctionTable(rfuncs, 1, reinterpret_cast<DWORD64>(code.getCode()));
     }
 
-    void SetCallback(std::function<std::optional<FakeCall>(u64)> new_cb) {
+    void SetCallback(FastmemCallbackType new_cb) {
         cb = new_cb;
         except_info->ExceptionHandler = cb ? exception_handler_with_cb_offset : exception_handler_without_cb_offset;
     }
@@ -276,7 +276,7 @@ struct ExceptionHandler::Impl final {
 
 private:
     RUNTIME_FUNCTION* rfuncs;
-    std::function<std::optional<FakeCall>(u64)> cb;
+    FastmemCallbackType cb;
     UNW_EXCEPTION_INFO* except_info;
     ULONG exception_handler_without_cb_offset;
     ULONG exception_handler_with_cb_offset;
@@ -293,7 +293,7 @@ bool ExceptionHandler::SupportsFastmem() const noexcept {
     return static_cast<bool>(impl);
 }
 
-void ExceptionHandler::SetFastmemCallback(std::function<std::optional<FakeCall>(u64)> cb) {
+void ExceptionHandler::SetFastmemCallback(FastmemCallbackType cb) {
     impl->SetCallback(cb);
 }
 
