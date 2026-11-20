@@ -9,6 +9,7 @@
 #include <SDL3/SDL.h>
 
 #include "audio_core/common/common.h"
+#include "audio_core/sink/silent_input_stream.h"
 #include "audio_core/sink/sdl3_sink.h"
 #include "audio_core/sink/sink_stream.h"
 #include "common/logging.h"
@@ -256,6 +257,18 @@ SDLSink::~SDLSink() = default;
 SinkStream* SDLSink::AcquireSinkStream(Core::System& system, u32 system_channels_,
                                        const std::string&, StreamType type) {
     system_channels = system_channels_;
+#ifdef __ANDROID__
+    if (type == StreamType::In) {
+        // Opening an SDL recording device on Android asks for RECORD_AUDIO and blocks until
+        // SDLActivity forwards the answer. Our activity is not an SDLActivity, so the answer never
+        // comes and the guest thread opening the microphone hangs (Ocarina of Time froze at boot).
+        // Hand out a silent input instead.
+        SinkStreamPtr& stream = sink_streams.emplace_back(
+            std::make_unique<SilentInputStream>(system, system_channels));
+        stream->SetDeviceVolume(device_volume);
+        return stream.get();
+    }
+#endif
     SinkStreamPtr& stream = sink_streams.emplace_back(std::make_unique<SDLSinkStream>(
         device_channels, system_channels, output_device, input_device, type, system));
     stream->SetDeviceVolume(device_volume);
