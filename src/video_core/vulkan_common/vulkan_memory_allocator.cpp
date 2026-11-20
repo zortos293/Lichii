@@ -30,6 +30,7 @@
 #include "common/logging.h"
 #include "common/memory_detect.h"
 #include <ranges>
+#include "video_core/vulkan_common/rebar_policy.h"
 #include "video_core/vulkan_common/unbacked_fallback.h"
 #include "video_core/vulkan_common/vma.h"
 #include "video_core/vulkan_common/vulkan_device.h"
@@ -578,6 +579,57 @@ VkResult MemoryAllocator::AllocateBuffer(const VkBufferCreateInfo &ci, MemoryUsa
     buffer = vk::Buffer(handle, *device.GetLogical(), allocator, allocation, mapped_data,
                         is_coherent, location, device.GetDispatchLoader());
     return VK_SUCCESS;
+}
+
+vk::Buffer MemoryAllocator::TryCreateDirectBuffer(const VkBufferCreateInfo &ci, u32 heap_index,
+                                                  u32 memory_type_bits) const {
+    std::array<VmaBudget, VK_MAX_MEMORY_HEAPS> budgets{};
+    vmaGetHeapBudgets(allocator, budgets.data());
+    if (!Rebar::FitsBudget(budgets[heap_index].usage, budgets[heap_index].budget, ci.size)) {
+        return {};
+    }
+    const VmaAllocationCreateInfo alloc_ci = {
+        .flags = VMA_ALLOCATION_CREATE_WITHIN_BUDGET_BIT | VMA_ALLOCATION_CREATE_MAPPED_BIT |
+                 VMA_ALLOCATION_CREATE_HOST_ACCESS_SEQUENTIAL_WRITE_BIT,
+        .usage = VMA_MEMORY_USAGE_AUTO_PREFER_DEVICE,
+        .requiredFlags = VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT | VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT |
+                         VK_MEMORY_PROPERTY_HOST_COHERENT_BIT,
+        .preferredFlags = 0,
+        .memoryTypeBits = memory_type_bits & valid_memory_types,
+        .pool = VK_NULL_HANDLE,
+        .pUserData = nullptr,
+        .priority = 0.f,
+    };
+    VkBuffer handle{};
+    VmaAllocation allocation{};
+    VmaAllocationInfo alloc_info{};
+    if (alloc_ci.memoryTypeBits == 0 ||
+        vmaCreateBuffer(allocator, &ci, &alloc_ci, &handle, &allocation, &alloc_info) !=
+            VK_SUCCESS) {
+        return {};
+    }
+    if (alloc_info.pMappedData == nullptr) {
+        vmaDestroyBuffer(allocator, handle, allocation);
+        return {};
+    }
+    const vk::MemoryLocation location{
+        .memory = alloc_info.deviceMemory,
+        .offset = alloc_info.offset,
+        .memory_type = alloc_info.memoryType,
+    };
+    return vk::Buffer(handle, *device.GetLogical(), allocator, allocation,
+                      std::span<u8>{static_cast<u8*>(alloc_info.pMappedData), ci.size}, true,
+                      location, device.GetDispatchLoader());
+}
+
+std::array<u64, VK_MAX_MEMORY_HEAPS> MemoryAllocator::HeapBudgets() const {
+    std::array<VmaBudget, VK_MAX_MEMORY_HEAPS> budgets{};
+    vmaGetHeapBudgets(allocator, budgets.data());
+    std::array<u64, VK_MAX_MEMORY_HEAPS> result{};
+    for (size_t heap = 0; heap < result.size(); ++heap) {
+        result[heap] = budgets[heap].budget;
+    }
+    return result;
 }
 
 vk::Buffer MemoryAllocator::CreateBuffer(const VkBufferCreateInfo &ci, MemoryUsage usage,

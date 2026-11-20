@@ -2379,6 +2379,9 @@ void BufferCache<P>::BindHostIndexBuffer() {
             std::array<BufferCopy, 1> copies{{BufferCopy{.src_offset = upload_staging.offset, .dst_offset = 0, .size = size}}};
             std::memcpy(upload_staging.mapped_span.data(), draw_state.inline_index_draw_indexes.data(), size);
             runtime.CopyBuffer(buffer, upload_staging.buffer, copies, true);
+            if constexpr (requires { buffer.DirectWriteSpan(); }) {
+                runtime.NoteStagedUpload(buffer, size, copies, 0);
+            }
         } else {
             buffer.ImmediateUpload(0, draw_state.inline_index_draw_indexes);
         }
@@ -4057,6 +4060,24 @@ void BufferCache<P>::MappedUploadMemory([[maybe_unused]] Buffer& buffer,
                                         [[maybe_unused]] u64 total_size_bytes,
                                         [[maybe_unused]] std::span<BufferCopy> copies) {
     if constexpr (USE_MEMORY_MAPS) {
+        constexpr bool has_direct = requires { buffer.DirectWriteSpan(); };
+        u64 stats_start = 0;
+        if constexpr (has_direct) {
+            stats_start = runtime.UploadStatsStart();
+            if (runtime.CanUploadDirectly(buffer, total_size_bytes, copies)) {
+                u8* const direct_pointer = buffer.DirectWriteSpan().data();
+                for (const BufferCopy& copy : copies) {
+                    const DAddr device_addr = buffer.CpuAddr() + copy.dst_offset;
+                    device_memory.ReadBlockUnsafe(device_addr, direct_pointer + copy.dst_offset,
+                                                  copy.size);
+                    if (copy.size >= 256_KiB) {
+                        uploaded_buffer_ranges.emplace_back(device_addr, copy.size);
+                    }
+                }
+                runtime.NoteDirectUpload(total_size_bytes, copies.size(), stats_start);
+                return;
+            }
+        }
         auto upload_staging = runtime.UploadStagingBuffer(total_size_bytes);
         const std::span<u8> staging_pointer = upload_staging.mapped_span;
         for (BufferCopy& copy : copies) {
@@ -4073,6 +4094,9 @@ void BufferCache<P>::MappedUploadMemory([[maybe_unused]] Buffer& buffer,
         }
         const bool can_reorder = runtime.CanReorderUpload(buffer, copies);
         runtime.CopyBuffer(buffer, upload_staging.buffer, copies, true, can_reorder);
+        if constexpr (has_direct) {
+            runtime.NoteStagedUpload(buffer, total_size_bytes, copies, stats_start);
+        }
     }
 }
 
@@ -4107,6 +4131,22 @@ void BufferCache<P>::InlineMemoryImplementation(DAddr dest_address, size_t copy_
     SynchronizeBuffer(buffer, dest_address, static_cast<u32>(copy_size));
 
     if constexpr (USE_MEMORY_MAPS_FOR_UPLOADS) {
+        constexpr bool has_direct = requires { buffer.DirectWriteSpan(); };
+        u64 stats_start = 0;
+        if constexpr (has_direct) {
+            stats_start = runtime.UploadStatsStart();
+            const std::array direct_copies{BufferCopy{
+                .src_offset = 0,
+                .dst_offset = buffer.Offset(dest_address),
+                .size = copy_size,
+            }};
+            if (runtime.CanUploadDirectly(buffer, copy_size, direct_copies)) {
+                std::memcpy(buffer.DirectWriteSpan().data() + buffer.Offset(dest_address),
+                            inlined_buffer.data(), copy_size);
+                runtime.NoteDirectUpload(copy_size, 1, stats_start);
+                return;
+            }
+        }
         auto upload_staging = runtime.UploadStagingBuffer(copy_size);
         std::array copies{BufferCopy{
             .src_offset = upload_staging.offset,
@@ -4117,6 +4157,9 @@ void BufferCache<P>::InlineMemoryImplementation(DAddr dest_address, size_t copy_
         std::memcpy(src_pointer, inlined_buffer.data(), copy_size);
         const bool can_reorder = runtime.CanReorderUpload(buffer, copies);
         runtime.CopyBuffer(buffer, upload_staging.buffer, copies, true, can_reorder);
+        if constexpr (has_direct) {
+            runtime.NoteStagedUpload(buffer, copy_size, copies, stats_start);
+        }
     } else {
         buffer.ImmediateUpload(buffer.Offset(dest_address), inlined_buffer.first(copy_size));
     }

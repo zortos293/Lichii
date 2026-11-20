@@ -1818,6 +1818,10 @@ void QueryCacheRuntime::SyncValues(std::span<SyncValuesType> values, VkBuffer ba
             const auto post_op = VideoCommon::ObtainBufferOperation::DoNothing;
             const auto [buffer, offset] = impl->buffer_cache.ObtainCPUBuffer(
                 pair.first, static_cast<u32>(pair.second - pair.first), sync_info, post_op);
+            if (buffer->IsDirectWrite()) {
+                // A direct upload (ReBAR) must not land before these copies.
+                buffer->MarkUsage(offset, static_cast<u32>(pair.second - pair.first));
+            }
             impl->buffers_to_upload_to.emplace_back(buffer->Handle(), offset);
         }
     });

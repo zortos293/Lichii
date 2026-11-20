@@ -5,6 +5,7 @@
 
 #pragma once
 
+#include <array>
 #include <atomic>
 #include <memory>
 #include <mutex>
@@ -152,6 +153,15 @@ namespace Vulkan {
 
         /// CreateBuffer, but a null buffer instead of an exception when there is no memory for it.
         vk::Buffer TryCreateBuffer(const VkBufferCreateInfo &ci, MemoryUsage usage) const;
+
+        /// A persistently mapped, write-combined buffer in host-visible device-local memory of
+        /// `memory_type_bits` on `heap_index` (resizable BAR, rebar_policy.h), within the heap's
+        /// budget. The CPU only writes it, sequentially. A null buffer when it does not fit.
+        vk::Buffer TryCreateDirectBuffer(const VkBufferCreateInfo &ci, u32 heap_index,
+                                         u32 memory_type_bits) const;
+
+        /// Each heap's budget in bytes (VK_EXT_memory_budget when enabled, else VMA's estimate).
+        std::array<u64, VK_MAX_MEMORY_HEAPS> HeapBudgets() const;
 
         vk::Buffer CreateBuffer(const VkBufferCreateInfo &ci, MemoryUsage usage,
                                 VkDeviceSize min_alignment) const;

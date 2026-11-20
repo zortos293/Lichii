@@ -20,6 +20,7 @@
 #include "video_core/renderer_vulkan/vk_staging_buffer_pool.h"
 #include "video_core/renderer_vulkan/vk_update_descriptor.h"
 #include "video_core/surface.h"
+#include "video_core/vulkan_common/rebar_policy.h"
 #include "video_core/vulkan_common/vulkan_memory_allocator.h"
 #include "video_core/vulkan_common/vulkan_wrapper.h"
 
@@ -75,8 +76,19 @@ public:
         return last_usage_tick;
     }
 
+    /// Mapped memory the CPU may read. Direct-upload buffers are write-combined VRAM: none.
     [[nodiscard]] std::span<const u8> Mapped() const noexcept {
-        return buffer.IsHostCoherent() ? buffer.Mapped() : std::span<const u8>{};
+        return buffer.IsHostCoherent() && !direct_write ? buffer.Mapped() : std::span<const u8>{};
+    }
+
+    /// The whole buffer in host-visible VRAM for direct uploads (resizable BAR), else empty.
+    /// Write-only, sequentially: never read it back.
+    [[nodiscard]] std::span<u8> DirectWriteSpan() noexcept {
+        return direct_write ? buffer.Mapped() : std::span<u8>{};
+    }
+
+    [[nodiscard]] bool IsDirectWrite() const noexcept {
+        return direct_write;
     }
 
     operator VkBuffer() const noexcept {
@@ -100,6 +112,7 @@ private:
     u64 last_usage_tick{};
     bool is_null{};
     bool sparse_compatible{};
+    bool direct_write{};
 };
 
 class QuadArrayIndexBuffer;
@@ -183,6 +196,22 @@ public:
     [[nodiscard]] StagingBufferRef DownloadStagingBuffer(size_t size, bool deferred = false);
 
     bool CanReorderUpload(const Buffer& buffer, std::span<const VideoCommon::BufferCopy> copies);
+
+    /// Whether `copies` can be written straight into `buffer` (resizable BAR): it lives in
+    /// host-visible VRAM and no recorded or unfinished GPU work uses their ranges.
+    bool CanUploadDirectly(const Buffer& buffer, u64 total_size,
+                           std::span<const VideoCommon::BufferCopy> copies);
+
+    /// Starts timing an upload for the ReBAR line of EDEN_NX2_GPU_PROFILE; 0 when it is off.
+    [[nodiscard]] u64 UploadStatsStart() const;
+
+    /// An upload written directly into `buffer`.
+    void NoteDirectUpload(u64 total_size, size_t num_copies, u64 stats_start);
+
+    /// An upload into `buffer` copied from a staging buffer. A later direct write must not land
+    /// before that copy runs, so the ranges count as used in a direct-upload buffer.
+    void NoteStagedUpload(Buffer& buffer, u64 total_size,
+                          std::span<const VideoCommon::BufferCopy> copies, u64 stats_start);
 
     void FreeDeferredStagingBuffer(StagingBufferRef& ref);
 
@@ -403,6 +432,25 @@ private:
     bool bound_index_valid = false;
 
     Nx2ListSlots nx2_list_slots{memory_allocator, scheduler};
+
+    Rebar::Decision rebar{};
+    struct RebarStats {
+        u64 direct_bytes;
+        u64 direct_uploads;
+        u64 direct_ns;
+        u64 staged_bytes;
+        u64 staged_uploads;
+        u64 staged_ns;
+        u64 small_staged_uploads; ///< Staged uploads a direct one could have taken (size)
+        u64 small_staged_ns;
+        u64 direct_buffers;
+        u64 direct_buffer_bytes;
+        u64 failed_buffers; ///< Direct allocations that did not fit and took device memory
+    };
+    RebarStats rebar_stats{};
+    u64 rebar_stats_start_ns{};
+
+    void LogRebarStats();
 };
 
 struct BufferCacheParams {

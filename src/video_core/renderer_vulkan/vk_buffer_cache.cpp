@@ -6,6 +6,7 @@
 #include <algorithm>
 #include <array>
 #include <atomic>
+#include <chrono>
 #include <cstring>
 #include <cstdlib>
 #include <span>
@@ -54,6 +55,12 @@ VkBufferCopy MakeBufferCopy(const VideoCommon::BufferCopy& copy) {
     };
 }
 
+u64 SteadyNs() {
+    return static_cast<u64>(std::chrono::duration_cast<std::chrono::nanoseconds>(
+                                std::chrono::steady_clock::now().time_since_epoch())
+                                .count());
+}
+
 VkIndexType IndexTypeFromNumElements(const Device& device, u32 num_elements) {
     if (num_elements <= 0xff && device.IsExtIndexTypeUint8Supported()) {
         return VK_INDEX_TYPE_UINT8_EXT;
@@ -79,7 +86,8 @@ size_t BytesPerIndex(VkIndexType index_type) {
 }
 
 vk::Buffer CreateBuffer(const Device& device, const MemoryAllocator& memory_allocator,
-                        StagingBufferPool& staging_pool, u64 size, VkDeviceSize sparse_alignment) {
+                        StagingBufferPool& staging_pool, u64 size, VkDeviceSize sparse_alignment,
+                        const Rebar::Decision& rebar, bool& direct_write) {
     VkBufferUsageFlags flags =
         VK_BUFFER_USAGE_TRANSFER_SRC_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT |
         VK_BUFFER_USAGE_UNIFORM_TEXEL_BUFFER_BIT | VK_BUFFER_USAGE_STORAGE_TEXEL_BUFFER_BIT |
@@ -113,6 +121,14 @@ vk::Buffer CreateBuffer(const Device& device, const MemoryAllocator& memory_allo
                 return memory_allocator.CreateBuffer(buffer_ci, MemoryUsage::DeviceLocal,
                                                      sparse_alignment);
             }
+            if (rebar.enabled) {
+                vk::Buffer direct = memory_allocator.TryCreateDirectBuffer(
+                    buffer_ci, rebar.heap_index, rebar.memory_type_bits);
+                if (direct) {
+                    direct_write = true;
+                    return direct;
+                }
+            }
             return memory_allocator.CreateBuffer(
                 buffer_ci, device.IsMoltenVK() ? MemoryUsage::Stream : MemoryUsage::DeviceLocal);
         },
@@ -144,11 +160,17 @@ Buffer::Buffer(BufferCacheRuntime& runtime, VideoCommon::NullBufferParams null_p
 Buffer::Buffer(BufferCacheRuntime& runtime, DAddr cpu_addr_, u64 size_bytes_,
                bool sparse_compatible_)
     : VideoCommon::BufferBase(cpu_addr_, size_bytes_), device{&runtime.device},
-      scheduler{&runtime.scheduler},
-      buffer{CreateBuffer(*device, runtime.memory_allocator, runtime.staging_pool, SizeBytes(),
-                          runtime.SparseAlignmentFor(sparse_compatible_))},
-      tracker{SizeBytes()} {
+      scheduler{&runtime.scheduler}, tracker{SizeBytes()} {
     sparse_compatible = sparse_compatible_;
+    const auto sparse_alignment = runtime.SparseAlignmentFor(sparse_compatible);
+    buffer = CreateBuffer(*device, runtime.memory_allocator, runtime.staging_pool, SizeBytes(),
+                          sparse_alignment, runtime.rebar, direct_write);
+    if (direct_write) {
+        ++runtime.rebar_stats.direct_buffers;
+        runtime.rebar_stats.direct_buffer_bytes += SizeBytes();
+    } else if (runtime.rebar.enabled && sparse_alignment <= 1) {
+        ++runtime.rebar_stats.failed_buffers;
+    }
     if (device->IsMoltenVK()) {
         runtime.scheduler.RequestOutsideRenderPassOperationContext();
         runtime.scheduler.Record([handle = *buffer, offset = SizeBytes()](vk::CommandBuffer cmdbuf) {
@@ -452,6 +474,12 @@ BufferCacheRuntime::BufferCacheRuntime(const Device& device_, MemoryAllocator& m
                                                                      scheduler_, staging_pool_);
     quad_strip_index_buffer = std::make_shared<QuadStripIndexBuffer>(device_, memory_allocator_,
                                                                      scheduler_, staging_pool_);
+    const auto budgets = memory_allocator.HeapBudgets();
+    rebar = Rebar::Decide(device.GetPhysical().GetMemoryProperties().memoryProperties, budgets,
+                          device.IsIntegrated() || device.IsMoltenVK(), Rebar::KillSwitchSet());
+    LOG_INFO(Render_Vulkan, "ReBAR: heap {} MiB, budget {} MiB, direct uploads {} ({})",
+             rebar.heap_size >> 20, rebar.budget >> 20, rebar.enabled ? "on" : "off",
+             Rebar::ReasonText(rebar.reason));
 }
 
 u32 BufferCacheRuntime::SetVertexRepackLayout(const Tegra::Engines::Maxwell3D::Regs& regs,
@@ -561,6 +589,9 @@ u64 BufferCacheRuntime::GetMaxStorageBufferRange() const {
 }
 
 void BufferCacheRuntime::TickFrame(Common::SlotVector<Buffer>& slot_buffers) noexcept {
+    if (rebar.enabled && VideoCommon::Nx2Profile::Enabled()) {
+        LogRebarStats();
+    }
     multi_range_buffers.TickFrame(scheduler);
     for (auto it = slot_buffers.begin(); it != slot_buffers.end(); it++) {
         if (scheduler.IsFree(it->LastUsageTick())) {
@@ -658,6 +689,82 @@ bool BufferCacheRuntime::CanReorderUpload(const Buffer& buffer,
             return !buffer.IsRegionUsed(copy.dst_offset, copy.size);
         });
     return can_use_upload_cmdbuf;
+}
+
+bool BufferCacheRuntime::CanUploadDirectly(const Buffer& buffer, u64 total_size,
+                                           std::span<const VideoCommon::BufferCopy> copies) {
+    return buffer.IsDirectWrite() && total_size <= Rebar::MAX_DIRECT_UPLOAD_SIZE &&
+           CanReorderUpload(buffer, copies);
+}
+
+u64 BufferCacheRuntime::UploadStatsStart() const {
+    return rebar.enabled && VideoCommon::Nx2Profile::Enabled() ? SteadyNs() : 0;
+}
+
+void BufferCacheRuntime::NoteDirectUpload(u64 total_size, size_t num_copies, u64 stats_start) {
+    if (stats_start == 0) {
+        return;
+    }
+    rebar_stats.direct_bytes += total_size;
+    rebar_stats.direct_uploads += num_copies;
+    rebar_stats.direct_ns += SteadyNs() - stats_start;
+}
+
+void BufferCacheRuntime::NoteStagedUpload(Buffer& buffer, u64 total_size,
+                                          std::span<const VideoCommon::BufferCopy> copies,
+                                          u64 stats_start) {
+    if (buffer.IsDirectWrite()) {
+        for (const VideoCommon::BufferCopy& copy : copies) {
+            buffer.MarkUsage(copy.dst_offset, copy.size);
+        }
+    }
+    if (stats_start == 0) {
+        return;
+    }
+    const u64 ns = SteadyNs() - stats_start;
+    rebar_stats.staged_bytes += total_size;
+    rebar_stats.staged_uploads += copies.size();
+    rebar_stats.staged_ns += ns;
+    if (total_size <= Rebar::MAX_DIRECT_UPLOAD_SIZE) {
+        rebar_stats.small_staged_uploads += copies.size();
+        rebar_stats.small_staged_ns += ns;
+    }
+}
+
+void BufferCacheRuntime::LogRebarStats() {
+    const u64 now = SteadyNs();
+    if (rebar_stats_start_ns == 0) {
+        rebar_stats_start_ns = now;
+        return;
+    }
+    if (now - rebar_stats_start_ns < 10'000'000'000ULL) {
+        return;
+    }
+    const RebarStats& s = rebar_stats;
+    const auto mib = [](u64 bytes) { return static_cast<double>(bytes) / (1 << 20); };
+    const auto ms = [](u64 ns) { return static_cast<double>(ns) / 1e6; };
+    // A direct upload skips the staging write's copy and its recording: priced at what the staged
+    // uploads of the same sizes cost per copy in this window.
+    const double staged_per_upload =
+        s.small_staged_uploads != 0
+            ? static_cast<double>(s.small_staged_ns) / static_cast<double>(s.small_staged_uploads)
+            : 0.0;
+    const double saved_ms =
+        (staged_per_upload * static_cast<double>(s.direct_uploads) -
+         static_cast<double>(s.direct_ns)) /
+        1e6;
+    LOG_INFO(Render_Vulkan,
+             "ReBAR uploads in {:.1f} s: direct {:.1f} MiB ({} copies, {:.2f} ms), staged {:.1f} "
+             "MiB ({} copies, {:.2f} ms; {} copies of uploads up to {} MiB in {:.2f} ms); est. "
+             "upload time saved {:.2f} ms; direct buffers made {} "
+             "({:.1f} MiB), {} did not fit",
+             static_cast<double>(now - rebar_stats_start_ns) / 1e9, mib(s.direct_bytes),
+             s.direct_uploads, ms(s.direct_ns), mib(s.staged_bytes), s.staged_uploads,
+             ms(s.staged_ns), s.small_staged_uploads, Rebar::MAX_DIRECT_UPLOAD_SIZE >> 20,
+             ms(s.small_staged_ns), saved_ms, s.direct_buffers,
+             mib(s.direct_buffer_bytes), s.failed_buffers);
+    rebar_stats = {};
+    rebar_stats_start_ns = now;
 }
 
 void BufferCacheRuntime::CopyBuffer(VkBuffer dst_buffer, VkBuffer src_buffer,
