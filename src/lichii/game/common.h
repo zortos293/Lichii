@@ -3,12 +3,21 @@
 
 #pragma once
 
+#include <algorithm>
+
 #include <QStandardItem>
 #include <QStringList>
 
 #include "qt_common/game_list/game_list_p.h"
 
 namespace Lichii {
+
+/// Display size used by the icon-based library views: without a title label the user icon size is
+/// used as-is, otherwise keep a minimum size that stays legible next to the title.
+inline u32 CardIconDisplaySize(bool show_game_name) {
+    const u32 icon_size = UISettings::values.game_cover_size.GetValue();
+    return show_game_name ? std::max<u32>(icon_size, u32{128}) : icon_size;
+}
 
 inline bool ContainsAllWords(const QString& haystack, const QString& userinput) {
     const QStringList userinput_split = userinput.split(QLatin1Char{' '}, Qt::SkipEmptyParts);

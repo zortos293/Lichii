@@ -7,5 +7,6 @@ SPDX-License-Identifier: GPL-2.0-or-later
         <file alias="lichii.ico">../../dist/lichii.ico</file>
         <file alias="lichii_wordmark.png">../../dist/lichii_wordmark.png</file>
         <file alias="lichii_wordmark@2x.png">../../dist/lichii_wordmark@2x.png</file>
+        <file alias="switch2_logo.svg">../../dist/branding/nintendo_switch_2_logo.svg</file>
     </qresource>
 </RCC>

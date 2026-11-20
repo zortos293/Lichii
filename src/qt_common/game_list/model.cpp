@@ -80,7 +80,10 @@ void GameListModel::WorkerEvent() {
 }
 
 void GameListModel::AddDirEntry(GameListDir* entry_items) {
-    if (m_flat) {
+    // The grid lists user folders as cards, empty ones included; the built-in SD and NAND
+    // locations stay structural and only appear in the tree.
+    if (m_flat &&
+        static_cast<GameListItemType>(entry_items->type()) != GameListItemType::CustomDir) {
         delete entry_items;
         return;
     }
@@ -89,6 +92,16 @@ void GameListModel::AddDirEntry(GameListDir* entry_items) {
 
 void GameListModel::AddEntry(const QList<QStandardItem*>& entry_items, GameListDir* parent) {
     if (m_flat) {
+        // Games sit at the top level in the flat list, so the folder card cannot read its game
+        // count from child rows; keep the counter the card displays up to date instead.
+        if (parent) {
+            parent->setData(parent->data(GameListDir::GameCountRole).toInt() + 1,
+                            GameListDir::GameCountRole);
+            const QVariant dir_index = parent->data(GameListDir::GameDirRole);
+            if (dir_index.isValid() && !entry_items.isEmpty()) {
+                entry_items[0]->setData(dir_index, GameListItemPath::OwnerDirRole);
+            }
+        }
         invisibleRootItem()->appendRow(entry_items);
     } else {
         parent->appendRow(entry_items);
@@ -96,9 +109,14 @@ void GameListModel::AddEntry(const QList<QStandardItem*>& entry_items, GameListD
 }
 
 void GameListModel::DonePopulating(const QStringList& watch_list) {
-    emit ShowList(!IsEmpty());
-
-    if (!m_flat) {
+    if (m_flat) {
+        // The grid keeps its empty-library card: it is the add-a-folder entry point, so hiding
+        // the whole list would leave a blank window.
+        invisibleRootItem()->appendRow(new GameListAddDir());
+        emit ShowList(true);
+    } else {
+        const bool has_games = !IsEmpty();
+        emit ShowList(has_games);
         invisibleRootItem()->appendRow(new GameListAddDir());
         invisibleRootItem()->insertRow(0, new GameListFavorites());
 
@@ -147,10 +165,20 @@ bool GameListModel::IsEmpty() const {
              type == GameListItemType::SysNandDir)) {
             invisibleRootItem()->removeRow(child->row());
             i--;
+            continue;
+        }
+
+        if (type == GameListItemType::Favorites || type == GameListItemType::AddDir) {
+            continue;
+        }
+
+        if (type == GameListItemType::Game || type == GameListItemType::CustomDir ||
+            child->hasChildren()) {
+            return false;
         }
     }
 
-    return !invisibleRootItem()->hasChildren();
+    return true;
 }
 
 void GameListModel::ToggleFavorite(u64 program_id) {

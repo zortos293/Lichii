@@ -58,6 +58,7 @@
 namespace {
 // A few at a time keeps SteamGridDB happy and the scan of a large library short.
 constexpr int MaxParallelLookups = 2;
+
 } // namespace
 
 GameList::GameList(FileSys::VirtualFilesystem vfs_, FileSys::ManualContentProvider* provider_,
@@ -87,7 +88,15 @@ GameList::GameList(FileSys::VirtualFilesystem vfs_, FileSys::ManualContentProvid
     connect(tree_view, &QTreeView::activated, this, &GameList::ValidateEntry);
     connect(tree_view, &QTreeView::customContextMenuRequested, this, &GameList::PopupContextMenu);
 
-    connect(grid_view, &QListView::activated, this, &GameList::ValidateEntry);
+    connect(grid_view, &QListView::doubleClicked, this, [this](const QModelIndex& index) {
+        grid_mouse_activated = true;
+        ValidateEntry(index);
+    });
+    // Mouse double-clicks also emit activated right after doubleClicked, and both would boot the
+    // game; a second boot while the first is still starting shuts it down again. Ignore activations
+    // that arrive from the mouse so the grid keeps keyboard and controller activation only.
+    connect(grid_view, &QListView::activated, this,
+            [this](const QModelIndex& index) { OnGridActivated(index); });
     connect(grid_view, &QListView::customContextMenuRequested, this, &GameList::PopupContextMenu);
 
     connect(carousel_view, &QListView::activated, this, &GameList::ValidateEntry);
@@ -123,6 +132,23 @@ GameList::GameList(FileSys::VirtualFilesystem vfs_, FileSys::ManualContentProvid
 
 void GameList::SetNupConversionRunning(bool running) {
     nup_conversion_running = running;
+}
+
+void GameList::OnGridActivated(const QModelIndex& index) {
+    // A mouse double-click is handled by the doubleClicked connection, and Qt then also emits
+    // activated for it. ValidateEntry twice would boot the game and immediately shut it down again,
+    // so only activations that came from the keyboard or the emulated controller open an entry.
+    if (grid_mouse_activated) {
+        grid_mouse_activated = false;
+        return;
+    }
+    ValidateEntry(index);
+}
+
+void GameList::SetModernLibrary(bool modern) {
+    if (search_field != nullptr) {
+        search_field->SetModernMode(modern);
+    }
 }
 
 void GameList::SetNxToolRunning(bool running) {
@@ -213,6 +239,7 @@ void GameList::UnloadController() {
 void GameList::ResetViewMode() {
     const auto mode = UISettings::values.game_list_mode.GetValue();
     game_list_mode = mode;
+    grid_view->SetBrowsedDirectory(-1);
 
     if (m_currentView)
         layout->removeWidget(m_currentView);
@@ -293,7 +320,10 @@ void GameList::OnFilterCloseClicked() {
 }
 
 void GameList::OnPopulatingCompleted(const QStringList& watch_list) {
-    emit ShowList(!item_model->IsEmpty());
+    // The grid keeps its empty-library card (the add-a-folder entry point), so it always shows.
+    emit ShowList(UISettings::values.game_list_mode.GetValue() ==
+                      Settings::GameListMode::GridView ||
+                  !item_model->IsEmpty());
 
     // favorites row
     if (m_isTreeMode) {
@@ -375,8 +405,9 @@ void GameList::OnPopulatingCompleted(const QStringList& watch_list) {
                      tree_view->header()->sortIndicatorOrder());
 
     // A repopulate (a directory removed, deep scan toggled) replaces the rows: apply the search
-    // text the user still has typed to them.
-    if (!search_field->filterText().isEmpty()) {
+    // text the user still has typed to them, and restore the folder card the grid is browsing.
+    if (!search_field->filterText().isEmpty() ||
+        (!m_isTreeMode && game_list_mode == Settings::GameListMode::GridView)) {
         OnTextChanged(search_field->filterText());
     }
 
@@ -687,6 +718,12 @@ void GameList::ValidateEntry(const QModelIndex& item) {
         emit GameChosen(file_path, title_id);
         break;
     }
+    case GameListItemType::CustomDir:
+        // Folder cards are grid navigation; the tree expands its rows natively.
+        if (m_currentView == grid_view) {
+            grid_view->BrowseDirectory(selected.data(GameListDir::GameDirRole).toInt());
+        }
+        break;
     case GameListItemType::AddDir:
         emit AddDirectory();
         break;
@@ -1036,31 +1073,60 @@ void GameList::AddPermDirPopup(QMenu& context_menu, QModelIndex selected) {
     move_up->setEnabled(row > 1);
     move_down->setEnabled(row < item_model->rowCount() - 2);
 
-    connect(move_up, &QAction::triggered, this, [this, selected, row, game_dir_index] {
-        const int other_index = selected.sibling(row - 1, 0).data(GameListDir::GameDirRole).toInt();
-        std::swap(UISettings::values.game_dirs[game_dir_index],
-                  UISettings::values.game_dirs[other_index]);
-        item_model->setData(selected, QVariant(other_index), GameListDir::GameDirRole);
-        item_model->setData(selected.sibling(row - 1, 0), QVariant(game_dir_index),
-                            GameListDir::GameDirRole);
-        QList<QStandardItem*> items = item_model->takeRow(row);
-        item_model->invisibleRootItem()->insertRow(row - 1, items);
-        tree_view->setExpanded(selected.sibling(row - 1, 0),
-                               UISettings::values.game_dirs[other_index].expanded);
-    });
+    const auto swap_game_owner_indices = [this](int first_index, int second_index) {
+        if (m_isTreeMode) {
+            return;
+        }
+        for (int i = 0; i < item_model->rowCount(); ++i) {
+            QStandardItem* item = item_model->item(i, 0);
+            if (!item || item->data(GameListItem::TypeRole).value<GameListItemType>() !=
+                             GameListItemType::Game) {
+                continue;
+            }
+            const QVariant owner = item->data(GameListItemPath::OwnerDirRole);
+            if (!owner.isValid()) {
+                continue;
+            }
+            const int owner_index = owner.toInt();
+            if (owner_index == first_index) {
+                item->setData(second_index, GameListItemPath::OwnerDirRole);
+            } else if (owner_index == second_index) {
+                item->setData(first_index, GameListItemPath::OwnerDirRole);
+            }
+        }
+    };
 
-    connect(move_down, &QAction::triggered, this, [this, selected, row, game_dir_index] {
-        const int other_index = selected.sibling(row + 1, 0).data(GameListDir::GameDirRole).toInt();
-        std::swap(UISettings::values.game_dirs[game_dir_index],
-                  UISettings::values.game_dirs[other_index]);
-        item_model->setData(selected, QVariant(other_index), GameListDir::GameDirRole);
-        item_model->setData(selected.sibling(row + 1, 0), QVariant(game_dir_index),
-                            GameListDir::GameDirRole);
-        const QList<QStandardItem*> items = item_model->takeRow(row);
-        item_model->invisibleRootItem()->insertRow(row + 1, items);
-        tree_view->setExpanded(selected.sibling(row + 1, 0),
-                               UISettings::values.game_dirs[other_index].expanded);
-    });
+    connect(move_up, &QAction::triggered, this,
+            [this, selected, row, game_dir_index, swap_game_owner_indices] {
+                const int other_index =
+                    selected.sibling(row - 1, 0).data(GameListDir::GameDirRole).toInt();
+                std::swap(UISettings::values.game_dirs[game_dir_index],
+                          UISettings::values.game_dirs[other_index]);
+                swap_game_owner_indices(game_dir_index, other_index);
+                item_model->setData(selected, QVariant(other_index), GameListDir::GameDirRole);
+                item_model->setData(selected.sibling(row - 1, 0), QVariant(game_dir_index),
+                                    GameListDir::GameDirRole);
+                QList<QStandardItem*> items = item_model->takeRow(row);
+                item_model->invisibleRootItem()->insertRow(row - 1, items);
+                tree_view->setExpanded(selected.sibling(row - 1, 0),
+                                       UISettings::values.game_dirs[other_index].expanded);
+            });
+
+    connect(move_down, &QAction::triggered, this,
+            [this, selected, row, game_dir_index, swap_game_owner_indices] {
+                const int other_index =
+                    selected.sibling(row + 1, 0).data(GameListDir::GameDirRole).toInt();
+                std::swap(UISettings::values.game_dirs[game_dir_index],
+                          UISettings::values.game_dirs[other_index]);
+                swap_game_owner_indices(game_dir_index, other_index);
+                item_model->setData(selected, QVariant(other_index), GameListDir::GameDirRole);
+                item_model->setData(selected.sibling(row + 1, 0), QVariant(game_dir_index),
+                                    GameListDir::GameDirRole);
+                const QList<QStandardItem*> items = item_model->takeRow(row);
+                item_model->invisibleRootItem()->insertRow(row + 1, items);
+                tree_view->setExpanded(selected.sibling(row + 1, 0),
+                                       UISettings::values.game_dirs[other_index].expanded);
+            });
 
     connect(open_directory_location, &QAction::triggered, this, [this, game_dir_index] {
         emit OpenDirectory(

@@ -12,6 +12,14 @@ Files: dist/english_plurals/*
 Copyright: yuzu Emulator Project
 License: GPL-2.0-or-later
 
+Files: dist/branding/nintendo_switch_2_logo.svg
+Copyright: Nintendo
+License: LicenseRef-PublicDomain
+Comment: Source: https://commons.wikimedia.org/wiki/File:Nintendo_Switch_2_logo.svg .
+         Wikimedia Commons identifies the simple text logo as public domain-ineligible
+         (below the threshold of originality); trademark restrictions may apply.
+         See LICENSES/LicenseRef-PublicDomain.txt.
+
 Files: dist/qt_themes/default/icons/256x256/eden.png
        dist/lichii.bmp
        dist/eden.icns

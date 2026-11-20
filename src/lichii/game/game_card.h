@@ -3,7 +3,10 @@
 
 #pragma once
 
+#include <QPixmap>
 #include <QStyledItemDelegate>
+
+QPixmap GameListFallbackIcon(int size);
 
 /**
  * A stylized "card"-like delegate for the game grid view.

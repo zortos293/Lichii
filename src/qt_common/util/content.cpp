@@ -38,7 +38,7 @@ bool CheckGameFirmware(u64 program_id) {
     return true;
 }
 
-void InstallFirmware(const QString& location, bool recursive) {
+bool InstallFirmware(const QString& location, bool recursive) {
     // Initialize a progress dialog.
     auto progress =
         QtCommon::Frontend::newProgressDialog(tr("Installing Firmware..."), tr("Cancel"), 0, 100);
@@ -59,6 +59,7 @@ void InstallFirmware(const QString& location, bool recursive) {
     FirmwareInstallResult result;
 
     const auto ShowMessage = [&]() {
+        progress->close();
         QtCommon::Frontend::ShowMessage(icon, failedTitle, GetFirmwareInstallResultString(result));
     };
 
@@ -68,7 +69,8 @@ void InstallFirmware(const QString& location, bool recursive) {
     // there.)
     std::filesystem::path firmware_source_path = location.toStdString();
     if (!Common::FS::IsDir(firmware_source_path)) {
-        return;
+        progress->close();
+        return false;
     }
 
     std::vector<std::filesystem::path> out;
@@ -95,7 +97,7 @@ void InstallFirmware(const QString& location, bool recursive) {
         result = FirmwareInstallResult::NoNCAs;
         icon = QtCommon::Frontend::Icon::Warning;
         ShowMessage();
-        return;
+        return false;
     }
 
     // Locate and erase the content of nand/system/Content/registered/*.nca, if any.
@@ -105,7 +107,7 @@ void InstallFirmware(const QString& location, bool recursive) {
         result = FirmwareInstallResult::FailedDelete;
         icon = QtCommon::Frontend::Icon::Critical;
         ShowMessage();
-        return;
+        return false;
     }
 
     LOG_INFO(Frontend,
@@ -134,7 +136,7 @@ void InstallFirmware(const QString& location, bool recursive) {
             result = FirmwareInstallResult::FailedCorrupted;
             icon = QtCommon::Frontend::Icon::Warning;
             ShowMessage();
-            return;
+            return false;
         }
     }
 
@@ -142,7 +144,7 @@ void InstallFirmware(const QString& location, bool recursive) {
         result = FirmwareInstallResult::FailedCopy;
         icon = QtCommon::Frontend::Icon::Critical;
         ShowMessage();
-        return;
+        return false;
     }
 
     // Re-scan VFS for the newly placed firmware files.
@@ -164,7 +166,7 @@ void InstallFirmware(const QString& location, bool recursive) {
         QtCommon::Frontend::Critical(
             tr("Firmware integrity verification failed!"),
             tr("Verification failed for the following files:\n\n%1").arg(failed_names));
-        return;
+        return false;
     }
 
     progress->close();
@@ -177,6 +179,7 @@ void InstallFirmware(const QString& location, bool recursive) {
     result = FirmwareInstallResult::Success;
     QtCommon::Frontend::Information(successTitle, GetFirmwareInstallResultString(result).arg(
                                                       QString::fromStdString(display_version)));
+    return true;
 }
 
 QString UnzipFirmwareToTmp(const QString& location) {
@@ -241,10 +244,7 @@ void InstallKeys() {
     if (key_source_location.isEmpty())
         return;
 
-    FirmwareManager::KeyInstallResult result =
-        FirmwareManager::InstallKeys(key_source_location.toStdString(), "keys");
-
-    system->GetFileSystemController().CreateFactories(*QtCommon::vfs);
+    const FirmwareManager::KeyInstallResult result = InstallKeys(key_source_location);
 
     const QString resMsg = GetKeyInstallResultString(result);
     switch (result) {
@@ -255,6 +255,13 @@ void InstallKeys() {
         QtCommon::Frontend::Critical(tr("Decryption Keys install failed"), resMsg);
         break;
     }
+}
+
+FirmwareManager::KeyInstallResult InstallKeys(const QString& location) {
+    const FirmwareManager::KeyInstallResult result =
+        FirmwareManager::InstallKeys(location.toStdString(), "keys");
+    system->GetFileSystemController().CreateFactories(*QtCommon::vfs);
+    return result;
 }
 
 void VerifyInstalledContents() {
@@ -512,8 +519,9 @@ void InstallFirmware() {
     const QString firmware_source_location =
         QtCommon::Frontend::GetExistingDirectory(tr("Select Dumped Firmware Source Location"), {});
 
-    if (!firmware_source_location.isEmpty())
+    if (!firmware_source_location.isEmpty()) {
         QtCommon::Content::InstallFirmware(firmware_source_location, false);
+    }
 }
 
 void InstallFirmwareZip() {
@@ -526,25 +534,32 @@ void InstallFirmwareZip() {
     if (firmware_zip_location.isEmpty())
         return;
 
-    const QString qCacheDir = QtCommon::Content::UnzipFirmwareToTmp(firmware_zip_location);
+    InstallFirmwareZip(firmware_zip_location);
+}
 
-    // In this case, it has to be done recursively, since sometimes people
-    // will pack it into a subdirectory after dumping
-    if (!qCacheDir.isEmpty()) {
-        QtCommon::Content::InstallFirmware(qCacheDir, true);
-        std::error_code ec;
-        std::filesystem::remove_all(std::filesystem::temp_directory_path() / "eden" / "firmware",
-                                    ec);
-
-        if (ec) {
-            QtCommon::Frontend::Warning(
-                tr("Firmware cleanup failed"),
-                tr("Failed to clean up extracted firmware cache.\n"
-                   "Check write permissions in the system temp directory and try "
-                   "again.\nOS reported error: %1")
-                    .arg(QString::fromStdString(ec.message())));
-        }
+bool InstallFirmwareZip(const QString& location) {
+    const QString cache_dir = UnzipFirmwareToTmp(location);
+    if (cache_dir.isEmpty()) {
+        QtCommon::Frontend::Critical(tr("Firmware archive could not be extracted"),
+                                     tr("The selected ZIP file could not be opened or was empty."));
+        return false;
     }
+
+    // Firmware archives often contain an extra directory level.
+    const bool installed = InstallFirmware(cache_dir, true);
+    std::error_code ec;
+    std::filesystem::remove_all(std::filesystem::temp_directory_path() / "eden" / "firmware",
+                                ec);
+
+    if (ec) {
+        QtCommon::Frontend::Warning(
+            tr("Firmware cleanup failed"),
+            tr("Failed to clean up extracted firmware cache.\n"
+               "Check write permissions in the system temp directory and try "
+               "again.\nOS reported error: %1")
+                .arg(QString::fromStdString(ec.message())));
+    }
+    return installed;
 }
 
 void configureFilesystemProvider(const std::string& filepath) {

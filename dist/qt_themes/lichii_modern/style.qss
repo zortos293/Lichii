@@ -1,0 +1,43 @@
+/*
+* SPDX-FileCopyrightText: Copyright 2026 Lichii Project
+* SPDX-License-Identifier: GPL-3.0-or-later
+*/
+
+/* Lichii Modern: Lichii Dark plus the modern game library and loading screen.
+   The theme loader applies lichii/style.qss first, then this file, so only the library rules
+   live here. They use the Lichii Dark tokens listed at the top of lichii/style.qss.
+   The rules apply while the Modern library style is selected (modernLibrary="true"). */
+
+QWidget#centralwidget[modernLibrary="true"] {
+    background-color: #17181b;
+}
+
+QListView#gameGridView {
+    background-color: #17181b;
+    border: none;
+}
+
+QWidget#gameListSearchField[modernLibrary="true"] {
+    background-color: #131416;
+    border-top: 1px solid #2a2b30;
+}
+
+QWidget#gameListSearchField[modernLibrary="true"] QLabel#gameListFilterLabel,
+QWidget#gameListSearchField[modernLibrary="true"] QLabel#gameListFilterResult {
+    color: #9b9da4;
+}
+
+QWidget#gameFolderNavigation[modernLibrary="true"] QLabel#gameFolderTitle {
+    color: #ececef;
+}
+
+QWidget#gameFolderNavigation[modernLibrary="true"] QPushButton#gameFolderBackButton {
+    background-color: #202125;
+    border: 1px solid #2a2b30;
+    border-radius: 7px;
+}
+
+QWidget#gameFolderNavigation[modernLibrary="true"] QPushButton#gameFolderBackButton:hover {
+    background-color: #2a2c31;
+    border: 1px solid #34363c;
+}
