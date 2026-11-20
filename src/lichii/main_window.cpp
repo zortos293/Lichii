@@ -1791,12 +1791,36 @@ void MainWindow::ConnectWidgetEvents() {
             game_list->PopulateAsync(UISettings::values.game_dirs);
         }
     });
+    connect(nx_tools, &NxTools::InPlaceWriteFinished, this, [this] {
+        nx_metadata_write_in_progress = false;
+        if (!close_pending) {
+            game_list->SetScanEnabled(true);
+            game_list->PopulateAsync(UISettings::values.game_dirs);
+        }
+    });
     connect(game_list, &GameList::ConvertToNxRequested, this,
-            [this](const std::string& path) { OnGameListNxTool(path, &NxTools::ConvertToNx); });
+            [this](const std::string& path) {
+                OnGameListNxTool(path, false,
+                                 [this](const std::string& p, const std::function<bool()>&) {
+                                     nx_tools->ConvertToNx(p);
+                                 });
+            });
     connect(game_list, &GameList::AddToNxRequested, this,
-            [this](const std::string& path) { OnGameListNxTool(path, &NxTools::AddToNx); });
+            [this](const std::string& path) {
+                OnGameListNxTool(path, true,
+                                 [this](const std::string& p,
+                                        const std::function<bool()>& prepare) {
+                                     nx_tools->AddToNx(p, prepare);
+                                 });
+            });
     connect(game_list, &GameList::RemoveFromNxRequested, this,
-            [this](const std::string& path) { OnGameListNxTool(path, &NxTools::RemoveFromNx); });
+            [this](const std::string& path) {
+                OnGameListNxTool(path, true,
+                                 [this](const std::string& p,
+                                        const std::function<bool()>& prepare) {
+                                     nx_tools->RemoveFromNx(p, prepare);
+                                 });
+            });
     connect(game_list, &GameList::EditNxMetadataRequested, this,
             &MainWindow::OnGameListEditNxMetadata);
 #endif
@@ -4971,16 +4995,37 @@ void MainWindow::OnGameListEditNxMetadata(const std::string& game_path) {
     });
 }
 
-void MainWindow::OnGameListNxTool(const std::string& game_path,
-                                  void (NxTools::*tool)(const std::string&)) {
+void MainWindow::OnGameListNxTool(
+    const std::string& game_path, bool in_place_edit,
+    const std::function<void(const std::string&, const std::function<bool()>&)>& tool) {
     // An archive edited in place must not be read by a running game.
-    if (emulation_running && tool != &NxTools::ConvertToNx &&
+    if (emulation_running && in_place_edit &&
         current_game_path == QString::fromStdString(game_path)) {
         QMessageBox::information(this, tr("NX Archive"),
                                  tr("Stop the game before changing its NX archive."));
         return;
     }
-    (nx_tools->*tool)(game_path);
+    if (!in_place_edit) {
+        tool(game_path, {});
+        return;
+    }
+    tool(game_path, [this] {
+        if (boot_in_progress || close_pending || nx_metadata_write_in_progress) {
+            return false;
+        }
+        if (emulation_running || QtCommon::system->IsPoweredOn()) {
+            QMessageBox::information(this, tr("NX Archive"),
+                                     tr("Stop emulation before changing an NX archive."));
+            return false;
+        }
+        nx_metadata_write_in_progress = true;
+        game_list->SetScanEnabled(false);
+        // The manual provider keeps NX sessions alive through registered updates and DLC,
+        // and each session holds a shared lock on its archive file: release both before the
+        // writer asks for an exclusive lock. InPlaceWriteFinished puts them back.
+        QtCommon::provider->ClearAllEntries();
+        return true;
+    });
 }
 #endif
 

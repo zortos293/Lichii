@@ -33,8 +33,11 @@ public:
     static bool IsNxArchive(const std::string& game_path);
 
     void ConvertToNx(const std::string& game_path);
-    void AddToNx(const std::string& archive_path);
-    void RemoveFromNx(const std::string& archive_path);
+    /// prepare_write runs just before the job starts, after every dialog has its input:
+    /// release readers of the archive there, and return false to skip the job.
+    void AddToNx(const std::string& archive_path, const std::function<bool()>& prepare_write);
+    void RemoveFromNx(const std::string& archive_path,
+                      const std::function<bool()>& prepare_write);
     /// Sets the title, publisher and icon the game list shows, in place.
     void EditNxMetadata(const std::string& archive_path, const std::function<bool()>& prepare_write);
 
@@ -44,6 +47,8 @@ signals:
     /// An archive was created or changed: the game list must be refreshed.
     void ArchivesChanged();
     void MetadataWriteFinished();
+    /// An in-place add/remove write ended, whatever its result.
+    void InPlaceWriteFinished();
 
 private:
     struct Job;

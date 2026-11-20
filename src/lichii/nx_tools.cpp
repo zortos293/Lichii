@@ -423,6 +423,9 @@ struct NxTools::Job {
     QStringList skipped;
     // The new icon given to set-metadata, removed when the job ends.
     std::unique_ptr<QTemporaryFile> icon_file;
+    // An add/remove job changes its archive in place: the front end releases readers
+    // before the job and restores them on InPlaceWriteFinished.
+    bool in_place_write = false;
 
     // nxformat 1.0.1 fails pack and add when the rebuild recipe cannot be kept (1.0.0 only
     // warned). Such a failure can be run again without the recipe.
@@ -654,7 +657,8 @@ void NxTools::ConvertToNx(const std::string& game_path) {
     Start(std::move(job));
 }
 
-void NxTools::AddToNx(const std::string& archive_path) {
+void NxTools::AddToNx(const std::string& archive_path,
+                      const std::function<bool()>& prepare_write) {
     if (running) {
         return;
     }
@@ -729,11 +733,16 @@ void NxTools::AddToNx(const std::string& archive_path) {
     } else {
         return;
     }
+    job->in_place_write = true;
+    if (!prepare_write()) {
+        return;
+    }
     job->done_message = tr("The NX archive was updated.");
     Start(std::move(job));
 }
 
-void NxTools::RemoveFromNx(const std::string& archive_path) {
+void NxTools::RemoveFromNx(const std::string& archive_path,
+                           const std::function<bool()>& prepare_write) {
     if (running) {
         return;
     }
@@ -797,6 +806,10 @@ void NxTools::RemoveFromNx(const std::string& archive_path) {
         return;
     }
     job->args.push_back("--frontend");
+    job->in_place_write = true;
+    if (!prepare_write()) {
+        return;
+    }
     job->done_message = tr("The selected content was removed from the NX archive.");
     Start(std::move(job));
 }
@@ -1169,6 +1182,8 @@ void NxTools::Finished(std::shared_ptr<Job> job, int code, QString error) {
     if (metadata_write) {
         emit MetadataWriteFinished();
     }
+    const bool in_place_write = job->in_place_write;
+    bool retried = false;
 
     // add keeps the content it committed before a failure or a cancel, also across a retry:
     // report it and refresh.
@@ -1219,6 +1234,7 @@ void NxTools::Finished(std::shared_ptr<Job> job, int code, QString error) {
             if (answer == QMessageBox::Retry) {
                 // The retry refreshes the archives when it ends.
                 job->PrepareRetryWithoutRecipe();
+                retried = true;
                 Start(std::move(job));
                 break;
             }
@@ -1231,5 +1247,11 @@ void NxTools::Finished(std::shared_ptr<Job> job, int code, QString error) {
         }
         break;
     }
+    }
+    if (in_place_write && !retried) {
+        // A retry keeps the game list's readers released: they come back when the retry ends
+        // and lands here again. Releasing them at the first failure would let the scan
+        // re-acquire the archive while the retry dialog is open.
+        emit InPlaceWriteFinished();
     }
 }

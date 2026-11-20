@@ -8,6 +8,7 @@
 
 #include <memory>
 #include <optional>
+#include <functional>
 #include <string>
 #include <utility>
 
@@ -493,7 +494,11 @@ private slots:
     void SyncNextendoProfile(bool force);
 
 private:
-    void OnGameListNxTool(const std::string& game_path, void (NxTools::*tool)(const std::string&));
+    /// Starts an NX tool. In-place edits pass the prepare_write callback through to the
+    /// tool, which runs it just before the job starts; conversion ignores it.
+    void OnGameListNxTool(
+        const std::string& game_path, bool in_place_edit,
+        const std::function<void(const std::string&, const std::function<bool()>&)>& tool);
     void OnGameListEditNxMetadata(const std::string& game_path);
     void RemovePlayTimeData(u64 program_id);
     bool SelectRomFSDumpTarget(const FileSys::ContentProvider&, u64 program_id,
