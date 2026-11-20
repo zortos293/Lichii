@@ -40,7 +40,7 @@ public:
             {23, nullptr, "DestroyToken"},
             {24, nullptr, "DestroyTokenWithApplicationId"},
             {25, nullptr, "QueryIsTokenValid"},
-            {26, nullptr, "ListenToMyApplicationId"},
+            {26, C<&INpnsSystem::ListenToMyApplicationId>, "ListenToMyApplicationId"},
             {27, nullptr, "DestroyTokenAll"},
             {28, nullptr, "CreateTokenWithName"}, // 18.0.0+
             {29, nullptr, "DestroyTokenWithName"}, // 18.0.0+
@@ -98,6 +98,11 @@ public:
 private:
     Result ListenTo(u32 program_id) {
         LOG_WARNING(Service_NPNS, "(STUBBED) called, program_id={}", program_id);
+        R_SUCCEED();
+    }
+
+    Result ListenToMyApplicationId() {
+        LOG_WARNING(Service_NPNS, "(STUBBED) called");
         R_SUCCEED();
     }
 
@@ -160,7 +165,7 @@ public:
             {21, nullptr, "CreateToken"},
             {23, nullptr, "DestroyToken"},
             {25, nullptr, "QueryIsTokenValid"},
-            {26, nullptr, "ListenToMyApplicationId"},
+            {26, C<&INpnsUser::ListenToMyApplicationId>, "ListenToMyApplicationId"},
             {101, nullptr, "Suspend"},
             {102, nullptr, "Resume"},
             {103, nullptr, "GetState"},
@@ -180,6 +185,14 @@ public:
 private:
     Result ListenTo(u64 program_id) {
         LOG_WARNING(Service_NPNS, "(STUBBED) called, program_id={:016X}", program_id);
+        R_SUCCEED();
+    }
+
+    // ACNH 3.0.3 subscribes to its own notifications when an online feature starts, and aborts
+    // the whole connection on an error here (#2214). Nothing delivers notifications yet; take
+    // the subscription so the game moves on.
+    Result ListenToMyApplicationId() {
+        LOG_WARNING(Service_NPNS, "(STUBBED) called");
         R_SUCCEED();
     }
 
