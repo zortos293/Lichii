@@ -426,7 +426,8 @@ void NPad::WriteEmptyEntry(NpadInternalState* npad) {
     npad->gc_trigger_lifo.WriteNextEntry(dummy_gc_state);
 }
 
-void NPad::RequestPadStateUpdate(Kernel::KernelCore& kernel, u64 aruid, Core::HID::NpadIdType npad_id) {
+void NPad::RequestPadStateUpdate(Kernel::KernelCore& kernel, u64 aruid, Core::HID::NpadIdType npad_id,
+                                 bool step_status) {
     std::scoped_lock lock{*applet_resource_holder.shared_mutex};
     auto& controller = GetControllerFromNpadIdType(aruid, npad_id);
     const auto controller_type = controller.device->GetNpadStyleIndex();
@@ -443,7 +444,9 @@ void NPad::RequestPadStateUpdate(Kernel::KernelCore& kernel, u64 aruid, Core::HI
     }
 
     // This function is unique to Lichii for the turbo buttons and motion to work properly
-    controller.device->StatusUpdate();
+    if (step_status) {
+        controller.device->StatusUpdate();
+    }
 
     auto& pad_entry = controller.npad_pad_state;
     auto& trigger_entry = controller.npad_trigger_state;
@@ -495,7 +498,8 @@ void NPad::RequestPadStateUpdate(Kernel::KernelCore& kernel, u64 aruid, Core::HI
     }
 }
 
-void NPad::OnUpdate(Kernel::KernelCore& kernel, const Core::Timing::CoreTiming& core_timing) {
+void NPad::OnUpdate(Kernel::KernelCore& kernel, const Core::Timing::CoreTiming& core_timing,
+                    bool step_status) {
     if (ref_counter == 0) {
         return;
     }
@@ -540,7 +544,7 @@ void NPad::OnUpdate(Kernel::KernelCore& kernel, const Core::Timing::CoreTiming& 
                 continue;
             }
 
-            RequestPadStateUpdate(kernel, aruid, controller.device->GetNpadIdType());
+            RequestPadStateUpdate(kernel, aruid, controller.device->GetNpadIdType(), step_status);
             auto& pad_state = controller.npad_pad_state;
             auto& libnx_state = controller.npad_libnx_state;
             auto& trigger_state = controller.npad_trigger_state;

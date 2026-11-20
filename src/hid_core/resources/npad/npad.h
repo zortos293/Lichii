@@ -62,8 +62,10 @@ public:
 
     void FreeAppletResourceId(u64 aruid);
 
-    // When the controller is requesting an update for the shared memory
-    void OnUpdate(Kernel::KernelCore& kernel, const Core::Timing::CoreTiming& core_timing);
+    // When the controller is requesting an update for the shared memory. step_status false
+    // writes the current state without the turbo and forced-motion step (debug server npad sync).
+    void OnUpdate(Kernel::KernelCore& kernel, const Core::Timing::CoreTiming& core_timing,
+                  bool step_status = true);
 
     Result SetSupportedNpadStyleSet(Kernel::KernelCore& kernel, u64 aruid, Core::HID::NpadStyleSet supported_style_set);
     Result GetSupportedNpadStyleSet(Kernel::KernelCore& kernel, u64 aruid, Core::HID::NpadStyleSet& out_supported_style_set) const;
@@ -176,7 +178,8 @@ private:
 
     void ControllerUpdate(Kernel::KernelCore& kernel, Core::HID::ControllerTriggerType type, std::size_t controller_idx);
     void InitNewlyAddedController(Kernel::KernelCore& kernel, u64 aruid, Core::HID::NpadIdType npad_id);
-    void RequestPadStateUpdate(Kernel::KernelCore& kernel, u64 aruid, Core::HID::NpadIdType npad_id);
+    void RequestPadStateUpdate(Kernel::KernelCore& kernel, u64 aruid, Core::HID::NpadIdType npad_id,
+                               bool step_status);
     void WriteEmptyEntry(NpadInternalState* npad);
 
     NpadControllerData& GetControllerFromHandle(
