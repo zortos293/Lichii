@@ -31,6 +31,7 @@ void EmitDemoteToHelperInvocation(EmitContext& ctx);
 void EmitBarrier(EmitContext& ctx);
 void EmitWorkgroupMemoryBarrier(EmitContext& ctx);
 void EmitDeviceMemoryBarrier(EmitContext& ctx);
+void EmitWarpSharedMemoryBarrier(EmitContext& ctx);
 void EmitBarrierVoteInit(EmitContext& ctx);
 void EmitBarrierVote(EmitContext& ctx);
 void EmitVotedBarrier(EmitContext& ctx);

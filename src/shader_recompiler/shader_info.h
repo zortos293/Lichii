@@ -349,6 +349,9 @@ struct Info {
     /// Set when a barrier in divergent control flow lost its execution barrier, see
     /// ConditionalBarrierPass.
     bool demoted_conditional_barrier{};
+    /// Set when WarpSharedOrderPass ordered a shared load after stores with no barrier between: the
+    /// program relies on its guest warp running in step.
+    bool orders_warp_shared_memory{};
     /// Set when ConditionalBarrierPass made barriers wait only while the workgroup's branches agree
     bool uses_barrier_vote{};
     bool uses_subgroup_mask{};

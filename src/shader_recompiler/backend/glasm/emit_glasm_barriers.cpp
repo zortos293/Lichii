@@ -21,4 +21,8 @@ void EmitDeviceMemoryBarrier(EmitContext& ctx) {
     ctx.Add("MEMBAR;");
 }
 
+void EmitWarpSharedMemoryBarrier(EmitContext& ctx) {
+    ctx.Add("MEMBAR.CTA;");
+}
+
 } // namespace Shader::Backend::GLASM

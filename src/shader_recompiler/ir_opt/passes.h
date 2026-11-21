@@ -49,6 +49,7 @@ void LimitSharedStageSampledTextureArrays(std::span<IR::Program* const> programs
 void LayerPass(IR::Program& program, const HostTranslateInfo& host_info);
 void VendorWorkaroundPass(IR::Program& program);
 void VerificationPass(const IR::Program& program);
+void WarpSharedOrderPass(IR::Program& program);
 bool HasBrokenPattern(const IR::Program& program);
 
 // Dual Vertex
