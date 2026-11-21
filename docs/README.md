@@ -1,4 +1,4 @@
-# Eden Build Documentation
+# Lichii build documentation
 
 Are you just a casual user? Take a look at our [User Handbook](./user) then!
 
