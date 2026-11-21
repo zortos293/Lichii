@@ -6324,9 +6324,10 @@ void MainWindow::OnCheckGraphicsBackend() {
     QMessageBox msgbox(this);
     msgbox.setWindowTitle(tr("Wayland Detected!"));
     msgbox.setText(
-        tr("Wayland is known to have significant performance issues and mysterious bugs.\n"
-           "It's recommended to use X11 instead.\n\n"
-           "Would you like to force it for future launches?"));
+        tr("Wayland support is still less tested than X11 and some setups may show "
+           "issues such as window or fullscreen problems.\n"
+           "If you run into problems, try X11 instead.\n\n"
+           "Would you like to force X11 for future launches?"));
     msgbox.setIcon(QMessageBox::Warning);
 
     QPushButton* okButton = msgbox.addButton(tr("Use X11"), QMessageBox::AcceptRole);
