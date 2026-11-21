@@ -34,6 +34,13 @@ namespace Memory {
 class Memory;
 }
 
+/// Bumped each time pages become tracked again (UpdatePagesCachedCount with a positive delta):
+/// a cache takes the CPU's writes there and treats the pages as clean from then on. A CPU write
+/// marks its page before storing its bytes (Memory::Write), so a cache that tracks the page
+/// again in between can take the old bytes for the new ones; a write that sees this change after
+/// its store marks the page again (NoteStoredWrite in memory.cpp).
+inline std::atomic<u64> g_pages_tracked_generation{};
+
 template <typename DTraits>
 struct DeviceMemoryManagerAllocator;
 

@@ -5,6 +5,7 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 
 #include <atomic>
+#include <bit>
 #include <algorithm>
 #include <cstdint>
 #include <cstring>
@@ -442,9 +443,13 @@ struct Memory::Impl {
         },
         [&](const Common::ProcessAddress current_vaddr, const std::size_t offset, const std::size_t copy_amount, u8* const ptr) {
             if (!unsafe) {
+                const u64 generation = TrackedGeneration();
                 HandleRasterizerWrite(GetInteger(current_vaddr), copy_amount);
+                std::memcpy(ptr, reinterpret_cast<u8 const*>(buffer) + offset, copy_amount);
+                NoteStoredWrite(GetInteger(current_vaddr), copy_amount, generation);
+            } else {
+                std::memcpy(ptr, reinterpret_cast<u8 const*>(buffer) + offset, copy_amount);
             }
-            std::memcpy(ptr, reinterpret_cast<u8 const*>(buffer) + offset, copy_amount);
             VideoCommon::GpuTrace::NoteCpuWrite(ptr, copy_amount);
         });
     }
@@ -458,8 +463,10 @@ struct Memory::Impl {
             std::memset(ptr, 0, copy_amount);
         },
         [&](const Common::ProcessAddress current_vaddr, const std::size_t offset, const std::size_t copy_amount, u8* const ptr) {
+            const u64 generation = TrackedGeneration();
             HandleRasterizerWrite(GetInteger(current_vaddr), copy_amount);
             std::memset(ptr, 0, copy_amount);
+            NoteStoredWrite(GetInteger(current_vaddr), copy_amount, generation);
             VideoCommon::GpuTrace::NoteCpuWrite(ptr, copy_amount);
         });
     }
@@ -928,6 +935,7 @@ struct Memory::Impl {
     inline void Write(Common::ProcessAddress vaddr, const T data) noexcept requires(std::is_trivially_copyable_v<T>) {
         const u64 addr = GetInteger(vaddr);
         bool rasterizer_write = false;
+        u64 generation = 0;
         if (auto const ptr = GetPointerImpl(addr, [addr, data]() {
             // As with unmapped reads, a guest spinning on a bad pointer writes unmapped memory
             // tens of thousands of times a second (#1340's fill loop): keep the first ones and
@@ -937,11 +945,13 @@ struct Memory::Impl {
                 LOG_ERROR(HW_Memory, "Unmapped Write{} @ {:#016x} = {:#016x}", sizeof(T) * 8, addr, u64(data));
             }
         }, [&]() {
+            generation = TrackedGeneration();
             HandleRasterizerWrite(addr, sizeof(T));
             rasterizer_write = true;
         }); ptr) [[likely]] {
             std::memcpy(ptr, &data, sizeof(T));
             if (rasterizer_write) [[unlikely]] {
+                NoteStoredWrite(addr, sizeof(T), generation);
                 VideoCommon::GpuTrace::NoteCpuWrite(ptr, sizeof(T));
             }
         }
@@ -949,15 +959,24 @@ struct Memory::Impl {
 
     template <typename T>
     bool WriteExclusive(Common::ProcessAddress vaddr, const T data, const T expected) {
+        bool rasterizer_write = false;
+        u64 generation = 0;
         u8* const ptr = GetPointerImpl(
             GetInteger(vaddr),
             [vaddr, data]() {
                 LOG_ERROR(HW_Memory, "Unmapped WriteExclusive{} @ {:#016x} = {:#016x}",
                           sizeof(T) * 8, GetInteger(vaddr), static_cast<u64>(data));
             },
-            [&]() { HandleRasterizerWrite(GetInteger(vaddr), sizeof(T)); });
+            [&]() {
+                generation = TrackedGeneration();
+                HandleRasterizerWrite(GetInteger(vaddr), sizeof(T));
+                rasterizer_write = true;
+            });
         if (ptr) {
             const bool stored = Common::AtomicCompareAndSwap(reinterpret_cast<T*>(ptr), data, expected);
+            if (stored && rasterizer_write) {
+                NoteStoredWrite(GetInteger(vaddr), sizeof(T), generation);
+            }
             VideoCommon::GpuTrace::NoteCpuWrite(ptr, sizeof(T));
             return stored;
         }
@@ -965,15 +984,24 @@ struct Memory::Impl {
     }
 
     bool WriteExclusive128(Common::ProcessAddress vaddr, const u128 data, const u128 expected) {
+        bool rasterizer_write = false;
+        u64 generation = 0;
         u8* const ptr = GetPointerImpl(
             GetInteger(vaddr),
             [vaddr, data]() {
                 LOG_ERROR(HW_Memory, "Unmapped WriteExclusive128 @ {:#016x} = {:#016x}{:016X}",
                           GetInteger(vaddr), static_cast<u64>(data[1]), static_cast<u64>(data[0]));
             },
-            [&]() { HandleRasterizerWrite(GetInteger(vaddr), sizeof(u128)); });
+            [&]() {
+                generation = TrackedGeneration();
+                HandleRasterizerWrite(GetInteger(vaddr), sizeof(u128));
+                rasterizer_write = true;
+            });
         if (ptr) {
             const bool stored = Common::AtomicCompareAndSwap(reinterpret_cast<u64*>(ptr), data, expected);
+            if (stored && rasterizer_write) {
+                NoteStoredWrite(GetInteger(vaddr), sizeof(u128), generation);
+            }
             VideoCommon::GpuTrace::NoteCpuWrite(ptr, sizeof(u128));
             return stored;
         }
@@ -1050,6 +1078,51 @@ struct Memory::Impl {
             DisarmReadTraps(v_address, size);
             current_area = system.GPU().OnCPURead(address, size);
         });
+    }
+
+    /// Read before a write marks its pages (HandleRasterizerWrite), for NoteStoredWrite.
+    [[nodiscard]] static u64 TrackedGeneration() noexcept {
+        return Core::g_pages_tracked_generation.load(std::memory_order_relaxed);
+    }
+
+    /// After a write that marked its pages stored its bytes. The mark comes first, so a cache
+    /// tracking a page again in between (BufferCache::SynchronizeBuffer, a texture upload) read
+    /// the page as clean and could take the old bytes: the stored ones then never reached it,
+    /// until the page was written again. The gap is wide: the mark gives the buffer cache's lock
+    /// up before the write untracks its pages (system calls, RasterizerVulkan::OnCPUWrite) and
+    /// stores, and a binding synchronized at every draw takes the lock back right away. Pages
+    /// tracked again since the mark, over a page of the write that is tracked now, mark the write
+    /// again.
+    void NoteStoredWrite(VAddr v_address, size_t size, u64 generation) {
+        // Pairs with UpdatePagesCachedCountNoLock's: this store is in the cache's read, or the
+        // bump is seen here.
+        std::atomic_thread_fence(std::memory_order_seq_cst);
+        if (Core::g_pages_tracked_generation.load(std::memory_order_relaxed) == generation) {
+            return;
+        }
+        // The address the store went to: GetPointerImpl drops the upper 16 bits (AArch64 tags).
+        v_address &= 0xffffffffffffULL;
+        if (!AddressSpaceContains(*current_page_table, v_address, size)) {
+            return;
+        }
+        const u64 first_page = v_address >> LICHII_PAGEBITS;
+        const u64 last_page = (v_address + (std::max<size_t>)(size, 1) - 1) >> LICHII_PAGEBITS;
+        bool tracked = false;
+        for (u64 page = first_page; page <= last_page && !tracked; ++page) {
+            tracked = current_page_table->entries[page].Type() ==
+                      Common::PageType::RasterizerCachedMemory;
+        }
+        if (!tracked) {
+            // Untracked pages are CPU-modified to every cache: the next upload takes the store.
+            return;
+        }
+        static std::atomic<u64> marked_again{};
+        const u64 count = marked_again.fetch_add(1, std::memory_order_relaxed) + 1;
+        if (std::has_single_bit(count) && count <= (u64{1} << 20)) {
+            LOG_INFO(HW_Memory, "CPU writes marked again after a cache tracked their pages: {}",
+                     count);
+        }
+        HandleRasterizerWrite(v_address, size);
     }
 
     void HandleRasterizerWrite(VAddr v_address, size_t size) {

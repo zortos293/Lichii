@@ -907,6 +907,12 @@ void DeviceMemoryManager<Traits>::UpdatePagesCachedCountNoLock(DAddr addr, size_
         }
     }
     release_pending();
+    if (delta > 0) {
+        // Before the caller reads the pages' guest memory: a CPU write whose check after its
+        // store (NoteStoredWrite) doesn't see this bump stored its bytes before that read.
+        g_pages_tracked_generation.fetch_add(1, std::memory_order_seq_cst);
+        std::atomic_thread_fence(std::memory_order_seq_cst);
+    }
 }
 
 template <typename Traits>
