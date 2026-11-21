@@ -14,6 +14,7 @@
 #include <QSaveFile>
 #include "common/fs/fs.h"
 #include "common/logging.h"
+#include "core/file_sys/control_metadata.h"
 
 namespace QtCommon::Game {
 
@@ -166,6 +167,56 @@ bool RemoveCustomArtwork(u64 program_id) {
         return false;
     }
     InvalidateHomeMenuArtwork(path);
+    return true;
+}
+
+std::filesystem::path CoverCachePath(u64 program_id, std::string_view language_tag) {
+    // v2 marks covers chosen by composition rather than by region order. Older caches can hold a
+    // 16:9 store banner cropped to a square, which cuts off part of the key art.
+    const std::string tag =
+        language_tag.empty() ? FileSys::GetConfiguredLanguageTag() : std::string(language_tag);
+    return Common::FS::GetEdenPath(Common::FS::EdenPath::CacheDir) / "covers" /
+           fmt::format("{:016X}.{}.v2.jpg", program_id, tag);
+}
+
+std::vector<u8> ReadCachedCover(u64 program_id) {
+    if (program_id == 0) {
+        return {};
+    }
+    constexpr qint64 MaxCoverBytes = 8 * 1024 * 1024;
+    QFile file(QString::fromStdString(Common::FS::PathToUTF8String(CoverCachePath(program_id))));
+    if (!file.open(QIODevice::ReadOnly) || file.size() > MaxCoverBytes) {
+        return {};
+    }
+    const QByteArray bytes = file.read(MaxCoverBytes + 1);
+    if (bytes.size() > MaxCoverBytes) {
+        return {};
+    }
+    return std::vector<u8>(bytes.begin(), bytes.end());
+}
+
+bool SaveCachedCover(u64 program_id, const QImage& image, std::string_view language_tag) {
+    if (program_id == 0 || image.isNull()) {
+        return false;
+    }
+    const int side = std::min(image.width(), image.height());
+    QImage cover =
+        image.copy((image.width() - side) / 2, (image.height() - side) / 2, side, side);
+    constexpr int MaxSide = 1024;
+    if (cover.width() > MaxSide) {
+        cover = cover.scaled(MaxSide, MaxSide, Qt::IgnoreAspectRatio, Qt::SmoothTransformation);
+    }
+
+    const auto path = CoverCachePath(program_id, language_tag);
+    if (!Common::FS::CreateDirs(path.parent_path())) {
+        LOG_ERROR(Frontend, "Cannot create the cover cache folder");
+        return false;
+    }
+    QSaveFile file(QString::fromStdString(Common::FS::PathToUTF8String(path)));
+    if (!file.open(QIODevice::WriteOnly) || !cover.save(&file, "JPEG", 90) || !file.commit()) {
+        LOG_ERROR(Frontend, "Cannot write the cached cover for {:016X}", program_id);
+        return false;
+    }
     return true;
 }
 

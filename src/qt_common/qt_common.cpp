@@ -33,6 +33,8 @@
 #include <thread>
 #include <JlCompress.h>
 #include <QPainter>
+#include <QPointF>
+#include <QtMath>
 
 #if !defined(WIN32) && !defined(__APPLE__)
 #include <qpa/qplatformnativeinterface.h>
@@ -331,14 +333,40 @@ QString ReadableByteSize(qulonglong size) {
 }
 
 QPixmap CreateCirclePixmapFromColor(const QColor& color) {
-    QPixmap circle_pixmap(16, 16);
+    QPixmap circle_pixmap(32, 32);
+    circle_pixmap.setDevicePixelRatio(2.0);
     circle_pixmap.fill(Qt::transparent);
     QPainter painter(&circle_pixmap);
     painter.setRenderHint(QPainter::Antialiasing);
     painter.setPen(color);
     painter.setBrush(color);
-    painter.drawEllipse({circle_pixmap.width() / 2.0, circle_pixmap.height() / 2.0}, 7.0, 7.0);
+    // QPainter works in the 16×16 logical space of this 32×32 @2x bitmap, so keep the
+    // original 16 px circle geometry instead of doubling it.
+    painter.drawEllipse(QPointF(8.0, 8.0), 7.0, 7.0);
     return circle_pixmap;
+}
+
+QPixmap ScalePixmapForDpr(const QPixmap& source, const QSize& logical_size, qreal dpr) {
+    if (source.isNull() || logical_size.isEmpty() || dpr <= 0.0) {
+        return {};
+    }
+    const QSize physical_size(qRound(logical_size.width() * dpr),
+                              qRound(logical_size.height() * dpr));
+    if (physical_size.isEmpty()) {
+        return {};
+    }
+    QPixmap scaled = source.scaled(physical_size, Qt::IgnoreAspectRatio,
+                                   Qt::SmoothTransformation);
+    scaled.setDevicePixelRatio(dpr);
+    return scaled;
+}
+
+QPixmap LoadPixmapForDpr(const QString& path, qreal dpr) {
+    QPixmap pixmap(path);
+    if (!pixmap.isNull() && dpr > 0.0) {
+        pixmap.setDevicePixelRatio(dpr);
+    }
+    return pixmap;
 }
 
 } // namespace QtCommon

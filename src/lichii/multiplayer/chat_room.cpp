@@ -411,7 +411,7 @@ void ChatRoom::SetPlayerList(const Network::RoomMember::MemberList& member_list)
                                                  static_cast<uint>(result.size())))
                             return;
                         icon_cache[avatar_url] =
-                            pixmap.scaled(48, 48, Qt::IgnoreAspectRatio, Qt::SmoothTransformation);
+                            QtCommon::ScalePixmapForDpr(pixmap, QSize(48, 48), 2.0);
                         // Update all the displayed icons with the new icon_cache
                         UpdateIconDisplay();
                     });

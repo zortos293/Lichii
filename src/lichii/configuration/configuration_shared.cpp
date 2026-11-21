@@ -5,10 +5,12 @@
 #include <memory>
 #include <type_traits>
 #include <vector>
+#include <QByteArray>
 #include <QCheckBox>
 #include <QScreen>
 #include <QScrollArea>
 #include "lichii/configuration/configuration_shared.h"
+#include "lichii/util/util.h"
 
 namespace ConfigurationShared {
 
@@ -17,12 +19,25 @@ QIcon PageIcon(const QString& name) {
     if (name.isEmpty()) {
         return icon;
     }
-    const QString normal = QStringLiteral(":/lichii/icons/%1.png").arg(name);
-    const QString active = QStringLiteral(":/lichii/icons/%1_active.png").arg(name);
-    icon.addFile(normal, {}, QIcon::Normal, QIcon::Off);
-    icon.addFile(active, {}, QIcon::Normal, QIcon::On);
-    icon.addFile(active, {}, QIcon::Selected, QIcon::Off);
-    icon.addFile(active, {}, QIcon::Selected, QIcon::On);
+
+    const QByteArray normal_name = name.toLatin1();
+    const QByteArray active_name = (name + QStringLiteral("_active")).toLatin1();
+    const QPixmap normal = ThemePixmap(normal_name.constData(), QSize(16, 16));
+    const QPixmap active = ThemePixmap(active_name.constData(), QSize(16, 16));
+    if (!normal.isNull() && !active.isNull()) {
+        icon.addPixmap(normal, QIcon::Normal, QIcon::Off);
+        icon.addPixmap(active, QIcon::Normal, QIcon::On);
+        icon.addPixmap(active, QIcon::Selected, QIcon::Off);
+        icon.addPixmap(active, QIcon::Selected, QIcon::On);
+        return icon;
+    }
+
+    const QString normal_file = QStringLiteral(":/lichii/icons/%1.png").arg(name);
+    const QString active_file = QStringLiteral(":/lichii/icons/%1_active.png").arg(name);
+    icon.addFile(normal_file, {}, QIcon::Normal, QIcon::Off);
+    icon.addFile(active_file, {}, QIcon::Normal, QIcon::On);
+    icon.addFile(active_file, {}, QIcon::Selected, QIcon::Off);
+    icon.addFile(active_file, {}, QIcon::Selected, QIcon::On);
     return icon;
 }
 

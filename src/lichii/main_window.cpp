@@ -487,6 +487,12 @@ MainWindow::MainWindow(bool has_broken_vulkan)
 
     UpdateUITheme();
 
+#if defined(Q_OS_MACOS) || defined(Q_OS_MAC)
+    // Native menus follow the system appearance; re-tint their icons if it changes while running.
+    connect(QGuiApplication::styleHints(), &QStyleHints::colorSchemeChanged, this,
+            [this](Qt::ColorScheme) { UpdateMenuIcons(); });
+#endif
+
     SetDiscordEnabled(UISettings::values.enable_discord_presence.GetValue());
     discord_rpc->Update();
 
@@ -1510,7 +1516,8 @@ void MainWindow::InitializeWidgets() {
 
     // Setup Refresh Button
     refresh_button = new QPushButton();
-    refresh_button->setIcon(QIcon::fromTheme(QStringLiteral("view-refresh")));
+    UpdateRefreshButtonIcon();
+    refresh_button->setIconSize(QSize(16, 16));
     refresh_button->setObjectName(QStringLiteral("RefreshButton"));
     refresh_button->setFocusPolicy(Qt::NoFocus);
     connect(refresh_button, &QPushButton::clicked, this, &MainWindow::OnGameListRefresh);
@@ -6723,6 +6730,16 @@ void MainWindow::UpdateMenuIcons() {
     }
 }
 
+void MainWindow::UpdateRefreshButtonIcon() {
+    if (refresh_button == nullptr) {
+        return;
+    }
+    const QIcon refresh_icon = WidgetIcon("refresh");
+    refresh_button->setIcon(refresh_icon.isNull()
+                                ? QIcon::fromTheme(QStringLiteral("view-refresh"))
+                                : refresh_icon);
+}
+
 void MainWindow::UpdateUITheme() {
     const QString default_theme = QString::fromUtf8(UISettings::themes[size_t(UISettings::default_theme)].second);
     QString current_theme = QString::fromStdString(UISettings::values.theme);
@@ -6780,6 +6797,7 @@ void MainWindow::UpdateUITheme() {
     }
 
     UpdateMenuIcons();
+    UpdateRefreshButtonIcon();
 
 #ifdef _WIN32
     RemoveTitlebarFilter();
@@ -6788,9 +6806,24 @@ void MainWindow::UpdateUITheme() {
 }
 
 void MainWindow::LoadTranslation() {
-    bool loaded;
-
     const std::string language = UISettings::values.language.GetValue();
+
+    // Qt's own strings, including the macOS application menu, come from qtbase_*.qm rather than
+    // from Lichii's catalog. Match the same language as the frontend and keep English when the
+    // build has no qtbase catalog for it.
+    qApp->removeTranslator(&qt_translator);
+    const QLocale qt_locale =
+        language.empty() ? QLocale{} : QLocale(QString::fromStdString(language));
+    const bool qt_loaded = qt_translator.load(qt_locale, QStringLiteral("qtbase_"), {},
+                                              QStringLiteral(":/qt-translations/"));
+    if (qt_loaded) {
+        qApp->installTranslator(&qt_translator);
+    } else if (!language.empty() && language != "en") {
+        LOG_WARNING(Frontend, "No Qt base translation for \"{}\"; Qt's own strings stay English",
+                    language);
+    }
+
+    bool loaded;
     if (language.empty()) {
         // If the selected language is empty, use system locale
         loaded = translator.load(QLocale(), {}, {}, QStringLiteral(":/languages/"));

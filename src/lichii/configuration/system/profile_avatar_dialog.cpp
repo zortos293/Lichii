@@ -10,6 +10,8 @@
 #include <QPainter>
 #include <QPushButton>
 
+#include "qt_common/qt_common.h"
+
 // TODO: Move this to a .ui def
 ProfileAvatarDialog::ProfileAvatarDialog(QWidget* parent)
     : QDialog{parent}, avatar_list{new QListWidget(this)}, bg_color_button{new QPushButton(this)} {
@@ -88,10 +90,9 @@ void ProfileAvatarDialog::RefreshAvatars() {
         return;
     }
     for (int i = 0; i < avatar_image_store.size(); ++i) {
-        const auto icon =
-            QIcon(CreateAvatar(avatar_image_store[i])
-                      .scaled(64, 64, Qt::IgnoreAspectRatio, Qt::SmoothTransformation));
-        avatar_list->item(i)->setIcon(icon);
+        const QPixmap avatar =
+            QtCommon::ScalePixmapForDpr(CreateAvatar(avatar_image_store[i]), QSize(64, 64), 2.0);
+        avatar_list->item(i)->setIcon(QIcon(avatar));
     }
 }
 

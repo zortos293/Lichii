@@ -36,6 +36,7 @@
 
 #include "common/fs/path_util.h"
 #include "lichii/util/icon_search.h"
+#include "lichii/util/util.h"
 
 namespace {
 
@@ -588,10 +589,14 @@ NupEditDialog::NupEditDialog(const std::filesystem::path& archive, QWidget* pare
     localized_toggle = new QToolButton;
     localized_toggle->setCheckable(true);
     localized_toggle->setAutoRaise(true);
-    localized_toggle->setIcon(QIcon::fromTheme(
-        QStringLiteral("preferences-desktop-locale"),
-        QIcon::fromTheme(QStringLiteral("applications-education-language"),
-                         style()->standardIcon(QStyle::SP_FileDialogDetailedView))));
+    QIcon language_icon = WidgetIcon("globe");
+    if (language_icon.isNull()) {
+        language_icon = QIcon::fromTheme(
+            QStringLiteral("preferences-desktop-locale"),
+            QIcon::fromTheme(QStringLiteral("applications-education-language"),
+                             style()->standardIcon(QStyle::SP_FileDialogDetailedView)));
+    }
+    localized_toggle->setIcon(language_icon);
     auto* name_row = new QHBoxLayout;
     name_row->setSpacing(6);
     name_row->addWidget(name_edit, 1);

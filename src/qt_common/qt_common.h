@@ -4,6 +4,8 @@
 #pragma once
 
 #include <memory>
+#include <QPixmap>
+#include <QSize>
 #include <QWindow>
 
 #include "core/core.h"
@@ -56,6 +58,15 @@ const QString tr(const std::string& str);
  * @return QPixmap circle pixmap
  */
 [[nodiscard]] QPixmap CreateCirclePixmapFromColor(const QColor& color);
+
+/// Scales an image to a logical size while preserving its high-DPI detail. The returned pixmap
+/// has `dpr` physical pixels per logical pixel; Qt then draws it at `logical_size` without
+/// upscaling the physical bitmap on a Retina display.
+[[nodiscard]] QPixmap ScalePixmapForDpr(const QPixmap& source, const QSize& logical_size,
+                                        qreal dpr = 2.0);
+
+/// Loads an image file or resource and marks it as a `dpr`-scale bitmap. Use this for @2x assets.
+[[nodiscard]] QPixmap LoadPixmapForDpr(const QString& path, qreal dpr = 2.0);
 
 
 

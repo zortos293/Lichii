@@ -7,6 +7,8 @@
 #include <QApplication>
 #include <QIcon>
 #include <QMessageBox>
+#include <QPixmap>
+#include <QSize>
 #include <QStandardItemModel>
 #include "common/announce_multiplayer_room.h"
 #include "common/logging.h"
@@ -20,6 +22,13 @@
 #include "lichii/multiplayer/message.h"
 #include "lichii/multiplayer/state.h"
 #include "lichii/util/clickable_label.h"
+
+namespace {
+QPixmap ConnectionPixmap(const QWidget* widget, const char* theme_name) {
+    return QIcon::fromTheme(QLatin1String(theme_name))
+        .pixmap(QSize(16, 16), widget->devicePixelRatioF());
+}
+} // namespace
 
 MultiplayerState::MultiplayerState(QWidget* parent, QStandardItemModel* game_list_model_,
                                    QAction* leave_room_, QAction* show_room_, Core::System& system_)
@@ -115,26 +124,26 @@ void MultiplayerState::SetNotificationStatus(NotificationStatus status) {
 void MultiplayerState::UpdateNotificationStatus() {
     switch (notification_status) {
     case NotificationStatus::Uninitialized:
-        status_icon->setPixmap(QIcon::fromTheme(QStringLiteral("disconnected")).pixmap(16));
+        status_icon->setPixmap(ConnectionPixmap(status_icon, "disconnected"));
         status_text->setText(tr("Not Connected. Click here to find a room!"));
         leave_room->setEnabled(false);
         show_room->setEnabled(false);
         break;
     case NotificationStatus::Disconnected:
-        status_icon->setPixmap(QIcon::fromTheme(QStringLiteral("disconnected")).pixmap(16));
+        status_icon->setPixmap(ConnectionPixmap(status_icon, "disconnected"));
         status_text->setText(tr("Not Connected"));
         leave_room->setEnabled(false);
         show_room->setEnabled(false);
         break;
     case NotificationStatus::Connected:
-        status_icon->setPixmap(QIcon::fromTheme(QStringLiteral("connected")).pixmap(16));
+        status_icon->setPixmap(ConnectionPixmap(status_icon, "connected"));
         status_text->setText(tr("Connected"));
         leave_room->setEnabled(true);
         show_room->setEnabled(true);
         break;
     case NotificationStatus::Notification:
         status_icon->setPixmap(
-            QIcon::fromTheme(QStringLiteral("connected_notification")).pixmap(16));
+            ConnectionPixmap(status_icon, "connected_notification"));
         status_text->setText(tr("New Messages Received"));
         leave_room->setEnabled(true);
         show_room->setEnabled(true);
@@ -220,13 +229,13 @@ void MultiplayerState::OnSaveConfig() {
 void MultiplayerState::UpdateThemedIcons() {
     if (show_notification) {
         status_icon->setPixmap(
-            QIcon::fromTheme(QStringLiteral("connected_notification")).pixmap(16));
+            ConnectionPixmap(status_icon, "connected_notification"));
     } else if (current_state == Network::RoomMember::State::Joined ||
                current_state == Network::RoomMember::State::Moderator) {
 
-        status_icon->setPixmap(QIcon::fromTheme(QStringLiteral("connected")).pixmap(16));
+        status_icon->setPixmap(ConnectionPixmap(status_icon, "connected"));
     } else {
-        status_icon->setPixmap(QIcon::fromTheme(QStringLiteral("disconnected")).pixmap(16));
+        status_icon->setPixmap(ConnectionPixmap(status_icon, "disconnected"));
     }
     if (client_room)
         client_room->UpdateIconDisplay();

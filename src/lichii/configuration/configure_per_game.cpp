@@ -43,6 +43,7 @@
 #include <QString>
 #include <QTimer>
 #include <QUrl>
+#include <QtMath>
 #include <QtConcurrent/QtConcurrentRun>
 
 #include "common/fs/fs_util.h"
@@ -387,16 +388,29 @@ ConfigurePerGame::ConfigurePerGame(QWidget* parent, u64 title_id_, const std::st
 
     scene = new QGraphicsScene(this);
     ui->icon_view->setScene(scene);
-    ui->button_detect_icon->setIcon(
-        QIcon::fromTheme(QStringLiteral("edit-find"), QIcon::fromTheme(QStringLiteral("search"))));
-    ui->button_upload_icon->setIcon(QIcon::fromTheme(
-        QStringLiteral("document-open"), QIcon::fromTheme(QStringLiteral("insert-image"))));
+    QIcon detect_icon = WidgetIcon("globe");
+    if (detect_icon.isNull()) {
+        detect_icon = QIcon::fromTheme(QStringLiteral("edit-find"),
+                                      QIcon::fromTheme(QStringLiteral("search")));
+    }
+    ui->button_detect_icon->setIcon(detect_icon);
+
+    QIcon upload_icon = WidgetIcon("image");
+    if (upload_icon.isNull()) {
+        upload_icon = QIcon::fromTheme(QStringLiteral("document-open"),
+                                      QIcon::fromTheme(QStringLiteral("insert-image")));
+    }
+    ui->button_upload_icon->setIcon(upload_icon);
 
     connect(ui->button_upload_icon, &QPushButton::clicked, this,
             &ConfigurePerGame::OnUploadNupIcon);
     connect(ui->button_detect_icon, &QPushButton::clicked, this,
             &ConfigurePerGame::OnDetectNupIcon);
-    ui->button_remove_icon->setIcon(QIcon::fromTheme(QStringLiteral("edit-clear")));
+    QIcon remove_icon = WidgetIcon("trash");
+    if (remove_icon.isNull()) {
+        remove_icon = QIcon::fromTheme(QStringLiteral("edit-clear"));
+    }
+    ui->button_remove_icon->setIcon(remove_icon);
     ui->button_remove_icon->setEnabled(false);
     connect(ui->button_remove_icon, &QPushButton::clicked, this,
             &ConfigurePerGame::OnRemoveCustomIcon);
@@ -601,8 +615,12 @@ void ConfigurePerGame::UpdateIconPreview(const QPixmap& map) {
     if (map.isNull()) {
         return;
     }
-    scene->addPixmap(map.scaled(ui->icon_view->width(), ui->icon_view->height(),
-                                Qt::IgnoreAspectRatio, Qt::SmoothTransformation));
+    const qreal dpr = devicePixelRatioF();
+    const QSize physical(qRound(ui->icon_view->width() * dpr),
+                         qRound(ui->icon_view->height() * dpr));
+    QPixmap scaled = map.scaled(physical, Qt::IgnoreAspectRatio, Qt::SmoothTransformation);
+    scaled.setDevicePixelRatio(dpr);
+    scene->addPixmap(scaled);
 }
 
 void ConfigurePerGame::StageCustomIcon(QImage icon) {

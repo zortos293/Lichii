@@ -48,10 +48,14 @@ DataWidget::DataWidget(FrontendCommon::DataManager::DataDir data_dir,
 
     ui->tooltip->setText(QtCommon::StringLookup::Lookup(tooltip));
 
-    ui->clear->setIcon(QIcon::fromTheme(QStringLiteral("user-trash")));
-    ui->open->setIcon(QIcon::fromTheme(QStringLiteral("folder")));
-    ui->upload->setIcon(QIcon::fromTheme(QStringLiteral("upload")));
-    ui->download->setIcon(QIcon::fromTheme(QStringLiteral("download")));
+    const auto set_theme_icon = [](QPushButton* button, const char* name, const char* fallback) {
+        const QIcon icon = WidgetIcon(name);
+        button->setIcon(icon.isNull() ? QIcon::fromTheme(QLatin1String(fallback)) : icon);
+    };
+    set_theme_icon(ui->clear, "trash", "user-trash");
+    set_theme_icon(ui->open, "folder", "folder");
+    set_theme_icon(ui->upload, "share", "upload");
+    set_theme_icon(ui->download, "download", "download");
 
     connect(ui->clear, &QPushButton::clicked, this, &DataWidget::clear);
     connect(ui->open, &QPushButton::clicked, this, &DataWidget::open);

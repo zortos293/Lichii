@@ -207,10 +207,13 @@ std::string SanitizeMarkdown(std::string_view markdown) {
     std::string result;
     result.reserve(markdown.size());
 
-    // our current structure for markdown is after "# Packages" remove everything.
+    // our current structure for markdown is after "# Packages" remove everything. Only a
+    // heading at the start of a line counts; a quoted commit message may mention it as text.
     std::string text{markdown};
-    if (auto pos = text.find("# Packages"); pos != std::string::npos) {
-        text = text.substr(0, pos);
+    const auto packages = text.starts_with("# Packages") ? std::size_t{0}
+                                                         : text.find("\n# Packages");
+    if (packages != std::string::npos) {
+        text = text.substr(0, packages);
     }
 
     // Fix line endings

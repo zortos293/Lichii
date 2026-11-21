@@ -48,6 +48,7 @@
 #include "common/settings.h"
 #include "common/settings_common.h"
 #include "qt_common/config/shared_translation.h"
+#include "lichii/util/util.h"
 #include "qt_common/qt_compat.h"
 
 namespace ConfigurationShared {
@@ -105,8 +106,15 @@ static QString DefaultSuffix(QWidget* parent, Settings::BasicSetting& setting) {
 QPushButton* Widget::CreateRestoreGlobalButton(bool using_global, QWidget* parent) {
     restore_button_count++;
 
-    QPushButton* restore_button =
-        new QPushButton(QIcon(QStringLiteral(":/lichii/icons/reset.png")), QString(), parent);
+    const qreal dpr = parent != nullptr ? parent->devicePixelRatioF() : 1.0;
+    QPixmap reset_pixmap = ThemePixmap("reset", QSize(14, 14), dpr);
+    if (reset_pixmap.isNull()) {
+        reset_pixmap =
+            QIcon::fromTheme(QStringLiteral("edit-undo"),
+                             QIcon(QStringLiteral(":/lichii/icons/reset.png")))
+                .pixmap(QSize(16, 16), dpr);
+    }
+    QPushButton* restore_button = new QPushButton(QIcon(reset_pixmap), QString(), parent);
     restore_button->setObjectName(QStringLiteral("RestoreButton%1").arg(restore_button_count));
     restore_button->setProperty("restore", true);
     restore_button->setToolTip(

@@ -715,21 +715,16 @@ QAbstractItemView::item:selected:!active {
 
 QTreeView::branch {
     background: transparent;
+    /* Keep the stylesheet rule drawable so Qt does not add its native branch arrow. */
+    border: 0px solid transparent;
 }
 
 QTreeView::branch:selected {
     background-color: #3a1d28;
 }
 
-QTreeView::branch:has-children:!has-siblings:closed,
-QTreeView::branch:closed:has-children:has-siblings {
-    image: url(:/lichii/icons/chevron_right.png);
-}
-
-QTreeView::branch:open:has-children:!has-siblings,
-QTreeView::branch:open:has-children:has-siblings {
-    image: url(:/lichii/icons/chevron_down.png);
-}
+/* The game tree paints its own @2x chevron. A stylesheet image here would be stretched to the
+   branch cell and then covered by the delegate, which reads as a double arrow. */
 
 QHeaderView {
     background-color: #17181b;

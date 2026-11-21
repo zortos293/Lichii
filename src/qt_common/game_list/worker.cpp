@@ -67,8 +67,10 @@ std::pair<std::vector<u8>, std::string> GetGameListCachedObject(
 
     const auto game_list_dir =
         Common::FS::GetEdenPath(Common::FS::EdenPath::CacheDir) / "game_list";
-    const auto jpeg_name = fmt::format("{}.jpeg", filename);
-    const auto app_name = fmt::format("{}.appname.txt", filename);
+    // Icons and titles are localized; a different system language needs its own cache entry.
+    const auto language = FileSys::GetConfiguredLanguageTag();
+    const auto jpeg_name = fmt::format("{}.{}.jpeg", filename, language);
+    const auto app_name = fmt::format("{}.{}.appname.txt", filename, language);
 
     const auto path1 = Common::FS::PathToUTF8String(game_list_dir / jpeg_name);
     const auto path2 = Common::FS::PathToUTF8String(game_list_dir / app_name);
@@ -309,12 +311,17 @@ QList<QStandardItem*> MakeGameListEntry(const std::string& path, const std::stri
     }
 
     u64 play_time = play_time_manager.GetPlayTime(program_id);
-    // Artwork the user picked replaces the icon from the game file.
+    // Artwork the user picked replaces the icon from the game file. A fetched cover is only a
+    // fallback for a game that has no icon of its own.
     const std::vector<u8> custom_artwork = QtCommon::Game::ReadCustomArtwork(program_id);
+    std::vector<u8> picture = custom_artwork.empty() ? icon : custom_artwork;
+    if (picture.empty()) {
+        picture = QtCommon::Game::ReadCachedCover(program_id);
+    }
     // So does the name the user gave the game in Properties.
     const std::string custom_title = QtCommon::Game::ReadCustomTitle(program_id);
     return QList<QStandardItem*>{
-        new GameListItemPath(FormatGameName(path), custom_artwork.empty() ? icon : custom_artwork,
+        new GameListItemPath(FormatGameName(path), picture,
                              QString::fromStdString(custom_title.empty() ? name : custom_title),
                              file_type_string, program_id, play_time, patch_versions),
         new GameListItem(file_type_string),

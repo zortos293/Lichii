@@ -5,6 +5,7 @@
 #include <charconv>
 #include <functional>
 #include <utility>
+#include <QByteArray>
 #include <QDesktopServices>
 #include <QFile>
 #include <QGridLayout>
@@ -15,6 +16,7 @@
 #include <QLabel>
 #include <QLocale>
 #include <QPainter>
+#include <QPixmap>
 #include <QPushButton>
 #include <QScrollArea>
 #include <QScrollBar>
@@ -22,6 +24,8 @@
 #include <QUrl>
 #include <QVBoxLayout>
 
+#include "qt_common/qt_common.h"
+#include "lichii/util/util.h"
 #include "lichii/whats_new_dialog.h"
 
 namespace {
@@ -62,11 +66,11 @@ QWidget* Highlight(const QString& icon, const QString& title, const QString& tex
     badge->setObjectName(QStringLiteral("WhatsNewBadge"));
     badge->setFixedSize(40, 40);
     badge->setAlignment(Qt::AlignCenter);
-    QIcon glyph(QStringLiteral(":/lichii/icons/menu_%1.png").arg(icon));
-    QPixmap pixmap = glyph.pixmap(QSize(22, 22), row->devicePixelRatioF());
+    const QByteArray glyph_name = QStringLiteral("menu_%1").arg(icon).toLatin1();
+    QPixmap pixmap = ThemePixmap(glyph_name.constData(), QSize(18, 18));
     if (pixmap.isNull()) {
-        pixmap = QIcon(QStringLiteral(":/lichii/icons/menu_sparkles.png"))
-                     .pixmap(QSize(22, 22), row->devicePixelRatioF());
+        pixmap = QtCommon::LoadPixmapForDpr(
+            QStringLiteral(":/lichii/icons/menu_sparkles@2x.png"), 2.0);
     }
     if (!pixmap.isNull() && row->palette().color(QPalette::Window).lightness() > 127) {
         QPainter painter(&pixmap);
@@ -91,14 +95,18 @@ QWidget* Highlight(const QString& icon, const QString& title, const QString& tex
     return row;
 }
 
-QToolButton* NavigationButton(const QString& name, const QString& icon) {
+QToolButton* NavigationButton(const QString& name, const QString& icon,
+                              const QSize& icon_size) {
     auto* const button = new QToolButton;
     button->setAccessibleName(name);
     button->setToolButtonStyle(Qt::ToolButtonTextBesideIcon);
     button->setAutoRaise(true);
     button->setFocusPolicy(Qt::StrongFocus);
-    button->setIcon(QIcon(icon));
-    button->setIconSize(QSize(16, 16));
+    QString icon_2x = icon;
+    icon_2x.replace(QStringLiteral(".png"), QStringLiteral("@2x.png"));
+    const QPixmap pixmap = QtCommon::LoadPixmapForDpr(icon_2x, 2.0);
+    button->setIcon(pixmap.isNull() ? QIcon(icon) : QIcon(pixmap));
+    button->setIconSize(icon_size);
     button->setMinimumHeight(30);
     QFont font = button->font();
     font.setPixelSize(14);
@@ -225,8 +233,9 @@ WhatsNewDialog::WhatsNewDialog(quint32 build, QDate build_date, bool include_pen
     labels->addWidget(title);
     intro->addLayout(labels, 1);
     auto* const wordmark = new QLabel;
-    wordmark->setPixmap(QIcon(QStringLiteral(":/img/lichii_wordmark.png"))
-                            .pixmap(QSize(84, 36), devicePixelRatioF()));
+    wordmark->setPixmap(QtCommon::ScalePixmapForDpr(
+        QtCommon::LoadPixmapForDpr(QStringLiteral(":/img/lichii_wordmark@2x.png"), 2.0),
+        QSize(84, 36), 2.0));
     intro->addWidget(wordmark, 0, Qt::AlignTop);
     header->addLayout(intro);
 
@@ -263,14 +272,16 @@ WhatsNewDialog::WhatsNewDialog(quint32 build, QDate build_date, bool include_pen
     for (int i = 0; i < 3; ++i) {
         history->setColumnStretch(i, 1);
     }
-    previous =
-        NavigationButton(tr("Previous release"), QStringLiteral(":/lichii/icons/chevron_left.png"));
+    previous = NavigationButton(tr("Previous release"),
+                                QStringLiteral(":/lichii/icons/chevron_left.png"),
+                                QSize(12, 12));
     previous->setObjectName(QStringLiteral("WhatsNewPrevious"));
     connect(previous, &QToolButton::clicked, this, [this] { ShowRelease(current_index + 1); });
     history->addWidget(previous, 0, 0, Qt::AlignLeading);
 
     auto* const archive = NavigationButton(tr("All releases on GitHub"),
-                                           QStringLiteral(":/lichii/icons/menu_link.png"));
+                                           QStringLiteral(":/lichii/icons/menu_link.png"),
+                                           QSize(16, 16));
     archive->setObjectName(QStringLiteral("WhatsNewArchive"));
     archive->setText(tr("All releases"));
     archive->setLayoutDirection(layoutDirection() == Qt::LeftToRight ? Qt::RightToLeft
@@ -281,7 +292,9 @@ WhatsNewDialog::WhatsNewDialog(quint32 build, QDate build_date, bool include_pen
     });
     history->addWidget(archive, 0, 1, Qt::AlignHCenter);
 
-    next = NavigationButton(tr("Next release"), QStringLiteral(":/lichii/icons/chevron_right.png"));
+    next = NavigationButton(tr("Next release"),
+                            QStringLiteral(":/lichii/icons/chevron_right.png"),
+                            QSize(12, 12));
     next->setObjectName(QStringLiteral("WhatsNewNext"));
     next->setText(tr("Next"));
     next->setLayoutDirection(archive->layoutDirection());

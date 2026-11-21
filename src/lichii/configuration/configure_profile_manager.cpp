@@ -32,6 +32,7 @@
 #include "core/core.h"
 #include "core/hle/service/acc/profile_manager.h"
 #include "core/hle/service/filesystem/filesystem.h"
+#include "qt_common/qt_common.h"
 #include "ui_configure_profile_manager.h"
 #include "lichii/configuration/configure_profile_manager.h"
 #include "lichii/util/limitable_input_dialog.h"
@@ -72,7 +73,7 @@ QPixmap GetIcon(const Common::UUID& uuid) {
                           static_cast<u32>(Core::Constants::ACCOUNT_BACKUP_JPEG.size()));
     }
 
-    return icon.scaled(64, 64, Qt::IgnoreAspectRatio, Qt::SmoothTransformation);
+    return QtCommon::ScalePixmapForDpr(icon, QSize(64, 64), 2.0);
 }
 
 } // Anonymous namespace
@@ -178,8 +179,7 @@ void ConfigureProfileManager::UpdateCurrentUser() {
     const auto username = GetAccountUsername(profile_manager, *current_user);
 
     scene->clear();
-    scene->addPixmap(
-        GetIcon(*current_user).scaled(64, 64, Qt::IgnoreAspectRatio, Qt::SmoothTransformation));
+    scene->addPixmap(GetIcon(*current_user));
     ui->current_user_username->setText(username);
 }
 

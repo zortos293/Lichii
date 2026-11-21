@@ -3,6 +3,7 @@
 
 // SPDX-License-Identifier: GPL-2.0-or-later
 
+#include <algorithm>
 #include <array>
 #include <cstddef>
 #include <cstring>
@@ -16,6 +17,8 @@
 #include "common/swap.h"
 #include "core/file_sys/control_metadata.h"
 #include "core/file_sys/vfs/vfs.h"
+#include "core/hle/service/ns/language.h"
+#include "core/hle/service/set/settings_server.h"
 
 namespace FileSys {
 
@@ -39,6 +42,163 @@ const std::array<const char*, size_t(Language::Count)> LANGUAGE_NAMES{{
     "Polish",
     "Thai",
 }};
+
+Language GetConfiguredLanguage() {
+    switch (Settings::values.language_index.GetValue()) {
+    case Settings::Language::Chinese:
+    case Settings::Language::ChineseSimplified:
+        return Language::SimplifiedChinese;
+    case Settings::Language::ChineseTraditional:
+    case Settings::Language::Taiwanese:
+        return Language::TraditionalChinese;
+    case Settings::Language::Dutch:
+        return Language::Dutch;
+    case Settings::Language::EnglishAmerican:
+        return Language::AmericanEnglish;
+    case Settings::Language::EnglishBritish:
+        return Language::BritishEnglish;
+    case Settings::Language::French:
+        return Language::French;
+    case Settings::Language::FrenchCanadian:
+        return Language::CanadianFrench;
+    case Settings::Language::German:
+        return Language::German;
+    case Settings::Language::Italian:
+        return Language::Italian;
+    case Settings::Language::Korean:
+        return Language::Korean;
+    case Settings::Language::Japanese:
+        return Language::Japanese;
+    case Settings::Language::Portuguese:
+        return Language::Portuguese;
+    case Settings::Language::PortugueseBrazilian:
+        return Language::BrazilianPortuguese;
+    case Settings::Language::Russian:
+        return Language::Russian;
+    case Settings::Language::Spanish:
+        return Language::Spanish;
+    case Settings::Language::SpanishLatin:
+        return Language::LatinAmericanSpanish;
+    case Settings::Language::Polish:
+        return Language::Polish;
+    case Settings::Language::Thai:
+        return Language::Thai;
+    default:
+        return Language::AmericanEnglish;
+    }
+}
+
+std::string_view GetLanguageTag(Language language) {
+    switch (language) {
+    case Language::AmericanEnglish:
+        return "en-us";
+    case Language::BritishEnglish:
+        return "en-gb";
+    case Language::Japanese:
+        return "ja";
+    case Language::French:
+        return "fr";
+    case Language::German:
+        return "de";
+    case Language::LatinAmericanSpanish:
+        return "es-419";
+    case Language::Spanish:
+        return "es";
+    case Language::Italian:
+        return "it";
+    case Language::Dutch:
+        return "nl";
+    case Language::CanadianFrench:
+        return "fr-ca";
+    case Language::Portuguese:
+        return "pt";
+    case Language::Russian:
+        return "ru";
+    case Language::Korean:
+        return "ko";
+    case Language::TraditionalChinese:
+        return "zh-hant";
+    case Language::SimplifiedChinese:
+        return "zh-hans";
+    case Language::BrazilianPortuguese:
+        return "pt-br";
+    case Language::Polish:
+        return "pl";
+    case Language::Thai:
+        return "th";
+    default:
+        return "en-us";
+    }
+}
+
+static std::string_view GetLanguageBaseTag(Language language) {
+    switch (language) {
+    case Language::BritishEnglish:
+        return "en-us";
+    case Language::CanadianFrench:
+        return "fr";
+    case Language::LatinAmericanSpanish:
+        return "es";
+    case Language::BrazilianPortuguese:
+        return "pt";
+    default:
+        return GetLanguageTag(language);
+    }
+}
+
+std::string GetConfiguredLanguageTag() {
+    return std::string(GetLanguageTag(GetConfiguredLanguage()));
+}
+
+std::vector<Language> GetLanguagePriority() {
+    const auto language_code = Service::Set::GetLanguageCodeFromIndex(
+        static_cast<u32>(Settings::values.language_index.GetValue()));
+    const auto application_language =
+        Service::NS::ConvertToApplicationLanguage(language_code)
+            .value_or(Service::NS::ApplicationLanguage::AmericanEnglish);
+    const auto priority = Service::NS::GetApplicationLanguagePriorityList(application_language);
+
+    std::vector<Language> languages;
+    languages.reserve(static_cast<std::size_t>(Language::Count));
+    if (priority != nullptr) {
+        for (const auto language : *priority) {
+            const auto index = static_cast<std::size_t>(language);
+            if (index < static_cast<std::size_t>(Language::Count)) {
+                languages.push_back(static_cast<Language>(index));
+            }
+        }
+    }
+    for (std::size_t index = 0; index < static_cast<std::size_t>(Language::Count); ++index) {
+        const auto language = static_cast<Language>(index);
+        if (std::find(languages.begin(), languages.end(), language) == languages.end()) {
+            languages.push_back(language);
+        }
+    }
+    return languages;
+}
+
+std::vector<std::string> GetLanguagePriorityNames() {
+    std::vector<std::string> names;
+    for (const auto language : GetLanguagePriority()) {
+        names.emplace_back(LANGUAGE_NAMES[static_cast<std::size_t>(language)]);
+    }
+    return names;
+}
+
+std::vector<std::string> GetPreferredLanguageTags() {
+    std::vector<std::string> tags;
+    const auto add = [&](std::string_view tag) {
+        if (!tag.empty() &&
+            std::find(tags.begin(), tags.end(), std::string(tag)) == tags.end()) {
+            tags.emplace_back(tag);
+        }
+    };
+    const auto language = GetConfiguredLanguage();
+    add(GetLanguageTag(language));
+    add(GetLanguageBaseTag(language));
+    add("en-us");
+    return tags;
+}
 
 namespace
 {
@@ -110,38 +270,12 @@ NACP::NACP(VirtualFile file)
 NACP::~NACP() = default;
 
 const LanguageEntry& NACP::GetLanguageEntry() const {
-
-    auto const language = []{
-        switch (Settings::values.language_index.GetValue()) {
-        case Settings::Language::Chinese: return Language::SimplifiedChinese;
-        case Settings::Language::ChineseSimplified: return Language::SimplifiedChinese;
-        case Settings::Language::ChineseTraditional: return Language::TraditionalChinese;
-        case Settings::Language::Dutch: return Language::Dutch;
-        case Settings::Language::EnglishAmerican: return Language::AmericanEnglish;
-        case Settings::Language::EnglishBritish: return Language::BritishEnglish;
-        case Settings::Language::French: return Language::French;
-        case Settings::Language::FrenchCanadian: return Language::CanadianFrench;
-        case Settings::Language::German: return Language::German;
-        case Settings::Language::Italian: return Language::Italian;
-        case Settings::Language::Korean: return Language::Korean;
-        case Settings::Language::Japanese: return Language::Japanese;
-        case Settings::Language::Portuguese: return Language::Portuguese;
-        case Settings::Language::PortugueseBrazilian: return Language::BrazilianPortuguese;
-        case Settings::Language::Russian: return Language::Russian;
-        case Settings::Language::Spanish: return Language::Spanish;
-        case Settings::Language::SpanishLatin: return Language::LatinAmericanSpanish;
-        case Settings::Language::Taiwanese: return Language::TraditionalChinese;
-        case Settings::Language::Thai: return Language::Thai;
-        case Settings::Language::Polish: return Language::Polish;
-        default: return Language::AmericanEnglish;
+    for (const auto language : GetLanguagePriority()) {
+        const auto index = static_cast<std::size_t>(language);
+        if (index < language_entries.size() &&
+            !language_entries[index].GetApplicationName().empty()) {
+            return language_entries[index];
         }
-    }();
-
-    const auto index = static_cast<size_t>(language);
-
-    if (index < language_entries.size() &&
-        !language_entries[index].GetApplicationName().empty()) {
-        return language_entries[index];
     }
 
     for (const auto& entry : language_entries) {

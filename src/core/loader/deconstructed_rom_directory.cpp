@@ -475,8 +475,8 @@ AppLoader_DeconstructedRomDirectory::AppLoader_DeconstructedRomDirectory(FileSys
     // Icon
     FileSys::VirtualFile icon_file = nullptr;
     for (const auto& sidecar_dir : sidecar_dirs) {
-        for (const auto& language : FileSys::LANGUAGE_NAMES) {
-            icon_file = sidecar_dir->GetFile("icon_" + std::string(language) + ".dat");
+        for (const auto& language : FileSys::GetLanguagePriorityNames()) {
+            icon_file = sidecar_dir->GetFile("icon_" + language + ".dat");
             if (icon_file != nullptr) {
                 break;
             }

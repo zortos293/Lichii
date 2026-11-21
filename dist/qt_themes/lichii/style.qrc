@@ -140,6 +140,7 @@ SPDX-License-Identifier: GPL-3.0-or-later
         <file>icons/menu_folder_white@2x.png</file>
         <file>icons/menu_gamepad.png</file>
         <file>icons/menu_gamepad@2x.png</file>
+        <file>icons/menu_gamepad_256.png</file>
         <file>icons/menu_gamepad_white.png</file>
         <file>icons/menu_gamepad_white@2x.png</file>
         <file>icons/menu_globe.png</file>
@@ -310,6 +311,12 @@ SPDX-License-Identifier: GPL-3.0-or-later
         <file>icons/toggle_on@2x.png</file>
         <file>icons/toggle_on_disabled.png</file>
         <file>icons/toggle_on_disabled@2x.png</file>
+        <!-- Lucide chevron-right, ISC; the tree rotates it when expanded. -->
+        <file>icons/tree_chevron.png</file>
+        <file>icons/tree_chevron@2x.png</file>
+        <!-- Lucide folder, ISC; the game-list folder row only. -->
+        <file>icons/tree_folder.png</file>
+        <file>icons/tree_folder@2x.png</file>
         <file>icons/user.png</file>
         <file>icons/user@2x.png</file>
         <file>icons/user_active.png</file>

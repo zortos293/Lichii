@@ -21,6 +21,7 @@
 #include <QRegularExpression>
 #include <QStandardItem>
 #include <QString>
+#include <QtMath>
 
 #include "common/common_types.h"
 #include "common/logging.h"
@@ -46,18 +47,22 @@ Q_DECLARE_METATYPE(GameListItemType);
  * @param size The desired width and height of the default icon.
  * @return QPixmap default icon
  */
+inline constexpr qreal GameIconDpr = 2.0;
+
 static bool IsLichiiTheme() {
     return UISettings::values.theme == "lichii";
 }
 
 static QPixmap GetDefaultIcon(u32 size) {
+    // `size` stays the logical tile size; only the backing bitmap is rendered at 2×.
+    const int side = static_cast<int>(qRound(size * GameIconDpr));
     if (size == 0 || !IsLichiiTheme()) {
-        QPixmap icon(size, size);
+        QPixmap icon(side, side);
         icon.fill(Qt::transparent);
+        icon.setDevicePixelRatio(GameIconDpr);
         return icon;
     }
     // Lichii Dark draws a game without art as a tile with a controller glyph.
-    const int side = static_cast<int>(size);
     QImage icon(side, side, QImage::Format_ARGB32_Premultiplied);
     icon.fill(Qt::transparent);
     QPainter painter(&icon);
@@ -67,16 +72,24 @@ static QPixmap GetDefaultIcon(u32 size) {
     painter.setBrush(QColor(0x23, 0x24, 0x2a));
     painter.drawRoundedRect(QRectF(0, 0, side, side), side * 0.18, side * 0.18);
     const int glyph = side * 3 / 8;
-    painter.drawImage(QRect((side - glyph) / 2, (side - glyph) / 2, glyph, glyph),
-                      QImage(QStringLiteral(":/lichii/icons/menu_gamepad@2x.png")));
+    // This 256 px file is only a high-resolution source glyph; it is scaled to the tile below.
+    QImage glyph_image(QStringLiteral(":/lichii/icons/menu_gamepad_256.png"));
+    if (glyph_image.isNull()) {
+        glyph_image = QImage(QStringLiteral(":/lichii/icons/menu_gamepad@2x.png"));
+    }
+    painter.drawImage(QRect((side - glyph) / 2, (side - glyph) / 2, glyph, glyph), glyph_image);
     painter.end();
-    return QPixmap::fromImage(icon);
+    icon.setDevicePixelRatio(GameIconDpr);
+    QPixmap result = QPixmap::fromImage(icon);
+    result.setDevicePixelRatio(GameIconDpr);
+    return result;
 }
 
 static QPixmap RoundedIcon(const QPixmap& picture) {
     if (!IsLichiiTheme() || picture.isNull()) {
         return picture;
     }
+    const qreal dpr = picture.devicePixelRatio() > 0.0 ? picture.devicePixelRatio() : 1.0;
     QImage icon(picture.size(), QImage::Format_ARGB32_Premultiplied);
     icon.fill(Qt::transparent);
     QPainter painter(&icon);
@@ -85,15 +98,24 @@ static QPixmap RoundedIcon(const QPixmap& picture) {
     const qreal radius = picture.width() * 0.18;
     path.addRoundedRect(QRectF(icon.rect()), radius, radius);
     painter.setClipPath(path);
-    painter.drawPixmap(0, 0, picture);
+    painter.drawPixmap(QRect(QPoint(0, 0), picture.size()), picture);
     painter.end();
-    return QPixmap::fromImage(icon);
+    icon.setDevicePixelRatio(dpr);
+    QPixmap result = QPixmap::fromImage(icon);
+    result.setDevicePixelRatio(dpr);
+    return result;
 }
 
 static QPixmap ThemeIcon(const char* name) {
     if (IsLichiiTheme()) {
-        // Lichii Dark keeps folder rows compact with the 16 px line icons from its set.
         const std::string_view icon{name};
+        // The game-list directory row uses the larger Lucide folder; the other rows keep
+        // the compact 16 px line icons from the theme set.
+        if (icon == "folder") {
+            QPixmap pixmap(QStringLiteral(":/lichii/icons/tree_folder@2x.png"));
+            pixmap.setDevicePixelRatio(2.0);
+            return pixmap;
+        }
         const char* lichii_name = icon == "sd_card"    ? "sd"
                                   : icon == "chip"     ? "cpu"
                                   : icon == "list-add" ? "plus"
@@ -180,10 +202,12 @@ public:
         QPixmap picture;
         const bool has_icon =
             picture.loadFromData(picture_data.data(), static_cast<u32>(picture_data.size()));
-        if (!has_icon) {
+        if (has_icon) {
+            picture = QtCommon::ScalePixmapForDpr(
+                picture, QSize(static_cast<int>(size), static_cast<int>(size)), GameIconDpr);
+        } else {
             picture = GetDefaultIcon(size);
         }
-        picture = picture.scaled(size, size, Qt::IgnoreAspectRatio, Qt::SmoothTransformation);
 
         item->setData(RoundedIcon(picture), Qt::DecorationRole);
         item->setData(has_icon, HasIconRole);

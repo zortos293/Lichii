@@ -6,6 +6,7 @@
 #include <QIcon>
 #include <fmt/ranges.h>
 #include "common/scm_rev.h"
+#include "qt_common/qt_common.h"
 #include "ui_aboutdialog.h"
 #include "lichii/about_dialog.h"
 
@@ -29,10 +30,16 @@ AboutDialog::AboutDialog(QWidget* parent)
     // Try and request the icon from Qt theme (Linux?)
     const QIcon lichii_logo = QIcon::fromTheme(QStringLiteral("io.github.zortos293.lichii"),
                                            QIcon(QStringLiteral(":/img/lichii.ico")));
+    const qreal dpr = devicePixelRatioF();
     if (!lichii_logo.isNull()) {
-        ui->labelLogo->setPixmap(lichii_logo.pixmap(112));
+        ui->labelLogo->setPixmap(lichii_logo.pixmap(QSize(112, 112), dpr));
     }
-    ui->labelLichii->setPixmap(QIcon(QStringLiteral(":/img/lichii_wordmark.png")).pixmap(113, 48));
+    QPixmap wordmark =
+        QtCommon::LoadPixmapForDpr(QStringLiteral(":/img/lichii_wordmark@2x.png"), 2.0);
+    if (wordmark.isNull()) {
+        wordmark = QPixmap(QStringLiteral(":/img/lichii_wordmark.png"));
+    }
+    ui->labelLichii->setPixmap(wordmark);
     ui->labelLichii->setAccessibleName(QStringLiteral("Lichii"));
     ui->verticalLayout_3->setContentsMargins(32, 28, 32, 20);
     ui->horizontalLayout->setSpacing(32);

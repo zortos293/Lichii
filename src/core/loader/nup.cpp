@@ -74,7 +74,7 @@ std::unique_ptr<FileSys::NACP> BuildNacp(const NupContainer::PackageInfo& base,
         for (const auto& slot : LanguageSlots) {
             // The uncompressed RawNACP only stores 16 entries; Polish/Thai exist
             // only in the compressed format, so they fall back to the default.
-            if (slot.index < 16 && slot.tag == lang) {
+            if (slot.index < 16 && Common::ToLower(lang) == std::string(slot.tag)) {
                 CopyNameToEntry(nacp->raw.language_entries.language_entries[slot.index], name);
             }
         }
@@ -166,9 +166,15 @@ AppLoader_NUP::AppLoader_NUP(FileSys::VirtualFile file_)
         }
     }
     display_title = meta.title_name;
-    for (const auto& [lang, name] : meta.localized_titles) {
-        if (lang == "en-us" && !name.empty()) {
-            display_title = name;
+    for (const auto& tag : FileSys::GetPreferredLanguageTags()) {
+        const auto match = std::find_if(
+            meta.localized_titles.begin(), meta.localized_titles.end(),
+            [&tag](const auto& entry) {
+                return !entry.second.empty() && Common::ToLower(entry.first) == tag;
+            });
+        if (match != meta.localized_titles.end()) {
+            display_title = match->second;
+            break;
         }
     }
     const auto exefs = selected->exefs;
@@ -195,17 +201,28 @@ AppLoader_NUP::AppLoader_NUP(FileSys::VirtualFile file_)
     }
     nacp_file = BuildNacp(meta, display_version, *raw_control);
     display_publisher = std::move(meta.publisher);
-    if (!meta.icon.empty()) {
-        icon_file = std::make_shared<FileSys::VectorVfsFile>(meta.icon, "icon.dat");
-    } else {
-        for (const auto& [lang, icon] : meta.localized_icons) {
-            if (lang == "en-us") {
-                icon_file = std::make_shared<FileSys::VectorVfsFile>(icon, "icon_" + lang + ".dat");
-            }
+    for (const auto& tag : FileSys::GetPreferredLanguageTags()) {
+        const auto match = std::find_if(
+            meta.localized_icons.begin(), meta.localized_icons.end(),
+            [&tag](const auto& entry) {
+                return !entry.second.empty() && Common::ToLower(entry.first) == tag;
+            });
+        if (match != meta.localized_icons.end()) {
+            icon_file =
+                std::make_shared<FileSys::VectorVfsFile>(match->second, "icon_" + tag + ".dat");
+            break;
         }
-        if (icon_file == nullptr && !meta.localized_icons.empty()) {
-            icon_file = std::make_shared<FileSys::VectorVfsFile>(
-                meta.localized_icons.front().second, "icon.dat");
+    }
+    if (icon_file == nullptr && !meta.icon.empty()) {
+        icon_file = std::make_shared<FileSys::VectorVfsFile>(meta.icon, "icon.dat");
+    }
+    if (icon_file == nullptr) {
+        const auto fallback = std::find_if(
+            meta.localized_icons.begin(), meta.localized_icons.end(),
+            [](const auto& entry) { return !entry.second.empty(); });
+        if (fallback != meta.localized_icons.end()) {
+            icon_file =
+                std::make_shared<FileSys::VectorVfsFile>(fallback->second, "icon.dat");
         }
     }
 }

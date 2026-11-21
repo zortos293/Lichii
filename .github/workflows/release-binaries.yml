@@ -844,8 +844,18 @@ jobs:
             pgo_note="The PGO builds are the same programs compiled with profile-guided optimization. Linux uses clang with Eglantine's profile; Windows uses clang-cl and ThinLTO with a profile trained in Lichii on Ocarina of Time, so other games gain less. Prefer them when your CPU supports it."
           fi
 
+          # A blockquote keeps an unclosed code fence in the commit message from swallowing the
+          # rest of the release notes.
+          commit_message=$(gh api "repos/${GITHUB_REPOSITORY}/commits/${GITHUB_SHA}" --jq '.commit.message' | sed 's/^/> /')
+
           cat > notes.md <<EOF
           Automatic build of \`${GITHUB_REF_NAME}\` at ${GITHUB_SHA}.
+
+          ## 本次构建 / This build
+
+          ${commit_message}
+
+          Commit: https://github.com/${GITHUB_REPOSITORY}/commit/${GITHUB_SHA}
 
           ## Linux
 

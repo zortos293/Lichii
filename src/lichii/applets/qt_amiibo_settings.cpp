@@ -5,6 +5,7 @@
 
 #include <algorithm>
 #include <thread>
+#include <QtMath>
 #include <fmt/ranges.h>
 #include <nlohmann/json.hpp>
 
@@ -137,8 +138,11 @@ void QtAmiiboSettingsDialog::LoadAmiiboApiInfo(std::string_view amiibo_id) {
     QPixmap pixmap;
     pixmap.loadFromData(reinterpret_cast<const u8*>(image_data.data()),
                         static_cast<uint>(image_data.size()));
-    pixmap = pixmap.scaled(250, 350, Qt::AspectRatioMode::KeepAspectRatio,
+    const qreal dpr = devicePixelRatioF();
+    pixmap = pixmap.scaled(QSize(qRound(250 * dpr), qRound(350 * dpr)),
+                           Qt::AspectRatioMode::KeepAspectRatio,
                            Qt::TransformationMode::SmoothTransformation);
+    pixmap.setDevicePixelRatio(dpr);
     ui->amiiboImageLabel->setPixmap(pixmap);
 #endif
 }

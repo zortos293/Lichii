@@ -44,8 +44,12 @@ UpdateDialog::UpdateDialog(const Common::Net::Release& release, QWidget* parent)
         tr("<a href=\"%1\">View on GitHub</a>").arg(QString::fromStdString(release.html_url)));
 
     std::string text{release.body};
-    if (auto pos = text.find("# Packages"); pos != std::string::npos) {
-        text = text.substr(0, pos);
+    // A commit message in the release body may mention "# Packages"; only a heading at the
+    // start of a line ends the description.
+    const auto packages = text.starts_with("# Packages") ? std::size_t{0}
+                                                         : text.find("\n# Packages");
+    if (packages != std::string::npos) {
+        text = text.substr(0, packages);
     }
 
     ui->body->setMarkdown(QString::fromStdString(text));

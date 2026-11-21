@@ -245,6 +245,34 @@ This would ban both their forum username and their IP address.</source>
 <context>
     <name>ConfigurationShared</name>
     <message>
+        <source>Quality</source>
+        <translation>质量</translation>
+    </message>
+    <message>
+        <source>Performance</source>
+        <translation>性能</translation>
+    </message>
+    <message>
+        <source>Ultra Performance</source>
+        <translation>超高性能</translation>
+    </message>
+    <message>
+        <source>NVIDIA default</source>
+        <translation>NVIDIA 默认</translation>
+    </message>
+    <message>
+        <source>Game</source>
+        <translation>游戏</translation>
+    </message>
+    <message>
+        <source>Off</source>
+        <translation>关</translation>
+    </message>
+    <message>
+        <source>Skip</source>
+        <translation>跳过</translation>
+    </message>
+    <message>
         <location filename="../../src/lichii/configuration/shared_widget.cpp" line="67"/>
         <source>%</source>
         <translation>%</translation>
@@ -6908,12 +6936,12 @@ Drag points to change position, or double-click table cells to edit values.</sou
     <message>
         <location filename="../../src/lichii/deps_dialog.ui" line="+14"/>
         <source>Lichii Dependencies</source>
-        <translation>Lichii 依赖</translation>
+        <translation>Lichii 依赖项</translation>
     </message>
     <message>
         <location line="+58"/>
         <source>&lt;html&gt;&lt;head/&gt;&lt;body&gt;&lt;p&gt;&lt;span style=" font-size:28pt;"&gt;Lichii Dependencies&lt;/span&gt;&lt;/p&gt;&lt;/body&gt;&lt;/html&gt;</source>
-        <translation>&lt;html&gt;&lt;head/&gt;&lt;body&gt;&lt;p&gt;&lt;span style=" font-size:28pt;"&gt;Lichii 依赖&lt;/span&gt;&lt;/p&gt;&lt;/body&gt;&lt;/html&gt;</translation>
+        <translation>&lt;html&gt;&lt;head/&gt;&lt;body&gt;&lt;p&gt;&lt;span style=" font-size:28pt;"&gt;Lichii 依赖项&lt;/span&gt;&lt;/p&gt;&lt;/body&gt;&lt;/html&gt;</translation>
     </message>
     <message>
         <location line="+13"/>
@@ -7374,8 +7402,8 @@ Please go to Configure -&gt; System -&gt; Network and make a selection.</source>
     </message>
     <message>
         <location line="+3"/>
-        <source>Look up artwork on SteamGridDB</source>
-        <translation>在 SteamGridDB 上查找封面</translation>
+        <source>Look up artwork</source>
+        <translation>查找封面</translation>
     </message>
     <message>
         <location line="+2"/>
@@ -7990,6 +8018,21 @@ Debug Message: </source>
 <context>
     <name>MainWindow</name>
     <message>
+        <location filename="../../src/lichii/main.ui" line="441"/>
+        <source>Apply Recommended &amp;Settings...</source>
+        <translation>应用推荐设置(&amp;S)…</translation>
+    </message>
+    <message>
+        <location filename="../../src/lichii/main.ui" line="446"/>
+        <source>Restore My &amp;Previous Settings</source>
+        <translation>恢复我之前的设置(&amp;P)</translation>
+    </message>
+    <message>
+        <location filename="../../src/lichii/main.ui" line="306"/>
+        <source>&amp;What's New in Lichii</source>
+        <translation>Lichii 新功能(&amp;W)</translation>
+    </message>
+    <message>
         <location filename="../../src/lichii/main.ui" line="14"/>
         <source>Lichii</source>
         <translation>Lichii</translation>
@@ -8358,9 +8401,9 @@ Debug Message: </source>
         <translation>从 ZIP</translation>
     </message>
     <message>
-        <location filename="../../src/lichii/main.ui" line="558"/>
-        <source>&amp;Eden Dependencies</source>
-        <translation>&amp;Eden 依赖项</translation>
+        <location filename="../../src/lichii/main.ui" line="592"/>
+        <source>&amp;Lichii Dependencies</source>
+        <translation>Lichii 依赖项(&amp;L)</translation>
     </message>
     <message>
         <location filename="../../src/lichii/main.ui" line="563"/>
@@ -13025,6 +13068,10 @@ Restart now?</source>
 <context>
     <name>GameListWorker</name>
     <message>
+        <source>Calculating...</source>
+        <translation>正在计算...</translation>
+    </message>
+    <message>
         <source>Not scanned</source>
         <translation>未扫描</translation>
     </message>
@@ -13577,6 +13624,66 @@ Would you like to manually select a portable folder to use?</source>
 <context>
     <name>RecommendedSettingsDialog</name>
     <message>
+        <location filename="../../src/lichii/recommended_settings_dialog.cpp" line="93"/>
+        <source>Recommended settings</source>
+        <translation>推荐设置</translation>
+    </message>
+    <message>
+        <location filename="../../src/lichii/recommended_settings_dialog.cpp" line="94"/>
+        <source>Do you want to use the recommended settings from the Lichii developer?</source>
+        <translation>是否使用 Lichii 开发者提供的推荐设置？</translation>
+    </message>
+    <message>
+        <location filename="../../src/lichii/recommended_settings_dialog.cpp" line="100"/>
+        <source>Use recommended settings</source>
+        <translation>使用推荐设置</translation>
+    </message>
+    <message>
+        <location filename="../../src/lichii/recommended_settings_dialog.cpp" line="101"/>
+        <source>Not now</source>
+        <translation>暂不</translation>
+    </message>
+    <message>
+        <location filename="../../src/lichii/recommended_settings_dialog.cpp" line="112"/>
+        <source>Your settings already match the recommended settings. Nothing changed.</source>
+        <translation>你的设置已经与推荐设置一致，没有需要更改的内容。</translation>
+    </message>
+    <message>
+        <location filename="../../src/lichii/recommended_settings_dialog.cpp" line="118"/>
+        <source>To go back, use Help &gt; Restore My Previous Settings.</source>
+        <translation>如需恢复，请使用「帮助 &gt; 恢复我之前的设置」。</translation>
+    </message>
+    <message>
+        <location filename="../../src/lichii/recommended_settings_dialog.cpp" line="123"/>
+        <source>Previous settings</source>
+        <translation>之前的设置</translation>
+    </message>
+    <message>
+        <location filename="../../src/lichii/recommended_settings_dialog.cpp" line="125"/>
+        <source>Your settings already match your previous settings. Nothing changed.</source>
+        <translation>你的设置已经与之前的设置一致，没有需要更改的内容。</translation>
+    </message>
+    <message>
+        <location filename="../../src/lichii/recommended_settings_dialog.cpp" line="128"/>
+        <source>Lichii uses your previous settings again.</source>
+        <translation>Lichii 已恢复为你之前的设置。</translation>
+    </message>
+    <message>
+        <location filename="../../src/lichii/recommended_settings_dialog.cpp" line="131"/>
+        <source>To use the recommended settings again, use Help &gt; Apply Recommended Settings.</source>
+        <translation>如需再次使用推荐设置，请使用「帮助 &gt; 应用推荐设置」。</translation>
+    </message>
+    <message>
+        <location filename="../../src/lichii/recommended_settings_dialog.cpp" line="117"/>
+        <source>On</source>
+        <translation>开</translation>
+    </message>
+    <message>
+        <location filename="../../src/lichii/recommended_settings_dialog.cpp" line="117"/>
+        <source>Off</source>
+        <translation>关</translation>
+    </message>
+    <message>
         <location line="-52"/>
         <source>%1 (game %2)</source>
         <translation>%1（游戏 %2）</translation>
@@ -13584,7 +13691,7 @@ Would you like to manually select a portable folder to use?</source>
     <message>
         <location line="+36"/>
         <source>They improve performance for most games. Games with their own value for one of these settings in their per-game settings use the recommended value too; other per-game settings do not change. Lichii keeps your own settings, global and per-game, so you can go back at any time with Help &gt; Restore My Previous Settings.</source>
-        <translation>这些设置能提升大多数游戏的性能。若某个游戏在自己的专属设置里为其中某项设了值，也会改用推荐值；其他专属设置不会改变。Lichii 会保留你自己的全局与专属设置，你随时可以用「帮助 &gt; 恢复原设置」改回去。</translation>
+        <translation>这些设置能提升大多数游戏的性能。若某个游戏在自己的专属设置里为其中某项设了值，也会改用推荐值；其他专属设置不会改变。Lichii 会保留你自己的全局与专属设置，你随时可以用「帮助 &gt; 恢复我之前的设置」改回去。</translation>
     </message>
     <message>
         <location line="+20"/>

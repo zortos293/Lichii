@@ -7,6 +7,7 @@
 
 #include <array>
 #include <string>
+#include <string_view>
 #include <vector>
 #include "common/common_funcs.h"
 #include "common/common_types.h"
@@ -264,6 +265,18 @@ struct RawNACP {
 static_assert(sizeof(RawNACP) == 0x4000, "RawNACP has incorrect size.");
 
 extern const std::array<const char*, size_t(Language::Count)> LANGUAGE_NAMES;
+
+/// The configured system language, with the same mapping the application control data uses.
+Language GetConfiguredLanguage();
+/// The BCP-47 tag used by NUP localized icons and the artwork cache.
+std::string_view GetLanguageTag(Language language);
+std::string GetConfiguredLanguageTag();
+/// Languages in application priority order, followed by any remaining language.
+std::vector<Language> GetLanguagePriority();
+std::vector<std::string> GetLanguagePriorityNames();
+/// The configured language, its base language when it is a regional variant, and English.
+/// This is the short list used to choose a NUP localized icon over the default one.
+std::vector<std::string> GetPreferredLanguageTags();
 
 // A class representing the format used by NX metadata files, typically named Control.nacp.
 // These store application name, dev name, title id, and other miscellaneous data.

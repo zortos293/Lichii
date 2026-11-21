@@ -21,6 +21,7 @@
 #include "lichii/applets/qt_profile_select.h"
 #include "lichii/main_window.h"
 #include "lichii/util/controller_navigation.h"
+#include "qt_common/qt_common.h"
 
 namespace {
 QString FormatUserEntryText(const QString& username, Common::UUID uuid) {
@@ -46,7 +47,7 @@ QPixmap GetIcon(Common::UUID uuid) {
                           static_cast<u32>(Core::Constants::ACCOUNT_BACKUP_JPEG.size()));
     }
 
-    return icon.scaled(64, 64, Qt::IgnoreAspectRatio, Qt::SmoothTransformation);
+    return QtCommon::ScalePixmapForDpr(icon, QSize(64, 64), 2.0);
 }
 } // Anonymous namespace
 

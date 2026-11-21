@@ -1,11 +1,13 @@
 // SPDX-FileCopyrightText: Copyright 2026 Eden Emulator Project
 // SPDX-License-Identifier: GPL-3.0-or-later
 
+#include <algorithm>
 #include <QPainter>
 #include <QPainterPath>
 #include <QStringList>
 #include <QTextLayout>
 #include <QTextOption>
+#include <QtMath>
 #include "game_card.h"
 #include "qt_common/config/uisettings.h"
 
@@ -47,12 +49,21 @@ void GameCard::paint(QPainter* painter, const QStyleOptionViewItem& option,
     QPixmap icon_pixmap = index.data(Qt::DecorationRole).value<QPixmap>();
 
     QRect iconRect;
-    if (!icon_pixmap.isNull()) {
-        QSize scaled = icon_pixmap.size();
-        scaled.scale(icon_size, icon_size, Qt::KeepAspectRatio);
+    if (!icon_pixmap.isNull() && icon_size > 0) {
+        const qreal dpr = icon_pixmap.devicePixelRatio() > 0.0
+                              ? icon_pixmap.devicePixelRatio()
+                              : 1.0;
+        const int target = std::max(1, qRound(icon_size * dpr));
+        QSize physical = icon_pixmap.size();
+        physical.scale(target, target, Qt::KeepAspectRatio);
 
-        iconRect = {cardRect.left() + (cardRect.width() - scaled.width()) / 2,
-                    cardRect.top() + cardMargin - 1, scaled.width(), scaled.height()};
+        QPixmap scaled = icon_pixmap.scaled(physical, Qt::KeepAspectRatio,
+                                            Qt::SmoothTransformation);
+        scaled.setDevicePixelRatio(dpr);
+        const QSize logical(qRound(physical.width() / dpr), qRound(physical.height() / dpr));
+
+        iconRect = {cardRect.left() + (cardRect.width() - logical.width()) / 2,
+                    cardRect.top() + cardMargin - 1, logical.width(), logical.height()};
 
         painter->setRenderHint(QPainter::SmoothPixmapTransform, true);
 
@@ -60,7 +71,7 @@ void GameCard::paint(QPainter* painter, const QStyleOptionViewItem& option,
         QPainterPath clip_path;
         clip_path.addRoundedRect(iconRect, cardCornerRadius, cardCornerRadius);
         painter->setClipPath(clip_path);
-        painter->drawPixmap(iconRect, icon_pixmap);
+        painter->drawPixmap(iconRect, scaled);
         painter->restore();
     } else {
         iconRect = {cardRect.left() + cardMargin, cardRect.top() + cardMargin,

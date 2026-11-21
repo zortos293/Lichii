@@ -19,8 +19,10 @@
 #include <QTabBar>
 #include <QTimer>
 #include <QVBoxLayout>
+#include <QtMath>
 #include "lichii/configuration/iidb_key_dialog.h"
 #include "lichii/game/artwork_image.h"
+#include "qt_common/qt_common.h"
 
 namespace IiDB {
 namespace {
@@ -466,11 +468,17 @@ void ArtworkDialog::Preview() {
                 preview_status->setText(ErrorText(error));
             } else if (const auto original = ArtworkImage::Decode(bytes); !original.isNull()) {
                 pending_icon = ArtworkImage::SquareIcon(original);
-                const auto fit = PreviewSize - QSize{12, 12};
-                source_preview->setPixmap(QPixmap::fromImage(
-                    original.scaled(fit, Qt::KeepAspectRatio, Qt::SmoothTransformation)));
-                icon_preview->setPixmap(QPixmap::fromImage(
-                    pending_icon.scaled(fit, Qt::KeepAspectRatio, Qt::SmoothTransformation)));
+                const qreal dpr = devicePixelRatioF();
+                const QSize fit = PreviewSize - QSize{12, 12};
+                const QSize physical(qRound(fit.width() * dpr), qRound(fit.height() * dpr));
+                QPixmap source = QPixmap::fromImage(
+                    original.scaled(physical, Qt::KeepAspectRatio, Qt::SmoothTransformation));
+                source.setDevicePixelRatio(dpr);
+                source_preview->setPixmap(source);
+                QPixmap icon = QPixmap::fromImage(
+                    pending_icon.scaled(physical, Qt::KeepAspectRatio, Qt::SmoothTransformation));
+                icon.setDevicePixelRatio(dpr);
+                icon_preview->setPixmap(icon);
                 preview_status->setText(
                     tr("Original: %1 × %2").arg(original.width()).arg(original.height()));
                 use->setEnabled(!pending_icon.isNull());

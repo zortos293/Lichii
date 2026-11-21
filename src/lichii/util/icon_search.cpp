@@ -37,7 +37,9 @@
 #include "common/httplib.h"
 #include "common/logging.h"
 #include "common/net/ca_store.h"
+#include "common/settings.h"
 #include "common/string_util.h"
+#include "core/file_sys/control_metadata.h"
 #include "qt_common/config/uisettings.h"
 
 namespace {
@@ -154,7 +156,8 @@ std::string UrlEncode(std::string_view value) {
 }
 
 constexpr std::chrono::seconds SearchDeadline{10};
-constexpr std::size_t MaxHttpBodySize = 4 * 1024 * 1024;
+// Nintendo of Europe serves its 1920x1080 product art as PNG, occasionally just over 4 MiB.
+constexpr std::size_t MaxHttpBodySize = 8 * 1024 * 1024;
 constexpr std::chrono::seconds PrimarySourceDeadline{5};
 // cpp-httplib cannot be interrupted from another thread while it connects or waits for the first
 // bytes of a reply, so these waits are kept short: a cancelled lookup ends within them instead of
@@ -166,7 +169,9 @@ constexpr std::string_view SgdbApiBase = "https://www.steamgriddb.com/api/v2";
 
 bool IsAllowedIconHost(std::string_view host) {
     return host == "switchiconshowdown.com" || host == "steamgriddb.com" ||
-           host.ends_with(".steamgriddb.com");
+           host.ends_with(".steamgriddb.com") || host == "ec.nintendo.com" ||
+           host == "www.nintendo.com" || host == "assets.nintendo.com" ||
+           host == "atum-img-lp1.cdn.nintendo.net" || host == "img-eshop.cdn.nintendo.net";
 }
 
 enum class HttpStatus { Ok, NetworkError, Timeout, Cancelled, Unauthorized };
@@ -176,6 +181,12 @@ struct HttpResult {
     std::string body;
     std::string detail;
 };
+
+bool IsNetworkFailure(const HttpResult& result) {
+    return result.status == HttpStatus::Timeout ||
+           (result.status == HttpStatus::NetworkError &&
+            !result.detail.starts_with("HTTP "));
+}
 
 // Every request shares one deadline and cancel flag, so a whole search can never run past it.
 HttpResult HttpGet(const std::string& full_url, std::chrono::steady_clock::time_point deadline,
@@ -324,6 +335,300 @@ std::vector<std::string> ParseSgdbIconUrls(const std::string& body) {
         }
     }
     return urls;
+}
+
+bool EqualsIgnoreCase(std::string_view left, std::string_view right) {
+    return left.size() == right.size() &&
+           std::equal(left.begin(), left.end(), right.begin(), [](char a, char b) {
+               return std::tolower(static_cast<unsigned char>(a)) ==
+                      std::tolower(static_cast<unsigned char>(b));
+           });
+}
+
+std::string NormalizeNintendoImageUrl(std::string url) {
+    if (url.empty() || !url.starts_with("https://")) {
+        return {};
+    }
+    // Cloudinary's f_auto may answer with a format Qt cannot decode; ask for JPEG instead.
+    boost::replace_all(url, "f_auto", "f_jpg");
+    return url;
+}
+
+std::string NintendoAssetUrl(const nlohmann::json& asset) {
+    if (!asset.is_object()) {
+        return {};
+    }
+    if (asset.contains("url") && asset["url"].is_string()) {
+        if (auto url = NormalizeNintendoImageUrl(asset["url"].get<std::string>()); !url.empty()) {
+            return url;
+        }
+    }
+    if (asset.contains("publicId") && asset["publicId"].is_string()) {
+        const auto public_id = asset["publicId"].get<std::string>();
+        if (public_id.starts_with("https://")) {
+            return NormalizeNintendoImageUrl(public_id);
+        }
+        if (!public_id.empty()) {
+            return "https://assets.nintendo.com/image/upload/c_fill,w_1024,h_1024/q_auto/f_jpg/" +
+                   public_id;
+        }
+    }
+    return {};
+}
+
+std::string ExtractNextData(const std::string& html) {
+    constexpr std::string_view marker = "__NEXT_DATA__";
+    std::size_t script = 0;
+    while ((script = html.find("<script", script)) != std::string::npos) {
+        const auto tag_end = html.find('>', script);
+        if (tag_end == std::string::npos) {
+            return {};
+        }
+        if (std::string_view{html}.substr(script, tag_end - script).find(marker) !=
+            std::string_view::npos) {
+            const auto body_end = html.find("</script>", tag_end + 1);
+            if (body_end == std::string::npos) {
+                return {};
+            }
+            return html.substr(tag_end + 1, body_end - tag_end - 1);
+        }
+        script = tag_end + 1;
+    }
+    return {};
+}
+
+bool ProductMatchesTitleId(const nlohmann::json& product, std::string_view title_id) {
+    if (product.contains("applicationId") && product["applicationId"].is_string() &&
+        EqualsIgnoreCase(product["applicationId"].get<std::string>(), title_id)) {
+        return true;
+    }
+    if (product.contains("softwareDetails") && product["softwareDetails"].is_object()) {
+        const auto& details = product["softwareDetails"];
+        if (details.contains("rights") && details["rights"].is_array()) {
+            for (const auto& right : details["rights"]) {
+                if (right.is_object() && right.contains("titleId") &&
+                    right["titleId"].is_string() &&
+                    EqualsIgnoreCase(right["titleId"].get<std::string>(), title_id)) {
+                    return true;
+                }
+            }
+        }
+    }
+    return false;
+}
+
+const nlohmann::json* FindPageProps(const nlohmann::json& root) {
+    const auto props = root.find("props");
+    if (props == root.end() || !props->is_object()) {
+        return nullptr;
+    }
+    const auto page = props->find("pageProps");
+    return page != props->end() && page->is_object() ? &*page : nullptr;
+}
+
+std::string FindMainSku(const nlohmann::json& root) {
+    const auto* page = FindPageProps(root);
+    if (page == nullptr) {
+        return {};
+    }
+    const auto sku_of = [](const nlohmann::json& item) -> std::string {
+        if (item.is_object() && item.contains("sku") && item["sku"].is_string()) {
+            return item["sku"].get<std::string>();
+        }
+        return {};
+    };
+    const auto linked = page->find("linkedData");
+    if (linked != page->end()) {
+        if (linked->is_array()) {
+            for (const auto& item : *linked) {
+                if (auto sku = sku_of(item); !sku.empty()) {
+                    return sku;
+                }
+            }
+        } else if (auto sku = sku_of(*linked); !sku.empty()) {
+            return sku;
+        }
+    }
+    // Some store pages leave linkedData out and keep the product only in analytics.
+    const auto analytics = page->find("analytics");
+    if (analytics != page->end() && analytics->is_object()) {
+        const auto product = analytics->find("product");
+        if (product != analytics->end()) {
+            return sku_of(*product);
+        }
+    }
+    return {};
+}
+
+std::string FindLinkedImage(const nlohmann::json& root) {
+    const auto* page = FindPageProps(root);
+    if (page == nullptr) {
+        return {};
+    }
+    const auto image_of = [](const nlohmann::json& item) -> std::string {
+        if (item.is_object() && item.contains("image") && item["image"].is_string()) {
+            return NormalizeNintendoImageUrl(item["image"].get<std::string>());
+        }
+        return {};
+    };
+    const auto linked = page->find("linkedData");
+    if (linked == page->end()) {
+        return {};
+    }
+    if (linked->is_array()) {
+        for (const auto& item : *linked) {
+            if (auto image = image_of(item); !image.empty()) {
+                return image;
+            }
+        }
+    } else if (auto image = image_of(*linked); !image.empty()) {
+        return image;
+    }
+    return {};
+}
+
+std::string FindEuMediaImage(const std::string& html) {
+    // Nintendo of Europe pages render their product art from www.nintendo.com/eu/media, not
+    // from the US Cloudinary store. The 1280w variant is a resized copy of the original.
+    constexpr std::string_view marker = "https://www.nintendo.com/eu/media/images/assets/";
+    const auto pos = html.find(marker.data());
+    if (pos == std::string::npos) {
+        return {};
+    }
+    auto end = html.find_first_of("\"' \\", pos);
+    if (end == std::string::npos) {
+        end = html.size();
+    }
+    auto url = NormalizeNintendoImageUrl(html.substr(pos, end - pos));
+    if (url.empty()) {
+        return {};
+    }
+    const auto resized = url.find("_image1280w");
+    if (resized != std::string::npos) {
+        auto original = url;
+        original.erase(resized, std::string_view{"_image1280w"}.size());
+        if (html.find(original) != std::string::npos) {
+            url = std::move(original);
+        }
+    }
+    return url;
+}
+
+std::string FindOgImage(const std::string& html) {
+    constexpr std::string_view marker = "og:image";
+    const auto marker_pos = html.find(marker.data());
+    if (marker_pos != std::string::npos) {
+        // Stay inside the matching <meta> tag: content may come before or after the property,
+        // and a neighbouring tag's content is not this image.
+        auto tag_begin = html.rfind("<meta", marker_pos);
+        if (tag_begin == std::string::npos) {
+            tag_begin = 0;
+        }
+        auto tag_end = html.find('>', marker_pos);
+        if (tag_end == std::string::npos) {
+            tag_end = html.size();
+        }
+        const std::string_view tag(html.data() + tag_begin, tag_end - tag_begin);
+        for (const std::string_view attribute : {std::string_view{"content=\""},
+                                                 std::string_view{"content='"}}) {
+            const auto content = tag.find(attribute);
+            if (content == std::string_view::npos) {
+                continue;
+            }
+            const auto begin = content + attribute.size();
+            const auto end = tag.find(attribute.back(), begin);
+            if (end == std::string_view::npos) {
+                continue;
+            }
+            if (auto url =
+                    NormalizeNintendoImageUrl(std::string(tag.substr(begin, end - begin)));
+                !url.empty()) {
+                return url;
+            }
+        }
+    }
+    // The Hong Kong store page also carries the same image without Open Graph metadata.
+    constexpr std::string_view eshop = "https://img-eshop.cdn.nintendo.net/i/";
+    const auto eshop_pos = html.find(eshop.data());
+    if (eshop_pos != std::string::npos) {
+        auto end = html.find_first_of("\"' \\", eshop_pos);
+        if (end == std::string::npos) {
+            end = html.size();
+        }
+        return NormalizeNintendoImageUrl(html.substr(eshop_pos, end - eshop_pos));
+    }
+    return {};
+}
+
+std::string FindNintendoStoreImageUrl(const std::string& html, std::string_view title_id) {
+    const auto next_data = ExtractNextData(html);
+    if (!next_data.empty()) {
+        const auto root = nlohmann::json::parse(next_data, nullptr, false);
+        if (!root.is_discarded() && root.is_object()) {
+            if (const auto* page = FindPageProps(root); page != nullptr) {
+                const auto state = page->find("initialApolloState");
+                if (state == page->end() || !state->is_object()) {
+                    if (auto image = FindLinkedImage(root); !image.empty()) {
+                        return image;
+                    }
+                    if (auto image = FindEuMediaImage(html); !image.empty()) {
+                        return image;
+                    }
+                    return FindOgImage(html);
+                }
+                const std::string square_key = "productImage({\"shape\":\"square\"})";
+                const auto main_sku = FindMainSku(root);
+                const nlohmann::json* main_product = nullptr;
+                const nlohmann::json* main_square = nullptr;
+                for (auto it = state->begin(); it != state->end(); ++it) {
+                    if (!it.value().is_object()) {
+                        continue;
+                    }
+                    const auto& product = it.value();
+                    const auto square = product.find(square_key);
+                    if (!main_sku.empty() && product.contains("sku") &&
+                        product["sku"].is_string() &&
+                        product["sku"].get<std::string>() == main_sku) {
+                        main_product = &product;
+                        main_square = square == product.end() ? nullptr : &*square;
+                    }
+                    if (square != product.end() && ProductMatchesTitleId(product, title_id)) {
+                        if (auto url = NintendoAssetUrl(*square); !url.empty()) {
+                            return url;
+                        }
+                    }
+                }
+                if (main_square != nullptr) {
+                    if (auto url = NintendoAssetUrl(*main_square); !url.empty()) {
+                        return url;
+                    }
+                }
+                if (main_product != nullptr) {
+                    const auto image = main_product->find("productImage");
+                    if (image != main_product->end()) {
+                        if (auto url = NintendoAssetUrl(*image); !url.empty()) {
+                            return url;
+                        }
+                    }
+                }
+            }
+            if (auto image = FindLinkedImage(root); !image.empty()) {
+                return image;
+            }
+        }
+    }
+    if (auto image = FindEuMediaImage(html); !image.empty()) {
+        return image;
+    }
+    return FindOgImage(html);
+}
+
+QImage CenterSquare(const QImage& image) {
+    if (image.isNull() || image.width() == image.height()) {
+        return image;
+    }
+    const int side = std::min(image.width(), image.height());
+    return image.copy((image.width() - side) / 2, (image.height() - side) / 2, side, side);
 }
 
 int ScoreCandidateTitle(const std::string& candidate, const std::string& query) {
@@ -689,6 +994,156 @@ ArtworkLookupResult LookUpSteamGridDbArtwork(const std::string& title, const std
     } catch (const std::exception& e) {
         out.status = ArtworkLookupStatus::NetworkError;
         out.detail = e.what();
+    }
+    return out;
+}
+
+static std::vector<std::string> NintendoStoreRegions(int language_index) {
+    switch (static_cast<Settings::Language>(language_index)) {
+    case Settings::Language::EnglishBritish:
+        return {"GB", "US", "HK"};
+    case Settings::Language::Japanese:
+        return {"JP", "US", "HK"};
+    case Settings::Language::French:
+        return {"FR", "GB", "US", "HK"};
+    case Settings::Language::FrenchCanadian:
+        return {"FR", "US", "HK"};
+    case Settings::Language::German:
+        return {"DE", "GB", "US", "HK"};
+    case Settings::Language::Spanish:
+        return {"ES", "GB", "US", "HK"};
+    case Settings::Language::SpanishLatin:
+        return {"ES", "US", "HK"};
+    case Settings::Language::Italian:
+        return {"IT", "GB", "US", "HK"};
+    case Settings::Language::Dutch:
+        return {"NL", "GB", "US", "HK"};
+    case Settings::Language::Portuguese:
+        return {"PT", "GB", "US", "HK"};
+    case Settings::Language::PortugueseBrazilian:
+        return {"PT", "US", "HK"};
+    case Settings::Language::Russian:
+        return {"US", "HK"};
+    case Settings::Language::Korean:
+        return {"US", "HK"};
+    case Settings::Language::Chinese:
+    case Settings::Language::ChineseSimplified:
+    case Settings::Language::ChineseTraditional:
+    case Settings::Language::Taiwanese:
+        return {"HK", "US"};
+    case Settings::Language::Polish:
+        return {"GB", "US", "HK"};
+    case Settings::Language::Thai:
+        return {"HK", "US"};
+    default:
+        return {"US", "HK"};
+    }
+}
+
+ArtworkLookupResult LookUpNintendoStoreArtwork(u64 title_id, int language_index,
+                                               const std::atomic_bool& cancel) {
+    ArtworkLookupResult out;
+    if (title_id == 0) {
+        out.status = ArtworkLookupStatus::NotFound;
+        return out;
+    }
+
+    const std::string exact = fmt::format("{:016X}", title_id);
+    std::vector<std::string> ids{exact};
+    // A Switch 2 Edition is sold from its Switch 1 base game's store page.
+    if (exact.starts_with("04") && exact.ends_with("001")) {
+        std::string base = exact;
+        base[1] = '1';
+        base[base.size() - 1] = '0';
+        base[base.size() - 2] = '0';
+        base[base.size() - 3] = '0';
+        ids.push_back(std::move(base));
+    }
+
+    const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds{30};
+    bool network_error = false;
+    std::string detail;
+    // Non-square key art is only a last resort. A localized store often serves a 16:9 banner,
+    // while another region has the proper square cover the grid expects.
+    QImage fallback;
+    std::string fallback_detail;
+    const auto regions = NintendoStoreRegions(language_index);
+    for (const auto& id : ids) {
+        for (const auto& region : regions) {
+            if (cancel) {
+                out.status = ArtworkLookupStatus::Cancelled;
+                return out;
+            }
+
+            const auto page = HttpGet(
+                fmt::format("https://ec.nintendo.com/apps/{}/{}", id, region), deadline, cancel);
+            if (page.status == HttpStatus::Cancelled) {
+                out.status = ArtworkLookupStatus::Cancelled;
+                return out;
+            }
+            if (page.status != HttpStatus::Ok) {
+                network_error = network_error || IsNetworkFailure(page);
+                detail = page.detail;
+                continue;
+            }
+
+            const auto image_url = FindNintendoStoreImageUrl(page.body, exact);
+            if (image_url.empty()) {
+                detail = "no store image";
+                continue;
+            }
+
+            const auto image = HttpGet(image_url, deadline, cancel);
+            if (image.status == HttpStatus::Cancelled) {
+                out.status = ArtworkLookupStatus::Cancelled;
+                return out;
+            }
+            if (image.status != HttpStatus::Ok) {
+                network_error = network_error || IsNetworkFailure(image);
+                detail = image.detail;
+                continue;
+            }
+
+            QImage decoded;
+            if (!decoded.loadFromData(reinterpret_cast<const uchar*>(image.body.data()),
+                                      static_cast<int>(image.body.size()))) {
+                detail = "image could not be decoded";
+                continue;
+            }
+
+            const auto image_detail = fmt::format("{} {}", id, region);
+            if (decoded.width() == decoded.height()) {
+                out.image = CenterSquare(decoded);
+                if (out.image.isNull()) {
+                    detail = "empty image";
+                    continue;
+                }
+                out.status = ArtworkLookupStatus::Found;
+                out.detail = image_detail;
+                out.from_official_store = true;
+                return out;
+            }
+            if (fallback.isNull()) {
+                fallback = CenterSquare(decoded);
+                fallback_detail = image_detail;
+            }
+        }
+    }
+
+    if (!fallback.isNull()) {
+        out.image = std::move(fallback);
+        out.status = ArtworkLookupStatus::Found;
+        out.detail = std::move(fallback_detail);
+        out.from_official_store = true;
+        return out;
+    }
+
+    out.status =
+        network_error ? ArtworkLookupStatus::NetworkError : ArtworkLookupStatus::NotFound;
+    if (detail.empty()) {
+        out.detail = "Nintendo store returned no artwork";
+    } else {
+        out.detail = std::move(detail);
     }
     return out;
 }

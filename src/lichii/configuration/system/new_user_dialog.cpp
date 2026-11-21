@@ -13,6 +13,7 @@
 #include "core/hle/service/filesystem/filesystem.h"
 #include "new_user_dialog.h"
 #include "qt_common/qt_common.h"
+#include "lichii/util/util.h"
 #include "ui_new_user_dialog.h"
 
 #include <QFileDialog>
@@ -30,7 +31,7 @@ QPixmap NewUserDialog::DefaultAvatar() {
     icon.loadFromData(Core::Constants::ACCOUNT_BACKUP_JPEG.data(),
                       static_cast<u32>(Core::Constants::ACCOUNT_BACKUP_JPEG.size()));
 
-    return icon.scaled(64, 64, Qt::IgnoreAspectRatio, Qt::SmoothTransformation);
+    return QtCommon::ScalePixmapForDpr(icon, QSize(64, 64), 2.0);
 }
 
 QString NewUserDialog::GetImagePath(const Common::UUID& uuid) {
@@ -47,7 +48,7 @@ QPixmap NewUserDialog::GetIcon(const Common::UUID& uuid) {
         return DefaultAvatar();
     }
 
-    return icon.scaled(64, 64, Qt::IgnoreAspectRatio, Qt::SmoothTransformation);
+    return QtCommon::ScalePixmapForDpr(icon, QSize(64, 64), 2.0);
 }
 
 NewUserDialog::NewUserDialog(Common::UUID uuid, const std::string& username, const QString& title,
@@ -147,7 +148,7 @@ void NewUserDialog::selectImage() {
         image = image.scaled(256, 256, Qt::KeepAspectRatioByExpanding, Qt::SmoothTransformation);
     }
 
-    setImage(image.scaled(64, 64, Qt::IgnoreAspectRatio));
+    setImage(QtCommon::ScalePixmapForDpr(image, QSize(64, 64), 2.0));
     setIsDefaultAvatar(false);
 }
 
@@ -158,7 +159,8 @@ void NewUserDialog::setAvatar() {
         }
     }
     if (avatar_dialog->exec() == QDialog::Accepted) {
-        setImage(avatar_dialog->GetSelectedAvatar().scaled(64, 64, Qt::IgnoreAspectRatio));
+        setImage(QtCommon::ScalePixmapForDpr(avatar_dialog->GetSelectedAvatar(),
+                                             QSize(64, 64), 2.0));
     }
 }
 
@@ -324,8 +326,16 @@ void NewUserDialog::generateUUID() {
 }
 
 void NewUserDialog::verifyUser() {
-    const QPixmap checked = QIcon::fromTheme(QStringLiteral("checked")).pixmap(16);
-    const QPixmap failed = QIcon::fromTheme(QStringLiteral("failed")).pixmap(16);
+    QPixmap checked = ThemePixmap("menu_check", QSize(16, 16));
+    if (checked.isNull()) {
+        checked = QIcon::fromTheme(QStringLiteral("checked")).pixmap(QSize(16, 16),
+                                                                     devicePixelRatioF());
+    }
+    QPixmap failed = ThemePixmap("menu_x", QSize(16, 16));
+    if (failed.isNull()) {
+        failed = QIcon::fromTheme(QStringLiteral("failed")).pixmap(QSize(16, 16),
+                                                                   devicePixelRatioF());
+    }
 
     const bool uuid_good = ui->uuid->hasAcceptableInput();
     const bool username_good = ui->username->hasAcceptableInput();

@@ -373,6 +373,83 @@ if (ENABLE_QT_TRANSLATION)
     file(GLOB_RECURSE LANGUAGES_TS ${LICHII_QT_LANGUAGES}/*.ts)
     list(REMOVE_ITEM LANGUAGES_TS ${LICHII_QT_LANGUAGES}/en.ts)
 
+    # Qt's own strings (the macOS application menu, standard dialogs) live in qtbase_*.qm,
+    # not in Lichii's catalog. Bundle one for every UI language this build ships, using the
+    # exact locale or its base language (ja_JP -> qtbase_ja.qm, pt_BR -> qtbase_pt_BR.qm).
+    # find_path needs a concrete file name. Use the catalogs this build requests so a Qt
+    # installation that ships only some languages can still be discovered.
+    set(LICHII_QT_CATALOG_NAMES)
+    foreach (TS ${LANGUAGES_TS})
+        get_filename_component(LANG ${TS} NAME_WE)
+        list(APPEND LICHII_QT_CATALOG_NAMES "qtbase_${LANG}.qm")
+        string(REGEX REPLACE "_.*$" "" BASE_LANG ${LANG})
+        if (NOT BASE_LANG STREQUAL LANG)
+            list(APPEND LICHII_QT_CATALOG_NAMES "qtbase_${BASE_LANG}.qm")
+        endif()
+    endforeach()
+    list(REMOVE_DUPLICATES LICHII_QT_CATALOG_NAMES)
+
+    if (LICHII_QT_CATALOG_NAMES)
+        find_path(LICHII_QT_TRANSLATIONS_DIR
+            NAMES ${LICHII_QT_CATALOG_NAMES}
+            HINTS
+                "${QT6_INSTALL_TRANSLATIONS}"
+                "${Qt6_DIR}/../../../translations"
+                "${Qt6_DIR}/../../../share/qt6/translations"
+                "${QT6_INSTALL_PREFIX}/translations"
+                "${QT6_INSTALL_PREFIX}/share/qt6/translations"
+                "${QT6_INSTALL_PREFIX}/share/qt/translations"
+                "${QT_HOST_PATH}/translations"
+                "${CMAKE_PREFIX_PATH}"
+            PATH_SUFFIXES translations share/qt6/translations share/qt/translations
+        )
+    endif()
+    set(QT_TRANSLATION_LANGUAGES)
+    set(QT_TRANSLATION_MISSING)
+    if (LICHII_QT_TRANSLATIONS_DIR)
+        foreach (TS ${LANGUAGES_TS})
+            get_filename_component(LANG ${TS} NAME_WE)
+            set(CANDIDATES ${LANG})
+            string(REGEX REPLACE "_.*$" "" BASE_LANG ${LANG})
+            if (NOT BASE_LANG STREQUAL LANG)
+                list(APPEND CANDIDATES ${BASE_LANG})
+            endif()
+            set(FOUND FALSE)
+            foreach (CANDIDATE ${CANDIDATES})
+                if (EXISTS "${LICHII_QT_TRANSLATIONS_DIR}/qtbase_${CANDIDATE}.qm")
+                    list(APPEND QT_TRANSLATION_LANGUAGES ${CANDIDATE})
+                    set(FOUND TRUE)
+                    break()
+                endif()
+            endforeach()
+            if (NOT FOUND)
+                list(APPEND QT_TRANSLATION_MISSING ${LANG})
+            endif()
+        endforeach()
+        list(REMOVE_DUPLICATES QT_TRANSLATION_LANGUAGES)
+    else()
+        message(WARNING "Qt base translations were not found; Qt's own strings stay in English")
+    endif()
+
+    if (QT_TRANSLATION_LANGUAGES)
+        set(QT_TRANSLATIONS_QRC ${CMAKE_CURRENT_BINARY_DIR}/qt_translations.qrc)
+        file(WRITE ${QT_TRANSLATIONS_QRC} "<RCC><qresource prefix=\"qt-translations\">\n")
+        foreach (LANG ${QT_TRANSLATION_LANGUAGES})
+            set(QM_NAME qtbase_${LANG}.qm)
+            configure_file("${LICHII_QT_TRANSLATIONS_DIR}/${QM_NAME}"
+                           "${CMAKE_CURRENT_BINARY_DIR}/${QM_NAME}" COPYONLY)
+            file(APPEND ${QT_TRANSLATIONS_QRC} "<file>${QM_NAME}</file>\n")
+        endforeach()
+        file(APPEND ${QT_TRANSLATIONS_QRC} "</qresource></RCC>")
+        qt_add_resources(QT_TRANSLATIONS ${QT_TRANSLATIONS_QRC})
+        message(STATUS "Bundling Qt translations: ${QT_TRANSLATION_LANGUAGES}")
+        if (QT_TRANSLATION_MISSING)
+            message(STATUS "No Qt base translation for: ${QT_TRANSLATION_MISSING}")
+        endif()
+    else()
+        set(QT_TRANSLATIONS)
+    endif()
+
     # Compile TS files to QM files
     qt_add_translation(LANGUAGES_QM ${LANGUAGES_TS})
 
@@ -392,12 +469,14 @@ if (ENABLE_QT_TRANSLATION)
     qt_add_resources(LANGUAGES ${LANGUAGES_QRC})
 else()
     set(LANGUAGES)
+    set(QT_TRANSLATIONS)
 endif()
 
 target_sources(lichii
     PRIVATE
         ${ICONS}
         ${LANGUAGES}
+        ${QT_TRANSLATIONS}
         ${THEMES})
 
 # TODO(crueter): Move Assets.car/icon/icns handling to its own Module.

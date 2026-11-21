@@ -8,6 +8,7 @@
 #include <limits>
 #include <mutex>
 #include <optional>
+#include <string_view>
 
 #include <fmt/format.h>
 #include <nx_disk_source.hpp>
@@ -389,50 +390,6 @@ enum SnapshotType : u8 { Base = 0, Update = 1, AddOn = 2, StandaloneUpdate = 3 }
 
 bool IsUpdate(u8 type) {
     return type == Update || type == StandaloneUpdate;
-}
-
-// The Catalog language tag for the configured system language.
-std::string_view PreferredLanguageTag() {
-    switch (Settings::values.language_index.GetValue()) {
-    case Settings::Language::EnglishBritish:
-        return "en-gb";
-    case Settings::Language::Japanese:
-        return "ja";
-    case Settings::Language::French:
-        return "fr";
-    case Settings::Language::FrenchCanadian:
-        return "fr-ca";
-    case Settings::Language::German:
-        return "de";
-    case Settings::Language::Spanish:
-        return "es";
-    case Settings::Language::SpanishLatin:
-        return "es-419";
-    case Settings::Language::Italian:
-        return "it";
-    case Settings::Language::Dutch:
-        return "nl";
-    case Settings::Language::Portuguese:
-        return "pt";
-    case Settings::Language::PortugueseBrazilian:
-        return "pt-br";
-    case Settings::Language::Russian:
-        return "ru";
-    case Settings::Language::Korean:
-        return "ko";
-    case Settings::Language::Chinese:
-    case Settings::Language::ChineseSimplified:
-        return "zh-hans";
-    case Settings::Language::ChineseTraditional:
-    case Settings::Language::Taiwanese:
-        return "zh-hant";
-    case Settings::Language::Polish:
-        return "pl";
-    case Settings::Language::Thai:
-        return "th";
-    default:
-        return "en-us";
-    }
 }
 
 bool UpdateDisabled(u64 program_id, u32 version) {
@@ -971,12 +928,15 @@ ResultStatus AppLoader_NX::ReadIcon(std::vector<u8>& buffer) {
     const auto& a = impl->Archive();
     const auto& owner = a.applications()[impl->app];
     u32 icon = Absent;
-    for (const auto tag : {PreferredLanguageTag(), std::string_view{"en-us"}}) {
+    for (const auto& tag : FileSys::GetPreferredLanguageTags()) {
         for (u32 i = owner.first_localized; i < owner.first_localized + owner.localized_count;
              ++i) {
-            if (icon == Absent && a.localized_language(i) == tag) {
+            if (icon == Absent && a.localized_language(i) == std::string_view{tag}) {
                 icon = a.localized_entries()[i].icon_index;
             }
+        }
+        if (icon != Absent) {
+            break;
         }
     }
     if (icon == Absent) {
@@ -1006,10 +966,14 @@ ResultStatus AppLoader_NX::ReadTitle(std::string& title) {
     }
     const auto& a = impl->Archive();
     const auto& owner = a.applications()[impl->app];
-    for (u32 i = owner.first_localized; i < owner.first_localized + owner.localized_count; ++i) {
-        if (a.localized_language(i) == PreferredLanguageTag() && !a.localized_title(i).empty()) {
-            title = a.localized_title(i);
-            return ResultStatus::Success;
+    for (const auto& tag : FileSys::GetPreferredLanguageTags()) {
+        for (u32 i = owner.first_localized; i < owner.first_localized + owner.localized_count;
+             ++i) {
+            if (a.localized_language(i) == std::string_view{tag} &&
+                !a.localized_title(i).empty()) {
+                title = a.localized_title(i);
+                return ResultStatus::Success;
+            }
         }
     }
     title = a.title(impl->app);

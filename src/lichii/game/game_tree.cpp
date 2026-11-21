@@ -2,13 +2,19 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 
 #include <algorithm>
+#include <utility>
 
+#include <QAbstractItemModel>
 #include <QApplication>
+#include <QEasingCurve>
 #include <QHeaderView>
+#include <QImage>
 #include <QPainter>
 #include <QScroller>
 #include <QScrollerProperties>
 #include <QStyledItemDelegate>
+#include <QVariant>
+#include <QVariantAnimation>
 
 #include "qt_common/config/uisettings.h"
 #include "qt_common/game_list/game_list_p.h"
@@ -35,18 +41,63 @@ public:
 
         QStyleOptionViewItem item = option;
         initStyleOption(&item, index);
+        const int icon_size = static_cast<int>(UISettings::values.game_icon_size.GetValue());
+        const int icon_side =
+            std::min({icon_size, item.rect.height() - 2, item.rect.width() - 8});
         const QStringList lines =
             item.text.replace(QChar::LineSeparator, QLatin1Char('\n')).split(QLatin1Char('\n'));
         item.text.clear();
-        if (const QPixmap picture = index.data(Qt::DecorationRole).value<QPixmap>();
-            !picture.isNull()) {
-            QIcon icon(picture);
-            icon.addPixmap(picture, QIcon::Selected);
-            item.icon = icon;
+
+        QPixmap decoration_picture = index.data(Qt::DecorationRole).value<QPixmap>();
+        QSize decoration_size;
+        if (!decoration_picture.isNull()) {
+            if (type == GameListItemType::Game) {
+                if (icon_side > 0) {
+                    decoration_size = QSize(icon_side, icon_side);
+                }
+            } else {
+                const qreal dpr = decoration_picture.devicePixelRatio() > 0.0
+                                      ? decoration_picture.devicePixelRatio()
+                                      : 1.0;
+                decoration_size =
+                    QSize(qRound(decoration_picture.width() / dpr),
+                          qRound(decoration_picture.height() / dpr));
+                const int max_side = std::max(0, item.rect.height() - 2);
+                if (max_side > 0 && (decoration_size.width() > max_side ||
+                                     decoration_size.height() > max_side)) {
+                    decoration_size.scale(QSize(max_side, max_side), Qt::KeepAspectRatio);
+                }
+            }
+
+            if (!decoration_size.isEmpty()) {
+                // Keep the decoration slot for layout and text, but draw the bitmap ourselves so
+                // its physical @2x pixels are used instead of QIcon scaling it through 1x.
+                item.decorationSize = decoration_size;
+                QPixmap placeholder(decoration_size);
+                placeholder.fill(Qt::transparent);
+                item.icon = QIcon(placeholder);
+            }
         }
+
         const QWidget* widget = item.widget;
         QStyle* style = widget != nullptr ? widget->style() : QApplication::style();
         style->drawControl(QStyle::CE_ItemViewItem, &item, painter, widget);
+
+        if (!decoration_picture.isNull() && !decoration_size.isEmpty()) {
+            const QRect slot =
+                style->subElementRect(QStyle::SE_ItemViewItemDecoration, &item, widget);
+            QSize draw_size = decoration_size;
+            if (draw_size.width() > slot.width() || draw_size.height() > slot.height()) {
+                draw_size.scale(slot.size(), Qt::KeepAspectRatio);
+            }
+            if (!draw_size.isEmpty()) {
+                const QRect target(slot.left() + (slot.width() - draw_size.width()) / 2,
+                                   slot.top() + (slot.height() - draw_size.height()) / 2,
+                                   draw_size.width(), draw_size.height());
+                painter->drawPixmap(target, decoration_picture);
+            }
+        }
+
         const int text_left =
             style->subElementRect(QStyle::SE_ItemViewItemText, &item, widget).left() + 4;
         const QRect rect(text_left, item.rect.top(), item.rect.right() - text_left - 4,
@@ -100,8 +151,9 @@ public:
             const int star_x = title_rect.right() + 8;
             const int star_y = title_rect.center().y() - 7;
             if (star_x + 14 <= rect.right()) {
-                painter->drawPixmap(QRect(star_x, star_y, 14, 14),
-                                    QPixmap(QStringLiteral(":/lichii/icons/star_accent@2x.png")));
+                QPixmap star(QStringLiteral(":/lichii/icons/star_accent@2x.png"));
+                star.setDevicePixelRatio(2.0);
+                painter->drawPixmap(QRect(star_x, star_y, 14, 14), star);
             }
         }
 
@@ -133,9 +185,42 @@ public:
     }
 };
 
+QPixmap LoadTreeChevron() {
+    QPixmap full(QStringLiteral(":/lichii/icons/tree_chevron@2x.png"));
+    if (full.isNull()) {
+        return {};
+    }
+    full.setDevicePixelRatio(2.0);
+    const QImage image = full.toImage().convertToFormat(QImage::Format_ARGB32_Premultiplied);
+    int min_x = image.width();
+    int min_y = image.height();
+    int max_x = -1;
+    int max_y = -1;
+    for (int y = 0; y < image.height(); ++y) {
+        const auto* line = reinterpret_cast<const QRgb*>(image.constScanLine(y));
+        for (int x = 0; x < image.width(); ++x) {
+            if (qAlpha(line[x]) == 0) {
+                continue;
+            }
+            min_x = std::min(min_x, x);
+            min_y = std::min(min_y, y);
+            max_x = std::max(max_x, x);
+            max_y = std::max(max_y, y);
+        }
+    }
+    if (max_x < min_x || max_y < min_y) {
+        return {};
+    }
+    QPixmap cropped = QPixmap::fromImage(
+        image.copy(QRect(min_x, min_y, max_x - min_x + 1, max_y - min_y + 1)));
+    cropped.setDevicePixelRatio(2.0);
+    return cropped;
+}
+
 } // namespace
 
 GameTree::GameTree(QWidget* parent) : QTreeView{parent} {
+    arrow_pixmap = LoadTreeChevron();
     setItemDelegateForColumn(GameListModel::COLUMN_NAME, new LichiiNameDelegate(this));
     setAlternatingRowColors(true);
     setSelectionMode(QHeaderView::SingleSelection);
@@ -153,12 +238,133 @@ GameTree::GameTree(QWidget* parent) : QTreeView{parent} {
 }
 
 void GameTree::SetModel(GameListModel* model) {
+    ClearArrowAnimations();
     QTreeView::setModel(model);
+    if (model != nullptr) {
+        connect(model, &QAbstractItemModel::modelReset, this, &GameTree::ClearArrowAnimations,
+                Qt::UniqueConnection);
+    }
+    const int icon_size = static_cast<int>(UISettings::values.game_icon_size.GetValue());
+    setIconSize(QSize(icon_size, icon_size));
     LoadInterfaceLayout();
     UpdateColumnVisibility(model);
 }
 
+void GameTree::drawBranches(QPainter* painter, const QRect& rect,
+                            const QModelIndex& index) const {
+    // Keep the style's row background, then draw the rotated @2x chevron.
+    QTreeView::drawBranches(painter, rect, index);
+    if (!IsLichiiTheme() || !index.isValid() || model() == nullptr ||
+        !model()->hasChildren(index)) {
+        return;
+    }
+
+    if (arrow_pixmap.isNull()) {
+        return;
+    }
+
+    const bool expanded = isExpanded(index);
+    int depth = 0;
+    for (QModelIndex parent = index.parent(); parent.isValid(); parent = parent.parent()) {
+        ++depth;
+    }
+    const int indent = indentation();
+    const QRect branch(rect.left() + depth * indent, rect.top(), indent, rect.height());
+
+    qreal angle = expanded ? 90.0 : 0.0;
+    if (!arrow_angles.isEmpty()) {
+        const QPersistentModelIndex key(index);
+        if (const auto it = arrow_angles.constFind(key); it != arrow_angles.constEnd()) {
+            angle = it.value();
+        }
+    }
+
+    // Center the visible (alpha-cropped) chevron, not its padded canvas, and rotate around
+    // that exact center.
+    const QSizeF arrow_size = arrow_pixmap.deviceIndependentSize();
+    const QPointF center = QRectF(branch).center();
+    const QRectF target(center.x() - arrow_size.width() / 2.0,
+                        center.y() - arrow_size.height() / 2.0,
+                        arrow_size.width(), arrow_size.height());
+
+    painter->save();
+    painter->setRenderHint(QPainter::SmoothPixmapTransform);
+    const QPointF pivot = target.center();
+    painter->translate(pivot);
+    painter->rotate(angle);
+    painter->translate(-pivot.x(), -pivot.y());
+    painter->drawPixmap(target.topLeft(), arrow_pixmap);
+    painter->restore();
+}
+
+void GameTree::AnimateArrow(const QModelIndex& index, bool expanded) {
+    if (!IsLichiiTheme() || !index.isValid() || model() == nullptr ||
+        !model()->hasChildren(index)) {
+        return;
+    }
+
+    const QPersistentModelIndex key(index);
+    const qreal end = expanded ? 90.0 : 0.0;
+    const qreal start = arrow_angles.value(key, expanded ? 0.0 : 90.0);
+
+    if (QVariantAnimation* old = arrow_animations.take(key)) {
+        old->stop();
+        old->deleteLater();
+    }
+
+    // Keep the first paint at the current angle; otherwise a new expansion would flash at 90°.
+    arrow_angles[key] = start;
+
+    auto* animation = new QVariantAnimation(this);
+    animation->setStartValue(start);
+    animation->setEndValue(end);
+    animation->setDuration(160);
+    animation->setEasingCurve(QEasingCurve::OutCubic);
+    connect(animation, &QVariantAnimation::valueChanged, this,
+            [this, key](const QVariant& value) {
+                arrow_angles[key] = value.toReal();
+                const QModelIndex current = static_cast<QModelIndex>(key);
+                if (!current.isValid()) {
+                    return;
+                }
+                const QRect row = visualRect(current);
+                if (row.isValid()) {
+                    viewport()->update(QRect(0, row.top(), viewport()->width(), row.height()));
+                }
+            });
+    connect(animation, &QVariantAnimation::finished, this, [this, key, animation] {
+        // A newer animation for this row may have replaced this one.
+        if (arrow_animations.value(key) == animation) {
+            arrow_animations.remove(key);
+            arrow_angles.remove(key);
+            const QModelIndex current = static_cast<QModelIndex>(key);
+            if (current.isValid()) {
+                const QRect row = visualRect(current);
+                if (row.isValid()) {
+                    viewport()->update(
+                        QRect(0, row.top(), viewport()->width(), row.height()));
+                }
+            }
+        }
+        animation->deleteLater();
+    });
+    arrow_animations.insert(key, animation);
+    animation->start();
+}
+
+void GameTree::ClearArrowAnimations() {
+    for (auto* animation : std::as_const(arrow_animations)) {
+        animation->stop();
+        animation->deleteLater();
+    }
+    arrow_animations.clear();
+    arrow_angles.clear();
+}
+
 void GameTree::OnItemExpanded(const QModelIndex& item) {
+    const bool is_expanded = isExpanded(item);
+    AnimateArrow(item, is_expanded);
+
     const auto type = item.data(GameListItem::TypeRole).value<GameListItemType>();
     const bool is_dir = type == GameListItemType::CustomDir || type == GameListItemType::SdmcDir ||
                         type == GameListItemType::UserNandDir ||
@@ -167,7 +373,6 @@ void GameTree::OnItemExpanded(const QModelIndex& item) {
     if (!is_dir && !is_fave) {
         return;
     }
-    const bool is_expanded = isExpanded(item);
     if (is_fave) {
         UISettings::values.favorites_expanded = is_expanded;
         return;
