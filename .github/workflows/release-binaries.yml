@@ -42,7 +42,8 @@ permissions:
 
 # Clang major the Linux PGO build uses, from apt.llvm.org. A profile is written by a current clang
 # and an older reader refuses it, so this has to stay at or above whatever produced
-# eglantine.profdata; bump it when a refreshed profile needs a newer LLVM.
+# eglantine.profdata and lichii-linux.profdata (LLVM 23); bump it when a refreshed profile needs
+# a newer LLVM.
 env:
   PGO_LLVM_VERSION: "23"
 
@@ -115,15 +116,17 @@ jobs:
         include:
           - platform: linux-x86_64
             runner: ubuntu-24.04
-          # The Linux -pgo builds are the same programs compiled by clang against the repo's
-          # eglantine.profdata. Eden's profile (Eden-CI/PGO) comes from Switch 1 games: with it Mario
-          # Kart World ran at about half the speed of the normal build, with eglantine.profdata at
-          # about the same speed. Both Windows builds are clang-cl with ThinLTO; windows-x86_64-pgo
+          # The Linux -pgo builds are the same programs compiled by clang against a profile in the
+          # repo: linux-x86_64-pgo uses lichii-linux.profdata, eglantine.profdata merged with Ocarina
+          # of Time gameplay on x86_64 (see docs/CI.md); linux-aarch64-pgo keeps eglantine.profdata.
+          # Eden's profile (Eden-CI/PGO) comes from Switch 1 games: with it Mario Kart World ran at
+          # about half the speed of the normal build, with eglantine.profdata at about the same speed. Both Windows builds are clang-cl with ThinLTO; windows-x86_64-pgo
           # adds lichii-windows.profdata, an MSVC-ABI profile trained on Ocarina of Time (see
           # docs/CI.md). MSVC still builds for development.
           - platform: linux-x86_64-pgo
             runner: ubuntu-24.04
             pgo: true
+            profile: lichii-linux.profdata
           - platform: windows-x86_64
             runner: windows-2022
           - platform: windows-x86_64-pgo
@@ -389,7 +392,7 @@ jobs:
           )
           if [ '${{ matrix.pgo }}' = 'true' ]; then
             # Same flags Eden's CI passes for its clang PGO build.
-            profile="-fprofile-use=$PWD/eglantine.profdata -Wno-backend-plugin \
+            profile="-fprofile-use=$PWD/${{ matrix.profile || 'eglantine.profdata' }} -Wno-backend-plugin \
               -Wno-profile-instr-unprofiled -Wno-profile-instr-out-of-date"
             flags+=(
               "-DCMAKE_C_COMPILER=clang-$PGO_LLVM_VERSION"
@@ -841,7 +844,7 @@ jobs:
           }
           pgo_note=""
           if [[ -n "$has_pgo" ]]; then
-            pgo_note="The PGO builds are the same programs compiled with profile-guided optimization. Linux uses clang with Eglantine's profile; Windows uses clang-cl and ThinLTO with a profile trained in Lichii on Ocarina of Time, so other games gain less. Prefer them when your CPU supports it."
+            pgo_note="The PGO builds are the same programs compiled with profile-guided optimization. Linux x86_64 uses clang with Eglantine's profile merged with one trained in Lichii on Ocarina of Time, and Linux ARM uses Eglantine's profile; Windows uses clang-cl and ThinLTO with a profile trained in Lichii on Ocarina of Time, so other games gain less. Prefer them when your CPU supports it."
           fi
 
           cat > notes.md <<EOF

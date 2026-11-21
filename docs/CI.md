@@ -108,6 +108,18 @@ To retrain:
 3. Merge with that LLVM: `llvm-profdata merge -o lichii-windows.profdata <dir>/*.profraw`.
 4. Check that `llvm-profdata show --all-functions lichii-windows.profdata` lists names starting with `?`, then replace the file in the repository root.
 
+## Linux PGO profile
+
+`linux-x86_64-pgo` is the `linux-x86_64` build compiled by clang (`PGO_LLVM_VERSION`) with `-fprofile-use=lichii-linux.profdata`. That profile is `eglantine.profdata`, weight 1, merged with an indexed profile of two sessions of about five minutes of Ocarina of Time gameplay on x86_64 Linux (a Steam Deck), weight 12, so the code Eglantine's profile covered keeps some weight and the Switch 2 paths Ocarina reaches get most of it. `linux-aarch64-pgo` still uses `eglantine.profdata`: nobody has measured an aarch64 profile yet.
+
+As for Windows, an older profile only produces warnings, and code it never reached is compiled as in the normal build.
+
+To retrain:
+
+1. Configure a Release build as the `linux-x86_64-pgo` job does, with clang `PGO_LLVM_VERSION` and `-fprofile-generate=<dir> -fprofile-update=atomic` in `CMAKE_C_FLAGS` and `CMAKE_CXX_FLAGS` in place of `-fprofile-use`, and build `lichii`.
+2. Run it with `LLVM_PROFILE_FILE=<dir>/lichii-%p.profraw`, play the scenes the profile should cover, and exit normally (counters are written at exit).
+3. Merge with the same LLVM: `llvm-profdata merge -o ocarina.profdata <dir>/*.profraw`, then `llvm-profdata merge -o lichii-linux.profdata -weighted-input=1,eglantine.profdata -weighted-input=12,ocarina.profdata`, and replace the file in the repository root.
+
 ## Release naming
 
 | Kind              | Tag                    | Release title                            | GitHub Release flag                |
