@@ -4,7 +4,10 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 
 #include <cstring>
+#include <limits>
 
+#include "common/alignment.h"
+#include "common/logging.h"
 #include "common/string_util.h"
 #include "core/file_sys/kernel_executable.h"
 #include "core/file_sys/vfs/vfs_offset.h"
@@ -96,6 +99,41 @@ bool DecompressBLZ(std::vector<u8>& data) {
 
     return true;
 }
+
+constexpr u64 KipPageSize = 0x1000;
+
+// The layout the kernel accepts for an initial process (Atmosphere's
+// KInitialProcessReader::MakeCreateProcessParameter): .text at 0, then .rodata, .data and .bss in
+// that order, each of the first three starting on a page and ending before the next begins, .bss
+// after .data. The header's fields are 32-bit; every sum here is 64-bit, so none wraps. The image
+// must also fit what a code set segment, whose size is a u32, can describe: real KIPs are a few
+// megabytes. Sets the image size and the page aligned extent of .text, .rodata and .data, the last
+// running to the end of the image over .bss.
+bool ValidLayout(const KIPHeader& header, u64& image_size, std::array<KIPSegment, 3>& segments) {
+    const u64 rx = header.sections[0].offset;
+    const u64 rx_size = header.sections[0].decompressed_size;
+    const u64 ro = header.sections[1].offset;
+    const u64 ro_size = header.sections[1].decompressed_size;
+    const u64 rw = header.sections[2].offset;
+    const u64 rw_size = header.sections[2].decompressed_size;
+    const u64 bss = header.sections[3].offset;
+    const u64 bss_size = header.sections[3].decompressed_size;
+    if (rx != 0 || ro % KipPageSize != 0 || rw % KipPageSize != 0) {
+        return false;
+    }
+    const u64 rx_extent = Common::AlignUp(rx_size, KipPageSize);
+    const u64 ro_extent = Common::AlignUp(ro_size, KipPageSize);
+    if (rx + rx_extent > ro || ro + ro_extent > rw || rw + rw_size > bss) {
+        return false;
+    }
+    const u64 end = Common::AlignUp(bss_size > 0 ? bss + bss_size : rw + rw_size, KipPageSize);
+    if (end > std::numeric_limits<u32>::max()) {
+        return false;
+    }
+    image_size = end;
+    segments = {{{rx, rx_extent}, {ro, ro_extent}, {rw, end - rw}}};
+    return true;
+}
 } // Anonymous namespace
 
 KIP::KIP(const VirtualFile& file) : status(Loader::ResultStatus::Success) {
@@ -114,33 +152,65 @@ KIP::KIP(const VirtualFile& file) : status(Loader::ResultStatus::Success) {
         return;
     }
 
+    // A rejected KIP keeps nothing it read or decompressed.
+    const auto reject = [this](Loader::ResultStatus result) {
+        status = result;
+        decompressed_sections = {};
+        segments = {};
+        image_size = 0;
+    };
+
+    // The six sections' stored bytes follow the header back to back. Their sum, in 64-bit
+    // arithmetic so six u32s cannot wrap, is where the next KIP of an INI1 starts; a file shorter
+    // than that is a truncated KIP, and ReadBytes would stop at its end.
+    u64 end = sizeof(KIPHeader);
+    for (const auto& section : header.sections) {
+        end += section.compressed_size;
+    }
+    if (end > file->GetSize()) {
+        reject(Loader::ResultStatus::ErrorBadKIPHeader);
+        return;
+    }
+    size_known = true;
+
+    // From the header alone, before anything is read.
+    if (!ValidLayout(header, image_size, segments)) {
+        reject(Loader::ResultStatus::ErrorBadKIPHeader);
+        return;
+    }
+
+    // As the kernel's loader (Atmosphere's KInitialProcessReader) and hactool do: the flags say
+    // which sections are BLZ compressed; a section stored raw is copied, and whatever its size has
+    // beyond its stored bytes is zero, which the loader's image already is. So no section is ever
+    // allocated at the size its header gives: that size comes from the file, and a damaged .kip
+    // claiming gigabytes for one cost that much as soon as the game list read it. Only .text,
+    // .rodata and .data are read: .bss and the two unused sections hold no file data that is used.
     u64 offset = sizeof(KIPHeader);
-    for (std::size_t i = 0; i < header.sections.size(); ++i) {
-        auto compressed = file->ReadBytes(header.sections[i].compressed_size, offset);
-        offset += header.sections[i].compressed_size;
-        // A section the file does not hold in full is a truncated KIP: ReadBytes stops at the end
-        // of the file, which used to leave a stored section shorter than its header says.
-        if (compressed.size() != header.sections[i].compressed_size) {
-            status = Loader::ResultStatus::ErrorBadKIPHeader;
+    for (std::size_t i = 0; i < decompressed_sections.size(); ++i) {
+        auto& section = decompressed_sections[i];
+        const bool compressed = (header.flags & (1U << i)) != 0;
+        // A section stored raw is its bytes as they are: more of them than its size is known
+        // from the header, without reading them.
+        if (!compressed &&
+            header.sections[i].compressed_size > header.sections[i].decompressed_size) {
+            reject(Loader::ResultStatus::ErrorBadKIPHeader);
             return;
         }
-
-        if (header.sections[i].compressed_size == 0 && header.sections[i].decompressed_size != 0) {
-            // Sections 3 to 5 (.bss and two unused ones) hold no file data and nothing reads
-            // them: the loader takes the .bss size from the header. Their sizes come from the
-            // file, so do not allocate them.
-            if (i >= 3) {
-                continue;
-            }
-            decompressed_sections[i] = std::vector<u8>(header.sections[i].decompressed_size);
-        } else if (header.sections[i].compressed_size == header.sections[i].decompressed_size) {
-            decompressed_sections[i] = std::move(compressed);
-        } else {
-            decompressed_sections[i] = compressed;
-            if (!DecompressBLZ(decompressed_sections[i])) {
-                status = Loader::ResultStatus::ErrorBLZDecompressionFailed;
-                return;
-            }
+        section = file->ReadBytes(header.sections[i].compressed_size, offset);
+        offset += header.sections[i].compressed_size;
+        if (section.size() != header.sections[i].compressed_size) {
+            reject(Loader::ResultStatus::ErrorBadKIPHeader);
+            return;
+        }
+        // A compressed section with no stored bytes has nothing to decompress: all zero.
+        if (compressed && !section.empty() && !DecompressBLZ(section)) {
+            reject(Loader::ResultStatus::ErrorBLZDecompressionFailed);
+            return;
+        }
+        // Raw or decompressed, the bytes must fit the section the layout check placed.
+        if (section.size() > header.sections[i].decompressed_size) {
+            reject(Loader::ResultStatus::ErrorBadKIPHeader);
+            return;
         }
     }
 }
@@ -158,7 +228,11 @@ u64 KIP::GetTitleID() const {
 }
 
 std::vector<u8> KIP::GetSectionDecompressed(u8 index) const {
-    return decompressed_sections[index];
+    return index < decompressed_sections.size() ? decompressed_sections[index] : std::vector<u8>{};
+}
+
+const std::array<KIPSegment, 3>& KIP::GetSegments() const {
+    return segments;
 }
 
 bool KIP::Is64Bit() const {
@@ -213,6 +287,18 @@ u32 KIP::GetDataOffset() const {
     return header.sections[2].offset;
 }
 
+u32 KIP::GetSectionSize(u8 index) const {
+    return index < 3 ? header.sections[index].decompressed_size : 0;
+}
+
+u64 KIP::GetImageSize() const {
+    return image_size;
+}
+
+bool KIP::IsSizeKnown() const {
+    return size_known;
+}
+
 u64 KIP::GetSize() const {
     u64 size = sizeof(KIPHeader);
     for (const auto& section : header.sections) {
@@ -245,17 +331,24 @@ INI::INI(const VirtualFile& file) : status(Loader::ResultStatus::Success) {
         return;
     }
 
-    // The KIPs follow the header back to back. A KIP that does not parse gives no reliable size,
-    // so the ones after it cannot be found.
+    // The KIPs follow the header back to back. A KIP whose header or stored sections the file
+    // does not hold gives no reliable size, so the ones after it cannot be found. One that is
+    // whole but rejected (a layout the kernel would refuse, a section that does not decompress)
+    // is skipped: stopping there lost every KIP after it, FS and spl among them.
     u64 offset = sizeof(INIHeader);
     for (std::size_t i = 0; i < header.kip_count && offset < file->GetSize(); ++i) {
         const auto kip_file =
             std::make_shared<OffsetVfsFile>(file, file->GetSize() - offset, offset);
         KIP kip(kip_file);
-        if (kip.GetStatus() != Loader::ResultStatus::Success) {
+        if (!kip.IsSizeKnown()) {
             break;
         }
         offset += kip.GetSize();
+        if (kip.GetStatus() != Loader::ResultStatus::Success) {
+            LOG_WARNING(Loader, "INI1: KIP {} ({}) skipped: {}", i, kip.GetName(),
+                        Loader::GetResultStatusString(kip.GetStatus()));
+            continue;
+        }
         kips.push_back(std::move(kip));
     }
 }

@@ -3,8 +3,9 @@
 
 // The metadata readers that take a whole file: NACP, NPDM (main.npdm), CNMT, KIP1 and INI1.
 // Run: build-fuzz/bin/fuzz_meta -max_len=32768 -rss_limit_mb=2048 -malloc_limit_mb=2048 corpus/meta
-// A KIP header can still ask for a large zero-filled .text, .rodata or .data with no stored bytes;
-// those show up as out-of-memory reports, not crashes.
+// A KIP's sections are kept at the bytes the file stores or decompresses to (BLZ output is at most
+// nine times its input), never at the sizes its header gives, so an out-of-memory report from
+// KIP1 or INI1 is a finding, not a header asking for a large section.
 
 #include <memory>
 #include <vector>
