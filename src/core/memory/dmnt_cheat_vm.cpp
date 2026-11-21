@@ -752,10 +752,24 @@ std::vector<DmntCheatVm::MainStore> DmntCheatVm::MainStaticStores(
     std::vector<MainStore> stores;
     std::array<std::optional<u64>, NumRegisters> values;
     values.fill(0);
-    std::size_t loop_depth = 0;
+    struct PendingLoopStore {
+        MainStore store;
+        u32 offset_register;
+    };
+    struct LoopScope {
+        std::array<bool, NumRegisters> modified{};
+        std::vector<PendingLoopStore> pending;
+    };
+    std::vector<LoopScope> loops;
     std::size_t conditional_depth = 0;
     std::size_t position = 0;
-    const auto change = [&](u32 reg) { values[reg & 0xF].reset(); };
+    const auto change = [&](u32 reg) {
+        reg &= 0xF;
+        values[reg].reset();
+        for (auto& loop : loops) {
+            loop.modified[reg] = true;
+        }
+    };
     const auto restores = [](SaveRestoreRegisterOpType type) {
         return type == SaveRestoreRegisterOpType::Restore ||
                type == SaveRestoreRegisterOpType::ClearRegs;
@@ -771,10 +785,15 @@ std::vector<DmntCheatVm::MainStore> DmntCheatVm::MainStaticStores(
         }
         if (const auto* store = std::get_if<StoreStaticOpcode>(&opcode.opcode)) {
             const auto offset = values[store->offset_register & 0xF];
-            if (store->mem_type == MemoryAccessType::MainNso && loop_depth == 0 && offset &&
+            if (store->mem_type == MemoryAccessType::MainNso && offset &&
                 position < ends.size()) {
                 const u64 begin = store->rel_address + *offset;
-                stores.push_back({ends[position].second, begin, begin + store->bit_width});
+                MainStore item{ends[position].second, begin, begin + store->bit_width};
+                if (loops.empty()) {
+                    stores.push_back(item);
+                } else {
+                    loops.back().pending.push_back({item, store->offset_register & 0xF});
+                }
             }
         } else if (std::holds_alternative<BeginConditionalOpcode>(opcode.opcode) ||
                    std::holds_alternative<BeginKeypressConditionalOpcode>(opcode.opcode) ||
@@ -786,10 +805,25 @@ std::vector<DmntCheatVm::MainStore> DmntCheatVm::MainStaticStores(
             }
         } else if (const auto* loop = std::get_if<ControlLoopOpcode>(&opcode.opcode)) {
             change(loop->reg_index);
-            loop_depth = loop->start_loop ? loop_depth + 1 : (loop_depth ? loop_depth - 1 : 0);
+            if (loop->start_loop) {
+                loops.emplace_back();
+            } else if (!loops.empty()) {
+                auto completed = std::move(loops.back());
+                loops.pop_back();
+                for (const auto& candidate : completed.pending) {
+                    if (completed.modified[candidate.offset_register]) {
+                        continue;
+                    }
+                    if (loops.empty()) {
+                        stores.push_back(candidate.store);
+                    } else {
+                        loops.back().pending.push_back(candidate);
+                    }
+                }
+            }
         } else if (const auto* load = std::get_if<LoadRegisterStaticOpcode>(&opcode.opcode)) {
             change(load->reg_index);
-            if (loop_depth == 0 && conditional_depth == 0) {
+            if (loops.empty() && conditional_depth == 0) {
                 values[load->reg_index & 0xF] = load->value;
             }
         } else if (const auto* read = std::get_if<LoadRegisterMemoryOpcode>(&opcode.opcode)) {
