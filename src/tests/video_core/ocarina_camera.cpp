@@ -68,7 +68,7 @@ TEST_CASE("Ocarina camera keeps scene extent and perspective checks", "[video_co
           OcarinaCameraIssue::Projection);
 }
 
-TEST_CASE("Ocarina camera accepts DLSS padding only within the existing tolerance",
+TEST_CASE("Ocarina camera accepts explicitly permitted padding within the existing tolerance",
           "[video_core][ocarina]") {
     CHECK(DecodeOcarinaCamera(Camera(2276, 1280), 2288, 1280, true).issue ==
           OcarinaCameraIssue::None);

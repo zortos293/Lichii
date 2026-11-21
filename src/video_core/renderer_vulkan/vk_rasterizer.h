@@ -302,6 +302,7 @@ private:
     /// Records the uniform and storage buffers of the current draw or dispatch for the frame dump.
     bool FrameDumpBuffers(bool compute, std::span<const u64> shader_hashes);
 
+    Core::Frontend::EmuWindow& emu_window;
     Tegra::GPU& gpu;
     Tegra::MaxwellDeviceMemoryManager& device_memory;
 
@@ -345,8 +346,6 @@ private:
     };
     std::optional<OcarinaCameraRefusal> oot_camera_refusal;
     mutable std::optional<VideoCommon::OcarinaUpscaleBackend> oot_backend;
-    /// The game started at the DLSS Performance render scale (1920x1080).
-    bool oot_performance_scale{};
     struct OcarinaMotionTrace {
         const Tegra::MemoryManager* camera_channel{};
         const Tegra::MemoryManager* depth_channel{};
@@ -362,8 +361,8 @@ private:
         /// Whether an image holds the whole scene: the game samples padded targets through
         /// descriptors of the scene's own size.
         [[nodiscard]] bool SceneSized(u32 width, u32 height) const noexcept {
-            return (width == extent.width || width == image_extent.width) &&
-                   (height == extent.height || height == image_extent.height);
+            return (width == extent.width && height == extent.height) ||
+                   (width == image_extent.width && height == image_extent.height);
         }
     } oot_motion;
     std::unique_ptr<class OcarinaUpscaler> oot_live_dlss;
@@ -377,6 +376,7 @@ private:
     u32 oot_jitter_phases{8}; ///< Halton sequence length for the last FSR frame's scale
     std::optional<u64> oot_4k_scene_frame;
     VkImage oot_4k_guest_present{};
+    VkExtent2D oot_temporal_output_extent{};
     std::optional<u64> oot_effects_frame;
     GPUVAddr oot_effects_address{};
     VkImageView oot_effects_scene{};

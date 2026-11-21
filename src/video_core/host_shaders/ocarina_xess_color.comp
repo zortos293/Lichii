@@ -1,0 +1,24 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
+#version 450
+
+layout(local_size_x = 8, local_size_y = 8) in;
+layout(binding = 0) uniform sampler2D guest_color;
+layout(binding = 1, rgba16f) uniform writeonly image2D xess_color;
+
+bool IsFinite(vec3 value) {
+    const uvec3 exponent = floatBitsToUint(value) & 0x7f800000u;
+    return all(notEqual(exponent, uvec3(0x7f800000u)));
+}
+
+void main() {
+    ivec2 pixel = ivec2(gl_GlobalInvocationID.xy);
+    if (any(greaterThanEqual(pixel, imageSize(xess_color)))) {
+        return;
+    }
+    vec3 color = texelFetch(guest_color, pixel, 0).rgb;
+    if (!IsFinite(color)) {
+        color = vec3(0.0);
+    }
+    color = clamp(color, vec3(0.0), vec3(1.0));
+    imageStore(xess_color, pixel, vec4(color * color, 1.0));
+}

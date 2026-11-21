@@ -198,6 +198,39 @@ std::unique_ptr<TranslationMap> InitializeTranslations(QObject* parent) {
            tr("Replaces Ocarina of Time's native upscaler using scene depth and camera motion. "
               "Works on any supported Vulkan GPU. NVIDIA DLSS takes precedence when enabled and "
               "available. RCAS Sharpness controls sharpening. Takes effect when a game starts."));
+        INSERT(Settings, ocarina_xess, tr("Use Intel XeSS upscaling in Ocarina of Time"),
+                  tr("Uses Intel XeSS-SR instead of the game's native network. Download Intel's official "
+                      "XeSS SDK 3.0.2 (its libxess.dll reports runtime version 2.0.2) and place "
+                      "libxess.dll in the xess directory under Lichii's user data folder or next "
+                      "to the executable. "
+                      "If XeSS is unavailable, FSR 3.1 is used "
+                      "when supported, otherwise the native game path remains active. NVIDIA DLSS takes "
+                      "precedence when enabled and available. Takes effect when a game starts."));
+        INSERT(Settings, ocarina_render_scale, tr("Ocarina render scale:"),
+               tr("Legacy scale Ocarina of Time's internal render resolution. Keep this setting for "
+                  "backward compatibility; the independent Render Input setting supersedes it. "
+                  "Requires the Max Resolution (built-in) patch."));
+        INSERT(Settings, ocarina_render_input, tr("Ocarina render input:"),
+               tr("Render resolution supplied to XeSS-SR or FSR 3.1. Legacy keeps the existing "
+                  "Ocarina render scale patches. Custom uses the width and height below. Takes "
+                  "effect when a game starts."));
+        INSERT(Settings, ocarina_upscale_output, tr("Ocarina upscale output:"),
+               tr("Resolution produced by XeSS-SR or FSR 3.1 before final window presentation. "
+                  "Can be changed while a game is running."));
+        INSERT(Settings, ocarina_upscaler, tr("Ocarina upscaler:"),
+               tr("Select XeSS-SR, FSR 3.1, or Off. Legacy preserves the existing XeSS/FSR setting "
+                  "precedence. Unsupported backends fall back gracefully. Takes effect when a game "
+                  "starts."));
+        INSERT(Settings, ocarina_custom_input_width, tr("Custom render input width:"),
+               tr("Horizontal render resolution for the Custom render input preset."));
+        INSERT(Settings, ocarina_custom_input_height, tr("Custom render input height:"),
+               tr("Vertical render resolution for the Custom render input preset."));
+        INSERT(Settings, ocarina_custom_output_width, tr("Custom upscale output width:"),
+               tr("Horizontal upscale resolution for the Custom upscale output preset."));
+        INSERT(Settings, ocarina_custom_output_height, tr("Custom upscale output height:"),
+               tr("Vertical upscale resolution for the Custom upscale output preset."));
+        INSERT(Settings, xess_quality, tr("Intel XeSS quality:"),
+                tr("Quality preset used by XeSS-SR in Ocarina of Time."));
 #if defined(__linux__) && !defined(__ANDROID__)
     INSERT(Settings, amd_fsr4, tr("Use FSR 4 (fsr4-vk community Vulkan port) in place of FSR 3.1"),
            tr("Uses fsr4-vk, a community Vulkan port of AMD's ML-based FSR 4.1.1 that Lichii's "
@@ -231,9 +264,11 @@ std::unique_ptr<TranslationMap> InitializeTranslations(QObject* parent) {
               "applies anti-aliasing at the game's render resolution, then scales to its output; "
               "Ocarina's 1440p mode stays at 1440p instead of reconstructing to 4K.\n"
               "In The Legend of Zelda: Ocarina of Time (docked, with the Max Resolution add-on), "
-              "Balanced, Performance and Ultra Performance lower the game's render resolution "
+              "when Ocarina render scale is Automatic, Balanced, Performance and Ultra Performance "
+              "lower the game's render resolution "
               "from 2560x1440 to 2276x1280, 1920x1080 and 1280x720 before DLSS reconstructs 4K. "
-              "That resolution changes when the game starts.\n"
+              "An explicit Ocarina render scale overrides those modes. That resolution changes "
+              "when the game starts.\n"
               "In other games, explicit modes only apply when the game's render size is within "
               "NVIDIA's supported range; otherwise Automatic is used and the fallback is logged. "
               "There they don't change the game's render resolution. Apply/OK updates the mode "
@@ -599,6 +634,42 @@ std::unique_ptr<ComboboxTranslationMap> ComboboxEnumeration(QObject* parent) {
                            PAIR(NvidiaDlssQuality, Balanced, tr("Balanced")),
                            PAIR(NvidiaDlssQuality, Performance, tr("Performance")),
                            PAIR(NvidiaDlssQuality, UltraPerformance, tr("Ultra Performance"))}});
+    translations->insert({Settings::EnumMetadata<Settings::XessQuality>::Index(),
+                          {PAIR(XessQuality, UltraQuality, tr("Ultra Quality")),
+                           PAIR(XessQuality, Quality, tr("Quality")),
+                           PAIR(XessQuality, Balanced, tr("Balanced")),
+                           PAIR(XessQuality, Performance, tr("Performance")),
+                           PAIR(XessQuality, UltraPerformance, tr("Ultra Performance"))}});
+    translations->insert(
+        {Settings::EnumMetadata<Settings::OcarinaRenderScale>::Index(),
+         {PAIR(OcarinaRenderScale, Automatic, tr("Automatic (NVIDIA DLSS setting)")),
+          PAIR(OcarinaRenderScale, Scale100, tr("100%")),
+          PAIR(OcarinaRenderScale, Scale87, tr("87%")),
+          PAIR(OcarinaRenderScale, Scale75, tr("75%")),
+          PAIR(OcarinaRenderScale, Scale50, tr("50%"))}});
+       translations->insert(
+              {Settings::EnumMetadata<Settings::OcarinaRenderInput>::Index(),
+               {PAIR(OcarinaRenderInput, Legacy, tr("Legacy (existing render scale)")),
+                PAIR(OcarinaRenderInput, P540, tr("960 x 540 (540p)")),
+                PAIR(OcarinaRenderInput, P720, tr("1280 x 720 (720p)")),
+                PAIR(OcarinaRenderInput, P900, tr("1600 x 900 (900p)")),
+                PAIR(OcarinaRenderInput, P1080, tr("1920 x 1080 (1080p)")),
+                PAIR(OcarinaRenderInput, P1440, tr("2560 x 1440 (1440p)")),
+                PAIR(OcarinaRenderInput, Custom, tr("Custom"))}});
+       translations->insert(
+              {Settings::EnumMetadata<Settings::OcarinaUpscaleOutput>::Index(),
+               {PAIR(OcarinaUpscaleOutput, Legacy, tr("Legacy (window size)")),
+                PAIR(OcarinaUpscaleOutput, P1080, tr("1920 x 1080 (1080p)")),
+                PAIR(OcarinaUpscaleOutput, P1440, tr("2560 x 1440 (1440p)")),
+                PAIR(OcarinaUpscaleOutput, P2160, tr("3840 x 2160 (2160p)")),
+                PAIR(OcarinaUpscaleOutput, MatchWindow, tr("Match window")),
+                PAIR(OcarinaUpscaleOutput, Custom, tr("Custom"))}});
+       translations->insert(
+              {Settings::EnumMetadata<Settings::OcarinaUpscaler>::Index(),
+               {PAIR(OcarinaUpscaler, Legacy, tr("Legacy (existing XeSS/FSR settings)")),
+                PAIR(OcarinaUpscaler, Xess, tr("Intel XeSS-SR")),
+                PAIR(OcarinaUpscaler, Fsr, tr("AMD FSR 3.1")),
+                PAIR(OcarinaUpscaler, Off, tr("Off (native resolution)"))}});
     translations->insert(
         {Settings::EnumMetadata<Settings::NvidiaDlssPreset>::Index(),
          {PAIR(NvidiaDlssPreset, M, tr("M (DLSS 4.5, default)")),

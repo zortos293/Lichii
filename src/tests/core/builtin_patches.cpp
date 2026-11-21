@@ -1264,7 +1264,7 @@ TEST_CASE("Built-in Texture Pool x2 doubles the allocator's initial pool size",
     REQUIRE(WordAt(patched, RoutineOffset) == 0);
 }
 
-TEST_CASE("Built-in DLSS render scale follows the NVIDIA DLSS quality", "[patch_manager]") {
+TEST_CASE("Built-in Ocarina render scale follows its setting", "[patch_manager]") {
 #ifdef EGLANTINE_STREAMLINE
     constexpr bool DlssBuild = true;
 #else
@@ -1276,6 +1276,8 @@ TEST_CASE("Built-in DLSS render scale follows the NVIDIA DLSS quality", "[patch_
         ~SettingsGuard() {
             Settings::values.nvidia_dlss.SetValue(false);
             Settings::values.nvidia_dlss_quality.SetValue(Settings::NvidiaDlssQuality::Automatic);
+            Settings::values.ocarina_render_scale.SetValue(Settings::OcarinaRenderScale::Automatic);
+            Settings::values.ocarina_render_input.SetValue(Settings::OcarinaRenderInput::Legacy);
             Settings::values.use_docked_mode.SetValue(Settings::ConsoleMode::Handheld);
         }
     } guard;
@@ -1285,9 +1287,23 @@ TEST_CASE("Built-in DLSS render scale follows the NVIDIA DLSS quality", "[patch_
     std::memcpy(nso.data() + ScaleOffset, &ScaleOne, sizeof(ScaleOne));
     const auto scale = [&] { return WordAt(context.Manager().PatchNSO(nso, "main"), ScaleOffset); };
 
+    Settings::values.ocarina_render_scale.SetValue(Settings::OcarinaRenderScale::Automatic);
     Settings::values.nvidia_dlss.SetValue(true);
     Settings::values.use_docked_mode.SetValue(Settings::ConsoleMode::Docked);
     using Quality = Settings::NvidiaDlssQuality;
+    using Scale = Settings::OcarinaRenderScale;
+    const auto scale_for_quality = [](Quality quality) -> std::optional<Scale> {
+        switch (quality) {
+        case Quality::Balanced:
+            return Scale::Scale87;
+        case Quality::Performance:
+            return Scale::Scale75;
+        case Quality::UltraPerformance:
+            return Scale::Scale50;
+        default:
+            return std::nullopt;
+        }
+    };
     for (const auto& [quality, word] : std::array<std::pair<Quality, u32>, 6>{{
              {Quality::Automatic, ScaleOne},
              {Quality::Native, ScaleOne},
@@ -1298,17 +1314,55 @@ TEST_CASE("Built-in DLSS render scale follows the NVIDIA DLSS quality", "[patch_
          }}) {
         Settings::values.nvidia_dlss_quality.SetValue(quality);
         CHECK(scale() == (DlssBuild ? word : ScaleOne));
-        CHECK(Settings::AppliedOcarinaRenderScale() ==
-              (DlssBuild && word != ScaleOne ? std::optional{quality} : std::nullopt));
+        std::optional<Scale> expected_scale;
+        if (DlssBuild) {
+            expected_scale = scale_for_quality(quality);
+        }
+        CHECK(Settings::AppliedOcarinaRenderScale() == expected_scale);
     }
 
+    Settings::values.nvidia_dlss.SetValue(false);
+    for (const auto& mode : {Settings::ConsoleMode::Docked, Settings::ConsoleMode::Handheld}) {
+        Settings::values.use_docked_mode.SetValue(mode);
+        for (const auto& [selected, word] :
+             std::array<std::pair<Scale, u32>, 4>{{
+                 {Scale::Scale100, ScaleOne},
+                 {Scale::Scale87, 0x52A7EBE9},
+                 {Scale::Scale75, 0x52A7E809},
+                 {Scale::Scale50, 0x52A7E009},
+             }}) {
+            Settings::values.ocarina_render_scale.SetValue(selected);
+            CHECK(scale() == word);
+            CHECK(Settings::AppliedOcarinaRenderScale() == selected);
+        }
+    }
+
+    Settings::values.ocarina_render_scale.SetValue(Scale::Automatic);
     Settings::values.nvidia_dlss_quality.SetValue(Quality::Performance);
     Settings::values.use_docked_mode.SetValue(Settings::ConsoleMode::Handheld);
     CHECK(scale() == ScaleOne);
     Settings::values.use_docked_mode.SetValue(Settings::ConsoleMode::Docked);
-    Settings::values.nvidia_dlss.SetValue(false);
     CHECK(scale() == ScaleOne);
     Settings::values.nvidia_dlss.SetValue(true);
+    Settings::values.ocarina_render_scale.SetValue(Scale::Scale75);
+    CHECK(scale() == 0x52A7E809);
+
+    Settings::values.ocarina_render_input.SetValue(Settings::OcarinaRenderInput::P540);
+    CHECK(scale() == 0x52A7D809);
+    Settings::values.ocarina_render_input.SetValue(Settings::OcarinaRenderInput::P720);
+    CHECK(scale() == 0x52A7E009);
+    Settings::values.ocarina_render_input.SetValue(Settings::OcarinaRenderInput::P900);
+    CHECK(scale() == 0x52A7E409);
+    Settings::values.ocarina_render_input.SetValue(Settings::OcarinaRenderInput::P1080);
+    CHECK(scale() == 0x52A7E809);
+    Settings::values.ocarina_render_input.SetValue(Settings::OcarinaRenderInput::P1440);
+    CHECK(scale() == ScaleOne);
+    Settings::values.ocarina_render_input.SetValue(Settings::OcarinaRenderInput::Custom);
+    Settings::values.ocarina_custom_input_width.SetValue(960);
+    Settings::values.ocarina_custom_input_height.SetValue(540);
+    CHECK(scale() == 0x52A7D809);
+
+    Settings::values.ocarina_render_input.SetValue(Settings::OcarinaRenderInput::Legacy);
     Settings::values.disabled_addons[OcarinaTitleId] = {std::string{MaxResolution}};
     CHECK(scale() == ScaleOne);
     CHECK_FALSE(Settings::AppliedOcarinaRenderScale());

@@ -145,7 +145,7 @@ constexpr VkImageSubresourceRange ALL_LEVELS{
 // ffxFsr3UpscalerGetJitterPhaseCount.
 s32 JitterPhaseCount(u32 render_width, u32 display_width) {
     const f32 ratio = static_cast<f32>(display_width) / static_cast<f32>(render_width);
-    return static_cast<s32>(8.0f * ratio * ratio);
+    return std::max<s32>(1, static_cast<s32>(8.0f * ratio * ratio));
 }
 
 // DLSS takes no camera, so FSR's depth-to-view-space conversion (which only scales its

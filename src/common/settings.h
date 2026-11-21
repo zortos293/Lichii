@@ -63,6 +63,7 @@ SETTING(std::string, false);
 SETTING(u16, false);
 SWITCHABLE(AnisotropyMode, true);
 SWITCHABLE(AntiAliasing, false);
+SWITCHABLE(OcarinaRenderScale, false);
 SWITCHABLE(OotAntiAliasing, false);
 SWITCHABLE(NvidiaDlssQuality, false);
 SWITCHABLE(NvidiaDlssPreset, false);
@@ -439,6 +440,37 @@ struct Values {
                                                            true,
                                                            true};
     SwitchableSetting<bool> ocarina_fsr{linkage, false, "ocarina_fsr", Category::Renderer};
+    SwitchableSetting<bool> ocarina_xess{linkage, false, "ocarina_xess", Category::Renderer};
+    SwitchableSetting<OcarinaRenderScale> ocarina_render_scale{
+        linkage, OcarinaRenderScale::Automatic, "ocarina_render_scale", Category::Renderer};
+    SwitchableSetting<OcarinaRenderInput> ocarina_render_input{
+        linkage, OcarinaRenderInput::Legacy, "ocarina_render_input", Category::Renderer,
+        Specialization::Default, true, true};
+    SwitchableSetting<OcarinaUpscaleOutput> ocarina_upscale_output{
+        linkage, OcarinaUpscaleOutput::Legacy, "ocarina_upscale_output", Category::Renderer,
+        Specialization::Default, true, true};
+    SwitchableSetting<OcarinaUpscaler> ocarina_upscaler{
+        linkage, OcarinaUpscaler::Legacy, "ocarina_upscaler", Category::Renderer,
+        Specialization::Default, true, true};
+    SwitchableSetting<u32, true> ocarina_custom_input_width{
+        linkage, 1280, 640, 3840, "ocarina_custom_input_width", Category::Renderer,
+        Specialization::Countable};
+    SwitchableSetting<u32, true> ocarina_custom_input_height{
+        linkage, 720, 360, 2160, "ocarina_custom_input_height", Category::Renderer,
+        Specialization::Countable};
+    SwitchableSetting<u32, true> ocarina_custom_output_width{
+        linkage, 1920, 960, 7680, "ocarina_custom_output_width", Category::Renderer,
+        Specialization::Countable};
+    SwitchableSetting<u32, true> ocarina_custom_output_height{
+        linkage, 1080, 540, 4320, "ocarina_custom_output_height", Category::Renderer,
+        Specialization::Countable};
+    SwitchableSetting<XessQuality> xess_quality{linkage,
+                                                XessQuality::UltraQuality,
+                                                "xess_quality",
+                                                Category::Renderer,
+                                                Specialization::Default,
+                                                true,
+                                                true};
     // AMD FSR 4 in place of FSR 3.1 where FSR replaces a game's upscaler (Windows, AMD's driver).
     SwitchableSetting<bool> amd_fsr4{linkage, false, "amd_fsr4", Category::Renderer};
     SwitchableSetting<AspectRatio, true> aspect_ratio{linkage,
@@ -1157,9 +1189,17 @@ NvidiaDlssRuntimeSettings GetNvidiaDlssRuntimeSettings();
 /// The NVIDIA DLSS quality whose render scale Ocarina of Time's built-in patch applies when the
 /// game starts: Balanced, Performance or Ultra Performance with NVIDIA DLSS on, docked.
 std::optional<NvidiaDlssQuality> OcarinaDlssRenderScale();
-/// The quality whose render-scale patch the running game's main module got (none: unpatched).
-void SetAppliedOcarinaRenderScale(std::optional<NvidiaDlssQuality> quality);
-std::optional<NvidiaDlssQuality> AppliedOcarinaRenderScale();
+/// The render-scale patch the running game's main module got (none: unpatched).
+void SetAppliedOcarinaRenderScale(std::optional<OcarinaRenderScale> scale);
+std::optional<OcarinaRenderScale> AppliedOcarinaRenderScale();
+
+struct OcarinaResolution {
+    u32 width;
+    u32 height;
+};
+
+OcarinaResolution OcarinaRenderInputResolution();
+OcarinaResolution OcarinaUpscaleOutputResolution(u32 window_width, u32 window_height);
 
 constexpr u32 MIN_FRAME_GEN_MULTIPLIER = 2;
 constexpr u32 MAX_FRAME_GEN_MULTIPLIER = 4;

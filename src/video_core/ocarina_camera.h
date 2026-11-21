@@ -39,8 +39,8 @@ inline OcarinaCamera DecodeOcarinaCamera(std::span<const f32> values, u32 target
     }
     camera.width = static_cast<u32>(width);
     camera.height = static_cast<u32>(height);
-    // DLSS Balanced draws 2276x1280 into 2288x1280 (QuincyForbes' f7d0938b5b).
-    // Only DLSS accepts that padding, with the existing limit of 15 pixels per dimension.
+    // Scale87 draws 2276x1280 into 2288x1280. DLSS and FSR crop to this camera extent; XeSS rejects
+    // its aspect ratio against the output extent.
     if (static_cast<f32>(camera.width) != width || static_cast<f32>(camera.height) != height ||
         target_width - camera.width >= 16 || target_height - camera.height >= 16 ||
         (!allow_padding && (camera.width != target_width || camera.height != target_height))) {

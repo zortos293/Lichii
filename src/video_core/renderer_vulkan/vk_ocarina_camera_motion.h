@@ -43,8 +43,8 @@ public:
     [[nodiscard]] bool EvaluationFailed() const;
     /// Save the 1440p temporal scene copy before the game adds its HUD.
     void SaveSceneReference(VkImageView color);
-    /// Composite the HUD from the guest image over the matching 4K scene.
-    void Composite4k(VkImageView native_composite, u64 frame);
+    /// Composite the HUD from the guest image over the temporal output at display size.
+    void CompositeOutput(VkImageView native_composite, VkExtent2D output_extent, u64 frame);
     /// Copy the scene colour once the fog is drawn, before the glows and particles that have no
     /// motion vectors of their own.
     void SaveEffectsBase(VkImageView scene, VkExtent2D extent, u64 frame);

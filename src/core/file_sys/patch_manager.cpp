@@ -5,7 +5,9 @@
 
 #include <algorithm>
 #include <array>
+#include <bit>
 #include <cstddef>
+#include <cmath>
 #include <cstring>
 #include <optional>
 #include <span>
@@ -95,6 +97,8 @@ struct BuiltinPatch {
     // Applies only with NVIDIA DLSS on at this quality in docked mode, and is not listed in
     // Add-Ons.
     std::optional<Settings::NvidiaDlssQuality> dlss_quality{};
+    // Applies at the selected vendor-neutral Ocarina scale and is not listed in Add-Ons.
+    std::optional<Settings::OcarinaRenderScale> ocarina_render_scale{};
     // Lets the game run faster than its console frame rate (KProcess::IsFrameRateUnlocked).
     bool unlocks_frame_rate = false;
     // Off until checked in Add-Ons (stored as EnabledAddonKey(name)), for game options rather
@@ -131,6 +135,22 @@ constexpr std::array RENDER_PERFORMANCE_RECORDS{
 constexpr std::array RENDER_ULTRA_RECORDS{
     BuiltinPatchRecord{0x806420, RENDER_SCALE_ULTRA, RENDER_SCALE_ONE},
 };
+constexpr std::array RENDER_NATIVE_RECORDS{
+    BuiltinPatchRecord{0x806420, RENDER_SCALE_ONE, RENDER_SCALE_ONE},
+};
+
+constexpr Settings::OcarinaRenderScale OcarinaScaleForDlss(Settings::NvidiaDlssQuality quality) {
+    switch (quality) {
+    case Settings::NvidiaDlssQuality::Balanced:
+        return Settings::OcarinaRenderScale::Scale87;
+    case Settings::NvidiaDlssQuality::Performance:
+        return Settings::OcarinaRenderScale::Scale75;
+    case Settings::NvidiaDlssQuality::UltraPerformance:
+        return Settings::OcarinaRenderScale::Scale50;
+    default:
+        return Settings::OcarinaRenderScale::Scale100;
+    }
+}
 
 // RsMan-Dev's texture pool patch: stp x8, x9, [sp, #0x10] stores the graphics allocator's
 // initial pool size (x8); the call doubles it first (lsl x8, x8, #1 ; stp ; ret).
@@ -807,6 +827,38 @@ constexpr std::array BUILTIN_PATCHES{
         .records = RENDER_ULTRA_RECORDS,
         .dlss_quality = Settings::NvidiaDlssQuality::UltraPerformance,
     },
+    BuiltinPatch{
+        .name = "Ocarina 100% render scale (built-in)",
+        .title_id = 0x0400486024DEC000,
+        .module = "main",
+        .build_id = "E0F3CCFAF50065AE4EA01EB5AEB13B1A45DA3348",
+        .records = RENDER_NATIVE_RECORDS,
+        .ocarina_render_scale = Settings::OcarinaRenderScale::Scale100,
+    },
+    BuiltinPatch{
+        .name = "Ocarina 87% render scale (built-in)",
+        .title_id = 0x0400486024DEC000,
+        .module = "main",
+        .build_id = "E0F3CCFAF50065AE4EA01EB5AEB13B1A45DA3348",
+        .records = RENDER_BALANCED_RECORDS,
+        .ocarina_render_scale = Settings::OcarinaRenderScale::Scale87,
+    },
+    BuiltinPatch{
+        .name = "Ocarina 75% render scale (built-in)",
+        .title_id = 0x0400486024DEC000,
+        .module = "main",
+        .build_id = "E0F3CCFAF50065AE4EA01EB5AEB13B1A45DA3348",
+        .records = RENDER_PERFORMANCE_RECORDS,
+        .ocarina_render_scale = Settings::OcarinaRenderScale::Scale75,
+    },
+    BuiltinPatch{
+        .name = "Ocarina 50% render scale (built-in)",
+        .title_id = 0x0400486024DEC000,
+        .module = "main",
+        .build_id = "E0F3CCFAF50065AE4EA01EB5AEB13B1A45DA3348",
+        .records = RENDER_ULTRA_RECORDS,
+        .ocarina_render_scale = Settings::OcarinaRenderScale::Scale50,
+    },
     // Text speed: off until checked in Add-Ons; with more than one checked, the fastest wins.
     BuiltinPatch{
         .name = "Text Speed Instant (built-in)",
@@ -1407,6 +1459,7 @@ std::vector<u8> PatchManager::PatchNSO(const std::vector<u8>& nso, const std::st
 
     const auto disabled = GetDisabledAddons();
     std::vector<std::string_view> replaced;
+    bool max_resolution_applied = false;
     std::vector<std::string_view> applied_groups;
     std::vector<std::string_view> applied;
     std::vector<InstalledBuiltinHook> installed_hooks;
@@ -1447,15 +1500,28 @@ std::vector<u8> PatchManager::PatchNSO(const std::vector<u8>& nso, const std::st
         }
         if (patch.dlss_quality) {
 #ifdef EGLANTINE_STREAMLINE
-            const bool wanted = Settings::OcarinaDlssRenderScale() == patch.dlss_quality &&
-                                std::find(disabled.cbegin(), disabled.cend(),
-                                          MAX_RESOLUTION_NAME) == disabled.cend();
+            const bool wanted =
+                max_resolution_applied &&
+                Settings::values.ocarina_render_scale.GetValue() ==
+                    Settings::OcarinaRenderScale::Automatic &&
+                Settings::OcarinaDlssRenderScale() == patch.dlss_quality &&
+                std::find(disabled.cbegin(), disabled.cend(), MAX_RESOLUTION_NAME) ==
+                    disabled.cend();
 #else
             constexpr bool wanted = false;
 #endif
             if (!wanted) {
                 continue;
             }
+        }
+        if (patch.ocarina_render_scale &&
+            (Settings::values.ocarina_render_input.GetValue() !=
+                 Settings::OcarinaRenderInput::Legacy ||
+             !max_resolution_applied ||
+             Settings::values.ocarina_render_scale.GetValue() != *patch.ocarina_render_scale ||
+             std::find(disabled.cbegin(), disabled.cend(), MAX_RESOLUTION_NAME) !=
+                 disabled.cend())) {
+            continue;
         }
         if (patch.build_id != build_id) {
             LOG_INFO(Loader, "    - Skipping \"{}\": build id {} is not {}", patch.name, build_id,
@@ -1551,6 +1617,9 @@ std::vector<u8> PatchManager::PatchNSO(const std::vector<u8>& nso, const std::st
             std::memcpy(out.data() + sizeof(Loader::NSOHeader) + record.module_offset,
                         record.bytes.data(), record.bytes.size());
         }
+        if (patch.name == MAX_RESOLUTION_NAME) {
+            max_resolution_applied = true;
+        }
         for (const auto& hook : patch.hooks) {
             const auto& text = header.segments[0];
             const u64 text_end = u64{text.location} + text.size;
@@ -1619,10 +1688,55 @@ std::vector<u8> PatchManager::PatchNSO(const std::vector<u8>& nso, const std::st
             *frame_rate_unlocked = true;
         }
         if (patch.dlss_quality) {
-            Settings::SetAppliedOcarinaRenderScale(patch.dlss_quality);
+            Settings::SetAppliedOcarinaRenderScale(OcarinaScaleForDlss(*patch.dlss_quality));
+        } else if (patch.ocarina_render_scale) {
+            Settings::SetAppliedOcarinaRenderScale(patch.ocarina_render_scale);
         }
         if (!patch.group.empty()) {
             applied_groups.push_back(patch.group);
+        }
+    }
+
+    if (title_id == 0x0400486024DEC000ULL && name == "main" && max_resolution_applied &&
+        Settings::values.ocarina_render_input.GetValue() !=
+            Settings::OcarinaRenderInput::Legacy) {
+        const auto input = Settings::OcarinaRenderInputResolution();
+        const f32 scale = std::clamp(static_cast<f32>(input.width) / 2560.0f, 0.25f, 1.0f);
+        const u32 scale_bits = std::bit_cast<u32>(scale);
+        const u32 top16 = scale_bits >> 16;
+        const u32 instruction = 0x52800009U | (top16 << 5) | (1U << 21);
+        std::array<u8, 4> bytes{
+            static_cast<u8>(instruction & 0xffU),
+            static_cast<u8>((instruction >> 8U) & 0xffU),
+            static_cast<u8>((instruction >> 16U) & 0xffU),
+            static_cast<u8>((instruction >> 24U) & 0xffU),
+        };
+        constexpr size_t offset = 0x806420;
+        const size_t module_offset = sizeof(Loader::NSOHeader) + offset;
+        if (module_offset <= out.size() - 4 &&
+            std::equal(RENDER_SCALE_ONE.begin(), RENDER_SCALE_ONE.end(),
+                       out.begin() + module_offset)) {
+            std::memcpy(out.data() + module_offset, bytes.data(), bytes.size());
+            if (scale >= 0.99f) {
+                Settings::SetAppliedOcarinaRenderScale(Settings::OcarinaRenderScale::Scale100);
+            } else if (std::abs(scale - 0.625f) < 0.001f) {
+                Settings::SetAppliedOcarinaRenderScale(Settings::OcarinaRenderScale::Scale625);
+            } else if (std::abs(scale - 0.375f) < 0.001f) {
+                Settings::SetAppliedOcarinaRenderScale(Settings::OcarinaRenderScale::Scale375);
+            } else if (std::abs(scale - 0.75f) < 0.001f) {
+                Settings::SetAppliedOcarinaRenderScale(Settings::OcarinaRenderScale::Scale75);
+            } else if (std::abs(scale - 0.5f) < 0.001f) {
+                Settings::SetAppliedOcarinaRenderScale(Settings::OcarinaRenderScale::Scale50);
+            } else {
+                Settings::SetAppliedOcarinaRenderScale(Settings::OcarinaRenderScale::ScaleCustom);
+            }
+            LOG_INFO(Loader,
+                     "    - Applying independent Ocarina render input {}x{} (scale {:.3f})",
+                     input.width, input.height, scale);
+        } else {
+            LOG_WARNING(Loader,
+                        "    - Could not apply independent Ocarina render input: scale instruction "
+                        "site changed or was already patched");
         }
     }
 
@@ -2203,7 +2317,8 @@ std::vector<Patch> PatchManager::GetPatches(VirtualFile update_raw) const {
     }
 
     for (const auto& patch : BUILTIN_PATCHES) {
-        if (patch.title_id != title_id || patch.dlss_quality || !patch.requires_patch.empty()) {
+        if (patch.title_id != title_id || patch.dlss_quality || patch.ocarina_render_scale ||
+            !patch.requires_patch.empty()) {
             continue;
         }
         const auto is_disabled = [&](std::string_view name) {

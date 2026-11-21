@@ -178,6 +178,7 @@ public:
         GenerateEdenPath(EdenPath::IconsDir, eden_path / ICONS_DIR);
         GenerateEdenPath(EdenPath::StreamlineDir, eden_path / STREAMLINE_DIR);
         GenerateEdenPath(EdenPath::FidelityFxDir, eden_path / FIDELITYFX_DIR);
+        GenerateEdenPath(EdenPath::XeSSDir, eden_path / XESS_DIR);
         // config
         GenerateEdenPath(EdenPath::ConfigDir, eden_path_config);
         // cache
