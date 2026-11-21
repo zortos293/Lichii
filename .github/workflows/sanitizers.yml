@@ -1,0 +1,178 @@
+name: sanitizers
+
+# The parser tests and the fuzzer harnesses under ASan and UBSan. They run each night on nx2 and
+# on pull requests that touch the parsers, the fuzzers or their tests, instead of in build-check
+# on every pull request: a cold build takes over an hour. Pull requests restore the nightly
+# compiler cache, so theirs only rebuild what they change. The check is not required: a failure
+# reports the crashing inputs as an artifact.
+on:
+  schedule:
+    - cron: "23 3 * * *"
+  workflow_dispatch:
+  pull_request:
+    branches: [nx2]
+    paths:
+      - "src/core/file_sys/**"
+      - "src/core/crypto/**"
+      - "src/core/loader/**"
+      - "src/core/memory/cheat_engine.*"
+      - "src/fuzz/**"
+      - "src/tests/core/**"
+      - ".github/workflows/sanitizers.yml"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: sanitizers-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  linux-clang-sanitizers:
+    name: Linux clang parser tests and fuzzers under ASan and UBSan
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+      actions: write # drops the older compiler cache
+    timeout-minutes: 120
+    env:
+      CCACHE_DIR: ${{ github.workspace }}/.ccache
+      CCACHE_MAXSIZE: 1G
+      CCACHE_COMPILERCHECK: content
+      # LeakSanitizer reports a few start-up allocations once per process (docs/Fuzzing.md).
+      # The clang the fuzz tree is known to build with, from apt.llvm.org as release-binaries.yml
+      # installs its PGO clang; Ubuntu 24.04's clang 18 is untested here.
+      SAN_LLVM_VERSION: "21"
+      ASAN_OPTIONS: detect_leaks=0
+      UBSAN_OPTIONS: print_stacktrace=1
+    steps:
+      - name: Check out source
+        uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09
+        with:
+          persist-credentials: false
+
+      - name: Install Linux dependencies
+        run: |
+          curl -fsSL https://apt.llvm.org/llvm-snapshot.gpg.key |
+            sudo tee /etc/apt/trusted.gpg.d/apt.llvm.org.asc > /dev/null
+          echo "deb http://apt.llvm.org/noble/ llvm-toolchain-noble-$SAN_LLVM_VERSION main" |
+            sudo tee /etc/apt/sources.list.d/llvm.list > /dev/null
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            "clang-$SAN_LLVM_VERSION" "libclang-rt-$SAN_LLVM_VERSION-dev" \
+            autoconf git glslang-tools libglu1-mesa-dev \
+            libpulse-dev libtool libudev-dev mesa-common-dev nasm ninja-build \
+            libavfilter-dev libavcodec-dev libswscale-dev pkg-config zlib1g-dev \
+            libva-dev libvdpau-dev spirv-tools spirv-headers libusb-1.0-0-dev \
+            libboost-dev libboost-fiber-dev libboost-context-dev libopus-dev \
+            libasound2-dev ccache pipx
+          pipx install cmake==4.4.4
+          echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+
+      - name: Restore dependencies and compiler objects
+        uses: actions/cache/restore@caa296126883cff596d87d8935842f9db880ef25
+        with:
+          path: |
+            .cache/cpm
+            .ccache
+          key: clang-sanitizers-${{ runner.os }}-${{ github.run_id }}
+          restore-keys: |
+            clang-sanitizers-${{ runner.os }}-
+
+      # LICHII_FUZZERS builds everything with ASan and UBSan; the tests target then runs under
+      # them too, which is what the ASan-only parser regressions need.
+      - name: Configure sanitizer build
+        run: |
+          cmake -S . -B build-san -G Ninja \
+            -DCMAKE_BUILD_TYPE=RelWithDebInfo \
+            "-DCMAKE_C_COMPILER=clang-$SAN_LLVM_VERSION" \
+            "-DCMAKE_CXX_COMPILER=clang++-$SAN_LLVM_VERSION" \
+            -DLICHII_FUZZERS=ON \
+            -DLICHII_TESTS=ON \
+            -DENABLE_WERROR=OFF \
+            -DENABLE_QT=OFF \
+            -DLICHII_CMD=OFF \
+            -DLICHII_ROOM=OFF \
+            -DLICHII_ROOM_STANDALONE=OFF \
+            -DLICHII_USE_BUNDLED_SDL3=ON \
+            -DVulkanHeaders_FORCE_BUNDLED=ON \
+            -DVulkanUtilityLibraries_FORCE_BUNDLED=ON \
+            -DUSE_DISCORD_PRESENCE=OFF \
+            -DUSE_CCACHE=ON
+
+      - name: Build tests and fuzzers
+        run: |
+          ccache --zero-stats
+          cmake --build build-san --parallel "$(nproc)" --target tests \
+            fuzz_partition_romfs fuzz_nca fuzz_package fuzz_cheats fuzz_ips fuzz_meta \
+            fuzz_nup fuzz_ncz fuzz_keys
+          ccache --show-stats
+
+      # The parser tests: the fuzzers' inputs, the header edge values and each parser's own
+      # cases. Several of them only fail on a broken parser under a sanitizer.
+      - name: Run parser tests under the sanitizers
+        run: |
+          build-san/bin/tests \
+            "[fuzz_regressions],[edge_values],[file_sys],[crypto],[cheats],[ncz],[nup-validation]"
+
+      # A short run of each harness, to catch a parser change that crashes on the first inputs.
+      # The NUP, NCA, package and NCZ ones start from made-up seeds: from an empty corpus the NCA
+      # and NCZ ones never get past their header magic. Longer runs are done by hand
+      # (docs/Fuzzing.md).
+      - name: Smoke-run the fuzzers
+        run: |
+          mkdir -p fuzz-ci/nup
+          FUZZ_NUP_SEED=fuzz-ci/nup/seed.nup build-san/bin/fuzz_nup
+          FUZZ_NCA_SEED=fuzz-ci/nca build-san/bin/fuzz_nca -runs=0
+          FUZZ_PACKAGE_SEED=fuzz-ci/package build-san/bin/fuzz_package -runs=0
+          FUZZ_NCZ_SEED=fuzz-ci/ncz build-san/bin/fuzz_ncz -runs=0
+          for harness in partition_romfs nca package cheats ips meta nup ncz keys; do
+            mkdir -p "fuzz-ci/$harness"
+            echo "::group::fuzz_$harness"
+            (cd "fuzz-ci/$harness" && "../../build-san/bin/fuzz_$harness" . \
+              -max_total_time=60 -max_len=32768 -rss_limit_mb=2048 -malloc_limit_mb=2048 \
+              -timeout=25 -print_final_stats=1)
+            echo "::endgroup::"
+          done
+
+      - name: Keep fuzzer crash inputs
+        if: failure()
+        uses: actions/upload-artifact@v7
+        with:
+          name: fuzzer-crashes
+          path: |
+            fuzz-ci/*/crash-*
+            fuzz-ci/*/oom-*
+            fuzz-ci/*/timeout-*
+          if-no-files-found: ignore
+
+      # Only the nx2 runs save, and they drop the older entry: one cache of about 0.5 GB in all,
+      # which pull requests restore without adding their own.
+      - name: Save dependencies and compiler objects
+        if: always() && github.event_name != 'pull_request' && github.ref == 'refs/heads/nx2'
+        uses: actions/cache/save@caa296126883cff596d87d8935842f9db880ef25
+        with:
+          path: |
+            .cache/cpm
+            .ccache
+          key: clang-sanitizers-${{ runner.os }}-${{ github.run_id }}
+
+      # Only once the new entry is there: a save that failed or was skipped keeps the old one.
+      - name: Drop older compiler caches
+        if: always() && github.event_name != 'pull_request' && github.ref == 'refs/heads/nx2'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          KEEP: clang-sanitizers-${{ runner.os }}-${{ github.run_id }}
+        run: |
+          caches="repos/$GITHUB_REPOSITORY/actions/caches"
+          keys=$(gh api "$caches?key=clang-sanitizers-${RUNNER_OS}-&ref=refs/heads/nx2&per_page=100" \
+            --jq '.actions_caches[].key')
+          if ! printf '%s\n' "$keys" | grep -qxF "$KEEP"; then
+            echo "The new cache $KEEP is not there; keeping the older ones."
+            exit 0
+          fi
+          printf '%s\n' "$keys" | while read -r key; do
+            if [ -n "$key" ] && [ "$key" != "$KEEP" ]; then
+              gh api -X DELETE "$caches?key=$key&ref=refs/heads/nx2" > /dev/null || true
+            fi
+          done
