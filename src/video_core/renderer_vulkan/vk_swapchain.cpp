@@ -316,35 +316,9 @@ bool Swapchain::AcquireNextImage(bool may_flush, u32 game_frame_presents) {
         return true;
     }
 
-    const auto wait_with_frame_pacing = [this, may_flush, game_frame_presents] {
-    switch (Settings::values.frame_pacing_mode.GetValue()) {
-    case Settings::FramePacingMode::Target_Auto:
-        scheduler.Wait(resource_ticks[image_index], 0.0, may_flush);
-        break;
-    case Settings::FramePacingMode::Target_30:
-        scheduler.Wait(resource_ticks[image_index], 30.0, may_flush, game_frame_presents);
-        break;
-    case Settings::FramePacingMode::Target_60:
-        scheduler.Wait(resource_ticks[image_index], 60.0, may_flush, game_frame_presents);
-        break;
-    case Settings::FramePacingMode::Target_90:
-        scheduler.Wait(resource_ticks[image_index], 90.0, may_flush, game_frame_presents);
-        break;
-    case Settings::FramePacingMode::Target_120:
-        scheduler.Wait(resource_ticks[image_index], 120.0, may_flush, game_frame_presents);
-        break;
-    }
-    };
-
-#ifdef __ANDROID__
-    if (android_get_device_api_level() >= 30) {
-        scheduler.Wait(resource_ticks[image_index], 0.0, may_flush);
-    } else {
-        wait_with_frame_pacing();
-    }
-#else
-    wait_with_frame_pacing();
-#endif
+    // PresentManager handles precision hybrid frame pacing right before presentation.
+    // AcquireNextImage only synchronizes the image resource tick without duplicate sleeps.
+    scheduler.Wait(resource_ticks[image_index], 0.0, may_flush);
 
     resource_ticks[image_index] = scheduler.CurrentTick();
 

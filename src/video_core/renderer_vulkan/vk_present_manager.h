@@ -94,6 +94,10 @@ public:
     /// Waits for the present thread to finish presenting all queued frames.
     void WaitPresent();
 
+    /// Calculates the target pacing interval for a frame based on guest frame interval,
+    /// frame pacing mode, and speed limits.
+    [[nodiscard]] std::chrono::nanoseconds GetPacingInterval(const Frame* frame) const;
+
     /// How many additional frames can be queued without stalling the render thread
     [[nodiscard]] size_t MaxExtraFrames() const;
 

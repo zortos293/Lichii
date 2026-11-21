@@ -6,6 +6,10 @@
 #include <algorithm>
 #include <thread>
 
+#if defined(_M_X64) || defined(_M_IX86) || defined(__x86_64__) || defined(__i386__)
+#include <immintrin.h>
+#endif
+
 #include "common/display_hdr.h"
 #include "common/dkb_frame_trace.h"
 #include "common/scope_exit.h"
@@ -16,6 +20,7 @@
 #endif
 #include "core/frontend/emu_window.h"
 #include "video_core/host_vsync.h"
+#include "video_core/nx2.h"
 #include "video_core/nx2_profile.h"
 #ifdef HAS_LSFG
 #include "video_core/renderer_vulkan/present/lsfg_common.h"
@@ -41,19 +46,41 @@ constexpr u32 MAX_PRESENT_ATTEMPTS = 3;
 static_assert(MAX_FRAMES_IN_FLIGHT <= LSFG_MAX_TARGETS);
 #endif
 
-// Sleeps until the deadline, without spinning: it may pass by up to a timer tick (about 0.5 ms
-// on Windows), well within a refresh, and the next deadline counts from this one.
+void Pause() {
+#if defined(_MSC_VER) && (defined(_M_X64) || defined(_M_IX86))
+    _mm_pause();
+#elif defined(__x86_64__) || defined(__i386__)
+    __builtin_ia32_pause();
+#elif defined(__aarch64__)
+    asm volatile("yield");
+#else
+    std::this_thread::yield();
+#endif
+}
+
+// Sleeps until the deadline using a high-precision hybrid approach: sleeps via the OS kernel
+// (SleepForOneTick on Windows / sleep_for) until ~250 us remains to save CPU, then performs
+// a short spin-wait with _mm_pause() for the final microseconds to achieve a flat frametime line.
 void SleepUntil(std::chrono::steady_clock::time_point deadline) {
+    static constexpr auto SpinThreshold = std::chrono::microseconds{250};
     while (true) {
-        const auto left = deadline - std::chrono::steady_clock::now();
+        const auto now = std::chrono::steady_clock::now();
+        const auto left = deadline - now;
         if (left <= std::chrono::steady_clock::duration::zero()) {
             return;
         }
+        if (left > SpinThreshold) {
 #ifdef _WIN32
-        Common::Windows::SleepForOneTick();
+            Common::Windows::SleepForOneTick();
 #else
-        std::this_thread::sleep_for(left);
+            std::this_thread::sleep_for(left - SpinThreshold);
 #endif
+        } else {
+            while (std::chrono::steady_clock::now() < deadline) {
+                Pause();
+            }
+            return;
+        }
     }
 }
 
@@ -283,6 +310,43 @@ Frame* PresentManager::GetRenderFrame() {
     return frame;
 }
 
+std::chrono::nanoseconds PresentManager::GetPacingInterval(const Frame* frame) const {
+    if (frame && frame->present_spacing.count() > 0) {
+        return frame->present_spacing;
+    }
+    if (!Settings::values.use_speed_limit.GetValue() ||
+        Settings::values.current_speed_mode.GetValue() == Settings::SpeedMode::Turbo) {
+        return std::chrono::nanoseconds{0};
+    }
+    const u32 speed_limit = Settings::SpeedLimit();
+    const auto scale_interval = [speed_limit](s64 base_ns) -> std::chrono::nanoseconds {
+        if (speed_limit != 0 && speed_limit != 100) {
+            return std::chrono::nanoseconds{base_ns * 100 / speed_limit};
+        }
+        return std::chrono::nanoseconds{base_ns};
+    };
+
+    switch (Settings::values.frame_pacing_mode.GetValue()) {
+    case Settings::FramePacingMode::Target_30:
+        return scale_interval(1'000'000'000LL / 30);
+    case Settings::FramePacingMode::Target_60:
+        return scale_interval(1'000'000'000LL / 60);
+    case Settings::FramePacingMode::Target_90:
+        return scale_interval(1'000'000'000LL / 90);
+    case Settings::FramePacingMode::Target_120:
+        return scale_interval(1'000'000'000LL / 120);
+    case Settings::FramePacingMode::Target_Auto:
+    default: {
+        const u64 guest_interval =
+            Tegra::g_nx2_guest_frame_interval_ns.load(std::memory_order_relaxed);
+        if (guest_interval > 0) {
+            return std::chrono::nanoseconds{guest_interval};
+        }
+        return scale_interval(1'000'000'000LL / 60);
+    }
+    }
+}
+
 void PresentManager::Present(Frame* frame) {
     if (!use_present_thread && Settings::values.frame_gen.GetValue()) {
         // Frame generation was turned on from the status bar while a game runs. Earlier frames
@@ -299,6 +363,22 @@ void PresentManager::Present(Frame* frame) {
         {
             VideoCommon::Nx2Profile::Scope scope{VideoCommon::Nx2Profile::Zone::PresentWait};
             scheduler.WaitWorker();
+        }
+        const auto ready = std::chrono::steady_clock::now();
+        const bool is_mailbox =
+            Settings::values.vsync_mode.GetValue() == Settings::VSyncMode::Mailbox;
+        const bool is_auto = Settings::values.frame_pacing_mode.GetValue() ==
+                             Settings::FramePacingMode::Target_Auto;
+        if (!is_mailbox && !is_auto) {
+            const auto spacing = GetPacingInterval(frame);
+            auto start = (std::max)(next_present, ready);
+            if (spacing.count() > 0) {
+                if (ready > next_present + spacing * 2) {
+                    start = ready;
+                }
+                SleepUntil(start);
+            }
+            next_present = (spacing.count() > 0) ? (start + spacing) : ready;
         }
         CopyToSwapchain(frame);
         free_queue.push_back(frame);
@@ -468,15 +548,24 @@ void PresentManager::PresentThread(std::stop_token token) {
             // lock in WaitPresent is guaranteed to occur after here.
             void(std::exchange(lock, std::unique_lock{swapchain_mutex}));
             const auto ready = std::chrono::steady_clock::now();
-            // The spacing counts from when this present was due, not from when it returned. A
-            // present that waits for vblank has already spent part of the spacing; counting it
-            // again cost each generated frame an extra refresh, which lengthened the measured
-            // frame interval and with it the spacing, until the game ran at a fraction of its
-            // speed (#1772).
-            const auto start = (std::max)(next_present, ready);
-            SleepUntil(start);
+            const bool is_mailbox =
+                Settings::values.vsync_mode.GetValue() == Settings::VSyncMode::Mailbox;
+            const bool is_auto = Settings::values.frame_pacing_mode.GetValue() ==
+                                 Settings::FramePacingMode::Target_Auto;
+            if (!is_mailbox && !is_auto) {
+                const auto spacing = GetPacingInterval(frame);
+                auto start = (std::max)(next_present, ready);
+                if (spacing.count() > 0) {
+                    // If we fell behind by more than 2 frames (e.g. hitch or pause), reset to
+                    // avoid bursts
+                    if (ready > next_present + spacing * 2) {
+                        start = ready;
+                    }
+                    SleepUntil(start);
+                }
+                next_present = (spacing.count() > 0) ? (start + spacing) : ready;
+            }
             CopyToSwapchain(frame);
-            next_present = start + frame->present_spacing;
             if (Common::DkbFrameTrace::Enabled()) {
                 const auto presented = std::chrono::steady_clock::now();
                 LogPacing(frame, presented - ready, presented);
