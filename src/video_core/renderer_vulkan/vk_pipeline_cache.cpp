@@ -471,6 +471,8 @@ vk::ShaderModule EmitComputeModule(const Device& device, const Shader::Profile& 
     kept_spirv = Common::Compression::CompressDataZSTD(reinterpret_cast<const u8*>(code.data()),
                                                        code.size() * sizeof(u32), 1);
     device.SaveShader(code);
+    LOG_DEBUG(Render_Vulkan, "Compute pipeline build start: shader={:#016x} spirv_words={}",
+              shader_hash, code.size());
     vk::ShaderModule spv_module{BuildGuestShader(device, code, shader_hash)};
 
     // Text log + .spv dump. Same split as the graphics path.
@@ -3318,6 +3320,12 @@ std::unique_ptr<GraphicsPipeline> PipelineCache::CreateGraphicsPipeline(
             mapped_pointers[index] = envs[mapped_env++]->MappedStoragePointerKeys();
         }
     }
+    size_t stage_spirv_words = 0;
+    for (const auto& stage : stage_spirv) {
+        stage_spirv_words += stage.size();
+    }
+    LOG_DEBUG(Render_Vulkan, "Graphics pipeline build start: pipeline={:#016x} spirv_words={}",
+              hash, stage_spirv_words);
     auto pipeline = std::make_unique<GraphicsPipeline>(
         scheduler, buffer_cache, texture_cache, vulkan_pipeline_cache, pipeline_binaries.get(),
         &shader_notify, device, descriptor_pool, guest_descriptor_queue, descriptor_buffer_ring,
