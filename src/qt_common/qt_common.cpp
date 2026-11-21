@@ -18,6 +18,7 @@
 #endif
 #include "common/scm_rev.h"
 #include "common/cpu_features.h"
+#include "common/settings.h"
 #include "core/memory.h"
 
 #include <QGuiApplication>
@@ -268,6 +269,16 @@ void Init(QWidget* root) {
     LOG_INFO(Frontend, "Host CPU: {}", cpu_string);
     if (std::optional<int> processor_core = Common::GetProcessorCount()) {
         LOG_INFO(Frontend, "Host CPU Cores: {}", *processor_core);
+    }
+    const bool avx2_setting_enabled = Settings::values.cpuopt_intel_avx2.GetValue();
+    if (caps.avx2) {
+        if (avx2_setting_enabled) {
+            LOG_INFO(Frontend, "Host CPU AVX2 Compatibility: Supported (Hardware AVX2 detected, Optimization Active)");
+        } else {
+            LOG_INFO(Frontend, "Host CPU AVX2 Compatibility: Supported (Disabled by User via Settings)");
+        }
+    } else {
+        LOG_WARNING(Frontend, "Host CPU AVX2 Compatibility: Unsupported (Host CPU lacks AVX2 instruction set, Falling back to SSE4.1/AVX)");
     }
 #endif
     LOG_INFO(Frontend, "Host CPU Threads: {}", processor_count);

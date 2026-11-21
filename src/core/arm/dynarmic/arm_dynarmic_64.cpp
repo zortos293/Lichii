@@ -520,6 +520,7 @@ void ArmDynarmic64::MakeJit(Common::PageTable* page_table, std::size_t address_s
         config.counters = &g_jit_counters[m_core_index];
     }
 #if defined(ARCHITECTURE_x86_64)
+    config.enable_avx2 = Settings::values.cpuopt_intel_avx2.GetValue();
     // x86-64 host code generation options; Paranoid keeps dynarmic's defaults.
     if (Settings::values.cpu_accuracy.GetValue() != Settings::CpuAccuracy::Paranoid) {
         // The JIT spilled ~9% of its instructions to stack slots in Ocarina of Time's hot code

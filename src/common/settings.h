@@ -298,6 +298,8 @@ struct Values {
                                            true,
                                            &use_custom_cpu_ticks};
 
+    SwitchableSetting<bool> cpuopt_intel_avx2{linkage, true, "cpuopt_intel_avx2", Category::Cpu};
+
     Setting<bool> cpuopt_page_tables{linkage, true, "cpuopt_page_tables", Category::CpuDebug};
     Setting<bool> cpuopt_block_linking{linkage, true, "cpuopt_block_linking", Category::CpuDebug};
     Setting<bool> cpuopt_return_stack_buffer{linkage, true, "cpuopt_return_stack_buffer",

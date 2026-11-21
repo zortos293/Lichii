@@ -86,6 +86,9 @@ public:
         , polyfill_options(GenPolyfillOptions(block_of_code))
     {
         ASSERT(conf.page_table_address_space_bits >= 12 && conf.page_table_address_space_bits <= 64);
+        if (!conf.enable_avx2) {
+            block_of_code.DisableHostFeature(HostFeature::AVX2);
+        }
     }
 
     ~Impl() = default;

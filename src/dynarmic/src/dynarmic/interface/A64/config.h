@@ -241,6 +241,9 @@ struct UserConfig {
     /// Processor ID
     std::uint8_t processor_id = 0;
 
+    /// When set to false, disables host AVX2 instruction emission in the JIT backend.
+    bool enable_avx2 = true;
+
     /// This enables unsafe optimizations that reduce emulation accuracy in favour of speed.
     /// For safety, in order to enable unsafe optimizations you have to set BOTH this flag
     /// AND the appropriate flag bits above.

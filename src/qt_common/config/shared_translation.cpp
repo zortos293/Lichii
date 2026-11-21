@@ -105,6 +105,9 @@ std::unique_ptr<TranslationMap> InitializeTranslations(QObject* parent) {
     INSERT(Settings, cpu_ticks, tr("Custom CPU Ticks"),
            tr("Set a custom value of CPU ticks. Higher values can increase performance, but may "
               "cause deadlocks. A range of 77-21000 is recommended."));
+    INSERT(Settings, cpuopt_intel_avx2, tr("Intel Core Optimization (AVX2 Vectorization)"),
+           tr("Enables AVX2 256-bit vectorization and fast host code generation for Intel Core "
+              "and compatible processors. Can be unchecked for debugging or legacy CPUs."));
     INSERT(Settings, cpu_backend, tr("Backend:"), QString());
 
     // Cpu Debug

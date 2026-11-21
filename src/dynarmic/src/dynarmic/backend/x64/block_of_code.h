@@ -173,6 +173,9 @@ public:
     JitStateInfo GetJitStateInfo() const { return jsi; }
 
     bool HasHostFeature(HostFeature feature) const noexcept;
+    void DisableHostFeature(HostFeature feature) noexcept {
+        disabled_features |= feature;
+    }
 
     // Flag reuse (A64 reuse_host_flags). The host flags equal the guest NZCV (x64 layout, CF in
     // ARM polarity) while getCurr() == nzcv_live_pos. nzcv_flags_pos/inst: the flags of the Add/Sub
@@ -230,6 +233,7 @@ private:
     RunCodeCallbacks cb;
     CodePtr code_begin = nullptr;
     bool prelude_complete = false;
+    HostFeature disabled_features = HostFeature{};
 
     void GenRunCode(std::function<void(BlockOfCode&)> rcp);
 };

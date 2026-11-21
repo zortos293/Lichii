@@ -188,6 +188,9 @@ BlockOfCode::BlockOfCode(RunCodeCallbacks cb, JitStateInfo jsi, size_t total_cod
 }
 
 bool BlockOfCode::HasHostFeature(HostFeature feature) const noexcept {
+    if ((disabled_features & feature) != HostFeature{}) {
+        return false;
+    }
     return (GetHostFeatures() & feature) == feature;
 }
 
