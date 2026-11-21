@@ -578,7 +578,7 @@ bool IsStoreOnlyExecutable(u32 method) {
 // no write history, trace or profile, not a macro call or SET_SHADOW_RAM_CONTROL. The hot
 // executable methods go straight to their handler.
 void Maxwell3D::CallMethodFast(u32 method, u32 method_argument, bool is_last_call) {
-    if (!execution_mask[method]) {
+    if (!execution_mask[method] || IsStoreOnlyExecutable(method)) {
         return WriteStateRegister(method, method_argument);
     }
     const u32 argument = ProcessShadowRam(method, method_argument);
@@ -592,11 +592,6 @@ void Maxwell3D::CallMethodFast(u32 method, u32 method_argument, bool is_last_cal
         return draw_manager.DrawBegin(*this);
     case MAXWELL3D_REG_INDEX(draw.end):
         return draw_manager.DrawEnd(*this);
-    case MAXWELL3D_REG_INDEX(vertex_buffer.first):
-    case MAXWELL3D_REG_INDEX(vertex_buffer.count):
-    case MAXWELL3D_REG_INDEX(index_buffer.first):
-    case MAXWELL3D_REG_INDEX(topology_override):
-        return;
     case MAXWELL3D_REG_INDEX(bind_groups[0].raw_config):
         return ProcessCBBind(0);
     case MAXWELL3D_REG_INDEX(bind_groups[1].raw_config):
@@ -905,7 +900,7 @@ void Maxwell3D::CallMethodSlow(Core::System& system, u32 method, u32 method_argu
     // million 3D register writes a second, ~60% of them same-value, most from macro replays.
     // Methods with side effects (execution_mask: draws, clears, constant buffer data and
     // binds, semaphores, ...) always run. EDEN_NX2_SKIP_SAME=0 turns it off.
-    if (!execution_mask[method]) {
+    if (!execution_mask[method] || IsStoreOnlyExecutable(method)) {
         // ProcessMethodCall (and the draw manager behind it) acts only on executable methods.
         if (!SkipSameValueWrites() || regs.reg_array[method] != argument) {
             ProcessDirtyRegisters(method, argument);

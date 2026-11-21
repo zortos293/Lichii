@@ -3341,9 +3341,12 @@ private:
         if (draw_manager.HasDeferredDraw() && !DrawManager::IsInstanceLoopMethod(method)) {
             draw_manager.DrawDeferred(*this, true);
         }
+        const bool same_value = regs.reg_array[method] == argument;
+        if (same_value && SkipSameValueWrites()) {
+            return;
+        }
         // A changed register that doesn't only parameterize the next draw ends fast draw reuse.
-        if (VideoCommon::Nx2FastDraw::Enabled() && regs.reg_array[method] != argument &&
-            !IsFastDrawParameter(method)) {
+        if (VideoCommon::Nx2FastDraw::Enabled() && !same_value && !IsFastDrawParameter(method)) {
             VideoCommon::Nx2FastDraw::Break(VideoCommon::Nx2FastDraw::Reason::Register, method);
         }
         regs.reg_array[method] = argument;
