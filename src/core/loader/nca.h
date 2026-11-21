@@ -5,6 +5,10 @@
 
 #pragma once
 
+#include <chrono>
+#include <functional>
+#include <span>
+
 #include "common/common_types.h"
 #include "core/loader/loader.h"
 
@@ -20,6 +24,28 @@ class NCA;
 namespace Loader {
 
 class AppLoader_DeconstructedRomDirectory;
+
+/// How a verification read waits on a file that returns no data before its end.
+struct VerifyReadPolicy {
+    /// The check fails after this long without a byte.
+    std::chrono::milliseconds stall_limit;
+    /// The wait between tries meanwhile; the progress function is called after each.
+    std::chrono::milliseconds poll_interval;
+};
+
+/// The policy NCA verification uses (nca.cpp says why).
+extern const VerifyReadPolicy DefaultVerifyReadPolicy;
+
+/**
+ * Reads `file` from start to end in pieces of up to `buffer`'s size, handing each to `consume`,
+ * and calls `progress` (which may be empty) with the bytes read so far and the file's size. A read
+ * that returns nothing is tried again, as `policy` says, until data comes or the stall limit
+ * passes. Fails if `consume` or `progress` returns false, or the stall limit passes.
+ */
+ResultStatus ReadForVerification(const FileSys::VirtualFile& file, std::span<u8> buffer,
+                                 const std::function<bool(std::span<const u8>)>& consume,
+                                 const std::function<bool(size_t, size_t)>& progress,
+                                 const VerifyReadPolicy& policy);
 
 /// Loads an NCA file
 class AppLoader_NCA final : public AppLoader {

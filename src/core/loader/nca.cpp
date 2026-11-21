@@ -3,6 +3,7 @@
 
 // SPDX-License-Identifier: GPL-2.0-or-later
 
+#include <thread>
 #include <utility>
 #include <openssl/err.h>
 #include <openssl/evp.h>
@@ -32,6 +33,55 @@ static u32 CalculatePointerBufferSize(size_t heap_size) {
     } else {
         return 0x8000; // Default for all other games
     }
+}
+
+// A read that returns nothing before the end is not always the end. The solid NCZ reader
+// (crypto/ncz_decompressor.cpp) returns nothing while it waits to decode again after a full disk
+// or a decoder memory budget held by other open readers, and resumes on a later read: its wait
+// doubles from SolidRetryDelayMin (250 ms) up to SolidRetryDelayMax (32 s). 75 s without a byte
+// gives such a reader two of its longest waits, and the decode after each, before the check
+// fails. A damaged reader or an I/O error returns nothing for good: before, the check asked again
+// forever, its progress standing still until the user cancelled.
+const VerifyReadPolicy DefaultVerifyReadPolicy{
+    .stall_limit = std::chrono::seconds{75},
+    .poll_interval = std::chrono::milliseconds{100},
+};
+
+ResultStatus ReadForVerification(const FileSys::VirtualFile& file, std::span<u8> buffer,
+                                 const std::function<bool(std::span<const u8>)>& consume,
+                                 const std::function<bool(size_t, size_t)>& progress,
+                                 const VerifyReadPolicy& policy) {
+    const size_t total_size = file->GetSize();
+    size_t processed_size = 0;
+    auto last_data = std::chrono::steady_clock::now();
+    while (processed_size < total_size) {
+        const size_t intended_read_size = (std::min)(buffer.size(), total_size - processed_size);
+        const size_t read_size = file->Read(buffer.data(), intended_read_size, processed_size);
+        if (read_size == 0) {
+            if (std::chrono::steady_clock::now() - last_data >= policy.stall_limit) {
+                LOG_ERROR(Loader, "{} returned no data at {} of {} bytes for {} s",
+                          file->GetName(), processed_size, total_size,
+                          std::chrono::duration_cast<std::chrono::seconds>(policy.stall_limit)
+                              .count());
+                return ResultStatus::ErrorIntegrityVerificationFailed;
+            }
+            // Cancel still works while waiting.
+            if (progress && !progress(processed_size, total_size)) {
+                return ResultStatus::ErrorIntegrityVerificationFailed;
+            }
+            std::this_thread::sleep_for(policy.poll_interval);
+            continue;
+        }
+        last_data = std::chrono::steady_clock::now();
+        if (!consume(buffer.first(read_size))) {
+            return ResultStatus::ErrorIntegrityVerificationFailed;
+        }
+        processed_size += read_size;
+        if (progress && !progress(processed_size, total_size)) {
+            return ResultStatus::ErrorIntegrityVerificationFailed;
+        }
+    }
+    return ResultStatus::Success;
 }
 
 AppLoader_NCA::AppLoader_NCA(FileSys::VirtualFile file_, u64 update_only_program_id_)
@@ -166,9 +216,10 @@ ResultStatus AppLoader_NCA::VerifyIntegrity(std::function<bool(size_t, size_t)> 
     std::vector<u8> buffer(4_MiB);
 
     // Initialize sha256 verification context.
+    // Not ErrorNotInitialized: callers take every status but the failed one as verified.
     EVP_MD_CTX* ctx = EVP_MD_CTX_new();
     if (!ctx)
-        return ResultStatus::ErrorNotInitialized;
+        return ResultStatus::ErrorIntegrityVerificationFailed;
 
     // Ensure we maintain a clean state on exit.
     SCOPE_EXIT {
@@ -178,28 +229,15 @@ ResultStatus AppLoader_NCA::VerifyIntegrity(std::function<bool(size_t, size_t)> 
     if (!EVP_DigestInit_ex(ctx, EVP_sha256(), nullptr))
         return ResultStatus::ErrorIntegrityVerificationFailed;
 
-    // Declare counters.
-    const size_t total_size = file->GetSize();
-    size_t processed_size = 0;
-
-    // Begin iterating the file.
-    while (processed_size < total_size) {
-        // Refill the buffer.
-        const size_t intended_read_size = (std::min)(buffer.size(), total_size - processed_size);
-        const size_t read_size = file->Read(buffer.data(), intended_read_size, processed_size);
-
-        // Update the hash function with the buffer contents.
-        if (!EVP_DigestUpdate(ctx, buffer.data(), read_size)) {
-            return ResultStatus::ErrorIntegrityVerificationFailed;
-        }
-
-        // Update counters.
-        processed_size += read_size;
-
-        // Call the progress function.
-        if (!progress_callback(processed_size, total_size)) {
-            return ResultStatus::ErrorIntegrityVerificationFailed;
-        }
+    // Hash the file as it is read.
+    const auto result = ReadForVerification(
+        file, buffer,
+        [ctx](std::span<const u8> data) {
+            return EVP_DigestUpdate(ctx, data.data(), data.size()) == 1;
+        },
+        progress_callback, DefaultVerifyReadPolicy);
+    if (result != ResultStatus::Success) {
+        return result;
     }
 
     // Finalize context and compute the output hash.
