@@ -15,6 +15,7 @@
 #include "shader_recompiler/frontend/ir/ir_emitter.h"
 #include "shader_recompiler/host_translate_info.h"
 #include "shader_recompiler/ir_opt/passes.h"
+#include "video_core/shader_environment.h"
 
 namespace {
 namespace IR = Shader::IR;
@@ -653,4 +654,18 @@ TEST_CASE("Iterator analysis handles deep loop-carried shader graphs",
     IR::IREmitter entry{fixture.entry};
     entry.WriteGlobal32(Address(entry, Word(entry, 0x310), Word(entry, 0x314)), entry.Imm32(1));
     CHECK(fixture.TrackedOffsets() == std::vector<u32>{0x310});
+}
+
+/// A cache written before the translator read a slot has no record for it, and outside precache
+/// there is no guess: replay must answer with the conservative classification (bank 0 held
+/// storage pointers, the others did not), not fail the pipeline - Ocarina of Time's foliage pass
+/// 539ffb3f650a34ac then never runs and Hyrule Field draws as black squares (#603).
+TEST_CASE("FileEnvironment answers an unrecorded storage pointer classification",
+          "[video_core][shader_environment]") {
+    VideoCommon::FileEnvironment env;
+    CHECK(env.IsCbufStorageBufferPointer(0, 0x110));
+    CHECK_FALSE(env.IsCbufStorageBufferPointer(2, 0x40));
+    CHECK(env.IsCbufIndirectStorageBufferPointer(0, 0x110, 0));
+    CHECK_FALSE(env.IsCbufIndirectStorageBufferPointer(3, 0x20, 1));
+    CHECK(env.LacksRecordedValue(0));
 }

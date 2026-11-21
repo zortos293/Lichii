@@ -99,6 +99,13 @@ void AddEqualGraphicsKeys(const std::filesystem::path& filename,
     }
 }
 
+bool GraphicsRecordLacksRecordedValue(std::span<const VideoCommon::FileEnvironment> envs,
+                                      u32 read_properties) noexcept {
+    return std::ranges::any_of(envs, [read_properties](const VideoCommon::FileEnvironment& env) {
+        return env.LacksRecordedValue(read_properties);
+    });
+}
+
 void AddIncompleteGraphics(std::span<const std::pair<u64, VideoCommon::PipelineRecord>> incomplete,
                            std::vector<DuplicateGraphicsRecord>& duplicates,
                            std::unordered_set<u64>& disk_pipelines,

@@ -1362,8 +1362,13 @@ bool FileEnvironment::IsCbufStorageBufferPointer(u32 index, u32 offset) {
         if (guess) {
             return index == 0 ? guess->storage_pointer_bank0 : guess->storage_pointer_other;
         }
+        // No record and no guess: the cache was written before this slot was read. Answer as the
+        // precache guesses do (GuessMissing: bank 0 held storage pointers, the others did not)
+        // and keep the missing-record flag so the entry is not trusted. Throwing here failed the
+        // whole pipeline: Ocarina of Time's foliage pass 539ffb3f650a34ac then never runs and
+        // Hyrule Field draws as black squares (#603).
         lacks_recorded_value = true;
-        throw Shader::LogicError("Uncached storage pointer classification");
+        return index == 0;
     }
     return it->second != 0;
 }
@@ -1375,8 +1380,10 @@ bool FileEnvironment::IsCbufIndirectStorageBufferPointer(u32 index, u32 offset, 
         if (guess) {
             return index == 0 ? guess->storage_pointer_bank0 : guess->storage_pointer_other;
         }
+        // As above: no record and no guess answers with the conservative classification instead
+        // of failing the pipeline (#603).
         lacks_recorded_value = true;
-        throw Shader::LogicError("Uncached storage pointer table classification");
+        return index == 0;
     }
     return it->second != 0;
 }

@@ -54,12 +54,29 @@ void AddEqualGraphicsKeys(const std::filesystem::path& filename,
                           std::span<const DuplicateGraphicsRecord> duplicates,
                           std::vector<VideoCommon::PipelineRecord>& records);
 
+/// Whether a graphics record's environments lack a value the translator reads (see
+/// FileEnvironment::LacksRecordedValue), so the record goes to live recapture: the first draw
+/// builds the pipeline from the values the game binds, and records them. It holds whether or not
+/// the conservative answers still produced a pipeline: that pipeline rests on a guessed
+/// classification, and caching it would keep the guess for the whole session (#603).
+[[nodiscard]] bool GraphicsRecordLacksRecordedValue(
+    std::span<const VideoCommon::FileEnvironment> envs, u32 read_properties) noexcept;
+
+/// Whether a pipeline translated from a disk record is kept for the cache: only when the record
+/// held every value the translator read. A translation on the conservative answers is a guess;
+/// the pipeline is left to the first draw, which builds and records it from the values the game
+/// binds (#603).
+[[nodiscard]] inline bool KeepTranslatedPipeline(bool pipeline_built,
+                                                 bool lacks_recorded_value) noexcept {
+    return pipeline_built && !lacks_recorded_value;
+}
+
 /// Adds the graphics records lacking a value the translator reads (with their key hashes) to
-/// `removed`. Such a record never builds, and while its key is in `disk_pipelines` the pipeline
-/// built when first needed is not recorded. Without a later record of its key, the key leaves
-/// `disk_pipelines` so that the pipeline is recorded; a later record is no longer a duplicate, as
-/// it takes the record's place once that is removed, so the key is recorded once however often
-/// removing it fails.
+/// `removed`. Such a record never builds, or built only on the conservative answers, and while
+/// its key is in `disk_pipelines` the pipeline built when first needed is not recorded. Without a
+/// later record of its key, the key leaves `disk_pipelines` so that the pipeline is recorded; a
+/// later record is no longer a duplicate, as it takes the record's place once that is removed, so
+/// the key is recorded once however often removing it fails.
 void AddIncompleteGraphics(std::span<const std::pair<u64, VideoCommon::PipelineRecord>> incomplete,
                            std::vector<DuplicateGraphicsRecord>& duplicates,
                            std::unordered_set<u64>& disk_pipelines,
