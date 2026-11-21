@@ -208,6 +208,10 @@ void Joycons::RegisterNewDevice(SDL_hid_device_info* device_info) {
 
         handle->InitializeDevice();
         handle->SetCallbacks(callbacks);
+
+        // A unit that never sends a battery report reads as BatteryLevel::None, which games
+        // treat as a dead controller (#306). Present a healthy one until the first report.
+        SetBattery(GetIdentifier(port, type), Common::Input::BatteryLevel::Full);
     }
 }
 
