@@ -79,6 +79,10 @@ extern "C" int LLVMFuzzerTestOneInput(const u8* data, std::size_t size) {
         Fuzz::Walk(nup.GetRomFSDir(i), budget);
         Fuzz::Walk(nup.GetPackageDir(i), budget);
     }
-    (void)nup.VerifyIntegrity([](std::size_t, std::size_t) { return true; });
+    // Many records can name one small extent that decodes to a lot, so the work is not bounded by
+    // the input's size: the callback, polled at least every 4 MiB of decoded output, cancels after
+    // about 64 MiB, and such an input ends as a cancel rather than a timeout.
+    int polls = 0;
+    (void)nup.VerifyIntegrity([&polls](std::size_t, std::size_t) { return ++polls < 16; });
     return 0;
 }
