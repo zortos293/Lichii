@@ -4454,6 +4454,21 @@ Binding BufferCache<P>::StorageBufferBinding(GPUVAddr ssbo_addr, u32 cbuf_index,
             // constant from them. Written pools keep a cap: a write marks the whole binding
             // GPU-modified.
             if (table_pointer && !is_written) {
+                // Duskbloods only: graphics table-pointer pools stop at 512 MiB
+                // (EDEN_NX2_GRAPHICS_TABLE_CAP_MIB=<MiB> overrides, 0 turns it off). Its stage-2
+                // pool reached ~977 MiB, over the block its CPU streams each frame, so every draw
+                // uploaded and re-protected that block while the guest was still writing it.
+                constexpr u64 DuskbloodsProgramId = 0x0400D1D02399A000ULL;
+                static const u32 graphics_cap = [] {
+                    const char* const value = std::getenv("EDEN_NX2_GRAPHICS_TABLE_CAP_MIB");
+                    const long mib = value != nullptr ? std::strtol(value, nullptr, 10) : 512;
+                    return mib > 0 && mib < 4096 ? static_cast<u32>(mib) << 20 : 0U;
+                }();
+                // Checked per bind: a later game in the same session gets its own answer.
+                if (!compute && graphics_cap != 0 &&
+                    Settings::GetCurrentProgramID() == DuskbloodsProgramId) {
+                    return (std::min)({memory_layout_size, limit, graphics_cap});
+                }
                 return (std::min)(memory_layout_size, limit);
             }
             // A native compute program's pointer is bare: the word after it is another parameter
