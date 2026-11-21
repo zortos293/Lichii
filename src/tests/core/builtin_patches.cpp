@@ -210,12 +210,16 @@ public:
             WriteIps(exefs / fmt::format("{}.ips", OcarinaBuildIdHex), *user_mod_word,
                      user_mod_offset);
         }
-        system.SetFilesystem(std::make_shared<FileSys::RealVfsFilesystem>());
-        system.SetContentProvider(std::make_unique<FileSys::ContentProviderUnion>());
-        system.GetFileSystemController().CreateFactories(*system.GetFilesystem());
+        // Made only now: its constructor writes the profiles into the NAND folder and the FS
+        // access log into the SD card folder, which were still the user's ones before this.
+        system.emplace();
+        system->SetFilesystem(std::make_shared<FileSys::RealVfsFilesystem>());
+        system->SetContentProvider(std::make_unique<FileSys::ContentProviderUnion>());
+        system->GetFileSystemController().CreateFactories(*system->GetFilesystem());
     }
 
     ~PatchManagerTestContext() {
+        system.reset();
         for (size_t i = 0; i < TestDirectories.size(); ++i) {
             Tests::RestoreEdenPath(TestDirectories[i].first, previous[i]);
         }
@@ -228,8 +232,8 @@ public:
     PatchManagerTestContext& operator=(const PatchManagerTestContext&) = delete;
 
     FileSys::PatchManager Manager(u64 title_id = OcarinaTitleId) {
-        return FileSys::PatchManager{title_id, system.GetFileSystemController(),
-                                     system.GetContentProvider()};
+        return FileSys::PatchManager{title_id, system->GetFileSystemController(),
+                                     system->GetContentProvider()};
     }
 
     void WriteCheat(std::string_view cheat) const {
@@ -243,7 +247,7 @@ private:
         std::filesystem::temp_directory_path() /
         ("builtin-patch-test-" +
          std::to_string(std::chrono::steady_clock::now().time_since_epoch().count()));
-    Core::System system;
+    std::optional<Core::System> system;
 };
 
 std::vector<u8> MakeMain(const FileSys::PatchManager::BuildID& build_id, u32 word) {

@@ -233,12 +233,11 @@ std::map<std::filesystem::path, std::string> SnapshotProfile(const std::filesyst
 TEST_CASE("Scratch Core leaves the shared filesystem access log untouched",
           "[core][native_home_reporter]") {
     using Common::FS::EdenPath;
+    // The context points the SD card folder at a folder of its own.
     ScopedSystemTestContext environment;
-    const auto sdmc = Common::FS::GetEdenPath(EdenPath::NANDDir) / "sdmc";
-    const auto previous_sdmc = Common::FS::GetEdenPath(EdenPath::SDMCDir);
-    REQUIRE(std::filesystem::create_directory(sdmc));
-    Common::FS::SetEdenPath(EdenPath::SDMCDir, sdmc);
-    SCOPE_EXIT { Tests::RestoreEdenPath(EdenPath::SDMCDir, previous_sdmc); };
+    const auto sdmc = Common::FS::GetEdenPath(EdenPath::SDMCDir);
+    REQUIRE(sdmc == Common::FS::GetEdenPath(EdenPath::NANDDir) / "sdmc");
+    REQUIRE(std::filesystem::is_directory(sdmc));
 
     const auto log = sdmc / "FsAccessLog.txt";
     const auto read_log = [&] {
