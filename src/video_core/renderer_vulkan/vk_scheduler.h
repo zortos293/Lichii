@@ -71,6 +71,11 @@ public:
     bool DeferFlush();
     /// Submits deferred work (the split's back, from its idle hook).
     void FlushDeferred();
+    /// Whether the GPU has finished everything submitted while the work recorded since the last
+    /// submission is older than a bound: then it should be submitted now instead of at the draw
+    /// budget, so the GPU runs it while more is recorded. Checked between draws, where a submit
+    /// is safe.
+    bool IdleGpuAwaitsWork();
     /// Threads other than the split's back: waits until tick is submitted, asking the back to
     /// submit deferred work (logged every 2 s while it waits). False only when the back thread
     /// is not running, so nothing will submit it: the caller then submits it itself.
@@ -358,6 +363,7 @@ public:
 
 private:
     std::chrono::steady_clock::time_point last_flush{};
+    std::chrono::steady_clock::time_point next_idle_gpu_check{};
     bool flush_pending{};
     u64 record_serial{};    ///< Commands recorded
     u64 submitted_serial{}; ///< record_serial at the last Flush or Finish
