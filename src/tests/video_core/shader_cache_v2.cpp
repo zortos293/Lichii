@@ -1111,7 +1111,8 @@ TEST_CASE("Shader cache v2: an older Vulkan cache and its used list are migrated
     REQUIRE_FALSE(Vulkan::MigrateLegacyPipelineCache(temp.path, log_file, 16).version.has_value());
     REQUIRE(ReadAll(log_file) == log_bytes);
 
-    // The newest version first
+    // A newer cache no longer hides the older one: both are migrated, and a record of a key in
+    // the newer file replaces the one in the older
     const auto newer = VideoCommon::VersionedPipelineCachePath(
         temp.path, "vulkan", VideoCommon::VulkanPipelineCacheVersion);
     VideoCommon::SerializePipeline(second, fragment_envs, newer,
@@ -1119,8 +1120,119 @@ TEST_CASE("Shader cache v2: an older Vulkan cache and its used list are migrated
     const auto newer_log = temp.path / "newer.bin";
     const auto from_newer = Vulkan::MigrateLegacyPipelineCache(temp.path, newer_log, 16);
     REQUIRE(from_newer.version == VideoCommon::VulkanPipelineCacheVersion);
-    REQUIRE(from_newer.graphics == 1);
-    REQUIRE(from_newer.used == 0);
+    REQUIRE(from_newer.sources == 2);
+    REQUIRE(from_newer.graphics == 2);
+    REQUIRE(from_newer.compute == 1);
+    REQUIRE(from_newer.collapsed == 3);
+    REQUIRE(from_newer.used == 2);
+}
+
+TEST_CASE("Shader cache v2: a small newer cache beside a large older one keeps both",
+          "[video_core][shader_cache_v2]") {
+    TempDir temp;
+    const auto log_file = temp.path / std::string{V2::FileName};
+    const auto older = VideoCommon::VersionedPipelineCachePath(temp.path, "vulkan", 53);
+    const auto newer = VideoCommon::VersionedPipelineCachePath(
+        temp.path, "vulkan", VideoCommon::VulkanPipelineCacheVersion);
+    TestEnvironment fragment{Shader::Stage::Fragment};
+    TestEnvironment other_fragment{Shader::Stage::Fragment, 1};
+    TestEnvironment compute{Shader::Stage::Compute};
+    const std::array<const VideoCommon::GenericEnvironment*, 1> fragment_envs{&fragment};
+    const std::array<const VideoCommon::GenericEnvironment*, 1> other_envs{&other_fragment};
+    const std::array<const VideoCommon::GenericEnvironment*, 1> compute_envs{&compute};
+    // The cache the game filled, and the one pipeline a build that ran once left behind
+    const auto shared = TestGraphicsKey(0x4444, 100);
+    const auto older_only = TestGraphicsKey(0x5555, 101);
+    const auto newer_only = TestGraphicsKey(0x6666, 101);
+    VideoCommon::SerializePipeline(shared, fragment_envs, older, 53, ReadProperties);
+    VideoCommon::SerializePipeline(older_only, fragment_envs, older, 53, ReadProperties);
+    VideoCommon::SerializePipeline(TestComputeKey(0x7777), compute_envs, older, 53, ReadProperties);
+    VideoCommon::SerializePipeline(shared, other_envs, newer,
+                                   VideoCommon::VulkanPipelineCacheVersion, ReadProperties);
+    VideoCommon::SerializePipeline(newer_only, fragment_envs, newer,
+                                   VideoCommon::VulkanPipelineCacheVersion, ReadProperties);
+    const auto write_used = [&](u32 version, std::span<const std::pair<u64, u8>> entries) {
+        std::ofstream used(
+            VideoCommon::VersionedPipelineCachePath(temp.path, "vulkan_used", version),
+            std::ios::binary);
+        const u32 magic = Vulkan::UsedPipelinesMagic;
+        const u32 count = static_cast<u32>(entries.size());
+        used.write(reinterpret_cast<const char*>(&magic), sizeof(magic));
+        used.write(reinterpret_cast<const char*>(&count), sizeof(count));
+        for (const auto& [hash, age] : entries) {
+            used.write(reinterpret_cast<const char*>(&hash), sizeof(hash));
+            used.write(reinterpret_cast<const char*>(&age), sizeof(age));
+        }
+    };
+    // The shared pipeline was used last session in the newer cache, three sessions ago in the
+    // older one; one entry is in neither cache
+    const std::array<std::pair<u64, u8>, 2> older_used{
+        {{shared.Hash(), 3}, {older_only.Hash(), 0}}};
+    const std::array<std::pair<u64, u8>, 2> newer_used{{{shared.Hash(), 1}, {0xbeef, 0}}};
+    write_used(53, older_used);
+    write_used(VideoCommon::VulkanPipelineCacheVersion, newer_used);
+
+    const auto migration = Vulkan::MigrateLegacyPipelineCache(temp.path, log_file, 16);
+    REQUIRE(migration.version == VideoCommon::VulkanPipelineCacheVersion);
+    REQUIRE(migration.sources == 2);
+    REQUIRE(migration.graphics == 3);
+    REQUIRE(migration.compute == 1);
+    REQUIRE(migration.collapsed == 1); // The shared pipeline, in both caches
+    REQUIRE(migration.used == 2);
+
+    const V2::LogFile log = V2::ReadLogFile(log_file);
+    REQUIRE(log.parsed.stats.dead_bytes == 0);
+    std::map<RecordKind, std::vector<const V2::LogRecord*>> kinds;
+    for (const V2::LogRecord& record : log.parsed.live) {
+        kinds[record.kind].push_back(&record);
+    }
+    REQUIRE(kinds[RecordKind::Graphics].size() == 3);
+    REQUIRE(kinds[RecordKind::Compute].size() == 1);
+    // One Migrated record per source, both named
+    REQUIRE(kinds[RecordKind::Migrated].size() == 2);
+    std::vector<std::string> sources;
+    for (const V2::LogRecord* record : kinds[RecordKind::Migrated]) {
+        const auto migrated = V2::DecodeMigrated(record->payload);
+        REQUIRE(migrated.has_value());
+        sources.push_back(migrated->source);
+    }
+    std::ranges::sort(sources);
+    REQUIRE(sources == std::vector<std::string>{"vulkan.fork-v53.bin", "vulkan.fork-v54.bin"});
+
+    // The shared pipeline carries the newer cache's payload
+    const auto shared_key = Vulkan::GraphicsRecordKey(shared);
+    const auto kept = std::ranges::find_if(kinds[RecordKind::Graphics],
+                                           [&](const V2::LogRecord* record) {
+                                               return record->key == shared_key;
+                                           });
+    REQUIRE(kept != kinds[RecordKind::Graphics].end());
+    const auto expected =
+        VideoCommon::SerializePipelinePayload(KeyBytes(shared), other_envs, ReadProperties);
+    const size_t without_key = expected.size() - sizeof(Vulkan::GraphicsPipelineCacheKey);
+    REQUIRE(std::ranges::equal(std::span{(*kept)->payload}.first(without_key),
+                               std::span{expected}.first(without_key)));
+
+    // The used lists merge on the most recent use: the shared pipeline is carried at the age the
+    // newer cache gave it (1), not the older one's (3). The log times a migrated session as
+    // 0x100 - age, so the older sessions come first.
+    std::vector<std::pair<u64, std::vector<u64>>> sessions;
+    for (const V2::LogRecord* record : kinds[RecordKind::Used]) {
+        const auto session = V2::DecodeUsed(record->payload);
+        REQUIRE(session.has_value());
+        sessions.emplace_back(session->session_time, session->pipelines);
+    }
+    std::ranges::sort(sessions);
+    REQUIRE(sessions.size() == 2);
+    REQUIRE(sessions[0].second == std::vector<u64>{shared_key});
+    REQUIRE(sessions[0].first == 0x100 - 1);
+    REQUIRE(sessions[1].second == std::vector<u64>{Vulkan::GraphicsRecordKey(older_only)});
+    REQUIRE(sessions[1].first == 0x100);
+
+    std::vector<u64> expired;
+    const auto used = Vulkan::UsedPipelinesFromLog(log.parsed.live, 16, expired);
+    REQUIRE(expired.empty());
+    REQUIRE(used == std::unordered_map<u64, u8>{
+                       {shared_key, 1}, {Vulkan::GraphicsRecordKey(older_only), 0}});
 }
 
 TEST_CASE("Shader cache v2: used pipelines age by the sessions that used them",

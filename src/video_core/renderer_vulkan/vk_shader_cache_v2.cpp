@@ -61,35 +61,63 @@ LegacyCacheMigration MigrateLegacyPipelineCache(const std::filesystem::path& dir
     std::array<u32, 1 + VideoCommon::CompatibleVulkanPipelineCacheVersions.size()> versions{
         VideoCommon::VulkanPipelineCacheVersion};
     std::ranges::copy(VideoCommon::CompatibleVulkanPipelineCacheVersions, versions.begin() + 1);
+
+    // Every compatible cache there is, newest first. The newest one can be small, or hold the few
+    // pipelines of a build that ran once, so stopping at the first one there would throw away the
+    // caches the game actually filled.
+    struct Source {
+        u32 version;
+        std::filesystem::path path;
+        u64 size;
+        std::filesystem::file_time_type mtime;
+        bool read{};                        ///< Its records are in the log
+        std::unordered_map<u64, u64> rekeyed; ///< Key hash with the driver -> without
+    };
+    std::vector<Source> sources;
     for (const u32 version : versions) {
-        const auto source = VideoCommon::VersionedPipelineCachePath(directory, "vulkan", version);
-        if (!std::filesystem::is_regular_file(source, error)) {
+        auto path = VideoCommon::VersionedPipelineCachePath(directory, "vulkan", version);
+        if (!std::filesystem::is_regular_file(path, error)) {
             continue;
         }
-        ShaderCacheV2::LogBuilder builder;
-        switch (builder.Start(log)) {
-        case ShaderCacheV2::WriteResult::Exists:
-            return result; // Another emulator migrated it first
-        case ShaderCacheV2::WriteResult::Written:
-            break;
-        default:
-            return {.failed = true};
+        const auto size = std::filesystem::file_size(path, error);
+        if (error) {
+            continue;
         }
-        // The source is read twice. The first pass keeps only where each record lies and which key
-        // it has, so that a record of one key replaces the ones before it; the second writes the
-        // kept records out as the bytes they are. The source, and a copy of it, never sit in
-        // memory at once, which a shared cache of tens of thousands of pipelines did not fit in.
-        struct LegacyRecord {
-            RecordKind kind;
-            u64 key;
-            u64 begin;
-            u64 end;
-        };
-        std::vector<LegacyRecord> records;
-        std::unordered_map<u64, size_t> last_of_key; ///< The record each key was last written by
-        std::unordered_map<u64, u64> rekeyed;        ///< Key hash with the driver -> without
-        const auto source_size = std::filesystem::file_size(source, error);
-        const auto source_mtime = std::filesystem::last_write_time(source, error);
+        const auto mtime = std::filesystem::last_write_time(path, error);
+        if (error) {
+            continue;
+        }
+        sources.push_back({version, std::move(path), size, mtime, {}});
+    }
+    if (sources.empty()) {
+        return result;
+    }
+
+    ShaderCacheV2::LogBuilder builder;
+    switch (builder.Start(log)) {
+    case ShaderCacheV2::WriteResult::Exists:
+        return result; // Another emulator migrated it first
+    case ShaderCacheV2::WriteResult::Written:
+        break;
+    default:
+        return {.failed = true};
+    }
+
+    // Each source is read twice. The first pass keeps only where each record lies and which key it
+    // has, the oldest source first so that a record of a key from a newer source replaces the ones
+    // before it. The second writes the kept records out as the bytes they are. A source, and a
+    // copy of it, never sit in memory at once.
+    struct LegacyRecord {
+        size_t source;
+        RecordKind kind;
+        u64 key;
+        u64 begin;
+        u64 end;
+    };
+    std::vector<LegacyRecord> records;
+    std::unordered_map<u64, size_t> last_of_key; ///< The record each key was last written by
+    std::optional<u32> newest_source;
+    for (size_t s = sources.size(); s-- > 0;) {
         u64 record_begin{VideoCommon::PipelineCacheMagic.size() + sizeof(u32)};
         // The bytes of the record the callback has read, from its start to the end of its key
         const auto record_bytes = [&](std::istream& file, u64& begin) {
@@ -101,12 +129,13 @@ LegacyCacheMigration MigrateLegacyPipelineCache(const std::filesystem::path& dir
             record_begin = end;
             return bytes;
         };
+        std::vector<LegacyRecord> read_records;
+        std::unordered_map<u64, u64> rekeyed;
         const auto add = [&](RecordKind kind, u64 key, u64 begin) {
-            last_of_key.insert_or_assign(key, records.size());
-            records.push_back({kind, key, begin, record_begin});
+            read_records.push_back({s, kind, key, begin, record_begin});
         };
         const bool read = VideoCommon::ReadPipelinesUnchanged(
-            source, version,
+            sources[s].path, sources[s].version,
             [&](std::istream& file, VideoCommon::FileEnvironment env) {
                 ComputePipelineCacheKey key;
                 file.read(reinterpret_cast<char*>(&key), sizeof(key));
@@ -127,109 +156,171 @@ LegacyCacheMigration MigrateLegacyPipelineCache(const std::filesystem::path& dir
                 add(RecordKind::Graphics, key.Hash(), begin);
             });
         if (!read) {
-            builder.Discard();
             continue; // Another file under that name
         }
-        result.collapsed = static_cast<u32>(records.size() - last_of_key.size());
-        for (size_t i = 0; i < records.size(); ++i) {
-            if (last_of_key[records[i].key] != i) {
-                continue;
-            }
-            ++(records[i].kind == RecordKind::Graphics ? result.graphics : result.compute);
+        // A source read whole joins the older ones, its records replacing theirs by key
+        for (const LegacyRecord& record : read_records) {
+            last_of_key.insert_or_assign(record.key, records.size());
+            records.push_back(record);
         }
+        sources[s].rekeyed = std::move(rekeyed);
+        sources[s].read = true;
+        newest_source = sources[s].version;
+    }
+    if (!newest_source) {
+        builder.Discard();
+        return result;
+    }
+    result.collapsed = static_cast<u32>(records.size() - last_of_key.size());
+    std::vector<u32> graphics(sources.size());
+    std::vector<u32> compute(sources.size());
+    for (size_t i = 0; i < records.size(); ++i) {
+        if (last_of_key[records[i].key] != i) {
+            continue;
+        }
+        const bool is_graphics = records[i].kind == RecordKind::Graphics;
+        ++(is_graphics ? graphics[records[i].source] : compute[records[i].source]);
+        ++(is_graphics ? result.graphics : result.compute);
+    }
 
-        // The second pass copies the records the first kept. A source another process wrote in
-        // between no longer matches the offsets. The migration fails then, as when the log is
-        // busy, rather than falling back to an older source that would shadow this one.
-        std::ifstream kept_source(source, std::ios::binary);
-        if (!kept_source.is_open() ||
-            std::filesystem::file_size(source, error) != source_size ||
-            std::filesystem::last_write_time(source, error) != source_mtime) {
+    // A source another process wrote since the first pass no longer matches the offsets. Only the
+    // sources read whole take part; one that wasn't is left out of the log as if it weren't there.
+    const auto unchanged = [](const Source& source) {
+        std::error_code check_error;
+        const auto size = std::filesystem::file_size(source.path, check_error);
+        if (check_error || size != source.size) {
+            return false;
+        }
+        const auto mtime = std::filesystem::last_write_time(source.path, check_error);
+        return !check_error && mtime == source.mtime;
+    };
+    for (const Source& source : sources) {
+        if (source.read && !unchanged(source)) {
             builder.Discard();
             return {.failed = true};
         }
-        std::vector<u8> bytes;
-        bool appended{true};
-        for (size_t i = 0; i < records.size() && appended; ++i) {
-            const LegacyRecord& record = records[i];
-            if (last_of_key[record.key] != i) {
-                continue;
-            }
-            bytes.resize(static_cast<size_t>(record.end - record.begin));
-            kept_source.seekg(static_cast<std::streamoff>(record.begin));
-            kept_source.read(reinterpret_cast<char*>(bytes.data()),
-                             static_cast<std::streamsize>(bytes.size()));
-            if (!kept_source.good()) {
+    }
+    std::ifstream kept_source;
+    std::optional<size_t> opened;
+    std::vector<u8> bytes;
+    bool appended{true};
+    for (size_t i = 0; i < records.size() && appended; ++i) {
+        const LegacyRecord& record = records[i];
+        if (last_of_key[record.key] != i) {
+            continue;
+        }
+        if (opened != record.source) {
+            kept_source.close();
+            kept_source.clear();
+            if (!unchanged(sources[record.source])) {
                 appended = false;
                 break;
             }
-            if (record.kind == RecordKind::Graphics) {
-                // The key the record ends with is kept without the driver that built it
-                GraphicsPipelineCacheKey key;
-                std::memcpy(&key, bytes.data() + bytes.size() - sizeof(key), sizeof(key));
-                ClearDriverFields(key);
-                std::memcpy(bytes.data() + bytes.size() - sizeof(key), &key, sizeof(key));
-            }
-            appended = builder.Append(record.kind, record.key, bytes);
+            kept_source.open(sources[record.source].path, std::ios::binary);
+            opened = record.source;
         }
-        if (!appended) {
-            builder.Discard();
-            return {.failed = true};
+        bytes.resize(static_cast<size_t>(record.end - record.begin));
+        kept_source.seekg(static_cast<std::streamoff>(record.begin));
+        kept_source.read(reinterpret_cast<char*>(bytes.data()),
+                         static_cast<std::streamsize>(bytes.size()));
+        if (!kept_source.good()) {
+            appended = false;
+            break;
         }
+        if (record.kind == RecordKind::Graphics) {
+            // The key the record ends with is kept without the driver that built it
+            GraphicsPipelineCacheKey key;
+            std::memcpy(&key, bytes.data() + bytes.size() - sizeof(key), sizeof(key));
+            ClearDriverFields(key);
+            std::memcpy(bytes.data() + bytes.size() - sizeof(key), &key, sizeof(key));
+        }
+        appended = builder.Append(record.kind, record.key, bytes);
+    }
+    // A source written while its records were copied no longer holds the bytes the offsets were
+    // taken from
+    for (const Source& source : sources) {
+        if (appended && source.read && !unchanged(source)) {
+            appended = false;
+        }
+    }
+    if (!appended) {
+        builder.Discard();
+        return {.failed = true};
+    }
 
-        // The used list saved beside the cache, by sessions since the last use
+    // The used lists saved beside each cache: a pipeline keeps its most recent use
+    std::unordered_map<u64, u8> merged_used;
+    std::vector<u32> used_by_source(sources.size());
+    for (size_t s = 0; s < sources.size(); ++s) {
+        if (!sources[s].read) {
+            continue; // Its records are not in the log, so its use of them is not either
+        }
         const auto used = LoadUsedPipelines(
-            VideoCommon::VersionedPipelineCachePath(directory, "vulkan_used", version),
+            VideoCommon::VersionedPipelineCachePath(directory, "vulkan_used", sources[s].version),
             max_used_age);
-        std::map<u8, std::vector<u64>> sessions;
         for (const auto& [hash, age] : used) {
-            if (const auto it = rekeyed.find(hash); it != rekeyed.end()) {
-                sessions[age].push_back(it->second);
-                ++result.used;
+            if (const auto it = sources[s].rekeyed.find(hash); it != sources[s].rekeyed.end()) {
+                const auto [entry, inserted] = merged_used.try_emplace(it->second, age);
+                if (!inserted) {
+                    entry->second = std::min(entry->second, age);
+                }
+                ++used_by_source[s];
             }
         }
-        for (auto& [age, pipelines] : sessions) {
-            std::ranges::sort(pipelines);
-            const std::vector<u8> payload = ShaderCacheV2::EncodeUsed({
-                .session_time = MigratedUsedSessionTime(age),
-                .pipelines = std::move(pipelines),
-            });
-            appended = builder.Append(RecordKind::Used, MigratedUsedSessionKey(age), payload) &&
-                       appended;
-        }
+    }
+    std::map<u8, std::vector<u64>> sessions;
+    for (const auto& [key, age] : merged_used) {
+        sessions[age].push_back(key);
+    }
+    for (auto& [age, pipelines] : sessions) {
+        std::ranges::sort(pipelines);
+        const std::vector<u8> payload = ShaderCacheV2::EncodeUsed({
+            .session_time = MigratedUsedSessionTime(age),
+            .pipelines = std::move(pipelines),
+        });
+        appended = builder.Append(RecordKind::Used, MigratedUsedSessionKey(age), payload) &&
+                   appended;
+    }
+    result.used = static_cast<u32>(merged_used.size());
 
+    // One record per source that made it into the log, naming the file it came from, oldest first
+    u32 read_sources{};
+    for (size_t s = sources.size(); s-- > 0;) {
+        if (!sources[s].read) {
+            continue;
+        }
+        ++read_sources;
         const ShaderCacheV2::MigratedRecord migrated{
-            .source = Common::FS::PathToUTF8String(source.filename()),
-            .source_size = static_cast<u64>(std::filesystem::file_size(source, error)),
-            .source_mtime = static_cast<s64>(
-                std::filesystem::last_write_time(source, error).time_since_epoch().count()),
-            .source_version = version,
-            .graphics = result.graphics,
-            .compute = result.compute,
-            .used = result.used,
+            .source = Common::FS::PathToUTF8String(sources[s].path.filename()),
+            .source_size = sources[s].size,
+            .source_mtime = static_cast<s64>(sources[s].mtime.time_since_epoch().count()),
+            .source_version = sources[s].version,
+            .graphics = graphics[s],
+            .compute = compute[s],
+            .used = used_by_source[s],
         };
         const std::vector<u8> name(migrated.source.begin(), migrated.source.end());
         const std::vector<u8> migrated_payload = ShaderCacheV2::EncodeMigrated(migrated);
         appended = builder.Append(RecordKind::Migrated, ShaderCacheV2::Hash64(name),
                                   migrated_payload) &&
                    appended;
-        if (!appended) {
-            builder.Discard();
-            return {.failed = true};
-        }
+    }
+    if (!appended) {
+        builder.Discard();
+        return {.failed = true};
+    }
 
-        switch (builder.Commit()) {
-        case ShaderCacheV2::WriteResult::Written:
-            result.version = version;
-            break;
-        case ShaderCacheV2::WriteResult::Exists:
-            result = {}; // Another emulator migrated it first
-            break;
-        default:
-            result = {.failed = true};
-            break;
-        }
-        return result;
+    switch (builder.Commit()) {
+    case ShaderCacheV2::WriteResult::Written:
+        result.version = newest_source;
+        result.sources = read_sources;
+        break;
+    case ShaderCacheV2::WriteResult::Exists:
+        result = {}; // Another emulator migrated it first
+        break;
+    default:
+        result = {.failed = true};
+        break;
     }
     return result;
 }

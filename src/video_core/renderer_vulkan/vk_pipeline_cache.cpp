@@ -1252,7 +1252,13 @@ void PipelineCache::LoadDiskResources(u64 title_id, std::stop_token stop_loading
     }
     const auto migration =
         MigrateLegacyPipelineCache(base_dir, pipeline_cache_filename, MaxUsedPipelineAge(device));
-    if (migration.version) {
+    if (migration.version && migration.sources > 1) {
+        LOG_INFO(Render_Vulkan,
+                 "Shader cache v2 started from {} older caches (newest version {}): {} graphics "
+                 "and {} compute pipelines ({} records collapsed), {} used-list entries",
+                 migration.sources, *migration.version, migration.graphics, migration.compute,
+                 migration.collapsed, migration.used);
+    } else if (migration.version) {
         LOG_INFO(Render_Vulkan,
                  "Shader cache v2 started from the version {} cache: {} graphics and {} "
                  "compute pipelines ({} records collapsed), {} used-list entries",
