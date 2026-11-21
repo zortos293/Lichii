@@ -191,6 +191,7 @@ add_executable(tests
     video_core/shader_cache_v2_programs.cpp
     video_core/shader_cache_v2_driver.cpp
     video_core/vulkan_pipeline_binaries.cpp
+    video_core/vulkan_physical_device_enumeration.cpp
     video_core/vulkan_buffer_oom.cpp
     video_core/pipeline_layout_cache.cpp
     video_core/shader_precache.cpp

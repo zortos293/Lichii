@@ -663,6 +663,15 @@ using SurfaceKHR = Handle<VkSurfaceKHR, VkInstance, InstanceDispatch>;
 using DescriptorSets = PoolAllocations<VkDescriptorSet, VkDescriptorPool>;
 using CommandBuffers = PoolAllocations<VkCommandBuffer, VkCommandPool>;
 
+namespace detail {
+
+// Retry physical-device enumeration if the adapter list changes between Vulkan's two calls.
+// Exposed for regression tests with a synthetic Vulkan enumerator.
+[[nodiscard]] std::vector<VkPhysicalDevice> EnumeratePhysicalDevicesWithRetry(
+    VkInstance instance, PFN_vkEnumeratePhysicalDevices enumerate);
+
+} // namespace detail
+
 /// Vulkan instance owning handle.
 class Instance : public Handle<VkInstance, NoOwner, InstanceDispatch> {
     using Handle<VkInstance, NoOwner, InstanceDispatch>::Handle;
