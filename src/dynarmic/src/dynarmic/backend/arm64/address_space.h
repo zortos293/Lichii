@@ -79,9 +79,9 @@ protected:
     }
 
     std::size_t GetRemainingSize();
-    EmittedBlockInfo Emit(IR::Block ir_block);
+    CodePtr Emit(IR::Block ir_block);
     void Link(EmittedBlockInfo& block);
-    void LinkBlockLinks(const CodePtr entry_point, const CodePtr target_ptr, const std::vector<BlockRelocation>& block_relocations_list);
+    void LinkBlockLink(CodePtr entry_point, CodePtr target_ptr, const BlockRelocation& relocation);
     void RelinkForDescriptor(IR::LocationDescriptor target_descriptor, CodePtr target_ptr);
 
     FakeCall FastmemCallback(u64 host_pc);
@@ -97,7 +97,8 @@ protected:
     std::map<CodePtr, IR::LocationDescriptor> reverse_block_entries;
     ::Common::unordered_map<IR::LocationDescriptor, CodePtr> block_entries;
     ::Common::unordered_map<CodePtr, EmittedBlockInfo> block_infos;
-    ::Common::unordered_map<IR::LocationDescriptor, ::Common::unordered_set<CodePtr>> block_references;
+    /// The blocks that link to each location, each once per location.
+    ::Common::unordered_map<IR::LocationDescriptor, std::vector<CodePtr>> block_references;
 
     ExceptionHandler exception_handler;
     FastmemManager fastmem_manager;
