@@ -6487,6 +6487,11 @@ bool MainWindow::ConfirmClose() {
 }
 
 void MainWindow::closeEvent(QCloseEvent* event) {
+    // A spontaneous close comes from the window system (on SteamOS game mode, gamescope);
+    // a non-spontaneous one from the app itself (the Exit hotkey, the menu). Reports of the
+    // exit prompt appearing on its own (#2211) need that origin to go anywhere.
+    LOG_INFO(Frontend, "Close requested: spontaneous={}, exit locked={}", event->spontaneous(),
+             QtCommon::system ? QtCommon::system->GetExitLocked() : false);
     if (!close_pending && !ConfirmClose()) {
         event->ignore();
         return;
