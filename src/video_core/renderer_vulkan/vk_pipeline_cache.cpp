@@ -856,6 +856,13 @@ PipelineCache::PipelineCache(Tegra::MaxwellDeviceMemoryManager& device_memory_,
         device.HasBrokenParallelShaderCompiling()
             ? 1
             : std::min(cpu_threads, std::max<size_t>(std::thread::hardware_concurrency() / 2, 2));
+    if (device.IsExtGraphicsPipelineLibraryEnabled() &&
+        !device.HasBrokenParallelShaderCompiling() &&
+        !device.IsKhrPipelineExecutablePropertiesEnabled()) {
+        fragment_library_workers.reset(new Common::ThreadWorker{
+            driver_threads, "VkFragmentBuilder", {}, Common::ThreadPlacement::Background});
+        LOG_INFO(Render_Vulkan, "Fast-linked graphics pipeline libraries enabled");
+    }
     shader_jobs.emplace(VideoCommon::ShaderJobConfig{
         .cpu_threads = cpu_threads,
         .driver_threads = device.IsAmdLegacyGcn() ? std::min<size_t>(driver_threads, 2)
@@ -2788,7 +2795,8 @@ std::unique_ptr<GraphicsPipeline> PipelineCache::RebuildGraphicsPipeline(KeptGra
     auto pipeline = std::make_unique<GraphicsPipeline>(
         scheduler, buffer_cache, texture_cache, vulkan_pipeline_cache, pipeline_binaries.get(),
         &shader_notify, device, descriptor_pool, guest_descriptor_queue, descriptor_buffer_ring,
-        BuildQueue(true, bytes), nullptr, render_pass_cache, graphics_key,
+        BuildQueue(true, bytes), fragment_library_workers.get(), nullptr, render_pass_cache,
+        graphics_key,
         std::array<std::vector<u32>, Maxwell::MaxShaderStage>{}, infos, std::move(emit),
         std::move(kept.mesh_emulation));
     pipeline->SetMappedPointers(std::move(kept.mapped_pointers));
@@ -3321,8 +3329,9 @@ std::unique_ptr<GraphicsPipeline> PipelineCache::CreateGraphicsPipeline(
     auto pipeline = std::make_unique<GraphicsPipeline>(
         scheduler, buffer_cache, texture_cache, vulkan_pipeline_cache, pipeline_binaries.get(),
         &shader_notify, device, descriptor_pool, guest_descriptor_queue, descriptor_buffer_ring,
-        BuildQueue(build_in_parallel, defer_emission ? deferred_ir_bytes : 0), statistics,
-        render_pass_cache, key, std::move(stage_spirv), infos, std::move(emit_stages),
+        BuildQueue(build_in_parallel, defer_emission ? deferred_ir_bytes : 0),
+        fragment_library_workers.get(), statistics, render_pass_cache, key, std::move(stage_spirv),
+        infos, std::move(emit_stages),
         std::move(mesh_emulation));
     pipeline->SetMappedPointers(std::move(mapped_pointers));
     return pipeline;

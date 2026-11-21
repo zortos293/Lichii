@@ -213,6 +213,7 @@ add_library(video_core STATIC
     renderer_vulkan/nx2_list_slots.cpp
     renderer_vulkan/nx2_list_slots.h
     renderer_vulkan/pipeline_build.h
+    renderer_vulkan/fast_graphics_pipeline.h
     renderer_vulkan/pipeline_build_failure.cpp
     renderer_vulkan/pipeline_build_failure.h
     renderer_vulkan/pipeline_build_trace.h
