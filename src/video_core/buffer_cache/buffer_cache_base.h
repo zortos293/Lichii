@@ -8,6 +8,8 @@
 #include <algorithm>
 #include <atomic>
 #include <cstdlib>
+#include <cstring>
+#include <map>
 #include <array>
 #include <bit>
 #include <chrono>
@@ -575,6 +577,42 @@ public:
     bool any_buffer_uploaded = false;
     /// Indirectly read banks of native programs already uploaded this frame.
     std::unordered_set<DAddr> native_indirect_uniforms_this_frame;
+    /// The bytes the host buffer holds for each native bank the once-a-frame bank upload covers,
+    /// per bank address. An unchanged bank skips that upload (the upload into a buffer
+    /// draws already use ends the render pass). Any other upload over a bank drops its copy.
+    std::map<DAddr, std::vector<u8>> native_uniform_shadows;
+    std::vector<u8> native_uniform_scratch;
+    u64 native_uniform_skipped{};
+    u64 native_uniform_uploaded{};
+    /// An upload of known bytes over a bank: the host buffer now holds them, so does the copy.
+    void UpdateNativeUniformShadows(DAddr addr, const u8* data, u64 size) {
+        if (native_uniform_shadows.empty()) {
+            return;
+        }
+        auto it = native_uniform_shadows.lower_bound(addr >= 0x10000 ? addr - 0x10000 : 0);
+        for (; it != native_uniform_shadows.end() && it->first < addr + size; ++it) {
+            const DAddr bank_end = it->first + it->second.size();
+            if (bank_end <= addr) {
+                continue;
+            }
+            const DAddr start = (std::max)(addr, it->first);
+            const DAddr end = (std::min)(addr + size, bank_end);
+            std::memcpy(it->second.data() + (start - it->first), data + (start - addr), end - start);
+        }
+    }
+    void DropNativeUniformShadows(DAddr addr, u64 size) {
+        if (native_uniform_shadows.empty()) {
+            return;
+        }
+        auto it = native_uniform_shadows.lower_bound(addr >= 0x10000 ? addr - 0x10000 : 0);
+        while (it != native_uniform_shadows.end() && it->first < addr + size) {
+            if (it->first + it->second.size() > addr) {
+                it = native_uniform_shadows.erase(it);
+            } else {
+                ++it;
+            }
+        }
+    }
 
 private:
     template <typename Mask, typename Func>

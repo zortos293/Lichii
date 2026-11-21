@@ -1465,6 +1465,7 @@ bool BufferCache<P>::DMACopy(
     ClearDownload(*cpu_dest_address, amount);
     MarkVertexBuffersStale(*cpu_dest_address, amount);
     NoteUniformWrite(*cpu_dest_address, amount);
+    DropNativeUniformShadows(*cpu_dest_address, amount);
 
     BufferId buffer_a;
     BufferId buffer_b;
@@ -1544,6 +1545,7 @@ bool BufferCache<P>::DMAClear(GPUVAddr dst_address, u64 amount, u32 value) {
     ClearDownload(*cpu_dst_address, size);
     gpu_modified_ranges.Subtract(*cpu_dst_address, size);
     NoteUniformWrite(*cpu_dst_address, size);
+    DropNativeUniformShadows(*cpu_dst_address, size);
 
     const BufferId buffer = FindBuffer(*cpu_dst_address, static_cast<u32>(size), false);
     Buffer& dest_buffer = slot_buffers[buffer];
@@ -2382,6 +2384,7 @@ void BufferCache<P>::BindHostIndexBuffer() {
         } else {
             buffer.ImmediateUpload(0, draw_state.inline_index_draw_indexes);
         }
+        DropNativeUniformShadows(buffer.CpuAddr(), size);
     }
     if constexpr (HAS_FULL_INDEX_AND_PRIMITIVE_SUPPORT) {
         const u32 new_offset = offset + draw_state.index_buffer.first * u32(draw_state.index_buffer.FormatSizeInBytes());
@@ -2672,13 +2675,41 @@ void BufferCache<P>::BindHostGraphicsUniformBuffer(size_t stage, u32 index, u32 
             mapped_size += Core::DEVICE_PAGESIZE - ((device_addr + mapped_size) & Core::DEVICE_PAGEMASK);
         }
         const u64 upload_size = (std::min<u64>)(mapped_size, size);
+        // Most banks are unchanged since their last upload: skip those (an upload into a bank
+        // draws already use ends the render pass, ~70 a frame in Ocarina's forest).
+        bool unchanged = false;
         if (upload_size != 0) {
-            std::array<BufferCopy, 1> copies{BufferCopy{
-                .src_offset = 0,
-                .dst_offset = buffer.Offset(device_addr),
-                .size = upload_size,
-            }};
-            UploadMemory(buffer, upload_size, upload_size, copies);
+            native_uniform_scratch.resize(upload_size);
+            device_memory.ReadBlockUnsafe(device_addr, native_uniform_scratch.data(), upload_size);
+            const auto it = native_uniform_shadows.find(device_addr);
+            unchanged = it != native_uniform_shadows.end() && it->second == native_uniform_scratch;
+            if (Nx2Profile::Enabled()) {
+                ++(unchanged ? native_uniform_skipped : native_uniform_uploaded);
+                if (((native_uniform_skipped + native_uniform_uploaded) & 4095) == 0) {
+                    LOG_INFO(HW_GPU, "Nx2 native bank uploads: {} skipped unchanged, {} uploaded",
+                             native_uniform_skipped, native_uniform_uploaded);
+                }
+            }
+        }
+        if (upload_size != 0 && !unchanged) {
+            // Upload the snapshot the copy is taken from, not a second read: a guest write in
+            // between would leave the copy claiming bytes the host buffer doesn't hold.
+            const std::span<const u8> snapshot{native_uniform_scratch.data(), upload_size};
+            if constexpr (USE_MEMORY_MAPS_FOR_UPLOADS) {
+                auto upload_staging = runtime.UploadStagingBuffer(upload_size);
+                std::array copies{BufferCopy{
+                    .src_offset = upload_staging.offset,
+                    .dst_offset = buffer.Offset(device_addr),
+                    .size = upload_size,
+                }};
+                std::memcpy(upload_staging.mapped_span.data(), snapshot.data(), upload_size);
+                const bool can_reorder = runtime.CanReorderUpload(buffer, copies);
+                runtime.CopyBuffer(buffer, upload_staging.buffer, copies, true, can_reorder);
+            } else {
+                buffer.ImmediateUpload(buffer.Offset(device_addr), snapshot);
+            }
+            UpdateNativeUniformShadows(device_addr, snapshot.data(), upload_size);
+            native_uniform_shadows[device_addr] = native_uniform_scratch;
         }
     }
     const bool use_fast_buffer = needs_alignment_stream
@@ -3360,6 +3391,7 @@ void BufferCache<P>::MarkWrittenBuffer(BufferId buffer_id, DAddr device_addr, u3
     NoteReadBackWrite(device_addr, size);
     memory_tracker.MarkRegionAsGpuModified(device_addr, size);
     NoteUniformWrite(device_addr, size);
+    DropNativeUniformShadows(device_addr, size);
     MarkVertexBuffersStale(device_addr, size);
     gpu_modified_ranges.Add(device_addr, size);
     const bool ampere = Tegra::g_nx2_ampere.load(std::memory_order_relaxed);
@@ -4035,6 +4067,7 @@ void BufferCache<P>::ImmediateUploadMemory([[maybe_unused]] Buffer& buffer,
         for (const BufferCopy& copy : copies) {
             std::span<const u8> upload_span;
             const DAddr device_addr = buffer.CpuAddr() + copy.dst_offset;
+            DropNativeUniformShadows(device_addr, copy.size);
             if (IsRangeGranular(device_addr, copy.size)) {
                 auto* const ptr = device_memory.GetPointer<u8>(device_addr);
                 if (ptr != nullptr) {
@@ -4063,6 +4096,7 @@ void BufferCache<P>::MappedUploadMemory([[maybe_unused]] Buffer& buffer,
             u8* const src_pointer = staging_pointer.data() + copy.src_offset;
             const DAddr device_addr = buffer.CpuAddr() + copy.dst_offset;
             device_memory.ReadBlockUnsafe(device_addr, src_pointer, copy.size);
+            UpdateNativeUniformShadows(device_addr, src_pointer, copy.size);
             // Large uploads are mostly geometry the host GPU now has its own copy of: TickFrame
             // marks their guest memory cold (see TextureCache::RefreshContents).
             if (copy.size >= 256_KiB) {
@@ -4120,6 +4154,8 @@ void BufferCache<P>::InlineMemoryImplementation(DAddr dest_address, size_t copy_
     } else {
         buffer.ImmediateUpload(buffer.Offset(dest_address), inlined_buffer.first(copy_size));
     }
+    // The host buffer now holds the inlined bytes over whatever SynchronizeBuffer put there.
+    UpdateNativeUniformShadows(dest_address, inlined_buffer.data(), copy_size);
 }
 
 template <class P>
@@ -4279,6 +4315,7 @@ void BufferCache<P>::DeleteBuffer(BufferId buffer_id, bool do_not_mark) {
     read_trapped_ranges.Subtract(slot_buffers[buffer_id].CpuAddr(),
                                  slot_buffers[buffer_id].SizeBytes());
     cpu_read_ranges.Subtract(slot_buffers[buffer_id].CpuAddr(), slot_buffers[buffer_id].SizeBytes());
+    DropNativeUniformShadows(slot_buffers[buffer_id].CpuAddr(), slot_buffers[buffer_id].SizeBytes());
     const auto scalar_replace = [buffer_id](Binding& binding) {
         if (binding.buffer_id == buffer_id) {
             binding.buffer_id = BufferId{};

@@ -1825,6 +1825,7 @@ void QueryCacheRuntime::SyncValues(std::span<SyncValuesType> values, VkBuffer ba
     // must not keep the bytes they downloaded as the newest.
     for (const auto& value : values) {
         impl->buffer_cache.OutdateReadDownloads(value.address, value.size);
+        impl->buffer_cache.DropNativeUniformShadows(value.address, value.size);
     }
 
     VkBuffer src_buffer;
