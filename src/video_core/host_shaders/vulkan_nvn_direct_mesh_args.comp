@@ -1,0 +1,34 @@
+// SPDX-FileCopyrightText: Copyright 2026 Eden Emulator Project
+// SPDX-License-Identifier: GPL-3.0-or-later
+
+// NVN2 direct mode, the mesh emulation of an indirect mesh draw: the workgroup count the GPU
+// wrote into the game's record, as the emulation's dispatch arguments (words 0-2) and its draw's
+// (words 4-7: that many workgroups' vertices). Counts past the output buffer's room are clamped.
+
+#version 450
+
+layout(local_size_x = 1) in;
+
+layout(std430, binding = 0) readonly buffer Record {
+    uint record[];
+};
+layout(std430, binding = 1) writeonly buffer Args {
+    uint args[];
+};
+
+layout(push_constant) uniform PushConstants {
+    uint record_word;     // the count's word in the record buffer
+    uint group_vertices;  // vertices a workgroup draws
+    uint max_groups;      // workgroups the output buffer has room for
+};
+
+void main() {
+    const uint groups = min(record[record_word], max_groups);
+    args[0] = groups;
+    args[1] = 1;
+    args[2] = 1;
+    args[4] = groups * group_vertices;
+    args[5] = 1;
+    args[6] = 0;
+    args[7] = 0;
+}

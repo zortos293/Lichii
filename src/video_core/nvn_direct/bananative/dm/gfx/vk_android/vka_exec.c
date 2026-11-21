@@ -19,7 +19,9 @@ enum { NQS = 8 };
 static qstate g_qs[NQS]; static int g_nqs;
 enum { NSLOT = 8 };
 enum { NCHUNK = 96 };   // (parts: every queue event signal and wait ends one when the NVN queues are Vulkan queues)
-static struct { VkCommandBuffer cb; uint64_t fence; VkCommandBuffer x[NCHUNK]; } g_slot[NSLOT];   // x: the command buffers a submission goes on in once it hands its first part to the queue (chunk)
+static struct { VkCommandBuffer cb; uint64_t fence; VkCommandBuffer x[NCHUNK]; } g_slot[NSLOT];
+enum { NPRE = 64 };
+static VkCommandBuffer g_pre_cbs[NSLOT][NPRE], g_pre; static int g_npre;   // Fritchii: pre command buffers (vka_pre_split)   // x: the command buffers a submission goes on in once it hands its first part to the queue (chunk)
 static unsigned g_slot_i;
 static int g_chunk_draws = -1, g_nx; static uint64_t g_chunk_d0;   // chunk(): draws a part, parts this submission, draws at its part's start
 static VkCommandPool g_pool;
@@ -55,6 +57,8 @@ void mtl_set_frame(uint64_t f) {
     int on = VKA_ENV("DM_VK_STATS", 1) != 0;
     if (on && f - f0 >= 300) {
         double n = (double)(f - f0);
+        if (f0 && VKA_ENV("DM_VK_BAR_SITES", 0)) { void vka_bar_sites_log(double); vka_bar_sites_log(n); }
+        { extern uint64_t vka_bar_deduped; static uint64_t dd0; if (f0) VLOG("full barriers left out as right after another: %.0f a frame", (vka_bar_deduped - dd0) / n); dd0 = vka_bar_deduped; }
         if (f0) VLOG("replay up to frame %llu: per frame %.0f draws, %.0f render passes, %.0f clears / copies (%.0f in a pass), %.0f full barriers, %.0f inline uniform updates, %.1f submissions (%.1f parts); recording %.2f ms a frame (%.2f us a draw)",
                      (unsigned long long)f, (g_stat_draws - d0) / n, (vka_n_rp - rp0) / n, (g_stat_ops - o0) / n, (g_n_pclear - pc0) / n, (vka_n_bar - b0) / n, (g_n_ub - ub0) / n, (g_n_sub - s0) / n, (g_n_sub - s0 + g_n_chunks - ch0) / n, (g_rec_ns - r0) / n / 1e6,
                      g_stat_draws > d0 ? (g_rec_ns - r0) / 1e3 / (double)(g_stat_draws - d0) : 0.0);
@@ -128,6 +132,61 @@ static int64_t gpu_offset(uint64_t g, uint64_t tmax) {   // (completion thread) 
     if (state != 1) { int64_t o = (int64_t)g - (int64_t)((double)tmax * g_sq_ns); if (!have || o < off || g - at > 2000000000ull) { off = o; at = g; have = 1; } }
     return off;
 }
+static struct { PFN_vkCreateQueryPool create; PFN_vkCmdResetQueryPool reset; PFN_vkCmdWriteTimestamp write; PFN_vkGetQueryPoolResults get; } qf;
+// ---------- Lichii: samples-passed counters from occlusion queries ----------
+// A SAMPLES_PASSED report wrote 1 (rc_counter), so the game's occlusion culling saw every object as visible and drew it (Ocarina of Time: ~1.8% of ~800 render
+// conditions a frame skipped, against what the GPU emulation culls). Now an occlusion query runs through each render pass, ended at each report and when the pass ends;
+// a report's value is the running count of samples of the queries since the previous report, written when the submission completes (the next frame's render conditions
+// read it). A span whose draws ran without a query (the pool full, a span over a submission boundary) counts one sample more: never culled by mistake. DM_VK_OCCLUSION=0: 1
+enum { OCCQ = 512 };   // occlusion queries per submission slot
+static VkQueryPool g_oqp; static int g_oq_base, g_oq_n, g_oq_first, g_oq_active = -1, g_oq_unc, g_oq_tried;
+static PFN_vkCmdBeginQuery g_oq_cbegin; static PFN_vkCmdEndQuery g_oq_cend;
+static uint64_t g_occ_total;   // (completion thread) the running samples-passed count
+static int oq_on(void) { return g_oqp != VK_NULL_HANDLE && VKA_ENV("DM_VK_OCCLUSION", 0); }
+static void oq_cmd(const void *a) { struct { VkCommandBuffer cb; int begin; uint32_t q; } w; memcpy(&w, a, sizeof w); if (w.begin) g_oq_cbegin(w.cb, g_oqp, w.q, 0); else g_oq_cend(w.cb, g_oqp, w.q); }
+static void oq_rec(VkCommandBuffer cb, int begin, uint32_t q) { struct { VkCommandBuffer cb; int begin; uint32_t q; } w = {cb, begin, q}; if (!vka_enc_call(oq_cmd, &w, sizeof w)) oq_cmd(&w); }
+static void oq_sub_begin(unsigned k) {   // a submission's command buffer began: its slot's queries reset
+    if (!g_oq_tried) {
+        g_oq_tried = 1;
+        g_oq_cbegin = (PFN_vkCmdBeginQuery)vk.vkGetDeviceProcAddr(V.dev, "vkCmdBeginQuery"); g_oq_cend = (PFN_vkCmdEndQuery)vk.vkGetDeviceProcAddr(V.dev, "vkCmdEndQuery");
+        VkQueryPoolCreateInfo ci = {VK_STRUCTURE_TYPE_QUERY_POOL_CREATE_INFO, .queryType = VK_QUERY_TYPE_OCCLUSION, .queryCount = NSLOT * OCCQ};
+        if (!g_oq_cbegin || !g_oq_cend || qf.create(V.dev, &ci, NULL, &g_oqp)) { g_oqp = VK_NULL_HANDLE; VRED("samples-passed counters: no occlusion query pool: they read 1"); }
+        else VLOG("samples-passed counters: occlusion queries (%d a submission)", OCCQ);
+    }
+    if (g_oq_first < g_oq_n) g_oq_unc = 1;   // the last submission's queries after its last report are lost with the reset
+    g_oq_base = (int)k * OCCQ; g_oq_n = g_oq_first = 0; g_oq_active = -1;
+    if (g_oqp) qf.reset(g_cb, g_oqp, (uint32_t)g_oq_base, OCCQ);
+}
+void vka_oq_pass_begin(VkCommandBuffer cb) {   // vka_draw.c, after vkCmdBeginRendering
+    if (!oq_on() || !cb) return;
+    if (g_oq_n >= OCCQ) { g_oq_unc = 1; return; }
+    g_oq_active = g_oq_n++; oq_rec(cb, 1, (uint32_t)(g_oq_base + g_oq_active));
+}
+void vka_oq_pass_end(VkCommandBuffer cb) {   // vka_draw.c, before vkCmdEndRendering
+    if (g_oq_active < 0) return;
+    oq_rec(cb, 0, (uint32_t)(g_oq_base + g_oq_active)); g_oq_active = -1;
+}
+VkCommandBuffer vka_draw_cb(void);   // vka_draw.c: the command buffer draws record into now (a part of the submission)
+static void oq_report(uint64_t ad) {   // a SAMPLES_PASSED report: the queries since the last one, counted at completion
+    const int restart = g_oq_active >= 0;
+    VkCommandBuffer cb = vka_draw_cb() ? vka_draw_cb() : g_cb;
+    vka_oq_pass_end(cb);
+    post((pop){4, (uint32_t)(g_oq_base + g_oq_first), (uint32_t)(g_oq_n - g_oq_first), (uint32_t)g_oq_unc, ad});
+    g_oq_first = g_oq_n; g_oq_unc = 0;
+    if (restart) vka_oq_pass_begin(cb);
+}
+static void oq_done(const pop *o, uint64_t ticks) {   // (completion thread) the report's running count
+    uint64_t sum = o->type;
+    if (o->v && g_oqp) {
+        uint64_t r[OCCQ]; uint32_t n = o->v <= OCCQ ? o->v : OCCQ;
+        if (!qf.get(V.dev, g_oqp, o->mode, n, sizeof r, r, 8, VK_QUERY_RESULT_64_BIT)) for (uint32_t i = 0; i < n; i++) sum += r[i];
+        else sum += 1;   // (not readable: visible)
+    }
+    g_occ_total += sum;
+    uint64_t rec[2] = {g_occ_total, ticks};
+    memcpy(nvn_direct_writable(o->addr), rec, sizeof rec);
+}
+
 static void post_run(void *ops_, int n) {   // the completion thread, in submission order, before the fence reads as done
     pop *ops = ops_;
     uint64_t g = guest_ns(); if (!g) { struct timespec t; clock_gettime(CLOCK_MONOTONIC, &t); g = (uint64_t)t.tv_sec * 1000000000ull + (uint64_t)t.tv_nsec; }
@@ -157,6 +216,7 @@ static void post_run(void *ops_, int n) {   // the completion thread, in submiss
             if (ops[i].mode) { memcpy((uint8_t *)nvn_direct_writable(ops[i].addr) + 8, &rec[1], 8); continue; }   // (Lichii: its counter written at replay, rc_counter)
             memcpy(nvn_direct_writable(ops[i].addr), rec, sizeof rec); continue;   // Lichii: through the backing memory (write tracking never protects it)
         }
+        if (ops[i].kind == 4) { oq_done(&ops[i], ticks); continue; }   // Lichii: a samples-passed report
         if (ops[i].kind == 1) { volatile uint32_t *v = (volatile uint32_t *)nvn_direct_writable(ops[i].addr); if (ops[i].mode == NVN_EVENT_SIGNAL_MODE_ADD) *v += ops[i].v; else *v = ops[i].v; }
         else {
             if (g > last_ts) last_ts = g;
@@ -177,7 +237,6 @@ static void post_run(void *ops_, int n) {   // the completion thread, in submiss
 // deswizzled, the encoder held up), counted as GPU time, and frames stalled on the CPU looked GPU-bound in the [longframe] lines (200-980 ms "GPU" spikes with no new
 // pipeline). The span (first part's top to the last part's bottom) is kept beside it: span minus busy is the time the GPU waited for the recording (vka_gpu_span_ms).
 // Without timestamps on the queue the frame reads -1 (no GPU time) instead of 0
-static struct { PFN_vkCreateQueryPool create; PFN_vkCmdResetQueryPool reset; PFN_vkCmdWriteTimestamp write; PFN_vkGetQueryPoolResults get; } qf;
 static VkQueryPool g_qp; static int g_ts_ok = -1; static double g_ts_ns;   // nanoseconds per tick
 enum { GRING = 64 };
 static struct { _Atomic uint64_t frame, ns, t0, t1, span; _Atomic int pending; } g_gpu[GRING];
@@ -238,13 +297,87 @@ void vka_perf_thread(int nice);   // vka_perf.c
 enum { NHREC = 16 };
 static struct { uint64_t fence, frame, queue, draws, ops, skipped, t_ns; } g_hrec[NHREC];
 static uint64_t g_sub_draws0, g_sub_ops0, g_sub_skip0, g_sub_t0;
-static void evtr_report(void);
+static void evtr_report(void); static void crumb_report(uint64_t fence);
 void vka_exec_hang_report(uint64_t fence) {
-    evtr_report();
+    evtr_report(); crumb_report(fence); crumb_report(fence + 1);
     for (int i = 0; i < NHREC; i++) if (g_hrec[i].fence == fence || g_hrec[i].fence == fence + 1) {
         VRED("GPU hang: submission %llu (frame %llu, queue serial %llu): %llu draws, %llu clears / copies, %llu skipped, recorded in %.2f ms", (unsigned long long)g_hrec[i].fence,
              (unsigned long long)g_hrec[i].frame, (unsigned long long)g_hrec[i].queue, (unsigned long long)g_hrec[i].draws, (unsigned long long)g_hrec[i].ops,
              (unsigned long long)g_hrec[i].skipped, g_hrec[i].t_ns / 1e6); }
+}
+
+// Lichii: GPU breadcrumbs (DM_VK_CRUMBS=1). A bottom-of-pipe timestamp after each draw and dispatch, with its shaders noted; a GPU hang names the first one of the hung
+// submission that did not finish (the shaders that ran forever)
+enum { NCRUMB = 8192 };
+static VkQueryPool g_cqp; static int g_crumb_on = -1; static unsigned g_crumb_k, g_crumb_n[NSLOT]; static uint64_t g_crumb_fence[NSLOT];
+static uint64_t (*g_crumb_key)[NCRUMB][3];
+static PFN_vkCmdWriteBufferMarkerAMD g_mark; static VkBuffer g_mbuf; static VkDeviceMemory g_mmem; static volatile uint32_t *g_mmap;   // AMD markers: each slot's crumbs done
+static int crumb_on(void) { if (g_crumb_on < 0) g_crumb_on = (int)VKA_ENV("DM_VK_CRUMBS", 0); return g_crumb_on; }
+static void crumb_sub_begin(unsigned k) {
+    if (!crumb_on()) return;
+    if (!g_cqp) {
+        VkQueryPoolCreateInfo ci = {VK_STRUCTURE_TYPE_QUERY_POOL_CREATE_INFO, .queryType = VK_QUERY_TYPE_TIMESTAMP, .queryCount = NSLOT * NCRUMB};
+        g_crumb_key = calloc(NSLOT, sizeof *g_crumb_key);
+        if (!g_crumb_key || qf.create(V.dev, &ci, NULL, &g_cqp)) { g_crumb_on = 0; g_cqp = VK_NULL_HANDLE; return; }
+        g_mark = (PFN_vkCmdWriteBufferMarkerAMD)vk.vkGetDeviceProcAddr(V.dev, "vkCmdWriteBufferMarkerAMD");
+        if (g_mark) {
+            VkBufferCreateInfo bi = {VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO, .size = NSLOT * 4, .usage = VK_BUFFER_USAGE_TRANSFER_DST_BIT};
+            VkMemoryRequirements mr; void *m = NULL; uint32_t t = UINT32_MAX;
+            if (!vk.vkCreateBuffer(V.dev, &bi, NULL, &g_mbuf)) { vk.vkGetBufferMemoryRequirements(V.dev, g_mbuf, &mr); t = vka_mem_type(mr.memoryTypeBits, VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT, 0); }
+            VkMemoryAllocateInfo ai = {VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO, .allocationSize = t == UINT32_MAX ? 0 : mr.size, .memoryTypeIndex = t};
+            if (!g_mbuf || t == UINT32_MAX || vk.vkAllocateMemory(V.dev, &ai, NULL, &g_mmem) || vk.vkBindBufferMemory(V.dev, g_mbuf, g_mmem, 0) || vk.vkMapMemory(V.dev, g_mmem, 0, VK_WHOLE_SIZE, 0, &m)) g_mark = NULL;
+            else g_mmap = m;
+        }
+        VLOG("GPU breadcrumbs: a timestamp after each draw and dispatch%s", g_mark ? ", and an AMD buffer marker" : "");
+    }
+    g_crumb_k = k; g_crumb_n[k] = 0; if (g_mmap) g_mmap[k] = 0;
+    qf.reset(g_cb, g_cqp, k * NCRUMB, NCRUMB);
+}
+static void crumb_write(const void *a) { struct { VkCommandBuffer cb; uint32_t q; } w; memcpy(&w, a, sizeof w); qf.write(w.cb, VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT, g_cqp, w.q);
+    if (g_mark) g_mark(w.cb, VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT, g_mbuf, (w.q / NCRUMB) * 4, w.q % NCRUMB + 1); }
+void vka_crumb(VkCommandBuffer cb, uint64_t a, uint64_t b, uint64_t c) {   // vka_draw.c, after a draw or dispatch
+    if (g_crumb_on <= 0 || !g_cqp || !cb) return;
+    unsigned k = g_crumb_k, i = g_crumb_n[k];
+    if (i >= NCRUMB) return;
+    g_crumb_key[k][i][0] = a; g_crumb_key[k][i][1] = b; g_crumb_key[k][i][2] = c; g_crumb_n[k] = i + 1;
+    struct { VkCommandBuffer cb; uint32_t q; } w = {cb, k * NCRUMB + i};
+    if (!vka_enc_call(crumb_write, &w, sizeof w)) crumb_write(&w);
+}
+char vka_watch[4][4096]; unsigned vka_watch_n;   // (vka_draw.c DM_VK_WATCH_FS)
+const volatile uint32_t *vka_mrec_last;   // (vka_draw.c mesh_records)
+void vka_crumb_dump(void) {
+    for (unsigned i = 0; i < 4 && i < vka_watch_n; i++) VRED("device lost: watched pixel shader draw %u:%s", vka_watch_n - 1 - i, vka_watch[(vka_watch_n - 1 - i) % 4]);   // the device is lost (vulkan_device.cpp ReportLoss): where each unfinished submission stopped, from the markers
+    if (g_crumb_on <= 0 || !g_mmap) return;
+    for (unsigned k = 0; k < NSLOT; k++) {
+        unsigned n = g_crumb_n[k], m = g_mmap[k];
+        if (m >= n) continue;
+        VRED("device lost: slot %u (fence %llu): breadcrumb %u of %u not reached: shaders %016llx %016llx, args %016llx (indirect address, or instances << 32 | count)", k, (unsigned long long)g_crumb_fence[k], m, n,
+             (unsigned long long)g_crumb_key[k][m][0], (unsigned long long)g_crumb_key[k][m][1], (unsigned long long)g_crumb_key[k][m][2]);
+        if (g_crumb_key[k][m][2] >> 62 == 1) { const volatile uint32_t *q = (const volatile uint32_t *)(uintptr_t)(g_crumb_key[k][m][2] & ((1ull << 62) - 1));
+            VRED("device lost: the stuck draw is an indirect mesh draw; its converted records: %u x %u x %u, %u x %u x %u", q[0], q[1], q[2], q[3], q[4], q[5]); }
+        for (unsigned j = m + 1; j < n && j < m + 3; j++) VRED("device lost:   then %016llx %016llx", (unsigned long long)g_crumb_key[k][j][0], (unsigned long long)g_crumb_key[k][j][1]);
+    }
+}
+static void crumb_report(uint64_t fence) {
+    if (g_crumb_on <= 0 || !g_cqp) return;
+    for (unsigned k = 0; k < NSLOT; k++) if (g_crumb_fence[k] == fence) {
+        unsigned n = g_crumb_n[k], done = 0;
+        for (unsigned i = 0; i < n; i++) {
+            uint64_t r[2] = {0, 0};
+            qf.get(V.dev, g_cqp, k * NCRUMB + i, 1, sizeof r, r, sizeof r, VK_QUERY_RESULT_64_BIT | VK_QUERY_RESULT_WITH_AVAILABILITY_BIT);
+            if (!r[1]) {
+                VRED("GPU hang: breadcrumb %u of %u in submission %llu not reached (%u before it done): shaders %016llx %016llx", i, n, (unsigned long long)fence, done,
+                     (unsigned long long)g_crumb_key[k][i][0], (unsigned long long)g_crumb_key[k][i][1]);
+                if (g_crumb_key[k][i][2] >> 62 == 1) { const volatile uint32_t *q = (const volatile uint32_t *)(uintptr_t)(g_crumb_key[k][i][2] & ((1ull << 62) - 1));
+                    VRED("GPU hang: the stuck draw is an indirect mesh draw; its converted records: %u x %u x %u, %u x %u x %u", q[0], q[1], q[2], q[3], q[4], q[5]); }
+                else VRED("GPU hang: the stuck draw's args %016llx", (unsigned long long)g_crumb_key[k][i][2]);
+                for (unsigned j = i + 1; j < n && j < i + 4; j++) VRED("GPU hang:   then %016llx %016llx", (unsigned long long)g_crumb_key[k][j][0], (unsigned long long)g_crumb_key[k][j][1]);
+                return;
+            }
+            done++;
+        }
+        VRED("GPU hang: all %u breadcrumbs of submission %llu reached", n, (unsigned long long)fence);
+    }
 }
 
 // The part's queue event waits and signals (the NVN queues as Vulkan queues, V.multi): timeline values of the events' semaphores, taken by the part's vkQueueSubmit
@@ -300,7 +433,7 @@ static unsigned slot_take(void) {
         vka_wait_fence(g_slot[g_slot_i % NSLOT].fence, 1000000);   // (then every slot again)
     }
     unsigned k = g_slot_i++ % NSLOT;
-    if (g_slot[k].fence) vka_wait_done(g_slot[k].fence, UINT64_MAX);
+    if (g_slot[k].fence && !vka_wait_done(g_slot[k].fence, 0)) { void fritchii_hitch_add(int, unsigned long long); uint64_t t0 = now_ns(); vka_wait_done(g_slot[k].fence, UINT64_MAX); fritchii_hitch_add(2, now_ns() - t0); }   // (Fritchii: timed for the hitch line)
     return k;
 }
 void vka_rp_sub_begin(void) {
@@ -328,6 +461,7 @@ void vka_rp_sub_begin(void) {
     vk.vkResetCommandBuffer(g_cb, 0);
     VkCommandBufferBeginInfo bi = {VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO, .flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT};
     vk.vkBeginCommandBuffer(g_cb, &bi);
+    { void vka_tex_relocate(VkCommandBuffer cb); vka_tex_relocate(g_cb); }   // Fritchii (vka_tex.c)
     if (ts_init()) {
         qf.reset(g_cb, g_qp, k * QPS, QPS); qf.write(g_cb, VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT, g_qp, k * QPS);
         g_slot_frame[k] = g_frame; g_slot_ts[k] = 1; g_slot_parts[k] = 1; gpu_tag_begin(g_frame);
@@ -338,6 +472,8 @@ void vka_rp_sub_begin(void) {
             g_sq_get = qf.get; g_sq_ns = g_ts_ns;
         }
         if (g_sqp) qf.reset(g_cb, g_sqp, (uint32_t)g_sq_base, SEGQ);
+        oq_sub_begin(k);
+        crumb_sub_begin(k);
     }
     vka_gp_sub_begin(g_cb, g_frame);
     vka_enc_start(g_cb);
@@ -347,7 +483,7 @@ void vka_rp_sub_begin(void) {
     vka_draw_sub_begin(g_cb, k);
     { void vka_pso_pause(int on); vka_pso_pause(0); }   // the game submits: resumed (mtl_drain paused the pipeline threads)
     g_chunk_draws = VKA_ENV("DM_VK_CHUNK", 600);   // live: from the next submission
-    g_nx = 0; g_chunk_d0 = g_stat_draws;
+    g_nx = 0; g_chunk_d0 = g_stat_draws; g_npre = 0; g_pre = VK_NULL_HANDLE;
 }
 
 // Lichii: nvnQueueWaitSync on a fence of another NVN queue. That submission was replayed before this one (the worker's FIFO); on another Vulkan queue, this submission's
@@ -384,6 +520,20 @@ static void part_begin(const void *a) {
     if (pa.q != UINT32_MAX) qf.write(cb, VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT, g_qp, pa.q);
 }
 static void labels_close(void);
+// Fritchii: a part's pre command buffer (vka_pre_split): the mesh emulation's compute passes of the draws of the part's first pass, recorded while that pass is open
+// and submitted just before the part, so the pass is not ended at each emulated mesh draw (vka_draw.c mesh_fb_compute)
+uint32_t g_setrt_n;   // OP_SET_RT ops replayed in this frame (vka_draw.c keys passes by it)
+VkCommandBuffer vka_pre_cb(void) { return g_pre; }
+uint64_t vka_slot_fence(unsigned slot) { return g_slot[slot % NSLOT].fence; }   // (Fritchii: the mesh emulation ring, vka_draw.c)
+static void pre_submit(int queue) {   // the part's pre command buffer to the queue, before the part
+    if (!g_pre) return;
+    vka_barrier(g_pre);   // its writes before the part
+    VkResult r = vk.vkEndCommandBuffer(g_pre);
+    part_sync none; memset(&none, 0, sizeof none);
+    if (!r) r = submit_part(queue, g_pre, 0, &none);
+    if (r && !vka_stopping()) { static _Atomic int n; if (atomic_fetch_add(&n, 1) < 4) VRED("mesh emulation pre-pass command buffer: %d", r); }
+    g_pre = VK_NULL_HANDLE;
+}
 static int chunk(void) {   // 1 = the part was ended and submitted
     unsigned k = (g_slot_i - 1) % NSLOT;
     if (g_nx >= NCHUNK) return 0;
@@ -402,7 +552,7 @@ static int chunk(void) {   // 1 = the part was ended and submitted
     vka_up_flush(); vka_up_throttle();   // the upload batch goes first: the part may use what it made (vka_dev.c "Upload batches")
     // With the encoder the part's end, its submit and the next part's reset and begin are made on its thread, in order with the calls before: the replay thread goes on
     if (vka_enc_call(part_submit, &pe, sizeof pe)) { vka_enc_call(part_begin, &pb, sizeof pb); vka_enc_switch(next); }
-    else { part_submit(&pe); part_begin(&pb); }
+    else { pre_submit(g_qi); part_submit(&pe); part_begin(&pb); }
     g_cb = next;
     vka_draw_cb_switch(g_cb); vka_gp_part(g_cb);
     g_chunk_d0 = g_stat_draws; g_n_chunks++;
@@ -419,7 +569,25 @@ static inline void chunk_check(void) {
     int cp = VKA_ENV("DM_VK_CHUNK_PASS", 600);
     if (cp > 0 && in >= (uint64_t)cp && vka_rp_open_for(&S.rt, S.has_rt)) { vka_rp_end(); chunk(); }
 }
-static uint64_t g_cur_fence;   // the fence of the submission being replayed, reserved before it (vka_worker.c); 0 = reserved at its commit
+// Fritchii: the part ends here (no pass open) and the next one gets a pre command buffer (above chunk); 0 = not done (the encoder on, no command buffer left)
+int vka_pre_split(void) {
+    if (!g_cb || vka_enc_on() || g_npre >= NPRE) return 0;
+    if (g_pre) pre_submit(g_qi);   // (not expected: a part has one)
+    if (!chunk()) return 0;
+    unsigned k = (g_slot_i - 1) % NSLOT;
+    if (!g_pre_cbs[k][g_npre]) {
+        VkCommandBufferAllocateInfo ai = {VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO, .commandPool = g_pool, .level = VK_COMMAND_BUFFER_LEVEL_PRIMARY, .commandBufferCount = 1};
+        if (vk.vkAllocateCommandBuffers(V.dev, &ai, &g_pre_cbs[k][g_npre])) { g_pre_cbs[k][g_npre] = VK_NULL_HANDLE; return 1; }
+    }
+    g_pre = g_pre_cbs[k][g_npre++];
+    vk.vkResetCommandBuffer(g_pre, 0);
+    VkCommandBufferBeginInfo bi = {VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO, .flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT};
+    if (vk.vkBeginCommandBuffer(g_pre, &bi)) { g_pre = VK_NULL_HANDLE; return 1; }
+    vka_barrier(g_pre);   // after the earlier parts' writes
+    return 1;
+}
+static uint64_t g_cur_fence;
+uint64_t vka_watch_addr;   // Fritchii: FRITCHII_SSBO_WATCH's address (vka_draw.c)   // the fence of the submission being replayed, reserved before it (vka_worker.c); 0 = reserved at its commit
 uint64_t vka_rp_sub_commit(uint64_t reserved) {
     uint64_t fence = reserved ? reserved : vka_fence_next(); g_cur_fence = 0;
     if (g_qn >= 0) g_qt[g_qn].last = fence;   // (queue_move)
@@ -444,9 +612,10 @@ uint64_t vka_rp_sub_commit(uint64_t reserved) {
     vka_tex_gw_commit(fence);
     vka_floor_commit(tail);
     vka_up_flush(); vka_up_throttle();   // before the submission that may use what it made
+    pre_submit(g_qi);   // (Fritchii: the last part's pre command buffer)
     if (!r) r = submit_part(g_qi, g_cb, fence, &g_psy);
     memset(&g_psy, 0, sizeof g_psy);
-    g_slot[(g_slot_i - 1) % NSLOT].fence = fence;
+    g_slot[(g_slot_i - 1) % NSLOT].fence = fence; g_crumb_fence[(g_slot_i - 1) % NSLOT] = fence;
     if (vka_nan_on()) vka_nan_commit(fence);
     vka_scratch_retire(fence);
     if (r) {
@@ -487,7 +656,14 @@ void vka_pso_pause(int on);
 void mtl_drain(void) { vka_pso_pause(1); vka_pso_save(1); mtl_present_flush(); mtl_finish(); if (vka_ok()) vka_queue_idle(); }
 
 // ---------- Buffers ----------
+uint64_t g_tpool_lo, g_tpool_hi;   // Fritchii (DM_VK_TPOOL_TRACE): the texture pool's descriptors, host addresses (hle_nvn.c)
+static void tpool_note(const char *what, uint64_t dst, uint64_t n) {
+    static int on = -1; if (on < 0) on = (int)VKA_ENV("DM_VK_TPOOL_TRACE", 0);
+    if (!on || !g_tpool_lo || dst >= g_tpool_hi || dst + n <= g_tpool_lo) return;
+    static _Atomic int k; if (atomic_fetch_add(&k, 1) < 60) VLOG("texture pool written by a %s: descriptors %llu..%llu (%llu bytes)", what, (unsigned long long)((dst > g_tpool_lo ? dst - g_tpool_lo : 0) / 32), (unsigned long long)((dst + n - 1 - g_tpool_lo) / 32), (unsigned long long)n);
+}
 static void buf_copy(uint64_t src, uint64_t dst, uint64_t n) {
+    tpool_note("GPU copy", dst, n);
     vka_tex_gw_copy(src, dst, n);
     while (n) {
         VkBuffer sb, db; VkDeviceSize so, dof;
@@ -498,6 +674,7 @@ static void buf_copy(uint64_t src, uint64_t dst, uint64_t n) {
     }
 }
 static void buf_fill(uint64_t dst, uint64_t n, uint32_t value) {
+    tpool_note("GPU fill", dst, n);
     vka_tex_gw_fill(dst, n, value);
     if ((dst | n) & 3) { VRED_ONCE("buffer fill at %#llx of %llu bytes is not 4-byte aligned", (unsigned long long)dst, (unsigned long long)n); return; }
     while (n) {
@@ -507,6 +684,7 @@ static void buf_fill(uint64_t dst, uint64_t n, uint32_t value) {
     }
 }
 static void buf_update(const void *data, uint64_t dst, uint64_t n) {   // inline data, in GPU order: through scratch memory
+    tpool_note("GPU inline update", dst, n);
     vka_tex_gw_update(dst, n, data);
     vka_span s; if (!n || !vka_scratch(n, 16, &s)) return;
     memcpy(s.ptr, data, n);
@@ -985,12 +1163,16 @@ static void evtr(char k, const evsem *e, uint32_t v, uint64_t t) {
     unsigned i = g_nevtr++ % NEVTR;
     g_evtr[i].k = k; g_evtr[i].q = k == 'C' ? -1 : g_qi; g_evtr[i].serial = S.serial; g_evtr[i].fence = g_cur_fence ? g_cur_fence : vka_fence_last() + 1;
     g_evtr[i].ev = (const void *)e->val; g_evtr[i].v = v; g_evtr[i].t = t;
+    if (VKA_ENV("DM_VK_DISPATCH_LOG", 0)) VLOG("event %c: %p value %u on NVN queue %llu (Vulkan queue %d) fence %llu, semaphore value %llu", k, (const void *)e->val, v, (unsigned long long)S.serial, g_evtr[i].q, (unsigned long long)g_evtr[i].fence, (unsigned long long)t);   // Fritchii
 }
+uint64_t vka_exec_queue_serial(void) { return S.serial; }
+uint64_t vka_exec_draws(void) { return g_stat_draws; }   // Fritchii (vka_worker.c's heavy-submission line)
+uint64_t vka_exec_cur_fence(void) { return g_cur_fence ? g_cur_fence : vka_fence_last() + 1; }   // Fritchii: the submission being replayed's fence (the dispatch log)   // Fritchii: the submission being replayed's NVN queue (the dispatch log)
 // The completion thread saw no progress for 2 s (vka_dev.c): the event steps and semaphores are logged once, and every gate below a wait walked for it whose signal no
 // submission walked yet is signalled by the host up to that wait ([RED]: the wait is let through, so a run goes on instead of ending in a GPU hang). Its waits then need
 // no GPU signal (pending cleared: a signal walked later would not be above the host's). With the signal already handed to a queue the GPU is just not there yet (a long
 // draw, or a hang the let-through cannot help)
-static void evtr_report(void);
+static void evtr_report(void); static void crumb_report(uint64_t fence);
 void vka_exec_stall(void) {
     static _Atomic int reported; if (!atomic_exchange(&reported, 1)) evtr_report();
     for (int i = 0; V.multi && i < g_nevs; i++) for (int j = 0; j < g_evs[i].ng; j++) { evgate *g = &g_evs[i].g[j]; uint64_t c = 0; vk.vkGetSemaphoreCounterValue(V.dev, g->sem, &c);
@@ -1134,6 +1316,7 @@ static void walk(walk_t *w) {
             ev_set((volatile uint32_t *)(uintptr_t)val, (int)m, v);
             continue; }
         case OP_REPORT_COUNTER: { uint64_t t, ad; memcpy(&t, a, 8); memcpy(&ad, (const uint8_t *)a + 8, 8);
+            if (t == NVN_COUNTER_TYPE_SAMPLES_PASSED && g_cb && oq_on()) { oq_report(ad); break; }   // Lichii: occlusion queries
             uint32_t q = 0;
             if (g_sqp && g_cb && g_sq_n < SEGQ && (t == NVN_COUNTER_TYPE_TIMESTAMP || t == NVN_COUNTER_TYPE_TIMESTAMP_TOP)) {
                 q = (uint32_t)(g_sq_base + g_sq_n++) + 1;
@@ -1159,11 +1342,22 @@ static void walk(walk_t *w) {
         case OP_DEBUG_LABEL: if (g_cb && V.label_begin) label_op(a); break;
         default: break;
         }
+        {   // Fritchii, FRITCHII_SSBO_WATCH: transfer writes over the watched address (vka_draw.c)
+            extern uint64_t vka_watch_addr; uint64_t nvn_direct_host_of(uint64_t); uint64_t wa = vka_watch_addr, d = 0, n = 0; const char *what = NULL;
+            if (wa) {
+                if (h.op == OP_CLEAR_BUF) { const p_clear_buf *cb = a; d = cb->addr; n = cb->size; what = "clear"; }
+                else if (h.op == OP_COPY_B2B) { memcpy(&d, (const uint8_t *)a + 8, 8); memcpy(&n, (const uint8_t *)a + 16, 8); what = "copy"; }
+                else if (h.op == OP_UPDATE_UB) { memcpy(&d, a, 8); memcpy(&n, (const uint8_t *)a + 8, 8); what = "update"; }
+                uint64_t dh = nvn_direct_host_of(d);
+                { static _Atomic int na; if (what && n <= 0x400 && getenv("FRITCHII_XFER_LOG") && atomic_fetch_add(&na, 1) < 400) VLOG("xfer: %s %llu bytes to %#llx (host %#llx), queue %llu fence %llu", what, (unsigned long long)n, (unsigned long long)d, (unsigned long long)dh, (unsigned long long)S.serial, (unsigned long long)(g_cur_fence ? g_cur_fence : vka_fence_last() + 1)); }
+                if (what && ((d < wa + 0xc0 && wa < d + n) || (dh < wa + 0xc0 && wa < dh + n))) { static _Atomic int nl; if (atomic_fetch_add(&nl, 1) < 600) VLOG("ssbo watch: %s of %llu bytes at +%#llx, queue %llu fence %llu", what, (unsigned long long)n, (unsigned long long)(wa - (d <= wa && wa < d + n ? d : dh)), (unsigned long long)S.serial, (unsigned long long)(g_cur_fence ? g_cur_fence : vka_fence_last() + 1)); }
+            }
+        }
         switch (h.op) {
         case OP_CLEAR_BUF: if (g_cb) { const p_clear_buf *cb = a; buf_fill(cb->addr, cb->size, cb->value); vka_barrier(g_cb); } break;
         case OP_COPY_B2B: if (g_cb && !S.copy_skip) { uint64_t s_, d, n; memcpy(&s_, a, 8); memcpy(&d, (const uint8_t *)a + 8, 8); memcpy(&n, (const uint8_t *)a + 16, 8); buf_copy(s_, d, n); vka_barrier(g_cb); } break;
         case OP_UPDATE_UB: g_n_ub++; if (g_cb) { uint64_t d, n; memcpy(&d, a, 8); memcpy(&n, (const uint8_t *)a + 8, 8); buf_update((const uint8_t *)a + 16, d, n); vka_barrier(g_cb); } break;
-        case OP_SET_RT: S.rt = *(const p_set_rt *)a; S.has_rt = 1; break;
+        case OP_SET_RT: S.rt = *(const p_set_rt *)a; S.has_rt = 1; g_setrt_n++; break;
         case OP_SCISSOR: S.sc = *(const p_scissor *)a; S.has_sc = 1; break;
         case OP_COPY_STRIDE: { const p_copy_stride *cs = a; if (cs->image) S.copy_img_stride = cs->stride; else S.copy_stride = cs->stride; break; }
         case OP_CLEAR_COLOR: if (g_cb) clear_color(a); break;

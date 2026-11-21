@@ -67,7 +67,10 @@ static void frame_path_creation(uint64_t tk) {
         over16++;
         over50 += d > 50000000ull;
         over_ns += d;
-        if (logged++ < 300) VLOG("present %llu: frame-path pipeline creation %.1f ms", (unsigned long long)tk, d / 1e6);
+        extern _Atomic uint64_t vka_cat_ns[5]; static uint64_t lc[5]; uint64_t c[5]; for (int i = 0; i < 5; i++) { c[i] = atomic_load(&vka_cat_ns[i]); }
+        if (logged++ < 300) VLOG("present %llu: frame-path pipeline creation %.1f ms (probe %.1f, link %.1f, whole %.1f, compute %.1f; waits for other threads' builds %.1f)", (unsigned long long)tk, d / 1e6,
+                                 (c[0] - lc[0]) / 1e6, (c[1] - lc[1]) / 1e6, (c[2] - lc[2]) / 1e6, (c[3] - lc[3]) / 1e6, (c[4] - lc[4]) / 1e6);
+        for (int i = 0; i < 5; i++) lc[i] = c[i];
     }
     if (tk % 1800 == 0) {
         uint64_t hit, miss;
@@ -158,14 +161,25 @@ static VkImageView frame_view(const vka_img* im, VkFormat format) {
 int nvn_direct_present_take(nvn_direct_frame* out) {
     memset(out, 0, sizeof *out);
     out->interval = t_interval ? t_interval : 1;
-    const uint64_t tk = t_ticket;
-    if (!tk) return 0;
+    // Fritchii: the image of the present before this one (FRITCHII_NVN_PRESENT_LAG, default 1; 0: this one). Waiting for this present's own
+    // ticket held the game until the replay worker had recorded its whole frame (8.9 ms of each 20 ms frame in Ocarina of Time): with the
+    // previous one, normally filled already, the game records its next frame meanwhile, at a frame of latency
+    static int lag = -1; if (lag < 0) { const char *e = getenv("FRITCHII_NVN_PRESENT_LAG"); lag = e ? atoi(e) != 0 : 1; }
+    static uint64_t pending;
+    uint64_t tk = t_ticket;
     t_ticket = 0;
+    if (lag) { const uint64_t now = tk; tk = pending; pending = now; }
+    if (!tk) return 0;
     pthread_mutex_lock(&g_mu);
     while (g_filled < tk && !vka_stopping()) pthread_cond_wait(&g_cv, &g_mu);
     const pres_t p = g_pres[tk % NPRES];
     pthread_mutex_unlock(&g_mu);
     if (vka_stopping()) return 0;   // the emulator shuts down (nvn_direct_stop): the worker may never fill it
+    { static int sync = -1; if (sync < 0) { const char *e = getenv("FRITCHII_NVN_SYNC_PRESENT"); sync = e ? atoi(e) : 0; }   // 1: the game waits for the taken frame's GPU work at its present; 2: for the one before it
+      static uint64_t prev_fence;
+      if (sync == 1 && p.fence) vka_wait_done(p.fence, 2000000000ull);
+      if (sync == 2 && prev_fence) vka_wait_done(prev_fence, 2000000000ull);
+      prev_fence = p.fence; }
     if (!vka_ok() || p.ticket != tk) return 0;
     vka_img* im = vka_tex_acquire(p.serial);
     if (!im) return 0;   // the replay never drew or uploaded it (a boot frame): nothing to show

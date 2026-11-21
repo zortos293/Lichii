@@ -3,6 +3,32 @@
 // Feature and extension choices follow the probe of android/spike (results/honor-pnm-n49.md): placed memory maps, buffer device addresses, update-after-bind arrays, display timing
 #if defined(__ANDROID__)
 #include "vka.h"
+#if defined(_WIN32)
+#include <windows.h>
+// Fritchii, FRITCHII_ALLOC_LOG=<ms>: each vkAllocateMemory over that long, logged with its size and its callers (dbghelp, in process)
+static PFN_vkAllocateMemory g_alloc_real; static double g_alloc_ms;
+typedef BOOL (WINAPI *sym_init_t)(HANDLE, PCSTR, BOOL); typedef BOOL (WINAPI *sym_from_t)(HANDLE, DWORD64, PDWORD64, void *);
+static sym_from_t g_symfrom; static int g_syminit;
+static const char *alloc_sym(void *a, char *buf, size_t n) {
+    if (!g_syminit) { g_syminit = 1; HMODULE h = LoadLibraryA("dbghelp.dll"); sym_init_t in = h ? (sym_init_t)GetProcAddress(h, "SymInitialize") : NULL; g_symfrom = h ? (sym_from_t)GetProcAddress(h, "SymFromAddr") : NULL; if (in && !in(GetCurrentProcess(), NULL, TRUE)) g_symfrom = NULL; }
+    struct { ULONG SizeOfStruct, TypeIndex; ULONG64 Reserved[2]; ULONG Index, Size; ULONG64 ModBase; ULONG Flags; ULONG64 Value, Address; ULONG Register, Scope, Tag, NameLen, MaxNameLen; CHAR Name[200]; } si;
+    memset(&si, 0, sizeof si); si.SizeOfStruct = 88; si.MaxNameLen = 199; DWORD64 d = 0;
+    if (g_symfrom && g_symfrom(GetCurrentProcess(), (DWORD64)(uintptr_t)a, &d, &si)) snprintf(buf, n, "%s+%#llx", si.Name, (unsigned long long)d); else snprintf(buf, n, "%p", a);
+    return buf;
+}
+static VkResult VKAPI_CALL alloc_timed(VkDevice dev, const VkMemoryAllocateInfo *ai, const VkAllocationCallbacks *cb, VkDeviceMemory *m) {
+    uint64_t t0 = now_ns(); VkResult r = g_alloc_real(dev, ai, cb, m); double ms = (now_ns() - t0) / 1e6;
+    if (ms >= g_alloc_ms) {
+        void *fr[6] = {0}; USHORT n = CaptureStackBackTrace(1, 6, fr, NULL); char a[3][240] = {{0}};
+        for (int i = 0; i < 3 && i < n; i++) alloc_sym(fr[i], a[i], sizeof a[i]);
+        VLOG("alloc: %.1f MiB type %u took %.2f ms: %s < %s < %s", ai->allocationSize / 1048576.0, ai->memoryTypeIndex, ms, a[0], a[1], a[2]);
+    }
+    return r;
+}
+static void alloc_log_install(void) { const char *e = getenv("FRITCHII_ALLOC_LOG"); if (!e || atof(e) <= 0 || !vk.vkAllocateMemory) return; g_alloc_ms = atof(e); g_alloc_real = vk.vkAllocateMemory; vk.vkAllocateMemory = alloc_timed; }
+#else
+static void alloc_log_install(void) {}
+#endif
 #include "../../../../nvn_direct.h"
 #include <dlfcn.h>
 #include <stdio.h>
@@ -163,12 +189,26 @@ static int init_once(void) {
     float prio = 1.f;
     // One Vulkan queue per NVN queue. Lichii: every queue of the family Lichii made, up to NVN_DIRECT_MAX_QUEUES (Ocarina of Time keeps six NVN queues)
     V.nq = (int)(fam_queues < NVN_DIRECT_MAX_QUEUES ? fam_queues : NVN_DIRECT_MAX_QUEUES); if (V.nq < 1) V.nq = 1;
+    // Fritchii: one queue by default. With a Vulkan queue per NVN queue, Ocarina of Time's cross-queue event waits deadlocked now and then on AMD's driver (a GPU hang or
+    // a device loss in 4-20 minutes; an hour without on one queue, which also ran faster: 51 frames/s against 45). DM_VK_QUEUES=<n>: at most n (0: every queue)
+    { const char *e = getenv("DM_VK_QUEUES"); int n = e ? atoi(e) : 1; if (n > 0 && n < V.nq) V.nq = n; }   // (1 or 2: one queue)
     float prios[4] = {1.f, 1.f, 1.f, 1.f}; (void)prio;
     (void)prios; (void)dext; (void)ndext;
     V.dev = g_adopt.device;   // Lichii's device (see above)
 #define D(f) vk.f = (PFN_##f)vk.vkGetDeviceProcAddr(V.dev, #f);
     VKA_DEVICE_FNS(D)
 #undef D
+    alloc_log_install();
+    {   // Fritchii: storage features of the formats translated shaders write without a declared format (OoT's fog volumes are B10G11R11)
+        PFN_vkGetPhysicalDeviceFormatProperties2 gfp2 = (PFN_vkGetPhysicalDeviceFormatProperties2)vk.vkGetInstanceProcAddr(V.inst, "vkGetPhysicalDeviceFormatProperties2");
+        const VkFormat fs[] = {VK_FORMAT_B10G11R11_UFLOAT_PACK32, VK_FORMAT_R8G8_UNORM, VK_FORMAT_R16G16B16A16_SFLOAT, VK_FORMAT_A2B10G10R10_UNORM_PACK32, VK_FORMAT_R16_SFLOAT};
+        for (unsigned i = 0; gfp2 && i < sizeof fs / sizeof fs[0]; i++) {
+            VkFormatProperties3 p3 = {VK_STRUCTURE_TYPE_FORMAT_PROPERTIES_3}; VkFormatProperties2 p2 = {VK_STRUCTURE_TYPE_FORMAT_PROPERTIES_2, &p3};
+            gfp2(V.pd, fs[i], &p2);
+            VLOG("format %d optimal: storage %d, write without format %d, read without format %d", (int)fs[i], (p3.optimalTilingFeatures & VK_FORMAT_FEATURE_2_STORAGE_IMAGE_BIT) != 0,
+                 (p3.optimalTilingFeatures & VK_FORMAT_FEATURE_2_STORAGE_WRITE_WITHOUT_FORMAT_BIT) != 0, (p3.optimalTilingFeatures & VK_FORMAT_FEATURE_2_STORAGE_READ_WITHOUT_FORMAT_BIT) != 0);
+        }
+    }
     if (!vk.vkMapMemory2KHR) vk.vkMapMemory2KHR = (PFN_vkMapMemory2KHR)vk.vkGetDeviceProcAddr(V.dev, "vkMapMemory2");   // core in 1.4
     if (!vk.vkUnmapMemory2KHR) vk.vkUnmapMemory2KHR = (PFN_vkUnmapMemory2KHR)vk.vkGetDeviceProcAddr(V.dev, "vkUnmapMemory2");
     if (!vk.vkMapMemory2KHR || !vk.vkUnmapMemory2KHR) V.placed = V.placed_range = 0;
@@ -781,13 +821,16 @@ void vka_up_flush(void) {
 void vka_up_throttle(void) {
     if (!g_utl) return;
     double cap = VKA_ENVF("DM_VK_UPLOAD_INFLIGHT_MB", 256.0) * 1048576.0;
+    void fritchii_hitch_add(int, unsigned long long); const uint64_t t0_ = now_ns(); int waited_ = 0;   // (Fritchii: timed for the hitch line)
     for (;;) {
         uint64_t udone = up_done(), oldest = UINT64_MAX; VkDeviceSize fl = 0;
         pthread_mutex_lock(&g_smu);
         for (sblk *b = g_busy; b; b = b->next) if (b->up && b->fence > udone) { fl += b->size; if (b->fence < oldest) oldest = b->fence; }
         pthread_mutex_unlock(&g_smu);
-        if ((double)fl <= cap || oldest == UINT64_MAX || !up_wait(oldest)) break;
+        if ((double)fl <= cap || oldest == UINT64_MAX) break;
+        waited_ = 1; if (!up_wait(oldest)) break;
     }
+    if (waited_) fritchii_hitch_add(3, now_ns() - t0_);
 }
 uint64_t vka_up_batches(void) { return g_n_ubatch; }
 void vka_up_stats(uint64_t *batches, uint64_t *waits, double *wait_ms) { if (batches) *batches = g_n_ubatch; if (waits) *waits = g_n_uwait; if (wait_ms) *wait_ms = g_uwait_ns / 1e6; }

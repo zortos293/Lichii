@@ -11,7 +11,7 @@
 #include <string.h>
 
 enum { NQ = 2048, DESC = 96 };
-typedef struct { const char *file; int line; int kind; uint64_t draws, passes, ops; char desc[DESC]; } gp_mark;   // kind: 0 barrier, 1 submission start, 2 part start, 3 commit
+typedef struct { const char *file; int line; int kind; uint64_t draws, passes, ops, mesh; char desc[DESC]; } gp_mark;   // kind: 0 barrier, 1 submission start, 2 part start, 3 commit
 static gp_mark g_m[NQ]; static int g_n;
 static VkQueryPool g_qp; static int g_ok = -1; static double g_tick_ns;
 static PFN_vkCmdWriteTimestamp g_write; static PFN_vkCmdResetQueryPool g_reset; static PFN_vkGetQueryPoolResults g_get;
@@ -37,7 +37,7 @@ static void mark(VkCommandBuffer cb, int kind, const char *file, int line) {
     if (g_n >= NQ) return;
     gp_mark *m = &g_m[g_n]; m->file = file; m->line = line; m->kind = kind;
     uint64_t sk, di, pi; vka_draw_stats(&m->draws, &sk, &di, &pi); (void)sk; (void)di; (void)pi;
-    extern uint64_t vka_n_rp; m->passes = vka_n_rp; uint64_t subs, rec; vka_exec_counts(&m->ops, &subs, &rec);
+    extern uint64_t vka_n_rp, vka_n_mesh_draws; m->passes = vka_n_rp; m->mesh = vka_n_mesh_draws; uint64_t subs, rec; vka_exec_counts(&m->ops, &subs, &rec);
     if (g_pass_new) { memcpy(m->desc, g_pass, DESC); g_pass_new = 0; } else m->desc[0] = 0;
     vka_enc_sync();
     g_write(cb, VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT, g_qp, (uint32_t)g_n);
@@ -69,8 +69,8 @@ static void report(void) {
     qsort(s, (size_t)ns, sizeof *s, by_ms);
     for (int k = 0; k < ns && k < 16; k++) {
         const gp_mark *a = &g_m[s[k].i - 1], *b = &g_m[s[k].i];
-        VLOG("gpu prof:  #%d %.3f ms: %s:%d, %llu draws, %llu passes, %llu ops%s%s", s[k].i, s[k].ms, b->file, b->line, (unsigned long long)(b->draws - a->draws),
-             (unsigned long long)(b->passes - a->passes), (unsigned long long)(b->ops - a->ops), b->desc[0] ? "; pass " : "", b->desc);
+        VLOG("gpu prof:  #%d %.3f ms: %s:%d, %llu draws (%llu mesh), %llu passes, %llu ops%s%s", s[k].i, s[k].ms, b->file, b->line, (unsigned long long)(b->draws - a->draws),
+             (unsigned long long)(b->mesh - a->mesh), (unsigned long long)(b->passes - a->passes), (unsigned long long)(b->ops - a->ops), b->desc[0] ? "; pass " : "", b->desc);
     }
     // by barrier site: count and time
     struct { const char *f; int l; int n; double ms; } site[64]; int nsite = 0;
@@ -85,6 +85,7 @@ static void report(void) {
 // mtl_sub_begin, after the command buffer begins: arms the profile at a new frame, reports a finished one
 void vka_gp_sub_begin(VkCommandBuffer cb, uint64_t frame) {
     if (g_sub_frame_set) frame = g_sub_frame;
+    { static int n; if (VKA_ENV("DM_VK_GPUPROF", 0) > 0 && n < 6 && frame > 200) { n++; VLOG("gpu prof: submission of frame %llu, state %d, last %llu, ok %d", (unsigned long long)frame, g_state, (unsigned long long)g_last_frame, g_ok); } }
     if (g_state == 2 && vka_done() >= g_fence) { report(); g_state = 0; }
     if (g_state == 1 && frame != g_frame) { g_state = 2; vka_gp_active = 0; g_cb = VK_NULL_HANDLE; }
     if (g_state == 2 && vka_done() >= g_fence) { report(); g_state = 0; }

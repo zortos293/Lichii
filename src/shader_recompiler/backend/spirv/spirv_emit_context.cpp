@@ -2499,7 +2499,8 @@ void EmitContext::DefineOutputs(const IR::Program& program) {
                                      spv::BuiltIn::ViewportMaskNV);
     }
     for (size_t index = 0; index < IR::NUM_GENERICS; ++index) {
-        if (info.stores.Generic(index)) {
+        if (info.stores.Generic(index) ||
+            (runtime_info.declare_all_generic_outputs && stage == Stage::VertexB)) {
             DefineGenericOutput(*this, index, invocations);
         }
     }

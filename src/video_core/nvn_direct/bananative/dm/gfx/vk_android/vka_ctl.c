@@ -153,6 +153,14 @@ void vka_ctl_frame(uint64_t f) {   // mtl_set_frame: frame f begins
         if (f - 9 + 1 >= g_cap_to) { VLOG("ctl: capture done"); g_cap_from = g_cap_to = 0; }
     }
     if (atomic_exchange_explicit(&g_stats, 0, memory_order_relaxed)) stats_line(f);
+    {   // Fritchii, FRITCHII_SLOW_FRAME=<ms>: each replayed frame over that long, once its GPU time is in: recording, GPU busy and span, draws
+        int lim = VKA_ENV("FRITCHII_SLOW_FRAME", 0);
+        if (lim > 0 && f >= 10) { const frec *a = &g_rec[(f - 9) % NREC], *b = &g_rec[(f - 8) % NREC];
+            double vka_gpu_span_ms(uint64_t);
+            if (a->frame == f - 9 && b->frame == f - 8 && (b->t - a->t) / 1e6 > lim)
+                VLOG("slow frame %llu: %.1f ms; recording %.2f ms, GPU busy %.2f span %.2f ms; %llu draws, %llu dispatches, %llu submissions", (unsigned long long)(f - 9), (b->t - a->t) / 1e6,
+                     (b->rec_ns - a->rec_ns) / 1e6, mtl_gpu_ms(f - 9), vka_gpu_span_ms(f - 9), (unsigned long long)(b->draws - a->draws), (unsigned long long)(b->disp - a->disp), (unsigned long long)(b->subs - a->subs)); }
+    }
 }
 
 // ---------- Screenshot ----------

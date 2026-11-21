@@ -64,6 +64,10 @@ typedef struct nvn_direct_shader_source {
     int (*read_memory)(void* context, uint64_t address, void* out, size_t size);
     /// The texture a handle names: its NVN target and VkFormat; 0 = no texture
     int (*texture_info)(void* context, uint32_t handle, uint32_t* nvn_target, int32_t* vk_format);
+    /// Fritchii, mesh: emit the program as a compute shader writing the mesh emulation's blocks
+    /// (Shader::Backend::SPIRV::MeshEmulationBlockWords) to its NVN_DIRECT_DESC_MESH_OUT buffer,
+    /// and the vertex shader that draws them (nvn_direct_shader::vs_spirv)
+    uint32_t mesh_fallback;
 } nvn_direct_shader_source;
 
 #define NVN_DIRECT_NVN2_CONTROL_SIZE 0xd8
@@ -78,8 +82,10 @@ enum {
     NVN_DIRECT_DESC_TEXTURE,
     NVN_DIRECT_DESC_IMAGE,
     NVN_DIRECT_DESC_LOOP_GUARD,     ///< storage buffer whose first word a loop's safety check sets when it ends a loop (at first_binding + NVN_DIRECT_LOOP_GUARD_SLOT)
+    NVN_DIRECT_DESC_MESH_OUT,       ///< Fritchii: the mesh emulation's output buffer (at first_binding + NVN_DIRECT_MESH_OUT_SLOT)
 };
 #define NVN_DIRECT_LOOP_GUARD_SLOT 62
+#define NVN_DIRECT_MESH_OUT_SLOT 63
 typedef struct nvn_direct_shader_desc {
     uint8_t kind;              ///< NVN_DIRECT_DESC_*
     uint8_t vk_type;           ///< VkDescriptorType
@@ -92,8 +98,10 @@ typedef struct nvn_direct_shader_desc {
     uint8_t texture_type;      ///< Shader::TextureType
     uint8_t is_depth, is_multisample, is_integer, is_written, is_atomic;
     /// Not a plain constant buffer word: a handle computed per draw, a pointer read from memory
-    /// (the replay's bindings cannot fill it)
+    /// (the replay's bindings cannot fill it). 3: a handle program the replay evaluates per draw.
+    /// 4: a storage buffer whose address is read from memory at its pointer + secondary_offset
     uint8_t unsupported;
+    uint32_t handle_program;   ///< unsupported 3: the program's index in nvn_direct_shader::hprog
 } nvn_direct_shader_desc;
 
 /// A translated stage. Everything is allocated by the translator and given back with shader_free.
@@ -108,6 +116,17 @@ typedef struct nvn_direct_shader {
     uint32_t per_primitive_outputs; ///< mesh: generic outputs written per primitive
     uint32_t ssbo_align;       ///< storage buffers are bound at their address rounded down to this
     uint32_t uses_render_area; ///< graphics: reads the render area (NVN_DIRECT_RENDER_AREA_OFFSET)
+    /// Handle programs (Shader::Info::handle_programs) and the storage buffers they read, as words:
+    /// program count, then each program's length and words; storage buffer count, then each one's
+    /// cbuf index, cbuf offset and indirect offset (~0: none). NULL when the shader has none
+    uint32_t* hprog;
+    uint32_t hprog_words;
+    /// Fritchii, mesh_fallback: the vertex shader drawing the blocks (its output buffer at the
+    /// vertex range's NVN_DIRECT_MESH_OUT_SLOT), a block's words, the vertices a workgroup draws
+    /// and their topology (0 triangles, 1 lines, 2 points)
+    uint32_t* vs_spirv;
+    size_t vs_words;
+    uint32_t mesh_block_words, mesh_group_vertices, mesh_topology;
     char error[256];           ///< why it was not translated
 } nvn_direct_shader;
 
@@ -196,6 +215,8 @@ static inline uint32_t nvn_direct_scale_image_bits(uint32_t nvn_stage) { return 
 /// Called once, after the device exists. When it fails the boot falls back to GPU emulation
 /// (Core::NvnHook::DirectFailed).
 int nvn_direct_adopt_device(const nvn_direct_device* device);
+/* Fritchii: one NVN2 program from the game files, translated and its pipeline library made ahead (nvn_recompile.c). 1 made, 0 known already, -1 failed */
+int vka_rc_prepare(const uint8_t* control, size_t control_size, const uint8_t* code, size_t code_size);
 
 /// Lichii's guest memory as the replay's memory pools need it.
 typedef struct nvn_direct_memory {

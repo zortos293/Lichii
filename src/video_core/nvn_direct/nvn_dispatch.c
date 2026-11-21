@@ -247,13 +247,39 @@ int nvn_direct_float_args(int slot) {
     return g_slot[slot].d && (g_slot[slot].d->flags & (NVN_DISPATCH_FLOAT_ARGS | NVN_DISPATCH_FLOAT_RETURN));
 }
 
+void dm_log(const char *file, int line, const char *func, const char *fmt, ...);
 int nvn_direct_call_blocks(int slot, const uint64_t x[8]) {
     const char* const name = nvn_direct_name(slot);
     if (!strcmp(name, "nvnSyncWait")) {
         const sync_t* const s = host_ptr(x[0]);
+        { static int lg = -1; static unsigned n; if (lg < 0) { const char* e = getenv("FRITCHII_NVN_SYNC_TRACE"); lg = e && *e == '1'; }
+          uint64_t vka_done(void), vka_fence_last(void);
+          if (lg && n++ % 120 == 0) dm_log(__FILE__, __LINE__, __func__, "[nvn] SyncWait: sync %p fenced %u fence %llu; done %llu, last reserved %llu, timeout %llu", (const void*)s, s->fenced,
+                                                       (unsigned long long)s->fence, (unsigned long long)vka_done(), (unsigned long long)vka_fence_last(), (unsigned long long)x[1]); }
         return s->fenced && !(s->fenced == 2 ? mtl_wait_acq : mtl_wait)(s->fence, 0);   // (one not fenced yet answers at once: hle_nvn.c)
     }
     if (!strcmp(name, "nvnQueueFinish")) return !mtl_wait(((const queue_t*)host_ptr(x[0]))->last_fence, 0);
+    // FRITCHII_NVN_SYNC_SUBMIT=1 (test): a frame's first submit waits until the GPU is done with the frame before it (its present's fence)
+    if (!strcmp(name, "nvnQueueSubmitCommands")) {
+        static int on = -1; if (on < 0) { const char* e = getenv("FRITCHII_NVN_SYNC_SUBMIT"); on = e && *e == '1'; }
+        if (!on) return 0;
+        extern uint64_t nvn_window_last_present_fence(void); extern uint64_t nvn_window_presents(void);
+        static uint64_t seen; const uint64_t pr = nvn_window_presents(), f = nvn_window_last_present_fence();
+        if (pr == seen) return 0;
+        if (f && !mtl_wait_acq(f, 0)) return 1;
+        seen = pr; return 0;
+    }
+    // Fritchii: an acquire waits until the GPU is done with the frame that last presented the texture it hands out, as the driver's does (that
+    // texture is free again only then). Answered at once, the game ran frames ahead of the replay's GPU without bound and rewrote the per-frame data
+    // of frames still to be drawn (its rings go by the window's textures): Ocarina of Time's foliage mesh draw (604134a5262ff670) then drew from
+    // overwritten instance data, now and then long enough for a device loss. FRITCHII_NVN_ACQUIRE_WAIT=0: no wait
+    if (!strcmp(name, "nvnWindowAcquireTexture") || !strcmp(name, "nvnQueueAcquireTexture")) {
+        static int on = -1; if (on < 0) { const char* e = getenv("FRITCHII_NVN_ACQUIRE_WAIT"); on = !e || *e != '0'; }
+        const win_t* const w = host_ptr(x[!strcmp(name, "nvnQueueAcquireTexture") ? 1 : 0]);
+        if (!on || !w || w->ntex <= 0) return 0;
+        const uint64_t f = w->pfence[w->next % w->ntex];
+        return f && !mtl_wait_acq(f, 0);
+    }
     // A texture the GPU wrote is read back once everything submitted is done (the game waited for its own work; the replay may still be behind it)
     if (!strcmp(name, "nvnTextureReadTexels") || !strcmp(name, "nvnTextureReadTexelsStrided"))
         return mtl_tex_gpu_owned(((const tex_t*)host_ptr(x[0]))->serial) && !mtl_wait_acq(mtl_last_fence(), 0);

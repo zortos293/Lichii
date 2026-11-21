@@ -85,6 +85,10 @@ struct TransformFeedbackVarying {
 struct RuntimeInfo {
     std::array<AttributeType, 32> generic_input_types{};
     VaryingState previous_stage_stores;
+    /// Fritchii (NVN direct): a vertex shader declares every generic output, those it does not store
+    /// left at the prologue's (0, 0, 0, 1). Its stages are translated alone, so a pixel shader may read
+    /// a varying this one never writes: the hardware reads it as that default, Vulkan leaves it undefined
+    bool declare_all_generic_outputs{};
     /// Fragment stage after a mesh program: generic inputs it writes per primitive.
     std::bitset<32> per_primitive_generics{};
     /// Fragment stage after the mesh emulation's vertex shader: per_primitive_generics arrive

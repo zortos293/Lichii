@@ -181,11 +181,16 @@ typedef struct {
     const vka_dstate* d; int st; const rc_control* control; const uint8_t* code; uint32_t ncode;
     uint8_t drv[3][DMSH_DRV_SIZE], have[3], cs_c0[DMSH_DRV_SIZE], have_cs;
 } rc_ctx;
+// Fritchii: a translation without a draw (vka_rc_prepare, speculative ones) answers the storage buffer table of c[0] with these placeholders, so the recompiler
+// takes each slot as a storage buffer, as it does with a draw's bound buffers, instead of global memory with range checks (another SPIR-V)
+#define RC_FAKE_SSBO 0x7ff0000000000000ull
 static int rc_read(void* ctx, uint64_t addr, void* out, size_t n) {
     (void)ctx;
+    if ((addr & 0xfff0000000000000ull) == RC_FAKE_SSBO) { memset(out, 0, n); return 1; }
     if (vka_addr(addr, n, NULL, NULL, NULL)) { memcpy(out, (const void*)(uintptr_t)nvn_direct_host_of(addr), n); return 1; }
     return !plat_mem_read(addr, out, n);
 }
+static int c0_ssbo_table(int st);
 static uint32_t rc_cbuf(void* ctx, uint32_t bank, uint32_t off) {
     rc_ctx* x = ctx; uint32_t v = 0;
     if (bank == 1) {   // the shader's own constants (rc_c1_range)
@@ -193,7 +198,15 @@ static uint32_t rc_cbuf(void* ctx, uint32_t bank, uint32_t off) {
         if (a <= e && e <= x->ncode && off + 4 <= e - a) memcpy(&v, x->code + a + off, 4);
         return v;
     }
-    if (!x->d) return 0;
+    if (!x->d) {   // no draw: placeholders in c[0]'s storage buffer table, their sizes the largest (RC_FAKE_SSBO)
+        if (bank != 0) return 0;
+        unsigned lo, hi;
+        if (x->st == 5 && nvn2_control(x->control->bytes)) { cs_layout l = cs_layout_of(x->control->bytes); lo = l.sb; hi = l.hb; }
+        else { int t = c0_ssbo_table(x->st); if (t < 0) return 0; lo = (unsigned)t; hi = lo + DMSH_C0_ROW * DMSH_C0_SSBO_SLOTS; }
+        if (off < lo || off >= hi) return 0;
+        const unsigned row = (off - lo) / DMSH_C0_ROW, in = (off - lo) % DMSH_C0_ROW;
+        return in == 0 ? 0 : in == 4 ? (uint32_t)(RC_FAKE_SSBO >> 32) | row << 8 : in == 8 ? 0x7fffffffu : 0;
+    }
     if (bank == 0 && x->st == 5 && nvn2_control(x->control->bytes)) {
         if (!x->have_cs) { cs_c0_fill(x->control->bytes, &x->d->b, x->cs_c0); x->have_cs = 1; }
         if (off + 4 <= DMSH_DRV_SIZE) memcpy(&v, x->cs_c0 + off, 4);
@@ -246,7 +259,7 @@ static int rc_bind(const nvn_direct_shader_desc* s, int st, const cs_layout* l, 
     if (s->is_written) b->flags |= DMSH_VK_BF_RW;
     if (s->is_atomic) b->flags |= DMSH_VK_BF_ATOMIC;
 #define NO(...) do { snprintf(why, whyn, __VA_ARGS__); return 0; } while (0)
-    if (s->unsupported == 1) NO("binding %u: a handle computed per draw or a pointer read from memory (c%u + %#x)", s->binding, s->cbuf_index, s->cbuf_offset);
+    if (s->unsupported == 1) NO("binding %u (kind %u, count %u): a handle computed per draw or a pointer read from memory (c%u + %#x)", s->binding, s->kind, s->count, s->cbuf_index, s->cbuf_offset);
     switch (s->kind) {
     case NVN_DIRECT_DESC_CBUF:
         if (s->cbuf_index == 0) { b->kind = l ? VKA_KIND_NVN2_CS_C0 : DMSH_VK_KIND_DRVCB; b->reg = 0; }
@@ -269,10 +282,19 @@ static int rc_bind(const nvn_direct_shader_desc* s, int st, const cs_layout* l, 
         } else if (s->cbuf_index >= 3 && s->cbuf_index < 19 && s->cbuf_offset < 0x10000) {
             b->kind = DMSH_VK_KIND_SBUF_UBO; b->reg = (int16_t)(s->cbuf_index - 3); b->off = (uint16_t)s->cbuf_offset;
         } else NO("binding %u: storage buffer pointer at c%u + %#x", s->binding, s->cbuf_index, s->cbuf_offset);
+        if (s->unsupported == 4) {   // Lichii: the address is read at the pointer + the indirect offset (vka_bind.c VKA_KIND_SBUF_IND)
+            if (s->secondary_offset > 0xFFFF || (b->kind != DMSH_VK_KIND_SBUF && b->kind != DMSH_VK_KIND_SBUF_UBO))
+                NO("binding %u: a storage buffer table entry %#x past its pointer at c%u + %#x", s->binding, s->secondary_offset, s->cbuf_index, s->cbuf_offset);
+            b->kind = b->kind == DMSH_VK_KIND_SBUF ? VKA_KIND_SBUF_IND : VKA_KIND_SBUF_UBO_IND; b->soff = (uint16_t)s->secondary_offset;
+        }
         return 1;
     case NVN_DIRECT_DESC_TEXTURE: case NVN_DIRECT_DESC_TEXTURE_BUFFER: {
         b->dim = dim_of(s);
         if (s->unsupported == 2) { b->kind = DMSH_VK_KIND_TEX; b->flags |= DMSH_VK_BF_NOSLOT; return 1; }   // a pointer word, never a handle: bound as nothing
+        if (s->unsupported == 3) {   // Lichii: a handle program, evaluated per draw (vka_bind.c VKA_KIND_TEX_HPROG)
+            if (s->kind != NVN_DIRECT_DESC_TEXTURE || s->handle_program > 0x7fff) NO("binding %u: a handle program for a texel buffer", s->binding);
+            b->kind = VKA_KIND_TEX_HPROG; b->reg = (int16_t)s->handle_program; return 1;
+        }
         if (s->shift_left || (s->has_secondary && s->secondary_shift_left)) NO("binding %u: a shifted handle", s->binding);
         if (b->count > 1 && s->size_shift != 3) NO("binding %u: an array of handles %u bytes apart", s->binding, 1u << s->size_shift);
         int c2 = c2_off(l, s->cbuf_index, s->cbuf_offset);
@@ -301,6 +323,7 @@ static int rc_bind(const nvn_direct_shader_desc* s, int st, const cs_layout* l, 
         NO("binding %u: a handle at c%u + %#x", s->binding, s->cbuf_index, s->cbuf_offset);
     }
     case NVN_DIRECT_DESC_LOOP_GUARD: b->kind = VKA_KIND_LOOP_GUARD; b->flags |= DMSH_VK_BF_RW; return 1;
+    case NVN_DIRECT_DESC_MESH_OUT: b->kind = VKA_KIND_MESH_OUT; b->flags |= DMSH_VK_BF_RW; return 1;
     case NVN_DIRECT_DESC_IMAGE: case NVN_DIRECT_DESC_IMAGE_BUFFER: {
         b->dim = dim_of(s);
         int c2 = c2_off(l, s->cbuf_index, s->cbuf_offset);
@@ -352,18 +375,20 @@ static int rc_vks(int st) { return vka_vk_stage(st); }
 static unsigned rc_first_binding(int vks) { int r = vks == DMSH_VK_STAGE_CS || vks == DMSH_VK_STAGE_MS ? DMSH_VK_STAGE_VS : vks == DMSH_VK_STAGE_TS ? DMSH_VK_STAGE_TCS : vks; return (unsigned)r * DMSH_VK_STAGE_BINDINGS; }
 // A stage translated with draw d's state: 1 with *o filled (given back with vka_shader_translated_free), *vin_types the vertex inputs' types
 // it was made for (DMSH_VK_TYPE_* by location); gl_depth: the depth mode it is made for; else 0 and why
+static _Thread_local int t_mesh_fb;   // Fritchii: rc_translate emits a mesh program for the mesh emulation (vka_rc_mesh_fb)
+static _Thread_local const uint8_t* t_code;   // Fritchii: the code vka_rc_prepare translates, in place of a program's code area in guest memory
 static int rc_translate(const prog_t* p, unsigned i, const rc_control* control, const vka_dstate* d, uint32_t prim_inputs, int gl_depth, nvn_direct_shader* o, uint64_t* vin_types, char* why, size_t whyn) {
     int st = (int)control->stage;
     uint32_t nctl, ncode; nvn_ctl_lens(control->bytes, &nctl, &ncode);
     uint64_t data = p->sd[i].data;
     *vin_types = 0;
     if (st > 7 || rc_vks(st) < 0) { snprintf(why, whyn, "NVN stage %d", st); return 0; }
-    if (!data || !ncode || !vka_addr(data, ncode, NULL, NULL, NULL)) { snprintf(why, whyn, "its code area (%u bytes at %#llx) is not in a memory pool", ncode, (unsigned long long)data); return 0; }
+    if (!t_code && (!data || !ncode || !vka_addr(data, ncode, NULL, NULL, NULL))) { snprintf(why, whyn, "its code area (%u bytes at %#llx) is not in a memory pool", ncode, (unsigned long long)data); return 0; }
     rc_ctx* x = calloc(1, sizeof *x); if (!x) { snprintf(why, whyn, "out of memory"); return 0; }
-    x->d = d; x->st = st; x->control = control; x->code = (const uint8_t*)(uintptr_t)nvn_direct_host_of(data); x->ncode = ncode;
-    nvn_direct_shader_source src = {.nvn_stage = (uint32_t)st, .control = control->bytes, .code = x->code, .code_size = ncode, .code_address = nvn_direct_guest_of(data),
+    x->d = d; x->st = st; x->control = control; x->code = t_code ? t_code : (const uint8_t*)(uintptr_t)nvn_direct_host_of(data); x->ncode = ncode;
+    nvn_direct_shader_source src = {.nvn_stage = (uint32_t)st, .control = control->bytes, .code = x->code, .code_size = ncode, .code_address = t_code ? 0 : nvn_direct_guest_of(data),
                                     .first_binding = rc_first_binding(rc_vks(st)), .convert_depth = gl_depth, .per_primitive_inputs = st == 1 ? prim_inputs : 0, .context = x,
-                                    .read_cbuf = rc_cbuf, .read_memory = rc_read, .texture_info = rc_texture};
+                                    .read_cbuf = rc_cbuf, .read_memory = rc_read, .texture_info = rc_texture, .mesh_fallback = st == 7 && t_mesh_fb};
     if (st == 0 && d)   // vertex inputs typed as the draw's attributes (the integer formats' classes): vka_draw.c then binds them retyping none
         for (int loc = 0; loc < 16 && loc < d->nattr; loc++) {
             vka_fmt vf; if (!d->attr[loc].fmt || !vka_fmt_of(d->attr[loc].fmt, &vf)) continue;
@@ -397,11 +422,11 @@ static dmsh_vk_bind* rc_binds(const nvn_direct_shader* o, int st, const rc_contr
 // Records: magic, size of the rest, slot, the shader key and the pixel shader's per-primitive inputs it was made for, gl_depth, per-primitive outputs,
 // vertex input types, the nvn_direct_shader fields, c1's size, the rc_control's size, descriptors, SPIR-V, rc_control, c1. Lichii: also "LRCS" records, the header
 // alone (key set, the rest 0): a shader translated speculatively (spec_main) in an earlier run, not done again
-#define RC_FILE_MAGIC 0x3543524cu   // "LRC5"
+#define RC_FILE_MAGIC 0x4143524cu   // "LRCA": no loop guard in pixel shaders, native float atomics on AMD
 #define RC_REC_MAGIC 0x5243524cu    // "LRCR"
 #define RC_SPEC_MAGIC 0x5343524cu   // "LRCS"
-typedef struct { uint32_t magic, size; uint64_t slot, key; uint32_t prim_inputs; int32_t gl_depth; uint32_t prim; uint64_t vin_types; uint32_t local[3], shared, input_mask, output_mask, ssbo_align, uses_render_area, desc_count, spirv_words, c1_len, ctl_len; } rc_rec;
-static size_t rc_rec_rest(const rc_rec* r) { return (size_t)r->desc_count * sizeof(nvn_direct_shader_desc) + (size_t)r->spirv_words * 4 + r->ctl_len + r->c1_len; }
+typedef struct { uint32_t magic, size; uint64_t slot, key; uint32_t prim_inputs; int32_t gl_depth; uint32_t prim; uint64_t vin_types; uint32_t local[3], shared, input_mask, output_mask, ssbo_align, uses_render_area, desc_count, spirv_words, c1_len, ctl_len, hprog_words; } rc_rec;
+static size_t rc_rec_rest(const rc_rec* r) { return (size_t)r->desc_count * sizeof(nvn_direct_shader_desc) + (size_t)r->spirv_words * 4 + r->ctl_len + r->c1_len + (size_t)r->hprog_words * 4; }   // (Lichii: the handle programs last)
 static const rc_control* rc_rec_control(const rc_rec* r) { return (const rc_control*)((const uint8_t*)r + sizeof *r + (size_t)r->desc_count * sizeof(nvn_direct_shader_desc) + (size_t)r->spirv_words * 4); }
 static rc_map g_disk;      // slot -> rc_rec + its descriptors, SPIR-V, control section and c1 (malloc'd, kept)
 static rc_map g_spec_done; // key -> 1: translated speculatively in an earlier run or this one
@@ -414,7 +439,8 @@ static void disk_open(void) {
     // (and to the render scale, which RescalingPass bakes into the SPIR-V)
     const uint64_t stamp[2] = {NVN_RECOMPILE_STAMP, (uint64_t)V.props.vendorID << 48 ^ (uint64_t)V.props.deviceID << 32 ^ V.props.driverVersion ^
                                                     (vka_scale_on() ? ((uint64_t)vka_scale_up << 8 | vka_scale_shift) * 0x9E3779B97F4A7C15ull : 0)};
-    char path[1024]; snprintf(path, sizeof path, "%s/vk_recompiled.bin", t);
+    const char *np = getenv("FRITCHII_NVN_NAN_PRESERVE");   // (vk_nvn_direct_shaders.cpp: other float modes, other translations)
+    char path[1024]; snprintf(path, sizeof path, "%s/vk_recompiled%s.bin", t, np && np[0] == '0' ? "-nonan" : "");
     FILE* f = fopen(path, "rb"); unsigned n = 0; long good = 0, end = 0;
     if (f) {
         uint32_t magic = 0; uint64_t had[2] = {0, 0};
@@ -446,6 +472,7 @@ static void disk_open(void) {
         g_disk_f = fopen(path, "wb");
         if (g_disk_f) { uint32_t magic = RC_FILE_MAGIC; fwrite(&magic, 4, 1, g_disk_f); fwrite(stamp, 8, 2, g_disk_f); fflush(g_disk_f); }
         if (n == ~0u) VLOG("recompiler: %s holds another build's or device's translations: started again", path);
+        char mk[1100]; snprintf(mk, sizeof mk, "%s/prepared.done", t); remove(mk);   // (Fritchii: the game files' shaders are prepared again: PrepareNvnDirect)
         n = 0;
     } else g_disk_f = fopen(path, "ab");
     if (!g_disk_f) { VRED("recompiler: %s not writable: translations are not kept", path); return; }
@@ -464,16 +491,19 @@ static int disk_get(uint64_t slot, nvn_direct_shader* o, uint64_t* vin_types, in
     o->per_primitive_outputs = r->prim;
     *vin_types = r->vin_types; *gl_depth = r->gl_depth; *prim = r->prim;
     *control = rc_rec_control(r); *c1 = (const uint8_t*)*control + r->ctl_len; *c1_len = r->c1_len;
+    if (r->hprog_words) { o->hprog = (uint32_t*)(*c1 + r->c1_len); o->hprog_words = r->hprog_words; }
     return 1;
 }
 static void disk_put(uint64_t slot, uint64_t key, uint32_t prim_inputs, const nvn_direct_shader* o, uint64_t vin_types, int gl_depth, const rc_control* control, const uint8_t* c1, uint32_t c1_len) {
     rc_rec r = {RC_REC_MAGIC, 0, slot, key, prim_inputs, gl_depth, o->per_primitive_outputs, vin_types, {o->local[0], o->local[1], o->local[2]}, o->shared, o->input_mask, o->output_mask, o->ssbo_align,
-                o->uses_render_area, o->desc_count, (uint32_t)o->spirv_words, c1_len, (uint32_t)rc_control_bytes(control)};
+                o->uses_render_area, o->desc_count, (uint32_t)o->spirv_words, c1_len, (uint32_t)rc_control_bytes(control), o->hprog ? o->hprog_words : 0};
     r.size = (uint32_t)(sizeof r + rc_rec_rest(&r));
     pthread_mutex_lock(&g_mu); disk_open();
     if (g_disk_f) {
         fwrite(&r, sizeof r, 1, g_disk_f); fwrite(o->descs, sizeof *o->descs, o->desc_count, g_disk_f); fwrite(o->spirv, 4, o->spirv_words, g_disk_f);
-        fwrite(control, 1, rc_control_bytes(control), g_disk_f); if (c1_len) fwrite(c1, 1, c1_len, g_disk_f); fflush(g_disk_f);
+        fwrite(control, 1, rc_control_bytes(control), g_disk_f); if (c1_len) fwrite(c1, 1, c1_len, g_disk_f);
+        if (r.hprog_words) fwrite(o->hprog, 4, r.hprog_words, g_disk_f);
+        fflush(g_disk_f);
     }
     pthread_mutex_unlock(&g_mu);
 }
@@ -484,6 +514,77 @@ static void disk_spec_done(uint64_t key) {
     if (g_disk_f) { fwrite(&r, sizeof r, 1, g_disk_f); fflush(g_disk_f); }
     pthread_mutex_unlock(&g_mu);
 }
+// Fritchii: shaders prepared from the game files (vka_rc_prepare) and their SPIR-V's hash, compared with the translation a draw makes of them later in the
+// run (prep_compare): how often the draw's state changes a translation, which says whether the prepared ones can be kept as they are
+static rc_map g_prep; static _Atomic unsigned g_prep_same, g_prep_diff;
+static uint64_t spirv_hash(const nvn_direct_shader* o) { uint64_t h = 1469598103934665603ull; const uint8_t* b = (const uint8_t*)o->spirv; for (size_t i = 0; i < o->spirv_words * 4; i++) h = (h ^ b[i]) * 1099511628211ull; return h ? h : 1; }
+static _Atomic unsigned g_prep_st[8][2];
+static int rc_translate(const prog_t* p, unsigned i, const rc_control* control, const vka_dstate* d, uint32_t prim_inputs, int gl_depth, nvn_direct_shader* o, uint64_t* vin_types, char* why, size_t whyn);
+static void prep_dump(const char* dir, uint64_t key, const char* tag, const nvn_direct_shader* o) {
+    char path[1100]; snprintf(path, sizeof path, "%s/%016llx.%s.spv", dir, (unsigned long long)key, tag);
+    FILE* f = fopen(path, "wb"); if (f) { fwrite(o->spirv, 4, o->spirv_words, f); fclose(f); }
+}
+// FRITCHII_PREP_DIFF=<dir>: the first mismatches' draw translation and a draw-less one (as vka_rc_prepare makes it) as <key>.draw.spv / .prep.spv
+static void prep_compare(uint64_t key, const nvn_direct_shader* o, const prog_t* p, unsigned i, const rc_control* control, int gl_depth) {
+    static const char* dir; static int init; if (!init) { dir = getenv("FRITCHII_PREP_DIFF"); init = 1; }
+    pthread_mutex_lock(&g_mu); rc_ent* e = g_prep.cap ? rc_find(&g_prep, rc_key(key)) : NULL; uint64_t h = e ? (uint64_t)(uintptr_t)e->val : 0; pthread_mutex_unlock(&g_mu);
+    nvn_direct_shader q; uint64_t vt; char why[300] = ""; int have_q = 0;
+    if (!h && dir && (have_q = rc_translate(p, i, control, NULL, 0, !vka_depth_zero(), &q, &vt, why, sizeof why))) h = spirv_hash(&q);   // (no preparation this run: a draw-less translation now)
+    if (!h) return;
+    const int same1 = h == spirv_hash(o), st = (int)control->stage & 7;
+    g_prep_st[st][same1 ? 0 : 1]++;
+    unsigned same = same1 ? ++g_prep_same : g_prep_same, diff = same1 ? g_prep_diff : ++g_prep_diff;
+    if ((same + diff) % 64 == 1) VLOG("recompiler: prepared shaders met by draws: %u translated the same, %u differently (with the draw's state); vertex %u/%u, pixel %u/%u, compute %u/%u same/different; draw depth mode %d, prepared %d",
+                                      same, diff, g_prep_st[0][0], g_prep_st[0][1], g_prep_st[1][0], g_prep_st[1][1], g_prep_st[5][0], g_prep_st[5][1], gl_depth, !vka_depth_zero());
+    static _Atomic int nd;
+    if (same1 || !dir || atomic_fetch_add(&nd, 1) >= 20) { if (have_q) vka_shader_translated_free(&q); return; }
+    if (!have_q && !rc_translate(p, i, control, NULL, 0, !vka_depth_zero(), &q, &vt, why, sizeof why)) return;
+    prep_dump(dir, key, "draw", o); prep_dump(dir, key, "prep", &q);
+    VLOG("recompiler: prepared %016llx (stage %d) differs: draw %zu words, draw-less %zu words, draw-less hash %s the prepared one", (unsigned long long)key, st, o->spirv_words, q.spirv_words, spirv_hash(&q) == h ? "matches" : "differs from");
+    vka_shader_translated_free(&q);
+}
+// One program from the game files (the shader warm-up's extraction): keyed as nvnProgramSetShaders keys it (hle_nvn.c keys_hash), translated without a draw
+// and its library made for the driver's caches, as a speculative translation is (spec_one), and marked so later runs leave it. 1 made, 0 known already, -1 failed
+int vka_rc_prepare(const uint8_t* control, size_t nctl, const uint8_t* code, size_t ncode_have) {
+    if (!vka_ok() || nctl < NVN_DIRECT_NVN2_CONTROL_SIZE || !nvn2_control(control)) return -1;
+    const int st = control[0x56];
+    if (st > 1 && st != 5) return 0;   // (the stages spec_add takes)
+    const uint32_t ncode = rd32(control, 0x44);
+    if (!ncode || ncode > ncode_have) return -1;
+    uint8_t ctl[0x48], md[32]; memcpy(ctl, control, sizeof ctl); memset(ctl + 0x30, 0, 4);
+    plat_sha256_t hc; plat_sha256_init(&hc); plat_sha256_update(&hc, ctl, sizeof ctl); plat_sha256_update(&hc, code, ncode); plat_sha256_final(md, &hc);
+    const uint64_t key = rc_key(vka_shlib_key(md));
+    pthread_mutex_lock(&g_mu); disk_open(); int known = rc_find(&g_disk, key) || rc_find(&g_sh, key) || rc_find(&g_spec_done, key) || (g_prep.cap && rc_find(&g_prep, key)); pthread_mutex_unlock(&g_mu);
+    if (known) return 0;
+    rc_control* rc = malloc(sizeof *rc + NVN_DIRECT_NVN2_CONTROL_SIZE); if (!rc) return -1;
+    rc->stage = (uint32_t)st; rc->size = NVN_DIRECT_NVN2_CONTROL_SIZE; memcpy(rc->bytes, control, NVN_DIRECT_NVN2_CONTROL_SIZE);
+    prog_t p; memset(&p, 0, sizeof p); p.nstage = 1;
+    nvn_direct_shader o; uint64_t vin_types; char why[300]; why[0] = 0;
+    t_code = code;
+    const int ok = rc_translate(&p, 0, rc, NULL, 0, !vka_depth_zero(), &o, &vin_types, why, sizeof why);
+    t_code = NULL;
+    if (!ok) { free(rc); return -1; }
+    const uint64_t h = spirv_hash(&o);
+    dmsh_vk_bind* b = rc_binds(&o, st, rc, why, sizeof why);
+    uint32_t a0, c1e; rc_c1_range(rc, &a0, &c1e); uint32_t c1_len = a0 < c1e && c1e <= ncode ? c1e - a0 : 0;
+    char err[200]; err[0] = 0;
+    vka_shlib* L = b && !*why ? rc_lib(key, rc_vks(st), 0, &o, b, o.desc_count, c1_len ? code + a0 : NULL, c1_len, vin_types, err, sizeof err) : NULL;
+    free(b); vka_shader_translated_free(&o);
+    vka_shader* s = L ? vka_shader_scratch(L, key) : NULL;
+    if (s) {   // at most 4 pipeline builds in the driver at once: AMD's crashed in its own thread with 22 (translations stay on every thread)
+        static pthread_mutex_t mu = PTHREAD_MUTEX_INITIALIZER; static pthread_cond_t cv = PTHREAD_COND_INITIALIZER; static int busy;
+        pthread_mutex_lock(&mu); while (busy >= 4) pthread_cond_wait(&cv, &mu); busy++; pthread_mutex_unlock(&mu);
+        if (st == 5) vka_cs_ahead_shader(s); else vka_lib_ahead_shader(s, st == 0 ? 1 : 2);
+        pthread_mutex_lock(&mu); busy--; pthread_cond_signal(&cv); pthread_mutex_unlock(&mu);
+    }
+    vka_shader_scratch_free(s);
+    if (L) { free((void*)L->base); free(L); }
+    free(rc);
+    pthread_mutex_lock(&g_mu); rc_put(&g_prep, key, (void*)(uintptr_t)h); pthread_mutex_unlock(&g_mu);
+    disk_spec_done(key);
+    return s ? 1 : -1;
+}
+
 // The kept translations' shader keys of NVN stage st (not the pixel shaders' per-primitive variants, valid only in mesh pipelines), malloc'd into *out: how many
 // (vka_pso.c lib_ahead_start: their stage libraries are made ahead, so a pair the frame path has not met only needs the fast link)
 unsigned vka_rc_stage_keys(int st, uint64_t** out) {
@@ -521,6 +622,8 @@ static void rc_make(rc_shader* r, uint64_t key, const nvn_direct_shader* o, cons
     r->sh = vka_shader_make(L, key);
     if (!r->sh) return;
     r->sh->nvn2_control = nvn2_control(control->bytes) ? control->bytes : NULL; g_made++;
+    if (o->hprog && o->hprog_words && !r->sh->hprog && (r->sh->hprog = malloc(o->hprog_words * 4u))) {   // Lichii: kept with the shader (o may be freed or a kept record)
+        memcpy(r->sh->hprog, o->hprog, o->hprog_words * 4u); r->sh->hprog_words = o->hprog_words; }
     for (unsigned k = 0; k < o->desc_count; k++) if (o->descs[k].kind == NVN_DIRECT_DESC_TEXTURE) {   // (the descriptors' order is RescalingPass's texture order)
         r->sh->scale_tex_binding = o->descs[k].binding; r->sh->scale_tex_bit = (uint8_t)nvn_direct_scale_texture_bit((uint32_t)r->st);
         r->sh->scale_tex_bits = (uint8_t)nvn_direct_scale_texture_bits((uint32_t)r->st); break; }
@@ -539,6 +642,7 @@ static rc_shader* rc_new(const prog_t* p, unsigned i, uint64_t key, uint64_t slo
         c1 = (const uint8_t*)(uintptr_t)nvn_direct_host_of(p->sd[i].data) + a; c1_len = a < c1e ? c1e - a : 0;
         if ((ok = rc_translate(p, i, control, g_draw, prim_inputs, gl_depth, &o, &vin_types, why, sizeof why))) {
             r->prim = o.per_primitive_outputs;
+            prep_compare(key, &o, p, i, control, gl_depth);
             disk_put(slot, key, prim_inputs, &o, vin_types, gl_depth, control, c1, c1_len);
         }
     }
@@ -695,10 +799,63 @@ static void rc_map_free(rc_map* m, int values) {
 void vka_rc_destroy(void) {
     for (size_t i = 0; i < g_nlibs; i++) { free((void*)g_libs[i]->base); free(g_libs[i]); }
     free(g_libs);
-    rc_map_free(&g_sh, 1); rc_map_free(&g_ctl, 1); rc_map_free(&g_disk, 1); rc_map_free(&g_spec_done, 0);
+    rc_map_free(&g_sh, 1); rc_map_free(&g_ctl, 1); rc_map_free(&g_disk, 1); rc_map_free(&g_spec_done, 0); rc_map_free(&g_prep, 0);
     free(g_guards); free(g_spec);
     if (g_disk_f) fclose(g_disk_f);
 }
 
 // Shaders made in this run, and of them the ones an earlier run kept (the rest were translated now: new to this run's DM_TEMP)
 void vka_rc_counts(unsigned* made, unsigned* kept) { *made = g_made; *kept = g_cached; }
+
+
+// ---------- Fritchii: the mesh emulation ----------
+// AMD's RDNA2 GPUs lose the device on native mesh draws now and then (Lichii #1934, #1937: Ocarina of Time on an RX 6800 XT; here an RX 6750 XT every 2-20 minutes,
+// always in a foliage mesh draw). A mesh program without a task program is drawn as Lichii's GPU emulation does on those GPUs: the program translated as a compute shader
+// that writes each workgroup's vertices and primitives to a buffer (MeshEmulationBlockWords), and a vertex shader that draws them (EmitMeshEmulationVertex), vka_draw.c
+// mesh_fb_*. Translated in each run (not kept in vk_recompiled.bin)
+static rc_map g_fb;   // slot -> vka_mesh_fb
+static vka_shader* fb_shader(uint64_t key, int vks, int st, nvn_direct_shader* o, const rc_control* control, const uint8_t* c1, uint32_t c1_len, char* why, size_t whyn) {
+    dmsh_vk_bind* b = rc_binds(o, st, control, why, whyn);
+    if (!b || *why) { free(b); return NULL; }
+    char err[200] = "";
+    vka_shlib* L = rc_lib(key, vks, o->uses_render_area ? VKA_F_RENDER_AREA : 0, o, b, o->desc_count, c1_len ? c1 : NULL, c1_len, 0, err, sizeof err);
+    free(b);
+    if (!L) { snprintf(why, whyn, "%s", err); return NULL; }
+    pthread_mutex_lock(&g_mu);
+    if (g_nlibs == g_libs_cap) { size_t nc = g_libs_cap ? 2 * g_libs_cap : 1024; vka_shlib** n = realloc(g_libs, nc * sizeof *n); if (n) { g_libs = n; g_libs_cap = nc; } }
+    if (g_nlibs < g_libs_cap) g_libs[g_nlibs++] = L;
+    pthread_mutex_unlock(&g_mu);
+    vka_shader* sh = vka_shader_make(L, key);
+    if (sh) sh->nvn2_control = nvn2_control(control->bytes) ? control->bytes : NULL;
+    return sh;
+}
+const vka_mesh_fb* vka_rc_mesh_fb(const prog_t* p, unsigned i, uint64_t key, int gl_depth) {
+    const rc_control* control = rc_control_of(key);
+    if (!control || control->stage != 7) return NULL;
+    const uint64_t slot = rc_key(rc_translation_slot(key, 0, 7, gl_depth) ^ 0x6d65736866616c6cull);
+    pthread_mutex_lock(&g_mu); rc_ent* e = rc_find(&g_fb, slot); vka_mesh_fb* f = e ? e->val : NULL; pthread_mutex_unlock(&g_mu);
+    if (f) return f->cs && f->vs ? f : NULL;
+    pthread_mutex_lock(&g_make_mu);
+    pthread_mutex_lock(&g_mu); e = rc_find(&g_fb, slot); f = e ? e->val : NULL; pthread_mutex_unlock(&g_mu);
+    if (!f && (f = calloc(1, sizeof *f))) {
+        nvn_direct_shader o; uint64_t vin = 0; char why[300] = "";
+        uint32_t a, c1e; rc_c1_range(control, &a, &c1e);
+        const uint8_t* c1 = (const uint8_t*)(uintptr_t)nvn_direct_host_of(p->sd[i].data) + a; const uint32_t c1_len = a < c1e ? c1e - a : 0;
+        t_mesh_fb = 1; const int ok = rc_translate(p, i, control, g_draw, 0, gl_depth, &o, &vin, why, sizeof why); t_mesh_fb = 0;
+        if (ok && (!o.vs_spirv || !o.mesh_block_words || !o.mesh_group_vertices)) snprintf(why, sizeof why, "no emulation output");
+        if (ok && !*why) {
+            f->cs = fb_shader(key ^ 0x63736d65736866ull, DMSH_VK_STAGE_CS, 7, &o, control, c1, c1_len, why, sizeof why);
+            nvn_direct_shader_desc out = {.kind = NVN_DIRECT_DESC_MESH_OUT, .vk_type = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, .binding = NVN_DIRECT_MESH_OUT_SLOT, .count = 1};
+            nvn_direct_shader vo; memset(&vo, 0, sizeof vo);
+            vo.spirv = o.vs_spirv; vo.spirv_words = o.vs_words; vo.descs = &out; vo.desc_count = 1; vo.ssbo_align = o.ssbo_align;
+            if (f->cs && !*why) f->vs = fb_shader(key ^ 0x76736d65736866ull, DMSH_VK_STAGE_VS, 0, &vo, control, NULL, 0, why, sizeof why);
+            f->block_words = o.mesh_block_words; f->group_vertices = o.mesh_group_vertices; f->topology = o.mesh_topology;
+        }
+        if (ok) vka_shader_translated_free(&o);
+        if (!f->cs || !f->vs) { static _Atomic int n; if (atomic_fetch_add(&n, 1) < 32) VRED("mesh emulation of %016llx not made: %s; drawn natively", (unsigned long long)key, *why ? why : "refused"); }
+        else { static _Atomic int n; if (atomic_fetch_add(&n, 1) < 32) VLOG("mesh emulation of %016llx: %u words a workgroup, %u vertices a workgroup (topology %u)", (unsigned long long)key, f->block_words, f->group_vertices, f->topology); }
+        pthread_mutex_lock(&g_mu); rc_put(&g_fb, slot, f); pthread_mutex_unlock(&g_mu);
+    }
+    pthread_mutex_unlock(&g_make_mu);
+    return f && f->cs && f->vs ? f : NULL;
+}

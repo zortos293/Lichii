@@ -395,6 +395,12 @@ NvnDirectShaders::NvnDirectShaders(const Device& device, const Shader::Profile& 
     : profile{profile_}, host_info{host_info_} {
     // The replay sets no VK_EXT_depth_clip_control: the GL depth mode is converted in the shader.
     profile.support_native_ndc = false;
+    // FRITCHII_NVN_NAN_PRESERVE=0: no SignedZeroInfNanPreserve (AMD optimises the float code more freely)
+    if (const char* e = std::getenv("FRITCHII_NVN_NAN_PRESERVE"); e && e[0] == '0') {
+        profile.support_fp16_signed_zero_nan_preserve = false;
+        profile.support_fp32_signed_zero_nan_preserve = false;
+        profile.support_fp64_signed_zero_nan_preserve = false;
+    }
     // The replay binds at most 512 descriptors a draw (vka_draw.c), over every stage: an array of
     // handles a shader indexes (the recompiler makes it up to 1,024 long) gets at most half of
     // them, which still covers the driver's c2 handle tables up into the separate samplers' from
@@ -439,8 +445,14 @@ int NvnDirectShaders::Translate(void* context, const nvn_direct_shader_source* s
 void NvnDirectShaders::Free(void*, nvn_direct_shader* shader) {
     std::free(shader->spirv);
     std::free(shader->descs);
+    std::free(shader->hprog);
+    std::free(shader->vs_spirv);
+    shader->vs_spirv = nullptr;
+    shader->vs_words = 0;
     shader->spirv = nullptr;
     shader->descs = nullptr;
+    shader->hprog = nullptr;
+    shader->hprog_words = 0;
     shader->spirv_words = 0;
     shader->desc_count = 0;
 }
@@ -473,6 +485,14 @@ void NvnDirectShaders::TranslateStage(const nvn_direct_shader_source& source,
 
     Shader::RuntimeInfo runtime_info;
     runtime_info.previous_stage_stores.mask.set();
+    // FRITCHII_NVN_VS_ALL_OUTPUTS=1: every generic output declared, unwritten ones at (0, 0, 0, 1). Off:
+    // AMD then relinks each pipeline (~150 ms a link); the replay adds only the outputs a pixel shader
+    // reads and its vertex shader does not write, per pair (vka_pso.c pstate_fill)
+    static const bool all_outputs = [] {
+        const char* e = std::getenv("FRITCHII_NVN_VS_ALL_OUTPUTS");
+        return e != nullptr && e[0] == '1';
+    }();
+    runtime_info.declare_all_generic_outputs = all_outputs && stage == Shader::Stage::VertexB;
     if (stage == Shader::Stage::VertexB) {
         for (size_t index = 0; index < runtime_info.generic_input_types.size(); ++index) {
             const u8 type = source.vertex_input_types[index];
@@ -490,13 +510,21 @@ void NvnDirectShaders::TranslateStage(const nvn_direct_shader_source& source,
         runtime_info.convert_depth_mode = source.convert_depth != 0;
     }
     // (not task and mesh programs: their epilogue's markers expect the program's own returns)
-    const bool loop_guard = stage != Shader::Stage::Task && stage != Shader::Stage::Mesh &&
+    // (nor pixel shaders: the guard's storage write makes AMD run their depth test late, after shading)
+    const bool loop_guard = stage != Shader::Stage::Task && stage != Shader::Stage::Mesh && stage != Shader::Stage::Fragment &&
                             !Settings::values.disable_shader_loop_safety_checks &&
                             std::ranges::any_of(program.syntax_list, [](const Shader::IR::AbstractSyntaxNode& node) {
                                 return node.type == Shader::IR::AbstractSyntaxNode::Type::Repeat;
                             });
     if (loop_guard) {
         runtime_info.loop_guard_binding = source.first_binding + NVN_DIRECT_LOOP_GUARD_SLOT;
+    }
+    // Fritchii: the mesh emulation (AMD's RDNA2 lost the device on native mesh draws): the
+    // program as a compute shader writing its blocks, drawn by EmitMeshEmulationVertex's shader
+    const bool mesh_fallback = stage == Shader::Stage::Mesh && source.mesh_fallback != 0;
+    if (mesh_fallback) {
+        runtime_info.mesh_as_compute = true;
+        runtime_info.mesh_output_binding = source.first_binding + NVN_DIRECT_MESH_OUT_SLOT;
     }
     Shader::Maxwell::ConvertLegacyToGeneric(program, runtime_info);
     Shader::Backend::Bindings bindings;
@@ -522,7 +550,8 @@ void NvnDirectShaders::TranslateStage(const nvn_direct_shader_source& source,
         desc.cbuf_offset = from.cbuf_offset;
         desc.count = from.count;
         desc.size_shift = from.size_shift;
-        desc.unsupported = from.handle_program != ~0U;
+        desc.unsupported = from.handle_program != ~0U ? 3 : 0;
+        desc.handle_program = from.handle_program;
         return desc;
     };
     u32 cbuf_slots = 0;
@@ -544,8 +573,11 @@ void NvnDirectShaders::TranslateStage(const nvn_direct_shader_source& source,
              .count = 1,
              .cbuf_index = ssbo.cbuf_index,
              .cbuf_offset = ssbo.cbuf_offset,
+             .secondary_offset = ssbo.indirect_offset, // unsupported 4: the table entry's offset
              .is_written = ssbo.is_written,
-             .unsupported = ssbo.count != 1 || ssbo.indirect_offset != ~0U},
+             .unsupported = static_cast<u8>(ssbo.count != 1             ? 1
+                                            : ssbo.indirect_offset != ~0U ? 4
+                                                                          : 0)},
             ssbo.count);
     }
     for (const Shader::TextureBufferDescriptor& texbuf : info.texture_buffer_descriptors) {
@@ -553,6 +585,7 @@ void NvnDirectShaders::TranslateStage(const nvn_direct_shader_source& source,
                                     .vk_type = VK_DESCRIPTOR_TYPE_UNIFORM_TEXEL_BUFFER,
                                     .texture_type = static_cast<u8>(Shader::TextureType::Buffer)};
         desc = handle(desc, texbuf);
+        desc.unsupported = desc.unsupported != 0; // handle programs: textures only
         desc.shift_left = texbuf.shift_left;
         desc.has_secondary = texbuf.has_secondary;
         add(desc, 1);
@@ -564,7 +597,7 @@ void NvnDirectShaders::TranslateStage(const nvn_direct_shader_source& source,
                                     .is_integer = imgbuf.is_integer,
                                     .is_written = imgbuf.is_written};
         desc = handle(desc, imgbuf);
-        desc.unsupported |= imgbuf.count != 1;
+        desc.unsupported = desc.unsupported != 0 || imgbuf.count != 1;
         add(desc, 1);
     }
     for (const Shader::TextureDescriptor& texture : info.texture_descriptors) {
@@ -593,7 +626,7 @@ void NvnDirectShaders::TranslateStage(const nvn_direct_shader_source& source,
                                     .is_written = image.is_written,
                                     .is_atomic = info.uses_atomic_image_u32 && image.is_integer};
         desc = handle(desc, image);
-        desc.unsupported |= image.count != 1 || image.is_byte_addressed;
+        desc.unsupported = desc.unsupported != 0 || image.count != 1 || image.is_byte_addressed;
         add(desc, 1);
     }
     if (binding > source.first_binding + NVN_DIRECT_LOOP_GUARD_SLOT) {
@@ -603,6 +636,17 @@ void NvnDirectShaders::TranslateStage(const nvn_direct_shader_source& source,
     if (loop_guard) {
         binding = source.first_binding + NVN_DIRECT_LOOP_GUARD_SLOT;
         add({.kind = NVN_DIRECT_DESC_LOOP_GUARD, .vk_type = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, .count = 1}, 1);
+    }
+    std::vector<u32> vs_spirv;
+    if (mesh_fallback) {
+        binding = source.first_binding + NVN_DIRECT_MESH_OUT_SLOT;
+        add({.kind = NVN_DIRECT_DESC_MESH_OUT, .vk_type = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, .count = 1, .is_written = 1}, 1);
+        vs_spirv = Shader::Backend::SPIRV::EmitMeshEmulationVertex(
+            profile, program.mesh, NVN_DIRECT_MESH_OUT_SLOT, ~0U,
+            runtime_info.convert_depth_mode && !profile.support_native_ndc);
+        shader.mesh_block_words = Shader::Backend::SPIRV::MeshEmulationBlockWords(program.mesh);
+        shader.mesh_group_vertices = program.mesh.max_primitives * program.mesh.PrimitiveVertices();
+        shader.mesh_topology = program.mesh.topology == 0 ? 2 : program.mesh.topology == 1 ? 1 : 0;
     }
     if (const u32 end = BindingEnd(spirv); end > binding) {
         throw Shader::RuntimeError("The SPIR-V binds up to {}, its descriptors end at {}", end,
@@ -617,6 +661,14 @@ void NvnDirectShaders::TranslateStage(const nvn_direct_shader_source& source,
     }
     std::memcpy(shader.spirv, spirv.data(), spirv.size() * sizeof(u32));
     shader.spirv_words = spirv.size();
+    if (!vs_spirv.empty()) {
+        shader.vs_spirv = static_cast<u32*>(std::malloc(vs_spirv.size() * sizeof(u32)));
+        if (!shader.vs_spirv) {
+            throw Shader::RuntimeError("Out of memory");
+        }
+        std::memcpy(shader.vs_spirv, vs_spirv.data(), vs_spirv.size() * sizeof(u32));
+        shader.vs_words = vs_spirv.size();
+    }
     std::memcpy(shader.descs, descs.data(), descs.size() * sizeof(nvn_direct_shader_desc));
     shader.desc_count = static_cast<u32>(descs.size());
     shader.local[0] = program.workgroup_size[0];
@@ -640,6 +692,25 @@ void NvnDirectShaders::TranslateStage(const nvn_direct_shader_source& source,
     }
     shader.ssbo_align = static_cast<u32>(host_info.min_ssbo_alignment);
     shader.uses_render_area = info.uses_render_area ? 1 : 0;
+    if (!info.handle_programs.empty()) {
+        // The replay evaluates them per draw (vka_bind.c), as the GPU emulation does
+        // (VideoCommon::EvaluateTextureHandle): the layout is in nvn_direct.h
+        std::vector<u32> words{static_cast<u32>(info.handle_programs.size())};
+        for (const std::vector<u32>& code : info.handle_programs) {
+            words.push_back(static_cast<u32>(code.size()));
+            words.insert(words.end(), code.begin(), code.end());
+        }
+        words.push_back(static_cast<u32>(info.storage_buffers_descriptors.size()));
+        for (const Shader::StorageBufferDescriptor& ssbo : info.storage_buffers_descriptors) {
+            words.insert(words.end(), {ssbo.cbuf_index, ssbo.cbuf_offset, ssbo.indirect_offset});
+        }
+        shader.hprog = static_cast<u32*>(std::malloc(words.size() * sizeof(u32)));
+        if (!shader.hprog) {
+            throw Shader::RuntimeError("Out of memory");
+        }
+        std::memcpy(shader.hprog, words.data(), words.size() * sizeof(u32));
+        shader.hprog_words = static_cast<u32>(words.size());
+    }
 }
 
 } // namespace Vulkan

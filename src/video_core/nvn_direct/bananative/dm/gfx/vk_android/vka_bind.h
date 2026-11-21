@@ -42,6 +42,7 @@ enum {
     VKA_R_GMEM_LOG,   // that memory's write log, cleared per draw or dispatch
     VKA_R_SHARED_SPILL,   // a compute program's shared memory past the device's limit (DMSH_VK_KIND_SHARED_SPILL): size = bytes of one workgroup's slice
     VKA_R_LOOP_GUARD,     // Lichii: the shader's loop guard word (VKA_KIND_LOOP_GUARD)
+    VKA_R_MESH_OUT,       // Fritchii: the mesh emulation's output buffer of the draw (VKA_KIND_MESH_OUT)
 };
 typedef struct {
     uint8_t what, desc, flags, dim;    // VKA_R_*, VkDescriptorType, DMSH_VK_BF_*, DMSH_VK_DIM_*
@@ -60,14 +61,23 @@ typedef int (*vka_read_fn)(void *ctx, uint64_t addr, void *out, size_t n);
 #define VKA_BANK_NVN2_CS_C0 0x100
 // Lichii: a recompiled shader's loop guard word (nvn_recompile.c): a VKA_R_LOOP_GUARD the walk's caller binds from the shader
 #define VKA_KIND_LOOP_GUARD 65
+// Fritchii: the mesh emulation's output buffer (nvn_recompile.c vka_rc_mesh_fb): a VKA_R_MESH_OUT the draw binds (vka_draw.c g_mesh_out)
+#define VKA_KIND_MESH_OUT 69
+// Lichii: a texture whose handle a handle program computes per draw (reg: the program; nvn_direct.h nvn_direct_shader::hprog), as the GPU emulation's EvaluateTextureHandle
+#define VKA_KIND_TEX_HPROG 66
+// Lichii: a storage buffer whose address is the 64-bit word at its pointer + soff (VideoCommon::StorageBufferBase's indirect offset): the pointer in storage slot reg
+// (SBUF_IND), or at uniform buffer reg + off (SBUF_UBO_IND)
+#define VKA_KIND_SBUF_IND 67
+#define VKA_KIND_SBUF_UBO_IND 68
 
 #define VKA_WALK_REFUSE (-1)
 // Walks one stage's binding records (e->bind_count of them from b) for NVN stage nvn_stage. Writes at most max results to out and returns their count, or VKA_WALK_REFUSE with
 // *why set when the draw cannot run correctly. Storage buffers of global memory (SBUF, SBUF_UBO, UBO_PTR): with the library's ssbo_align (header; DMSH_VK_SSBO_ALIGN) they are
 // bound at their address rounded down to it, the range grown by the difference (the shader adds it back); with 0 (an older library) at the exact address, and one off the
 // device's dev_align refuses the draw. An UNKNOWN record refuses it too. *uses_pool is set when the shader reads set 1 (the texture or sampler pool)
+// hprog / hprog_words: the shader's handle programs (VKA_KIND_TEX_HPROG; NULL when it has none)
 int vka_walk(const vka_bstate *s, int nvn_stage, const dmsh_vk_entry *e, const dmsh_vk_bind *b, uint32_t ssbo_align, uint64_t dev_align, vka_read_fn rd, void *rd_ctx,
-             vka_res *out, int max, int *uses_pool, char *why, size_t whyn);
+             vka_res *out, int max, int *uses_pool, char *why, size_t whyn, const uint32_t *hprog, uint32_t hprog_words);
 // Fills a driver segment as the GPU's driver would (nvn_mtl.m encode_args NVN_RB_DRV0 / DRV2 / PUSH): DMSH_DRV_SIZE bytes for banks 0 and 2, DMSH_PUSH_SIZE for the push bank.
 // pool: the shader reads the pools (c2 then holds the handles without the pools' bases, as the game wrote them)
 void vka_drv_fill(const vka_bstate *s, int nvn_stage, int bank, int pool, uint8_t *d);

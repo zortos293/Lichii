@@ -954,7 +954,7 @@ int vka_mem_release(uintptr_t lo, uintptr_t hi) {
 // the GPU with the old pages). Then the replay's readers of guest storage (nvn_pool_use: texture uploads, which check that pages are mapped and then read
 // them in place) are kept out until the pages are gone (nvn_direct_guest_unmap_done)
 void nvn_pool_unmap(int on);   // hle_nvn.c
-void nvn_direct_guest_unmap(uint64_t address, uint64_t size) { vka_mem_release((uintptr_t)address, (uintptr_t)(address + size)); nvn_pool_unmap(1); }
+void nvn_direct_guest_unmap(uint64_t address, uint64_t size) { void fritchii_hitch_add(int, unsigned long long); const uint64_t t0 = mono_ns(); vka_mem_release((uintptr_t)address, (uintptr_t)(address + size)); nvn_pool_unmap(1); fritchii_hitch_add(8, mono_ns() - t0); }
 void nvn_direct_guest_unmap_done(void) { nvn_pool_unmap(0); }
 
 // The segments this thread found, by address block (the draws look up their vertex and uniform buffers, ~10 lookups a draw): valid while g_sg_gen stands.
@@ -987,7 +987,7 @@ static const seg_t *lookup(uintptr_t a, seg_t *tmp) {   // the segment holding a
     if (e && c->gen == gen && a >= e->lo && a < e->hi) return e;
     if (pthread_rwlock_tryrdlock(&g_rw)) {   // contended: a table edit (or, under DM_VK_MEM_LOCK_WHOLE, a placement) holds it
         uint64_t t0 = mono_ns(); pthread_rwlock_rdlock(&g_rw);
-        atomic_fetch_add_explicit(c == &g_rlc ? &g_lkw_rec_ns : &g_lkw_oth_ns, mono_ns() - t0, memory_order_relaxed);
+        atomic_fetch_add_explicit(c == &g_rlc ? &g_lkw_rec_ns : &g_lkw_oth_ns, mono_ns() - t0, memory_order_relaxed); { void fritchii_hitch_add(int, unsigned long long); fritchii_hitch_add(9, mono_ns() - t0); }
     }
     gen = atomic_load_explicit(&g_sg_gen, memory_order_relaxed);
     int i = sg_find(a); const seg_t *r = NULL;
@@ -1124,6 +1124,34 @@ static void placed_line(uint64_t tot) {
     pthread_mutex_unlock(&g_pmu);
     VLOG("%.2f GiB of memory pools is placed Vulkan memory (%d pools whole, %d by parts; %d pools, %.2f GiB not placed: no GPU address taken in them yet)", tot / 1073741824.0, n - nl, np, nl, lb / 1073741824.0);
 }
+// Fritchii: pools placed ahead, on a thread of their own (FRITCHII_PLACE_AHEAD=0: off). A lazy pool is placed when the GPU is first given an address in it
+// (mtl_pool_need), inside the game's NVN call: walking into a new area of Ocarina of Time streams in pools, and their placements (2-8 ms each) held up the game
+// for half a second (37 fps). A whole pool is now placed right after the game makes it; one the game needs while it is being placed waits for that placement
+// (mtl_pool_need). Pools placed by parts stay lazy
+enum { AHEAD_Q = 256 };
+static struct { const void *mem; uint64_t size; } g_ahead[AHEAD_Q];
+static unsigned g_ahead_h, g_ahead_t; static int g_ahead_thr;
+static pthread_mutex_t g_ahead_mu = PTHREAD_MUTEX_INITIALIZER; static pthread_cond_t g_ahead_cv = PTHREAD_COND_INITIALIZER;
+void mtl_pool_need(const void *addr, uint64_t len, const char *why);
+static void *ahead_main(void *arg) {
+    (void)arg;
+    for (;;) {
+        pthread_mutex_lock(&g_ahead_mu);
+        while (g_ahead_h == g_ahead_t) pthread_cond_wait(&g_ahead_cv, &g_ahead_mu);
+        const void *mem = g_ahead[g_ahead_t % AHEAD_Q].mem; uint64_t size = g_ahead[g_ahead_t % AHEAD_Q].size; g_ahead_t++;
+        pthread_mutex_unlock(&g_ahead_mu);
+        mtl_pool_need(mem, size, "placed ahead");   // (a pool deleted meanwhile is not in the table: nothing to place)
+    }
+    return NULL;
+}
+static void ahead_push(const void *mem, uint64_t size) {
+    static int on = -1; if (on < 0) on = VKA_ENV("FRITCHII_PLACE_AHEAD", 1) != 0;
+    if (!on) return;
+    pthread_mutex_lock(&g_ahead_mu);
+    if (!g_ahead_thr) { pthread_t t; g_ahead_thr = pthread_create(&t, NULL, ahead_main, NULL) ? -1 : 1; if (g_ahead_thr > 0) pthread_detach(t); }
+    if (g_ahead_thr > 0 && g_ahead_h - g_ahead_t < AHEAD_Q) { g_ahead[g_ahead_h % AHEAD_Q].mem = mem; g_ahead[g_ahead_h % AHEAD_Q].size = size; g_ahead_h++; pthread_cond_signal(&g_ahead_cv); }
+    pthread_mutex_unlock(&g_ahead_mu);
+}
 void mtl_pool_add(const void *mem, uint64_t size) {
     vka_init(); swap_hooks();
     int placed = 0, lg = 0, lazy = 0, part = 0; uint64_t t0 = mono_ns(), tot = 0; seglist l = {0};
@@ -1136,6 +1164,7 @@ void mtl_pool_add(const void *mem, uint64_t size) {
     if (lazy) { atomic_fetch_add(&g_nlazy, 1); g_lazy_bytes += size; atomic_fetch_add(&g_lzgen, 1); }
     static int nlog; int first = nlog++ < 8;
     pthread_mutex_unlock(&g_pmu);
+    if (lazy && !part) ahead_push(mem, size);
     if (lazy) {
         static _Atomic int once, oncep;
         if (!atomic_exchange(&once, 1)) VLOG("memory pool %p+%#llx: placed when the GPU is first given an address in it (DM_VK_PLACE_LAZY)", mem, (unsigned long long)size);

@@ -17,3 +17,5 @@ int vka_spv_gs_claim(const uint32_t *w, size_t nw, uint32_t binding, uint32_t **
 uint32_t *vka_spv_fout_retype(const uint32_t *w, size_t nw, uint32_t umask, uint32_t smask, size_t *out_nw, char *err, size_t errn);
 // Lichii: every DescriptorSet from decoration of module w (nw words) set to to, in place; returns how many (vka_spvpatch.c)
 int vka_spv_set_remap(uint32_t *w, size_t nw, uint32_t from, uint32_t to);
+uint32_t vka_spv_io_mask(const uint32_t *w, size_t nw, uint32_t storage);   // Fritchii: the locations of a storage class's variables (1 Input, 3 Output)
+uint32_t *vka_spv_add_default_outputs(const uint32_t *w, size_t nw, uint32_t mask, size_t *out_nw, char *err, size_t errn);   // Fritchii: vec4 outputs at mask's locations, (0, 0, 0, 1)

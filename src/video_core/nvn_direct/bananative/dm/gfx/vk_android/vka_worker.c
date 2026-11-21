@@ -67,6 +67,7 @@ static void aff_check(void) {
             if (d) closedir(d); VLOG("DM_VK_AFF_ALL=%#x: %d threads", a, n); } }
     if (r != r_was) { r_was = r; if (r) { aff_set(0, r); VLOG("DM_VK_AFF_REPLAY=%#x", r); } }
 }
+void fritchii_hitch_add(int which, unsigned long long ns);   // Fritchii (common/nx2_hitch.cpp): 0 recording, 1 idle, 6 the game waiting for room
 static void *worker_main(void *arg) {
     (void)arg; pthread_setname_np(pthread_self(), "vk-replay");
     for (;;) {
@@ -77,6 +78,8 @@ static void *worker_main(void *arg) {
         job_t j = g_q[g_qout % NJOB];
         pthread_mutex_unlock(&g_mu);
         uint64_t t1 = wns(), c1 = j.kind == J_SUB ? thread_cpu_ns() : 0; g_idle_ns += t1 - t0;
+        extern _Atomic uint64_t vka_cat_ns[5], vka_img_create_ns, vka_up_total_ns, vka_up_total_bytes; uint64_t vka_exec_draws(void);
+        uint64_t pso0 = 0, img0 = atomic_load(&vka_img_create_ns), up0 = atomic_load(&vka_up_total_ns), ub0 = atomic_load(&vka_up_total_bytes), dr0 = vka_exec_draws(); for (int k = 0; k < 5; k++) pso0 += atomic_load(&vka_cat_ns[k]);
         aff_check();
         if (j.kind == J_SUB) {
             vka_rp_queue_activate(j.serial); vka_rp_set_queue_origin(j.origin_ll);
@@ -89,10 +92,21 @@ static void *worker_main(void *arg) {
         else if (j.kind == J_FORGET) vka_rp_queue_forget(j.serial);
         else if (j.kind == J_EVENT) vka_rp_event(j.ev, j.ev_mode, j.ev_v);
         uint64_t t2 = wns(); g_busy_ns += t2 - t1;
+        fritchii_hitch_add(1, t1 - t0);
+        if (j.kind == J_SUB) { fritchii_hitch_add(0, t2 - t1);   // (and the pipelines and images it made or waited for: other threads add to them too, rarely)
+            uint64_t pso1 = 0, img1 = atomic_load(&vka_img_create_ns); for (int k = 0; k < 5; k++) pso1 += atomic_load(&vka_cat_ns[k]);
+            if (pso1 > pso0) fritchii_hitch_add(4, pso1 - pso0);
+            if (img1 > img0) fritchii_hitch_add(5, img1 - img0);
+            if (t2 - t1 > 16000000ull) { static _Atomic int nh; if (atomic_fetch_add(&nh, 1) < 2000)   // Fritchii: what a heavy submission's recording went to
+                VLOG("heavy submission (fence %llu, %d command buffers): recorded in %.1f ms: %llu draws, texture uploads %.1f ms (%.1f MiB), pipelines %.1f ms, image creates %.1f ms",
+                     (unsigned long long)j.fence, j.nh, (t2 - t1) / 1e6, (unsigned long long)(vka_exec_draws() - dr0), (atomic_load(&vka_up_total_ns) - up0) / 1e6,
+                     (atomic_load(&vka_up_total_bytes) - ub0) / 1048576.0, (pso1 - pso0) / 1e6, (img1 - img0) / 1e6); } }
         if (j.kind == J_SUB) { g_sub_ns += t2 - t1; atomic_fetch_add_explicit(&g_sub_all, t2 - t1, memory_order_relaxed); atomic_fetch_add_explicit(&g_sub_cpu_all, thread_cpu_ns() - c1, memory_order_relaxed); }
         if (j.kind == J_PRESENT && j.ticket % 300 == 0) {
-            VLOG("replay worker up to present %llu: busy %.1f ms a frame (submissions %.1f), idle %.1f; the game waited %.1f ms a frame for the worker",
-                 (unsigned long long)j.ticket, g_busy_ns / 300e6, g_sub_ns / 300e6, g_idle_ns / 300e6, g_room_ns / 300e6);
+            static uint64_t pcpu; const uint64_t cpu = atomic_load(&g_sub_cpu_all);   // (Fritchii: its CPU time in them: far below the wall time = blocked, not busy)
+            VLOG("replay worker up to present %llu: busy %.1f ms a frame (submissions %.1f, of it CPU %.1f), idle %.1f; the game waited %.1f ms a frame for the worker",
+                 (unsigned long long)j.ticket, g_busy_ns / 300e6, g_sub_ns / 300e6, (cpu - pcpu) / 300e6, g_idle_ns / 300e6, g_room_ns / 300e6);
+            pcpu = cpu;
             g_busy_ns = g_idle_ns = g_room_ns = g_sub_ns = 0; }
         pthread_mutex_lock(&g_mu);
         g_qout++; if (j.kind == J_PRESENT) g_pres_out++;
@@ -119,7 +133,7 @@ static void push(const job_t *j) {
         if (j->kind == J_SUB) free(j->h);
         return;
     }
-    { uint64_t w = wns() - t0; g_room_ns += w; atomic_fetch_add_explicit(&g_room_all, w, memory_order_relaxed); }
+    { uint64_t w = wns() - t0; g_room_ns += w; atomic_fetch_add_explicit(&g_room_all, w, memory_order_relaxed); if (w > 50000) fritchii_hitch_add(6, w); }
     g_q[g_qin % NJOB] = *j; g_qin++; if (j->kind == J_PRESENT) g_pres_in++;
     pthread_cond_broadcast(&g_cv);
     pthread_mutex_unlock(&g_mu);
@@ -178,6 +192,7 @@ uint64_t mtl_sub_commit(void) {
     j.h = malloc((size_t)(j.nh ? j.nh : 1) * sizeof *j.h); if (j.nh) memcpy(j.h, g_cur.h, (size_t)j.nh * sizeof *j.h);
     j.fence = vka_fence_next(); j.frame = vka_frame();
     for (int i = 0; i < j.nh; i++) fence_syncs(j.h[i], j.fence, 0);
+    { void vka_fog_snapshot(uint64_t serial, uint64_t fence); vka_fog_snapshot(j.serial, j.fence); }   // Fritchii (vka_draw.c fog_bind)
     push(&j);
     return j.fence;
 }

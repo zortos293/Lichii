@@ -113,6 +113,8 @@ set(SHADER_FILES
     ${CMAKE_CURRENT_SOURCE_DIR}/ocarina_dlss_effects_base.comp
     ${CMAKE_CURRENT_SOURCE_DIR}/ocarina_dlss_bias.comp
     ${CMAKE_CURRENT_SOURCE_DIR}/vulkan_nvn_direct_shading_rate.comp
+    ${CMAKE_CURRENT_SOURCE_DIR}/vulkan_nvn_direct_mesh_args.comp
+    ${CMAKE_CURRENT_SOURCE_DIR}/vulkan_nvn_direct_oot_movie.comp
 )
 
 if (HAIKUOS)

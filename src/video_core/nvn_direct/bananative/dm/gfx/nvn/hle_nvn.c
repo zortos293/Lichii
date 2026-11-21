@@ -359,7 +359,7 @@ static plive *g_pl; static uint32_t g_npl, g_cpl; static uint64_t g_plgen;   // 
 static pthread_mutex_t g_pl_mu = PTHREAD_MUTEX_INITIALIZER;
 static pthread_rwlock_t g_pl_use = PTHREAD_RWLOCK_INITIALIZER;
 static _Thread_local int t_pl_use;   // this thread's holds: only the outermost takes the lock (a waiting writer would block a second read lock)
-void nvn_pool_use(int on) { if (on ? !t_pl_use++ : !--t_pl_use) { if (on) pthread_rwlock_rdlock(&g_pl_use); else pthread_rwlock_unlock(&g_pl_use); } }
+void nvn_pool_use(int on) { if (on ? !t_pl_use++ : !--t_pl_use) { if (on) { if (pthread_rwlock_tryrdlock(&g_pl_use)) { void fritchii_hitch_add(int, unsigned long long); uint64_t t0 = now_ns(); pthread_rwlock_rdlock(&g_pl_use); fritchii_hitch_add(9, now_ns() - t0); } } else pthread_rwlock_unlock(&g_pl_use); } }
 void nvn_pool_unmap(int on) { if (on) pthread_rwlock_wrlock(&g_pl_use); else pthread_rwlock_unlock(&g_pl_use); }
 static uint32_t pl_hash(const pool_t *p) { uint64_t h = (uint64_t)(uintptr_t)p * 0x9E3779B97F4A7C15ull; return (uint32_t)(h >> 32); }
 static _Atomic uint64_t g_plfin;   // pools finalized (or initialized again at a live pool's address) so far: nvn_pool_fin
@@ -460,17 +460,29 @@ void nvn_dpool_base_set(const void *pool, int tex_base, int samp_base) {
 // Dark Souls Remastered binds one of 12 sampler pools in more than 64 command buffers, and every later one read its samplers through the first pool's numbering
 NVN(nvnTexturePoolInitialize, NVNboolean, NVNtexturePool *tp, const NVNmemoryPool *p, ptrdiff_t off, int n) {
     *(dpool_t *)tp = (dpool_t){(const pool_t *)p, off, n}; OLOG("TexturePool n=%d", n);
+    { extern uint64_t g_tpool_lo, g_tpool_hi; const pool_t *pp = (const pool_t *)p; if (pp && pp->mem) { g_tpool_lo = (uint64_t)(uintptr_t)(pp->mem + off); g_tpool_hi = g_tpool_lo + (uint64_t)n * 32;
+      LOG("[nvn] texture pool of %d descriptors at %#llx", n, (unsigned long long)g_tpool_lo); } }
     dpool_add(g_tpb, &g_ntpb, &g_tnext, tp, n, "texture"); mtl_set_tex_pool_n(g_tnext);
     return 1;
 }
 NVN(nvnTexturePoolFinalize, void, NVNtexturePool *tp) { (void)tp; }
+// Fritchii: the descriptor's slot in the pool memory gets a tag naming the registration (the driver writes the texture's descriptor there): a game that copies
+// descriptors between slots with the CPU (Ocarina of Time: its light table names slot 254, never registered) copies the tag, which the replay follows (vka_tex.c tag_id)
+static void tpool_tag(const NVNtexturePool *tp, int id, int host_id) {
+    const dpool_t *d = (const dpool_t *)tp;
+    if (!d || !d->pool || !d->pool->mem || id < 0 || id >= d->n) return;
+    uint32_t tag[2] = {0x58545246u /* "FRTX" */, (uint32_t)host_id};
+    memcpy(d->pool->mem + d->off + (int64_t)id * 32, tag, sizeof tag);
+}
 NVN(nvnTexturePoolRegisterTexture, void, const NVNtexturePool *tp, int id, const NVNtexture *t, const NVNtextureView *v) {
     mtl_reg_tex(dpool_base(g_tpb, g_ntpb, tp) + id, (const tex_t *)t, (const view_t *)v);
+    tpool_tag(tp, id, dpool_base(g_tpb, g_ntpb, tp) + id);
 }
 // Image descriptors live in the same pool index space as texture descriptors, and image handles are pool indices (nvnDeviceGetImageHandle; BindImages below), so an image
 // registers into the same table. Hyrule Warriors: Age of Calamity registers the images its compute shaders write in the first battle (earlier games registered only textures)
 NVN(nvnTexturePoolRegisterImage, void, const NVNtexturePool *tp, int id, const NVNtexture *t, const NVNtextureView *v) {
     mtl_reg_image(dpool_base(g_tpb, g_ntpb, tp) + id, (const tex_t *)t, (const view_t *)v);
+    tpool_tag(tp, id, dpool_base(g_tpb, g_ntpb, tp) + id);
 }
 NVN(nvnSamplerPoolInitialize, NVNboolean, NVNsamplerPool *sp, const NVNmemoryPool *p, ptrdiff_t off, int n) {
     *(dpool_t *)sp = (dpool_t){(const pool_t *)p, off, n}; OLOG("SamplerPool n=%d", n); dpool_add(g_spb, &g_nspb, &g_snext, sp, n, "sampler"); return 1;
@@ -897,13 +909,18 @@ NVN(nvnSyncSetDebugLabel, void, NVNsync *s, const char *l) { (void)s; (void)l; }
 // Fence = "all commands previously submitted to the queue have completed": record the fence value of the most recent submit
 // Lichii: the queue's own last submission, not the last of every queue: with the NVN queues as Vulkan queues another queue's submission may wait for an
 // event this queue only signals after the game's wait for this sync (Mario Kart World hung waiting for its second queue's submission, which waited for the first's signal)
-NVN(nvnQueueFenceSync, void, NVNqueue *q, NVNsync *s, NVNsyncCondition c, int f) { (void)c; (void)f; ((sync_t *)s)->fenced = 1; ((sync_t *)s)->fence = ((const queue_t *)q)->last_fence; }
+// Fritchii, FRITCHII_SYNC_LOG=<skip>,<count>: the game's queue syncs and submissions in call order, after <skip> of them
+static int sync_log(void) { static long skip = -2, cnt; static _Atomic long n; if (skip == -2) { const char *e = getenv("FRITCHII_SYNC_LOG"); skip = -1; if (e) sscanf(e, "%ld,%ld", &skip, &cnt); }
+    if (skip < 0) return 0; long k = atomic_fetch_add(&n, 1); return k >= skip && k < skip + cnt; }
+NVN(nvnQueueFenceSync, void, NVNqueue *q, NVNsync *s, NVNsyncCondition c, int f) { (void)c; (void)f; ((sync_t *)s)->fenced = 1; ((sync_t *)s)->fence = ((const queue_t *)q)->last_fence;
+    if (sync_log()) LOG("[nvn] sync log: FenceSync queue %p sync %p -> fence %llu", (void *)q, (void *)s, (unsigned long long)((const queue_t *)q)->last_fence); }
 // A sync object that was never fenced waits until timeout, as on a real device; a fenced one is released only after the GPU has actually completed up to that fence value
 // A GPU-side wait on a sync: the host has a single Metal queue that executes submissions in order, so commands before the fence are always done first and nothing needs waiting. A sync not fenced yet (fenced later by another thread) is not waited for here; logged once
 // Lichii: the replay may run NVN queues on several Vulkan queues (V.multi), so a fence of QueueFenceSync goes with the queue's next submission, which waits for it on the GPU (mtl_sub_wait).
 // A fence done already or kept already adds nothing. When NVN_QUEUE_WAITS fences not done yet are kept, this one is waited for here (at most the replay's hang time)
 NVN(nvnQueueWaitSync, NVNboolean, NVNqueue *q, const NVNsync *s) {
     const sync_t *y = (const sync_t *)s; static int once;
+    if (sync_log()) LOG("[nvn] sync log: WaitSync queue %p sync %p fenced %d fence %llu (done %d)", (void *)q, (void *)s, y->fenced, (unsigned long long)y->fence, y->fenced == 1 && y->fence ? mtl_wait(y->fence, 0) : -1);
     if (!y->fenced && !once++) LOG("[nvn] QueueWaitSync: the sync object has no fence yet, the host does not wait");
     if (y->fenced == 1 && y->fence && !mtl_wait(y->fence, 0)) {
         queue_t *o = (queue_t *)q; int kept = 0, full = 0; dm_host_mutex_lock(&g_sub_mu);
@@ -922,13 +939,32 @@ NVN(nvnCommandBufferSaveZCullData, void, NVNcommandBuffer *c, NVNbufferAddress a
 // The stencil test ZCull's stencil cull assumes (a stencil function, then its reference and mask): only a hint for culling ahead of the real stencil test, which the draws'
 // depth-stencil state still does. The host does no ZCull, so there is nothing to set (Donkey Kong Bananza: EQUAL, 0xff)
 NVN_NOPROTO(nvnCommandBufferSetStencilCullCriteria, void, NVNcommandBuffer *c, int func, int ref) { (void)c; (void)func; (void)ref; }
-static _Atomic uint64_t g_sync_ns;
+static _Atomic uint64_t g_sync_ns, g_sync_timeouts, g_finish_ns;
+// Lichii, DM_NVN_WAIT_STATS=1: once a second, the game's blocked time in SyncWait and QueueFinish (the present calls it)
+void nvn_wait_stats(uint64_t present_ns) {
+    static int on = -1; if (on < 0) { const char *e = getenv("DM_NVN_WAIT_STATS"); on = e && atoi(e); }
+    if (!on) return;
+    static uint64_t t_last, frames, pres_ns, s0, f0, x0;
+    uint64_t t = now_ns(); frames++; pres_ns += present_ns;
+    if (!t_last) { t_last = t; return; }
+    if (t - t_last < 1000000000ull) return;
+    const double sec = (t - t_last) / 1e9; const uint64_t s = atomic_load(&g_sync_ns), f = atomic_load(&g_finish_ns), x = atomic_load(&g_sync_timeouts);
+    LOG("[nvn] waits: %.1f frames/s; a second: SyncWait %.0f ms (%llu timeouts), QueueFinish %.0f ms, present call %.0f ms", frames / sec, (s - s0) / 1e6 / sec,
+        (unsigned long long)(x - x0), (f - f0) / 1e6 / sec, pres_ns / 1e6 / sec);
+    { uint64_t vka_frame(void); double vka_gpu_span_ms(uint64_t f), mtl_gpu_ms(uint64_t f); uint64_t fr = vka_frame(); double sp = 0, bu = 0; int n = 0;
+      for (uint64_t k = fr - 40; k < fr - 10; k++) { double a = vka_gpu_span_ms(k), b = mtl_gpu_ms(k); if (a >= 0 && b >= 0) { sp += a; bu += b; n++; } }
+      if (n) LOG("[nvn] GPU per frame: busy %.1f ms, span %.1f ms (%.1f waiting for the recording), %d frames", bu / n, sp / n, (sp - bu) / n, n); }
+    static int every; if (++every % 10 == 0) { void mtl_pso_line(char *out, size_t n); char pl[1024]; mtl_pso_line(pl, sizeof pl); LOG("[nvn] pipelines: %s", pl); }
+    t_last = t; frames = 0; pres_ns = 0; s0 = s; f0 = f; x0 = x;
+}
 NVN(nvnSyncWait, NVNsyncWaitResult, const NVNsync *s, uint64_t timeout) {
     const sync_t *o = (const sync_t *)s;
+    if (sync_log()) { __declspec(dllimport) unsigned long __stdcall GetCurrentThreadId(void); int pre = o->fenced && o->fence ? (o->fenced == 2 ? mtl_wait_acq : mtl_wait)(o->fence, 0) : -1; LOG("[nvn] sync log: SyncWait sync %p fenced %d fence %llu timeout %llu (done before %d) thread %lu", (void *)s, o->fenced, (unsigned long long)o->fence, (unsigned long long)timeout, pre, (unsigned long)GetCurrentThreadId()); }
     if (!o->fenced) return NVN_SYNC_WAIT_RESULT_TIMEOUT_EXPIRED;
     int (*w)(uint64_t, uint64_t) = o->fenced == 2 ? mtl_wait_acq : mtl_wait;
     if (w(o->fence, 0)) return NVN_SYNC_WAIT_RESULT_ALREADY_SIGNALED;
-    uint64_t t0 = now_ns(); int ok = w(o->fence, timeout); atomic_fetch_add(&g_sync_ns, now_ns() - t0);   // the frame's blocked SyncWait time (@sync_ms)
+    uint64_t t0 = now_ns(); int ok = w(o->fence, timeout); atomic_fetch_add(&g_sync_ns, now_ns() - t0); { void fritchii_hitch_add(int, unsigned long long); fritchii_hitch_add(7, now_ns() - t0); }   // the frame's blocked SyncWait time (@sync_ms)
+    if (!ok) atomic_fetch_add(&g_sync_timeouts, 1);
     return ok ? NVN_SYNC_WAIT_RESULT_CONDITION_SATISFIED : NVN_SYNC_WAIT_RESULT_TIMEOUT_EXPIRED;
 }
 NVN(nvnEventBuilderSetDefaults, void, NVNeventBuilder *b) { memset(b, 0, sizeof(ev_builder_t)); }
@@ -986,7 +1022,7 @@ NVN(nvnQueueGetError, NVNqueueGetErrorResult, NVNqueue *q, NVNqueueErrorInfo *in
     (void)q; if (info) memset(info, 0, sizeof *info); return NVN_QUEUE_GET_ERROR_RESULT_GPU_NO_ERROR;
 }
 NVN(nvnQueueFlush, void, NVNqueue *q) { (void)q; }
-NVN(nvnQueueFinish, void, NVNqueue *q) { mtl_wait(((const queue_t *)q)->last_fence, UINT64_MAX); }   // Lichii: the queue's own work (see nvnQueueFenceSync)
+NVN(nvnQueueFinish, void, NVNqueue *q) { uint64_t t0 = now_ns(); mtl_wait(((const queue_t *)q)->last_fence, UINT64_MAX); atomic_fetch_add(&g_finish_ns, now_ns() - t0); { void fritchii_hitch_add(int, unsigned long long); fritchii_hitch_add(7, now_ns() - t0); } }   // Lichii: the queue's own work (see nvnQueueFenceSync)
 
 // ---------- Command buffer: record into the game's command memory, perform CPU-visible side effects at submit ----------
 #define CB(c) ((cmd_t *)(c))
@@ -1520,6 +1556,7 @@ NVN(nvnQueueSubmitCommands, void, NVNqueue *q, int n, const NVNcommandHandle *h)
     for (int i = 0; i < n; i++) { mtl_exec_rest((const uint64_t *)h + i + 1, n - i - 1); mtl_exec((const uint8_t *)h[i]); }
     mtl_exec_rest(NULL, 0);
     ((queue_t *)q)->last_fence = mtl_sub_commit();
+    if (sync_log()) LOG("[nvn] sync log: Submit queue %p (%d command buffers) -> fence %llu", (void *)q, n, (unsigned long long)((queue_t *)q)->last_fence);
     pthread_mutex_unlock(&g_sub_mu);
     uint64_t dw = now_ns() - t0;
     atomic_fetch_add(&g_nvn_ns, dw); atomic_fetch_add(&g_sub_wall_ns, dw);

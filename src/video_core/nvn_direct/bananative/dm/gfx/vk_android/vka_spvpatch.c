@@ -511,3 +511,57 @@ int vka_spv_set_remap(uint32_t *w, size_t nw, uint32_t from, uint32_t to) {
     }
     return n;
 }
+
+// Fritchii: the Location-decorated variables of a storage class (1 Input, 3 Output) as a mask of locations 0-31 (builtins have none)
+uint32_t vka_spv_io_mask(const uint32_t *w, size_t nw, uint32_t storage) {
+    if (nw < 5) return 0;
+    uint32_t bound = w[3], m = 0; uint8_t *loc = calloc(bound ? bound : 1, 1); if (!loc) return 0;
+    for (size_t i = 5; i < nw;) { uint32_t op = w[i] & 0xffff, wc = w[i] >> 16; if (!wc || i + wc > nw) break;
+        if (op == 71 && wc == 4 && w[i + 2] == 30 && w[i + 1] < bound && w[i + 3] < 32) loc[w[i + 1]] = (uint8_t)(w[i + 3] + 1);   // OpDecorate id Location l
+        i += wc; }
+    for (size_t i = 5; i < nw;) { uint32_t op = w[i] & 0xffff, wc = w[i] >> 16; if (!wc || i + wc > nw) break;
+        if (op == 59 && wc >= 4 && w[i + 3] == storage && w[i + 2] < bound && loc[w[i + 2]]) m |= 1u << (loc[w[i + 2]] - 1);   // OpVariable type id storage
+        i += wc; }
+    free(loc); return m;
+}
+// Fritchii: a vertex module with an Output vec4 at each location of mask (none of which it declares), stored (0, 0, 0, 1) at the start of its entry point: what a
+// pixel shader reading a varying this stage never writes reads on the hardware (Vulkan leaves it undefined). malloc'd, NULL on failure (why in err)
+uint32_t *vka_spv_add_default_outputs(const uint32_t *w, size_t nw, uint32_t mask, size_t *out_nw, char *err, size_t errn) {
+    if (nw < 5 || !mask) { snprintf(err, errn, "nothing to add"); return NULL; }
+    uint32_t bound = w[3], f32 = 0, v4 = 0, entry = 0; size_t first_type = 0, first_fn = 0, ep_at = 0, body_at = 0;
+    for (size_t i = 5; i < nw;) { uint32_t op = w[i] & 0xffff, wc = w[i] >> 16; if (!wc || i + wc > nw) { snprintf(err, errn, "bad instruction"); return NULL; }
+        if (op == 15 && !ep_at && w[i + 1] == 0) { ep_at = i; entry = w[i + 2]; }   // OpEntryPoint Vertex
+        if (!first_type && ((op >= 19 && op <= 39) || op == 43 || op == 44 || op == 59)) first_type = i;
+        if (op == 22 && wc == 3 && w[i + 2] == 32 && !f32) f32 = w[i + 1];
+        if (op == 23 && wc == 4 && w[i + 2] == f32 && w[i + 3] == 4 && f32 && !v4) v4 = w[i + 1];
+        if (op == 54 && !first_fn) first_fn = i;
+        if (op == 54 && w[i + 2] == entry && !body_at) {   // the entry function: after its first label and the label's OpVariables
+            size_t j = i + wc; while (j < nw && (w[j] & 0xffff) != 248) j += w[j] >> 16;
+            if (j < nw) { j += w[j] >> 16; while (j < nw && (w[j] & 0xffff) == 59) j += w[j] >> 16; body_at = j; } }
+        i += wc; }
+    if (!ep_at || !f32 || !v4 || !first_type || !first_fn || !body_at) { snprintf(err, errn, "no vertex entry point, vec4 type or entry body"); return NULL; }
+    uint32_t nloc = 0, var[32], id = bound; for (uint32_t l = 0; l < 32; l++) if (mask >> l & 1) var[nloc++] = 0;
+    const uint32_t ptr = id++, c0 = id++, c1 = id++, cc = id++; for (uint32_t k = 0; k < nloc; k++) var[k] = id++;
+    size_t cap = nw + nloc * 4 + 4 + 4 + 4 + 7 + nloc * 4 + nloc * 3 + 16; uint32_t *o = malloc(cap * 4); if (!o) { snprintf(err, errn, "out of memory"); return NULL; }
+    size_t n = 0;
+    for (size_t i = 0; i < nw;) {
+        if (i < 5) { o[n++] = w[i++]; continue; }
+        uint32_t op = w[i] & 0xffff, wc = w[i] >> 16;
+        if (i == first_type) { uint32_t k = 0; for (uint32_t l = 0; l < 32; l++) if (mask >> l & 1) { o[n++] = 4u << 16 | 71; o[n++] = var[k++]; o[n++] = 30; o[n++] = l; } }   // OpDecorate Location
+        if (i == first_fn) {   // types, constants and the variables, after every other global
+            o[n++] = 4u << 16 | 32; o[n++] = ptr; o[n++] = 3; o[n++] = v4;   // OpTypePointer Output vec4
+            const float z = 0.0f, one = 1.0f; uint32_t zb, ob; memcpy(&zb, &z, 4); memcpy(&ob, &one, 4);
+            o[n++] = 4u << 16 | 43; o[n++] = f32; o[n++] = c0; o[n++] = zb;   // OpConstant 0.0
+            o[n++] = 4u << 16 | 43; o[n++] = f32; o[n++] = c1; o[n++] = ob;   // OpConstant 1.0
+            o[n++] = 7u << 16 | 44; o[n++] = v4; o[n++] = cc; o[n++] = c0; o[n++] = c0; o[n++] = c0; o[n++] = c1;   // OpConstantComposite (0, 0, 0, 1)
+            for (uint32_t k = 0; k < nloc; k++) { o[n++] = 4u << 16 | 59; o[n++] = ptr; o[n++] = var[k]; o[n++] = 3; }   // OpVariable Output
+        }
+        if (i == body_at) for (uint32_t k = 0; k < nloc; k++) { o[n++] = 3u << 16 | 62; o[n++] = var[k]; o[n++] = cc; }   // OpStore
+        if (i == ep_at) {   // the entry point's interface takes the new variables
+            o[n++] = (wc + nloc) << 16 | op; for (uint32_t k = 1; k < wc; k++) o[n++] = w[i + k]; for (uint32_t k = 0; k < nloc; k++) o[n++] = var[k];
+            i += wc; continue; }
+        for (uint32_t k = 0; k < wc; k++) o[n++] = w[i + k];
+        i += wc;
+    }
+    o[3] = id; *out_nw = n; return o;
+}

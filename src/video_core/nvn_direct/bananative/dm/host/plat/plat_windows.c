@@ -208,7 +208,18 @@ int getpriority(int which, int who) {
 
 // ---- Memory ----
 // 0 = every byte copied; an inaccessible page fails the read (ERROR_PARTIAL_COPY) instead of faulting
+uint64_t nvn_direct_guest_of(uint64_t host); const void *nvn_direct_readable(uint64_t host);
 int plat_mem_read(uint64_t addr, void *out, size_t len) {
+    // Fritchii: guest memory (the fastmem arena) through its backing memory, page by page: no system call (ReadProcessMemory was ~10 % of the replay while panning)
+    if (len && nvn_direct_guest_of(addr) != addr && nvn_direct_guest_of(addr + len - 1) != addr + len - 1) {
+        uint8_t *d = out;
+        for (uint64_t p = addr, end = addr + len; p < end;) {
+            uint64_t e = (p & ~(uint64_t)0xFFF) + 0x1000; if (e > end) e = end;
+            const void *s = nvn_direct_readable(p); if (!s) return -1;
+            memcpy(d + (p - addr), s, (size_t)(e - p)); p = e;
+        }
+        return 0;
+    }
     SIZE_T got = 0;
     return ReadProcessMemory(GetCurrentProcess(), (LPCVOID)(uintptr_t)addr, out, len, &got) && got == len ? 0 : -1;
 }

@@ -248,6 +248,7 @@ typedef struct {
     uint8_t srgb;          // stored as UNORM, cleared with an sRGB-encoded colour
     uint8_t bpb, bw, bh;
     uint8_t astc_bw, astc_bh;   // an ASTC texture on a device without ASTC: the storage's block size; the image is BC3 (Lichii: BC1 when opaque and never in a texture copy, vka_tex.c astc_bc1) filled on the GPU or by vka_astc_transcode (0: not such a texture)
+    uint8_t conv, src_bpb;      // Fritchii: a format the device cannot sample, converted at upload (1 A2B10G10R10 SNORM -> RGBA16 SNORM, 2 RGB32F -> RGBA32F); src_bpb: the storage's bytes a texel
 } vka_fmt;
 int vka_fmt_of(int nvn_format, vka_fmt *f);         // 0 = no Vulkan format (logged once per format)
 // ASTC blocks (w x h x depth texels, bw x bh blocks, rows of blocks packed) transcoded to BC3 (rows of 4x4 blocks packed, 16 bytes each) on the CPU, for a device without
@@ -312,6 +313,8 @@ typedef struct vka_img {
     uint32_t nsamp, novl; uint64_t ovl[4];
     uint64_t used;           // the budget's tick (vka_tex.c vka_tex_budget) at which a draw, copy or view last took it
     uint8_t scaled;          // Lichii: made at the render scale (vka_scale_on): w, h are the texture's scaled, d.width / d.height its own size
+    uint32_t remade_after, remade_idle;   // Fritchii: with remade, the ticks since it was let go of and how long it had been idle then
+    uint8_t remade;          // Fritchii: made again after superseded_targets let its serial go (FRITCHII_RT_REMADE_LOG)
     uint64_t drawn[2];       // Lichii: the last two frames (presents filled, plus 1) a pass drew into it, the newest first (vka_draw.c drawn_again)
 } vka_img;
 // Texture level lv as a level of im (a sparse texture's image starts at level im->base): 0 when the image does not hold it
@@ -353,7 +356,10 @@ void vka_tex_uploads(VkCommandBuffer cb);
 VkDescriptorSet vka_bindless_set(void);
 VkDescriptorSetLayout vka_bindless_layout(void);
 void vka_barrier_at(VkCommandBuffer cb, const char *file, int line);   // a full memory barrier (the replay orders every transfer op after the previous one)
-#define vka_barrier(cb) vka_barrier_at(cb, __FILE_NAME__, __LINE__)   // the site names the step that ends there in DM_VK_GPUPROF's report (vka_gprof.c)
+#define vka_barrier(cb) vka_barrier_at(cb, __FILE_NAME__, __LINE__)
+// Fritchii: a barrier after the work of src stages only (src access: what they write), before everything after (DM_VK_NARROW_BAR=0: a full one, vka_barrier)
+void vka_barrier_from_at(VkCommandBuffer cb, VkPipelineStageFlags src, VkAccessFlags src_access, const char *file, int line);
+#define vka_barrier_from(cb, src, acc) vka_barrier_from_at(cb, src, acc, __FILE_NAME__, __LINE__)   // the site names the step that ends there in DM_VK_GPUPROF's report (vka_gprof.c)
 // DM_VK_GPUPROF (vka_gprof.c): GPU timestamps between the steps of a profiled frame
 extern int vka_gp_active;
 void vka_gp_mark(VkCommandBuffer cb, const char *file, int line);
@@ -392,6 +398,8 @@ typedef struct vka_shader {
     VkShaderModule mods[4];             // by DMSH_VK_MOD_* variant, made when a pipeline first asks (the base when the shader is made)
     struct vka_vinmod *vin;             // vertex modules with integer-fed inputs retyped, by masks (vka_shader_vin_module)
     struct vka_vinmod *fout;            // pixel modules with float outputs retyped for integer targets, by masks (vka_shader_fout_module)
+    struct vka_vinmod *defout;          // Fritchii: vertex modules with default outputs added, by locations (vka_shader_defout_module)
+    uint32_t io_in, io_out; int io_known;   // Fritchii: the base module's Input / Output locations (vka_shader_io)
     vka_span c1; VkDeviceSize c1_len;   // the c1 bytes in static memory (none when c1_len is 0)
     int bad;                            // refused: no module, an unknown binding, an NV-only capability (logged once with its key)
     int gs_fx;                          // a geometry shader's memory writes (vka_spv_gs_claim): above 0, its draws bind a claim buffer at VKA_GS_CLAIM_BINDING
@@ -400,6 +408,8 @@ typedef struct vka_shader {
     vka_span loop_guard;                // Lichii: a recompiled shader's loop guard word (static memory; none when it has no loops)
     uint16_t scale_tex_binding;         // Lichii: a recompiled shader's first texture binding and that texture's bit in the render scale's push constants
     uint8_t scale_tex_bit, scale_tex_bits;   // (nvn_direct.h nvn_direct_scale_texture_bit; scale_tex_bits 0: no textures)
+    uint32_t base_words;                // Lichii: the base module's SPIR-V words (cs_create: oversized compute programs)
+    uint32_t *hprog; uint32_t hprog_words;   // Lichii: a recompiled shader's handle programs (VKA_KIND_TEX_HPROG; nvn_direct.h nvn_direct_shader::hprog), malloc'd
 } vka_shader;
 // by NVN stage; bad: stages whose shader is refused (bit = NVN stage) or VKA_BAD_MISSING (their draws are skipped). Lichii: depth, recompiled shaders' depth mode
 // (1 + gl_depth: the pre-rasterization stages are translated for one, vka_rc_shader; 0: any)
@@ -418,6 +428,8 @@ VkShaderModule vka_shader_gs_module(vka_shader *s);   // a geometry shader's mod
 VkShaderModule vka_shader_fout_module(vka_shader *s, uint32_t umask, uint32_t smask);
 int vka_shader_fout_retyped(vka_shader *s, uint32_t umask, uint32_t smask);   // 1 when that module is a rewritten one (not the base module it falls back to)   // the base pixel module with those float outputs as uint / int vectors of their bits (vka_spv_fout_retype), made once per masks
 #define VKA_FS_RETYPE 4                  // vka_gkey.fs_variant beyond the library's DMSH_VK_MOD_*: the base pixel module with its float outputs at integer attachments retyped (vka_pso.c fout_masks)
+uint32_t vka_shader_io(vka_shader *s, int out);   // Fritchii: the base module's Input (0) / Output (1) locations
+VkShaderModule vka_shader_defout_module(vka_shader *s, uint32_t mask);   // Fritchii: the base vertex module with (0, 0, 0, 1) outputs at mask's locations, made once per mask
 VkShaderModule vka_shader_vin_module(vka_shader *s, uint32_t umask, uint32_t smask);   // the base module with those float inputs as uvec4 / ivec4 (vka_spv_vin_retype), made once per masks   // the module of that variant (DMSH_VK_MOD_*), made on first use; VK_NULL_HANDLE = the entry has none   // the shader of key in library L (the game's, or the selftest's own); NULL = not there or refused
 // Lichii's recompiler (nvn_recompile.c): control sections kept at nvnProgramSetShaders; the draw whose state translation reads; a program stage's shader (*st its NVN
 // stage, -1 without a kept control section); a shader by key; a recompiled compute shader's c[0]
@@ -427,6 +439,10 @@ void vka_rc_draw(const vka_dstate *d);
 vka_shader *vka_rc_shader(const prog_t *p, unsigned i, uint64_t key, uint32_t prim_inputs, int gl_depth, int *st);
 int vka_rc_stage(uint64_t key);         // NVN stage of a kept control section, -1 none
 uint32_t vka_rc_prim(uint64_t key);     // a recompiled mesh shader's generic outputs per primitive
+// Fritchii: a mesh program's emulation (nvn_recompile.c): its compute shader (resources read as the mesh stage's: walked at stage 7) and the vertex shader drawing its blocks
+typedef struct { vka_shader *cs, *vs; uint32_t block_words, group_vertices, topology; } vka_mesh_fb;
+const vka_mesh_fb *vka_rc_mesh_fb(const prog_t *p, unsigned i, uint64_t key, int gl_depth);
+const vka_mesh_fb *vka_prog_mesh_fb(const prog_t *p);   // vka_shader.c: the emulation of p's mesh stage, NULL when it has none or it was not made
 vka_shader *vka_rc_by_key(uint64_t key, int gl_depth);
 unsigned vka_rc_stage_keys(int st, uint64_t **out);   // the kept translations' shader keys of NVN stage st (malloc'd)
 void vka_rc_counts(unsigned *made, unsigned *kept);    // shaders made this run, of them kept from earlier runs

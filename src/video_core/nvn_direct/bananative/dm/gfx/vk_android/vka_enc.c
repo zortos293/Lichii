@@ -158,11 +158,20 @@ static inline int mine(VkCommandBuffer cb) { return cb && cb == atomic_load_expl
 static inline uint8_t *cpy(uint8_t **at, const void *src, size_t n) { uint8_t *d = *at; if (n) memcpy(d, src, n); *at += A8(n); return d; }
 #define BEGIN(T, id, extra) T *r = rec_alloc(id, A8(sizeof(T)) + (extra)); uint8_t *at = (uint8_t *)r + A8(sizeof(T)); (void)at; r->cb = cb;
 #define END() rec_done(r->h.size)
-#define DIRECT(f, ...) do { if (!mine(cb)) { R.f(__VA_ARGS__); return; } } while (0)
+// Fritchii: the barrier dedup (run, below) on the direct path too, per thread (the encoder is off by default)
+static int keeps_full(int id); static _Thread_local VkCommandBuffer t_fb_cb; static _Thread_local int t_fb;
+#define DIRECT(f, ...) do { if (!mine(cb)) { if (!keeps_full(E_##f)) t_fb = 0; R.f(__VA_ARGS__); return; } } while (0)
 #define FALLBACK(f, ...) do { g_n_direct++; vka_enc_sync(); R.f(__VA_ARGS__); return; } while (0)
 
 static void VKAPI_CALL e_vkCmdPipelineBarrier(VkCommandBuffer cb, VkPipelineStageFlags s, VkPipelineStageFlags d, VkDependencyFlags f, uint32_t nm, const VkMemoryBarrier *m, uint32_t nb, const VkBufferMemoryBarrier *b, uint32_t ni, const VkImageMemoryBarrier *i) {
-    DIRECT(vkCmdPipelineBarrier, cb, s, d, f, nm, m, nb, b, ni, i);
+    if (!mine(cb)) {
+        const int full = nm == 1 && !nb && !ni && s == VK_PIPELINE_STAGE_ALL_COMMANDS_BIT && d == VK_PIPELINE_STAGE_ALL_COMMANDS_BIT &&
+                         m[0].srcAccessMask == VK_ACCESS_MEMORY_WRITE_BIT && m[0].dstAccessMask == (VK_ACCESS_MEMORY_READ_BIT | VK_ACCESS_MEMORY_WRITE_BIT);
+        static int dedup = -1; if (dedup < 0) dedup = (int)VKA_ENV("DM_VK_BAR_DEDUP", 1);
+        if (dedup && full && t_fb && t_fb_cb == cb) { extern uint64_t vka_bar_deduped; vka_bar_deduped++; return; }
+        t_fb = full; t_fb_cb = cb;
+        R.vkCmdPipelineBarrier(cb, s, d, f, nm, m, nb, b, ni, i); return;
+    }
     for (uint32_t k = 0; k < nm; k++) if (m[k].pNext) FALLBACK(vkCmdPipelineBarrier, cb, s, d, f, nm, m, nb, b, ni, i);
     for (uint32_t k = 0; k < nb; k++) if (b[k].pNext) FALLBACK(vkCmdPipelineBarrier, cb, s, d, f, nm, m, nb, b, ni, i);
     for (uint32_t k = 0; k < ni; k++) if (i[k].pNext) FALLBACK(vkCmdPipelineBarrier, cb, s, d, f, nm, m, nb, b, ni, i);
@@ -351,8 +360,33 @@ static void VKAPI_CALL e_vkCmdPushConstants(VkCommandBuffer cb, VkPipelineLayout
 }
 
 // ---------- The encoder thread ----------
+// Fritchii: a full memory barrier (vka_barrier_at's) right after another on the same command buffer, with only binds and dynamic state between
+// (no memory access), is left out: the first one already ordered everything (Ocarina of Time: ~570 a frame, a pass end, a dispatch or a
+// uniform update followed by the game's own). DM_VK_BAR_DEDUP=0 records them all
+static VkCommandBuffer g_fb_cb; static int g_fb; uint64_t vka_bar_deduped;   // (encoder thread)
+static int full_bar(const r_bar *r) {
+    return r->nm == 1 && !r->nb && !r->ni && r->s == VK_PIPELINE_STAGE_ALL_COMMANDS_BIT && r->d == VK_PIPELINE_STAGE_ALL_COMMANDS_BIT &&
+           r->m[0].srcAccessMask == VK_ACCESS_MEMORY_WRITE_BIT && r->m[0].dstAccessMask == (VK_ACCESS_MEMORY_READ_BIT | VK_ACCESS_MEMORY_WRITE_BIT);
+}
+static int keeps_full(int id) {   // calls that touch no memory: a full barrier before them still stands right before the next one
+    switch (id) {
+    case E_vkCmdBindPipeline: case E_vkCmdBindDescriptorSets: case E_vkCmdBindVertexBuffers2: case E_vkCmdBindIndexBuffer:
+    case E_vkCmdSetViewport: case E_vkCmdSetScissor: case E_vkCmdSetCullMode: case E_vkCmdSetFrontFace: case E_vkCmdSetPrimitiveTopology:
+    case E_vkCmdSetDepthTestEnable: case E_vkCmdSetDepthWriteEnable: case E_vkCmdSetDepthCompareOp: case E_vkCmdSetDepthBoundsTestEnable: case E_vkCmdSetStencilTestEnable:
+    case E_vkCmdSetStencilOp: case E_vkCmdSetStencilCompareMask: case E_vkCmdSetStencilWriteMask: case E_vkCmdSetStencilReference: case E_vkCmdSetDepthBias:
+    case E_vkCmdSetDepthBiasEnable: case E_vkCmdSetRasterizerDiscardEnable: case E_vkCmdSetPrimitiveRestartEnable: case E_vkCmdSetBlendConstants: case E_vkCmdSetLineWidth:
+    case E_vkCmdPushDescriptorSetKHR: case E_vkCmdSetVertexInputEXT: case E_vkCmdPushConstants: case E_vkCmdSetDepthBounds: return 1;
+    default: return 0;
+    }
+}
 static void run(const hdr *h) {
     #define C(T) const T *r = (const T *)h; (void)r
+    static int dedup = -1; if (dedup < 0) dedup = (int)VKA_ENV("DM_VK_BAR_DEDUP", 1);
+    if (h->id == E_vkCmdPipelineBarrier) {
+        const r_bar *rb = (const r_bar *)h; const int full = full_bar(rb);
+        if (dedup && full && g_fb && g_fb_cb == rb->cb) { vka_bar_deduped++; return; }
+        g_fb = full; g_fb_cb = rb->cb;
+    } else if (!keeps_full(h->id)) g_fb = 0;
     switch (h->id) {
     case E_vkCmdPipelineBarrier: { C(r_bar); R.vkCmdPipelineBarrier(r->cb, r->s, r->d, r->f, r->nm, r->nm ? r->m : NULL, r->nb, r->nb ? r->b : NULL, r->ni, r->ni ? r->i : NULL); break; }
     case E_vkCmdCopyBuffer: { C(r_cpb); R.vkCmdCopyBuffer(r->cb, r->s, r->d, r->n, r->r); break; }
@@ -456,9 +490,29 @@ static void *enc_main(void *arg) {
 
 // ---------- Interface ----------
 #define ENC_HOOK(f) R.f = vk.f; if (R.f) vk.f = e_##f;
+// Fritchii, DM_VK_ROBUST=0: the replay's pipelines without robust buffer and image access (VK_EXT_pipeline_robustness, enabled on the device when it has it)
+static PFN_vkCreateGraphicsPipelines r_cgp; static PFN_vkCreateComputePipelines r_ccp;
+static const VkPipelineRobustnessCreateInfoEXT g_norob = {VK_STRUCTURE_TYPE_PIPELINE_ROBUSTNESS_CREATE_INFO_EXT, NULL, VK_PIPELINE_ROBUSTNESS_BUFFER_BEHAVIOR_DISABLED_EXT,
+    VK_PIPELINE_ROBUSTNESS_BUFFER_BEHAVIOR_DISABLED_EXT, VK_PIPELINE_ROBUSTNESS_BUFFER_BEHAVIOR_DISABLED_EXT, VK_PIPELINE_ROBUSTNESS_IMAGE_BEHAVIOR_DISABLED_EXT};
+static VkResult VKAPI_CALL e_cgp(VkDevice d, VkPipelineCache c, uint32_t n, const VkGraphicsPipelineCreateInfo *ci, const VkAllocationCallbacks *a, VkPipeline *p) {
+    VkGraphicsPipelineCreateInfo x[8]; VkPipelineRobustnessCreateInfoEXT r[8];
+    if (n > 8) return r_cgp(d, c, n, ci, a, p);
+    for (uint32_t i = 0; i < n; i++) { x[i] = ci[i]; r[i] = g_norob; r[i].pNext = ci[i].pNext; x[i].pNext = &r[i]; }
+    return r_cgp(d, c, n, x, a, p);
+}
+static VkResult VKAPI_CALL e_ccp(VkDevice d, VkPipelineCache c, uint32_t n, const VkComputePipelineCreateInfo *ci, const VkAllocationCallbacks *a, VkPipeline *p) {
+    VkComputePipelineCreateInfo x[8]; VkPipelineRobustnessCreateInfoEXT r[8];
+    if (n > 8) return r_ccp(d, c, n, ci, a, p);
+    for (uint32_t i = 0; i < n; i++) { x[i] = ci[i]; r[i] = g_norob; r[i].pNext = ci[i].pNext; x[i].pNext = &r[i]; }
+    return r_ccp(d, c, n, x, a, p);
+}
+static PFN_vkBeginCommandBuffer r_begin;
+static VkResult VKAPI_CALL e_begin(VkCommandBuffer cb, const VkCommandBufferBeginInfo *bi) { t_fb = 0; return r_begin(cb, bi); }   // (a new recording: no barrier before it)
 void vka_enc_install(void) {   // vka_dev.c, once the device's entry points are loaded
     static int done; if (done) return; done = 1;
     ENC_FNS(ENC_HOOK)
+    r_begin = vk.vkBeginCommandBuffer; vk.vkBeginCommandBuffer = e_begin;
+    if (!VKA_ENV("DM_VK_ROBUST", 1)) { r_cgp = vk.vkCreateGraphicsPipelines; vk.vkCreateGraphicsPipelines = e_cgp; r_ccp = vk.vkCreateComputePipelines; vk.vkCreateComputePipelines = e_ccp; VLOG("pipelines without robust access (DM_VK_ROBUST=0)"); }
 }
 static void enc_wake(void) { atomic_fetch_add(&g_cseq, 1); fwake(&g_cseq); }   // Lichii: the shutdown (vka_thread)
 static int up(void) {
@@ -473,11 +527,15 @@ void vka_enc_destroy(void) { free(g_ring); }   // Lichii: the teardown (vka_dev.
 void vka_enc_sync(void) {
     flush_pub();
     if (g_ph != atomic_load_explicit(&g_tail, memory_order_acquire)) wait_tail(g_ph);
+    g_fb = 0;   // (the encoder is idle: calls made directly from here on are not seen by the barrier dedup)
 }
 // The replay thread starts recording cb (after vkBeginCommandBuffer): its calls go through the ring when DM_VK_ENC is on
 void vka_enc_start(VkCommandBuffer cb) {
     vka_enc_sync();
     extern int vka_gp_active;
+    // Fritchii: on again by default (2026-11-20). It was off while Ocarina of Time lost the device every 2-11 minutes on an RX 6750 XT in one foliage draw: that was
+    // the native mesh shaders (now drawn through the compute fallback). With it on: 12 minutes of camera turns and walking without a fault, ~2 frames/s more while
+    // turning (65.8 against 63.6). DM_VK_ENC=0 turns it off
     if (!VKA_ENV("DM_VK_ENC", 1) || vka_gp_active || vka_nan_on() || !up()) { atomic_store(&g_ecb, VK_NULL_HANDLE); return; }
     { int bt = VKA_ENV("DM_VK_ENC_BATCH", 4096); g_batch = bt < 0 ? 0 : bt > (1 << 20) ? (1 << 20) : (uint32_t)bt; }   // live: from this submission
     atomic_store(&g_ecb, cb);

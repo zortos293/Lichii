@@ -19,16 +19,19 @@
 
 #define UNIT 256ull
 #define BLOCK (64ull << 20)
-#define VKA_IMEM_MAX (4ull << 20)            // images of at least 4 MiB keep their own allocation
-typedef struct iblock { struct iblock *next; VkDeviceMemory dm; uint32_t type; vke_list free; } iblock;
-static iblock *g_blocks[VK_MAX_MEMORY_TYPES];
+#define VKA_IMEM_MAX (4ull << 20)            // images from 4 MiB take the large blocks (Fritchii)
+#define BIG_BLOCK ((uint64_t)VKA_ENV("FRITCHII_IMEM_BIG_MB", 256) << 20)   // (Fritchii: the large blocks' size, a test switch)
+#define VKA_IMEM_BIG (64ull << 20)           // Fritchii: images of at least 64 MiB keep their own allocation (a dedicated vkAllocateMemory per image blocked the replay thread ~12% of a camera turn in OoT)
+typedef struct iblock { struct iblock *next; VkDeviceMemory dm; uint32_t type, list; uint64_t size; vke_list free; } iblock;
+static iblock *g_blocks[2 * VK_MAX_MEMORY_TYPES];   // by memory type * 2 + size class (0: 64 MiB blocks, 1: 256 MiB blocks)
 static pthread_mutex_t g_imu = PTHREAD_MUTEX_INITIALIZER;
 // Stats (under g_imu): blocks, images in blocks (count, units' bytes, the images' own sizes), dedicated allocations (count, bytes), blocks freed, block allocations that failed
-static struct { uint64_t blocks, runs, run_bytes, req_bytes, ded, ded_bytes, freed, fail; } S;
+static struct { uint64_t blocks, runs, run_bytes, req_bytes, ded, ded_bytes, freed, fail, block_bytes; } S;
 
 // Shared memory for the image (it fits a block): 1, or 0 (a dedicated allocation)
 static int sharable(VkImage img, uint32_t type, const VkMemoryRequirements *mr) {
-    if (!VKA_ENV("DM_VK_IMGMEM", 1) || mr->size >= VKA_IMEM_MAX || mr->alignment > VKA_IMEM_MAX || type >= VK_MAX_MEMORY_TYPES || BLOCK > V.max_alloc
+    const uint64_t lim = VKA_ENV("FRITCHII_IMEM_BIG", 1) && BIG_BLOCK <= V.max_alloc ? VKA_IMEM_BIG : VKA_IMEM_MAX;
+    if (!VKA_ENV("DM_VK_IMGMEM", 1) || mr->size >= lim || mr->alignment > VKA_IMEM_MAX || type >= VK_MAX_MEMORY_TYPES || BLOCK > V.max_alloc
         || !vk.vkGetImageMemoryRequirements2) return 0;
     VkMemoryDedicatedRequirements dr = {VK_STRUCTURE_TYPE_MEMORY_DEDICATED_REQUIREMENTS};
     VkMemoryRequirements2 r2 = {VK_STRUCTURE_TYPE_MEMORY_REQUIREMENTS_2, &dr};
@@ -54,6 +57,52 @@ static int take(iblock *b, uint32_t n, uint32_t al, const VkMemoryRequirements *
     return 1;
 }
 
+// Fritchii: the fullest block with room first (FRITCHII_IMEM_BEST_FIT=0: first fit, newest block first). With first fit, Ocarina of Time's camera turns spread
+// the live render targets over many blocks as older images went, and those blocks stayed allocated at 10-40% use (1.7 GB free in blocks): the fullest first
+// keeps the emptier blocks emptying, and blocks_compact (vka_tex.c) gives them back
+static int take_best(uint32_t list, uint32_t n, uint32_t al, const VkMemoryRequirements *mr, vka_imem *m) {   // (caller holds g_imu)
+    static int best = -1; if (best < 0) best = VKA_ENV("FRITCHII_IMEM_BEST_FIT", 1);
+    if (!best) { for (iblock *b = g_blocks[list]; b; b = b->next) if (take(b, n, al, mr, m)) return 1; return 0; }
+    iblock *c[128]; int nc = 0;
+    for (iblock *b = g_blocks[list]; b && nc < 128; b = b->next) if (b->free.used + n <= b->size / UNIT) c[nc++] = b;
+    for (int i = 1; i < nc; i++) { iblock *x = c[i]; int j = i - 1; while (j >= 0 && c[j]->free.used < x->free.used) { c[j + 1] = c[j]; j--; } c[j + 1] = x; }
+    for (int i = 0; i < nc; i++) if (take(c[i], n, al, mr, m)) return 1;
+    for (iblock *b = g_blocks[list]; b; b = b->next) { int listed = 0; for (int i = 0; i < nc; i++) listed |= c[i] == b; if (!listed && take(b, n, al, mr, m)) return 1; }   // (beyond 128 blocks)
+    return 0;
+}
+
+// Fritchii: one spare block per memory type and size class, allocated ahead on a thread of its own (FRITCHII_IMEM_SPARE=0: off). A camera turn in Ocarina of Time streams
+// ~3 GB of textures in a few seconds: each new 256 MiB block's vkAllocateMemory held up the replay thread. A list that takes its spare asks for the next one
+static iblock *g_spare[2 * VK_MAX_MEMORY_TYPES]; static uint64_t g_spare_size[2 * VK_MAX_MEMORY_TYPES]; static uint8_t g_spare_want[2 * VK_MAX_MEMORY_TYPES];
+static pthread_mutex_t g_smu = PTHREAD_MUTEX_INITIALIZER; static pthread_cond_t g_scv = PTHREAD_COND_INITIALIZER; static int g_spare_thr;
+static void *spare_main(void *arg) {
+    (void)arg;
+    pthread_mutex_lock(&g_smu);
+    for (;;) {
+        int l = 0; for (; l < 2 * VK_MAX_MEMORY_TYPES && !(g_spare_want[l] && !g_spare[l]); l++) {}
+        if (l == 2 * VK_MAX_MEMORY_TYPES) { pthread_cond_wait(&g_scv, &g_smu); continue; }
+        g_spare_want[l] = 0; const uint64_t bsize = g_spare_size[l];
+        pthread_mutex_unlock(&g_smu);
+        iblock *nb = calloc(1, sizeof *nb);
+        VkMemoryAllocateInfo ai = {VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO, .allocationSize = bsize, .memoryTypeIndex = (uint32_t)l / 2};
+        int ok = nb && vke_init(&nb->free, (uint32_t)(bsize / UNIT)) && !vk.vkAllocateMemory(V.dev, &ai, NULL, &nb->dm);
+        if (nb && !ok) { vke_fini(&nb->free); free(nb); nb = NULL; }
+        pthread_mutex_lock(&g_smu);
+        if (nb) g_spare[l] = nb;
+    }
+    return NULL;
+}
+static iblock *spare_take(uint32_t list, uint32_t type, uint64_t bsize) {   // the list's spare (NULL: none ready) and a request for the next
+    (void)type;
+    static int on = -1; if (on < 0) on = (int)VKA_ENV("FRITCHII_IMEM_SPARE", 1);
+    if (!on) return NULL;
+    pthread_mutex_lock(&g_smu);
+    if (!g_spare_thr) { pthread_t t; g_spare_thr = pthread_create(&t, NULL, spare_main, NULL) ? -1 : 1; if (g_spare_thr > 0) pthread_detach(t); }
+    iblock *b = g_spare[list]; g_spare[list] = NULL;
+    g_spare_size[list] = bsize; g_spare_want[list] = 1; pthread_cond_signal(&g_scv);
+    pthread_mutex_unlock(&g_smu);
+    return b;
+}
 // The image's memory (type: the memory type the caller picked from mr's memoryTypeBits): space in a block, or a dedicated allocation as before; bound to the image.
 // VK_SUCCESS, or the Vulkan error with nothing allocated
 VkResult vka_imem_bind(VkImage img, uint32_t type, const VkMemoryRequirements *mr, vka_imem *m) {
@@ -61,18 +110,22 @@ VkResult vka_imem_bind(VkImage img, uint32_t type, const VkMemoryRequirements *m
     if (!sharable(img, type, mr)) return dedicated(img, type, mr, m);
     uint32_t n = (uint32_t)((mr->size + UNIT - 1) / UNIT), al = mr->alignment > UNIT ? (uint32_t)(mr->alignment / UNIT) : 1;
     if (al & (al - 1)) return dedicated(img, type, mr, m);   // (Vulkan alignments are powers of two)
+    const uint32_t list = type * 2 + (mr->size >= VKA_IMEM_MAX); const uint64_t bsize = mr->size >= VKA_IMEM_MAX ? BIG_BLOCK : BLOCK;
     pthread_mutex_lock(&g_imu);
     int got = 0;
-    for (iblock *b = g_blocks[type]; b && !got; b = b->next) got = take(b, n, al, mr, m);
+    got = take_best(list, n, al, mr, m);
     pthread_mutex_unlock(&g_imu);
     if (!got) {   // a new block, allocated without the lock; another thread may have added one meanwhile, which is tried first
-        iblock *nb = calloc(1, sizeof *nb);
-        VkMemoryAllocateInfo ai = {VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO, .allocationSize = BLOCK, .memoryTypeIndex = type};
-        int ok = nb && vke_init(&nb->free, (uint32_t)(BLOCK / UNIT)) && !vk.vkAllocateMemory(V.dev, &ai, NULL, &nb->dm);
-        if (nb && !ok) nb->dm = VK_NULL_HANDLE;
+        iblock *nb = spare_take(list, type, bsize); int ok = nb != NULL;
+        if (!nb) {
+            nb = calloc(1, sizeof *nb);
+            VkMemoryAllocateInfo ai = {VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO, .allocationSize = bsize, .memoryTypeIndex = type};
+            ok = nb && vke_init(&nb->free, (uint32_t)(bsize / UNIT)) && !vk.vkAllocateMemory(V.dev, &ai, NULL, &nb->dm);
+            if (nb && !ok) nb->dm = VK_NULL_HANDLE;
+        }
         pthread_mutex_lock(&g_imu);
-        for (iblock *b = g_blocks[type]; b && !got; b = b->next) got = take(b, n, al, mr, m);
-        if (!got && ok) { nb->type = type; nb->next = g_blocks[type]; g_blocks[type] = nb; S.blocks++; got = take(nb, n, al, mr, m); nb = NULL; }
+        got = take_best(list, n, al, mr, m);
+        if (!got && ok) { nb->type = type; nb->list = list; nb->size = bsize; nb->next = g_blocks[list]; g_blocks[list] = nb; S.blocks++; S.block_bytes += bsize; got = take(nb, n, al, mr, m); nb = NULL; }
         if (!ok) S.fail++;
         pthread_mutex_unlock(&g_imu);
         if (nb) { if (nb->dm) vk.vkFreeMemory(V.dev, nb->dm, NULL); vke_fini(&nb->free); free(nb); }   // not needed (another thread's block had room) or not allocated
@@ -141,10 +194,10 @@ void vka_imem_free(vka_imem *m) {
     else if (fr) { VRED_ONCE("image memory block: free extent list not grown, %u units lost to reuse until the block empties", m->units); b->free.used -= m->units; }   // still counted free: the block can be released
     if (fr != -2) { S.runs--; S.run_bytes -= m->units * UNIT; S.req_bytes -= m->size; }   // a bad free was never a run
     if (vke_empty(&b->free)) {   // freed unless it is the memory type's only empty block
-        int empties = 0; for (iblock *x = g_blocks[b->type]; x; x = x->next) empties += vke_empty(&x->free);
+        int empties = 0; for (iblock *x = g_blocks[b->list]; x; x = x->next) empties += vke_empty(&x->free);
         if (empties > 1) {
-            for (iblock **p = &g_blocks[b->type]; *p; p = &(*p)->next) if (*p == b) { *p = b->next; break; }
-            gone = b; S.blocks--; S.freed++;
+            for (iblock **p = &g_blocks[b->list]; *p; p = &(*p)->next) if (*p == b) { *p = b->next; break; }
+            gone = b; S.blocks--; S.freed++; S.block_bytes -= b->size;
         }
     }
     pthread_mutex_unlock(&g_imu);
@@ -153,14 +206,14 @@ void vka_imem_free(vka_imem *m) {
 }
 
 // Lichii: the blocks' free space (bytes) and the share of a block its images use (0-1; read without the lock: a heuristic's input)
-uint64_t vka_imem_block_free(uint64_t *block_bytes) { pthread_mutex_lock(&g_imu); uint64_t all = S.blocks * BLOCK, f = all - S.run_bytes; pthread_mutex_unlock(&g_imu); if (block_bytes) *block_bytes = all; return f; }
-double vka_imem_block_use(const void *blk) { const iblock *b = blk; return b ? (double)b->free.used / (double)(BLOCK / UNIT) : 1.0; }
+uint64_t vka_imem_block_free(uint64_t *block_bytes) { pthread_mutex_lock(&g_imu); uint64_t all = S.block_bytes, f = all - S.run_bytes; pthread_mutex_unlock(&g_imu); if (block_bytes) *block_bytes = all; return f; }
+double vka_imem_block_use(const void *blk) { const iblock *b = blk; return b ? (double)b->free.used / (double)(b->size / UNIT) : 1.0; }
 // For the stats line: the blocks, the bytes the images in them take, what rounding to units and the blocks' free space leave unused, the dedicated allocations
 void vka_imem_stats(char *o, size_t n) {
     pthread_mutex_lock(&g_imu);
     snprintf(o, n, "image memory: %llu blocks (%.0f MiB, %llu freed), used %.1f MiB by %llu images (wasted %.2f MiB rounding to units, %.1f MiB free in blocks), %llu dedicated (%.0f MiB)",
-             (unsigned long long)S.blocks, S.blocks * (double)BLOCK / 1048576.0, (unsigned long long)S.freed, S.req_bytes / 1048576.0, (unsigned long long)S.runs,
-             (S.run_bytes - S.req_bytes) / 1048576.0, (S.blocks * (double)BLOCK - S.run_bytes) / 1048576.0, (unsigned long long)S.ded, S.ded_bytes / 1048576.0);
+             (unsigned long long)S.blocks, S.block_bytes / 1048576.0, (unsigned long long)S.freed, S.req_bytes / 1048576.0, (unsigned long long)S.runs,
+             (S.run_bytes - S.req_bytes) / 1048576.0, ((double)S.block_bytes - S.run_bytes) / 1048576.0, (unsigned long long)S.ded, S.ded_bytes / 1048576.0);
     if (S.fail) { size_t l = strlen(o); snprintf(o + l, n - l, "; %llu block allocations failed (those images dedicated)", (unsigned long long)S.fail); }
     if (Z.made) { uint64_t zi, za, zb, zs; vkz_stats(&Z, &zi, &za, &zb, &zs); size_t l = strlen(o);
         snprintf(o + l, n - l, "; zero-shared: %llu images in %llu allocations (%.0f MiB, %.0f MiB saved), %llu made their own", (unsigned long long)zi, (unsigned long long)za, zb / 1048576.0, zs / 1048576.0, (unsigned long long)Z.owned); }
@@ -169,7 +222,7 @@ void vka_imem_stats(char *o, size_t n) {
 uint64_t vka_imem_allocations(void) { pthread_mutex_lock(&g_imu); uint64_t c = S.blocks + S.ded + (uint64_t)Z.n; pthread_mutex_unlock(&g_imu); return c; }
 // Lichii: the teardown (vka_dev.c vka_destroy, after every image went): the empty blocks the memory types kept, the zero-shared table
 void vka_imem_destroy(void) {
-    for (int t = 0; t < VK_MAX_MEMORY_TYPES; t++)
+    for (int t = 0; t < 2 * VK_MAX_MEMORY_TYPES; t++)
         for (iblock *b = g_blocks[t], *n; b; b = n) { n = b->next; vk.vkFreeMemory(V.dev, b->dm, NULL); vke_fini(&b->free); free(b); }
     for (int i = 0; i < Z.n; i++) vk.vkFreeMemory(V.dev, (VkDeviceMemory)(uintptr_t)Z.e[i].h, NULL);   // (none: freed with their last image)
     free(Z.e);

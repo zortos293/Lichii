@@ -83,10 +83,19 @@ static const char *refusal(const vka_shlib *L, const dmsh_vk_entry *e) {
 }
 // Lichii: a pixel shader's set-0 resources in their own set (VKA_SET_FS), in every module made of it
 static void fs_set(const dmsh_vk_entry *e, uint32_t *w, size_t nb) { if (e->stage == DMSH_VK_STAGE_FS) vka_spv_set_remap(w, nb / 4, DMSH_VK_SET_DRAW, VKA_SET_FS); }
+static _Thread_local size_t t_last_bytes;   // the SPIR-V size of this thread's last spv_module
 static VkShaderModule spv_module(const vka_shlib *L, const dmsh_vk_entry *e, const dmsh_vk_module *m, uint64_t key, const char **why, char *err, size_t errn) {
     size_t nb = 0; uint32_t *w = vka_shlib_spirv(L, m, &nb, err, errn);
     if (!w) { *why = err; return VK_NULL_HANDLE; }
+    t_last_bytes = nb;
     fs_set(e, w, nb);
+    {   // DM_VK_SPV_DUMP=<dir>: each module as <key>.<variant>.spv
+        const char *dir = getenv("DM_VK_SPV_DUMP");
+        if (dir && *dir) {
+            char path[1024]; snprintf(path, sizeof path, "%s/%016llx.%u.spv", dir, (unsigned long long)key, m->variant);
+            FILE *f = fopen(path, "wb"); if (f) { fwrite(w, 1, nb, f); fclose(f); }
+        }
+    }
     VkShaderModuleCreateInfo ci = {VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO, .codeSize = nb, .pCode = w};
     VkShaderModule mod = VK_NULL_HANDLE; VkResult r = vk.vkCreateShaderModule(V.dev, &ci, NULL, &mod);
     free(w);
@@ -157,6 +166,41 @@ VkShaderModule vka_shader_vin_module(vka_shader *s, uint32_t umask, uint32_t sma
     pthread_mutex_unlock(&g_mu);
     return mod;
 }
+// Fritchii: the base module's Input / Output locations, read once
+uint32_t vka_shader_io(vka_shader *s, int out) {
+    pthread_mutex_lock(&g_mu); int known = s->io_known; uint32_t r = out ? s->io_out : s->io_in; pthread_mutex_unlock(&g_mu);
+    if (known) return r;
+    char err[256] = ""; const dmsh_vk_module *m = vka_shlib_module(s->lib, s->e, DMSH_VK_MOD_BASE);
+    size_t nb = 0; uint32_t *w = m ? vka_shlib_spirv(s->lib, m, &nb, err, sizeof err) : NULL;
+    uint32_t in = w ? vka_spv_io_mask(w, nb / 4, 1) : 0, ou = w ? vka_spv_io_mask(w, nb / 4, 3) : ~0u;
+    free(w);
+    pthread_mutex_lock(&g_mu); s->io_in = in; s->io_out = ou; s->io_known = 1; pthread_mutex_unlock(&g_mu);
+    return out ? ou : in;
+}
+// Fritchii: the base vertex module with (0, 0, 0, 1) outputs at the locations of mask, which a pixel shader it is drawn with reads and it never writes (vka_pso.c pstate_fill)
+VkShaderModule vka_shader_defout_module(vka_shader *s, uint32_t mask) {
+    pthread_mutex_lock(&g_mu);
+    for (struct vka_vinmod *v = s->defout; v; v = v->next) if (v->u == mask) { VkShaderModule m = v->mod; pthread_mutex_unlock(&g_mu); return m; }
+    pthread_mutex_unlock(&g_mu);
+    VkShaderModule mod = VK_NULL_HANDLE; char err[256] = ""; int own = 0;
+    const dmsh_vk_module *m = vka_shlib_module(s->lib, s->e, DMSH_VK_MOD_BASE);
+    size_t nb = 0; uint32_t *w = m ? vka_shlib_spirv(s->lib, m, &nb, err, sizeof err) : NULL;
+    size_t on = 0; uint32_t *o = w ? vka_spv_add_default_outputs(w, nb / 4, mask, &on, err, sizeof err) : NULL;
+    if (o) { VkShaderModuleCreateInfo ci = {VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO, .codeSize = on * 4, .pCode = o};
+             VkResult r = vk.vkCreateShaderModule(V.dev, &ci, NULL, &mod); if (r) { snprintf(err, sizeof err, "vkCreateShaderModule %d", r); mod = VK_NULL_HANDLE; } else own = 1; }
+    free(w); free(o);
+    if (!mod) { static _Atomic int n; if (atomic_fetch_add(&n, 1) < 8) VRED("vertex shader %016llx: default outputs %#x not added: %s; the pixel shader reads them undefined", (unsigned long long)s->key, mask, err);
+                mod = vka_shader_module(s, DMSH_VK_MOD_BASE); }
+    else { static _Atomic int n; if (atomic_fetch_add(&n, 1) < 16) VLOG("vertex shader %016llx: outputs %#x its pixel shader reads and it does not write added as (0, 0, 0, 1)", (unsigned long long)s->key, mask); }
+    pthread_mutex_lock(&g_mu);
+    for (struct vka_vinmod *x = s->defout; x; x = x->next) if (x->u == mask) {
+        VkShaderModule w2 = x->mod; pthread_mutex_unlock(&g_mu);
+        if (own && mod != w2) vk.vkDestroyShaderModule(V.dev, mod, NULL);
+        return w2; }
+    struct vka_vinmod *v = malloc(sizeof *v); *v = (struct vka_vinmod){s->defout, mask, 0, mod}; s->defout = v;
+    pthread_mutex_unlock(&g_mu);
+    return mod;
+}
 // The base pixel module with the float outputs of umask / smask retyped for integer attachments (vka_spvpatch.c vka_spv_fout_retype): made once per pair of masks, as the vertex ones
 VkShaderModule vka_shader_fout_module(vka_shader *s, uint32_t umask, uint32_t smask) {
     pthread_mutex_lock(&g_mu);
@@ -198,6 +242,7 @@ vka_shader *vka_shader_scratch(const vka_shlib *L, uint64_t key) {
     const char *why = NULL; char err[256] = "";
     s->mods[DMSH_VK_MOD_BASE] = spv_module(L, e, m, key, &why, err, sizeof err);
     if (!s->mods[DMSH_VK_MOD_BASE]) { free(s); return NULL; }
+    s->base_words = (uint32_t)(t_last_bytes / 4);
     return s;
 }
 void vka_shader_scratch_free(vka_shader *s) {
@@ -221,7 +266,7 @@ vka_shader *vka_shader_make(const vka_shlib *L, uint64_t key) {
         why = refusal(L, e);
         const dmsh_vk_module *m = why ? NULL : vka_shlib_module(L, e, DMSH_VK_MOD_BASE);
         if (!why && !m) why = "no base module";
-        if (m) s->mods[DMSH_VK_MOD_BASE] = spv_module(L, e, m, key, &why, err, sizeof err);
+        if (m) { s->mods[DMSH_VK_MOD_BASE] = spv_module(L, e, m, key, &why, err, sizeof err); s->base_words = (uint32_t)(t_last_bytes / 4); }
         if (!why && e->stage == DMSH_VK_STAGE_GS && VKA_ENV("DM_VK_GS_CLAIM", 1)) {   // memory writes: made once per primitive (vka_spv_gs_claim)
             char e2[256] = ""; s->gs_fx = gs_words(s, NULL, NULL, e2, sizeof e2);
             if (s->gs_fx < 0) VRED("geometry shader %016llx: memory writes not put under a claim (%s): drawn as it is, its writes repeated by the device's runs of each primitive", (unsigned long long)key, e2);
@@ -317,6 +362,17 @@ int vka_prog_shaders(const prog_t *p, vka_progsh *out) {
     return 1;
 }
 
+const vka_mesh_fb *vka_prog_mesh_fb(const prog_t *p) {   // Fritchii (vka.h)
+    if (!p || !p->serial) return NULL;
+    const int gl_depth = !vka_depth_zero();
+    for (unsigned i = 0; i < p->nstage && i < 6; i++) {
+        uint8_t md[8];
+        if (!prog_key(p, i, md)) continue;
+        uint64_t key = vka_shlib_key(md);
+        if (vka_rc_stage(key) == 7) return vka_rc_mesh_fb(p, i, key, gl_depth);
+    }
+    return NULL;
+}
 // Lichii: the teardown (vka_dev.c vka_destroy, after the pipelines): every shader's modules, the static blocks, the tables
 void vka_shader_destroy(void) {
     for (size_t i = 0; i < g_shcap; i++) if (g_sh[i].sh) {

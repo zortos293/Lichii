@@ -79,6 +79,54 @@ void vka_dstate_reset(vka_dstate *d) {   // NVN's defaults (nvn_mtl.m state_rese
     memset(d->vrs_pal, 5, sizeof d->vrs_pal);   // one invocation a pixel
 }
 static int cpu_read(uint64_t addr, void *out, size_t n);
+// Fritchii: Ocarina of Time's fog. The froxel pass (OOT_FOG_CS) and the sky average before it in the same submission (1bba09ec4bc8ff67, which adds into it)
+// bind a 192-byte block of the sky's light colours (binding 4). Each frame the game clears part of it on the CPU after submitting them, and a later submission
+// on another queue fills it again. On hardware they run before the clear; the replay runs them later, so they read the cleared block and the fog loses its
+// distant haze. So each submission of their queue keeps a copy of the block as the game submitted it (vka_fog_snapshot, from mtl_sub_commit, before the worker
+// records it), and that submission's bindings of the block use the copy. The copy is the block as hardware would read it: the game waits for the refill just before
+#define OOT_FOG_CS 0x9e6b00b050e30801ull
+enum { FOG_SLOTS = 64, FOG_SLOT = 256, FOG_BLOCK = 192 };
+static vka_span g_fog_ring;
+static _Atomic uint64_t g_fog_host, g_fog_serial, g_fog_tag[FOG_SLOTS]; static _Atomic unsigned g_fog_newest = ~0u;
+void vka_fog_snapshot(uint64_t serial, uint64_t fence) {
+    const uint64_t h = atomic_load(&g_fog_host);
+    if (!h || serial != atomic_load(&g_fog_serial)) return;
+    const unsigned i = (unsigned)(fence % FOG_SLOTS);
+    uint8_t *slot = (uint8_t *)g_fog_ring.ptr + (size_t)i * FOG_SLOT;
+    memcpy(slot, (const void *)(uintptr_t)h, FOG_BLOCK);
+    {   // The refill (21d9f83e6027c565, another queue) may run before the game's clear instead of after it, as the acquire it waits for on hardware is not
+        // waited for here: the clear then wipes it and the block is submitted with no light colours (a frame of darker shade and fog). Those rows
+        // (+48, 60 bytes) are then the last ones a snapshot found: they follow the sky and change slowly
+        static uint8_t last[60]; static int have; static uint64_t reused;
+        const float *c = (const float *)(slot + 48);
+        if (c[0] != 0.f || c[1] != 0.f || c[2] != 0.f) { memcpy(last, slot + 48, sizeof last); have = 1; }
+        else if (have) { memcpy(slot + 48, last, sizeof last);
+            if (VKA_ENV("FRITCHII_FOG_LOG", 0) && reused++ < 50) VLOG("fog snapshot at fence %llu: the light colours were cleared; the last ones are used", (unsigned long long)fence); }
+    }
+    atomic_store(&g_fog_tag[i], fence); atomic_store(&g_fog_newest, i);
+}
+static void fog_bind(uint64_t key, unsigned binding, uint64_t addr, VkDescriptorBufferInfo *bi) {
+    static int on = -1;
+    if (on < 0) { int fritchii_oot_fog_snapshot(void); on = fritchii_oot_fog_snapshot(); }
+    if (!on) return;
+    uint64_t vka_exec_queue_serial(void), vka_exec_cur_fence(void);
+    uint64_t h = atomic_load(&g_fog_host); const uint64_t ah = nvn_direct_host_of(addr);
+    if (!h) {   // learnt from the froxel pass's binding
+        if (key != OOT_FOG_CS || binding != 4) return;
+        if (!vka_static(FOG_SLOTS * FOG_SLOT, FOG_SLOT, &g_fog_ring)) { on = 0; VRED("Ocarina of Time: no memory for the fog's light colours: the fog reads them as they are"); return; }
+        atomic_store(&g_fog_serial, vka_exec_queue_serial()); atomic_store(&g_fog_host, h = ah);
+        VLOG("Ocarina of Time: the fog's light colours are read as the game submitted them");
+    }
+    if (ah != h || bi->range > FOG_SLOT || vka_exec_queue_serial() != atomic_load(&g_fog_serial)) return;
+    const uint64_t f = vka_exec_cur_fence(); const unsigned i = (unsigned)(f % FOG_SLOTS);
+    unsigned use = i;
+    if (atomic_load(&g_fog_tag[i]) != f) {   // no copy for this submission (taken before the slot was known): the newest one, not the live block
+        use = atomic_load(&g_fog_newest);
+        if (VKA_ENV("FRITCHII_FOG_LOG", 0)) { static _Atomic int n; if (atomic_fetch_add(&n, 1) < 50) VLOG("fog snapshot missing for fence %llu: slot %u used", (unsigned long long)f, use); }
+        if (use >= FOG_SLOTS) return;
+    }
+    *bi = (VkDescriptorBufferInfo){g_fog_ring.buf, g_fog_ring.off + (VkDeviceSize)use * FOG_SLOT, bi->range};
+}
 // Lichii: a deferred bind (Bind*Deferred) as the memory at its source holds it now, applied as the bind it names (hle_nvn.c bind_handles' pool bases)
 static void bind_deferred(vka_dstate *d, const p_bind_defer *b) {
     if (b->stage < 0 || b->stage >= VKA_NSTAGE || b->n <= 0 || b->n > 32) return;
@@ -86,7 +134,9 @@ static void bind_deferred(vka_dstate *d, const p_bind_defer *b) {
     if (!cpu_read(b->src, w, (buf ? 16 : 8) * (size_t)b->n)) { VRED_ONCE("deferred bind at %#llx is not readable: not bound", (unsigned long long)b->src); return; }
     for (int i = 0; i < b->n; i++) {
         const int s = b->first + i;
-        if (buf) { if (s < 16) (b->kind == DEFER_UBO ? d->b.ubo : d->b.ssbo)[b->stage][s] = (vka_range){nvn_direct_host_of(w[2 * i]), w[2 * i + 1]}; continue; }
+        if (buf) { if (s < 16) (b->kind == DEFER_UBO ? d->b.ubo : d->b.ssbo)[b->stage][s] = (vka_range){nvn_direct_host_of(w[2 * i]), w[2 * i + 1]};
+                   if (w[2 * i] >> 40) { static _Atomic int nl; if (atomic_fetch_add(&nl, 1) < 8) VLOG("deferred %s bind stage %d slot %d from %#llx: %#llx+%#llx", b->kind == DEFER_UBO ? "ubo" : "ssbo", b->stage, s, (unsigned long long)b->src, (unsigned long long)w[2 * i], (unsigned long long)w[2 * i + 1]); }
+                   continue; }
         uint64_t v = (uint32_t)w[i], tid = v & 0xfffff, sid = v >> 20;
         if (b->kind == DEFER_SAMP) { if (s < 128) d->b.samp[b->stage][s] = sid ? (sid + (uint64_t)b->sbase) << 20 : v; continue; }
         if (tid) tid += (uint64_t)b->tbase;
@@ -192,11 +242,14 @@ static int statics(void) {
 // ---------- Descriptor sets that do not fit a push (per submission slot) ----------
 enum { NSLOT = 8, MAXPOOLS = 64 };
 static VkDescriptorPool g_dp[NSLOT][MAXPOOLS]; static int g_ndp[NSLOT], g_cur_dp[NSLOT];
+static VkDescriptorBufferInfo g_mesh_out;   // Fritchii: the mesh emulation draw's output range (VKA_R_MESH_OUT, mesh_fb_compute)
+static uint64_t g_pre_want[16], g_pre_seen[16]; static uint32_t g_pre_done;   // Fritchii: SET_RT ordinals with emulated mesh draws (the frame before, this one)
 void vka_dyn_invalidate(void);
 static void drv_memo_reset(void);
 static void fsc_reset(void);
 void vka_draw_sub_begin(VkCommandBuffer cb, unsigned slot) {
     g_cb = cb; g_slot = slot % NSLOT; vka_dyn_invalidate();
+    { void vka_mesh_fb_sub_begin(unsigned); vka_mesh_fb_sub_begin(g_slot); }   // (Fritchii: the slot's mesh emulation output, given back with its fence)
     { void vka_mem_rec_thread(void); vka_mem_rec_thread(); }   // the address lookups' cache outside TLS for the recording thread (vka_mem.c)
     drv_memo_reset();   // the last submission's scratch spans go with its fence
     g_prof = VKA_ENV("DM_VK_PROF", 0) != 0; g_dyn_filter = VKA_ENV("DM_VK_DYN_FILTER", 1); g_pass_keep = VKA_ENV("DM_VK_PASS_KEEP", 1); g_vb_filter = VKA_ENV("DM_VK_VB_FILTER", 1);   // live: from this submission
@@ -204,6 +257,27 @@ void vka_draw_sub_begin(VkCommandBuffer cb, unsigned slot) {
     g_cur_dp[g_slot] = 0;
     fsc_reset();   // (Lichii: its sets were the slot's)
     vka_pso_save(0);
+    {   // Fritchii: a 1x1x1 white 3D image, for a small 2D texture a shader samples as 3D (vka_tex.c view_of: the game binds its 4x4 white texture to unused 3D slots, which the
+        // Switch reads as white; with no view at all the slot read zero, and OoT's translucent water came out magenta from the fog volumes it samples)
+        extern VkImageView vka_white3d; static int made;
+        if (!made && g_cb) {
+            made = 1; VkImage img = VK_NULL_HANDLE; VkDeviceMemory mem = VK_NULL_HANDLE; VkMemoryRequirements mr;
+            VkImageCreateInfo ci = {VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO, .imageType = VK_IMAGE_TYPE_3D, .format = VK_FORMAT_R8G8B8A8_UNORM, .extent = {1, 1, 1}, .mipLevels = 1, .arrayLayers = 1,
+                                    .samples = VK_SAMPLE_COUNT_1_BIT, .tiling = VK_IMAGE_TILING_OPTIMAL, .usage = VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT};
+            if (!vk.vkCreateImage(V.dev, &ci, NULL, &img)) {
+                vk.vkGetImageMemoryRequirements(V.dev, img, &mr);
+                VkMemoryAllocateInfo ai = {VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO, .allocationSize = mr.size, .memoryTypeIndex = vka_mem_type(mr.memoryTypeBits, VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT, 0)};
+                if (ai.memoryTypeIndex != UINT32_MAX && !vk.vkAllocateMemory(V.dev, &ai, NULL, &mem) && !vk.vkBindImageMemory(V.dev, img, mem, 0)) {
+                    vka_img_barrier(g_cb, img, VK_IMAGE_ASPECT_COLOR_BIT, VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_GENERAL);
+                    const VkClearColorValue one = {{1, 1, 1, 1}}; const VkImageSubresourceRange rg = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1};
+                    vk.vkCmdClearColorImage(g_cb, img, VK_IMAGE_LAYOUT_GENERAL, &one, 1, &rg); vka_barrier(g_cb);
+                    VkImageViewCreateInfo vi = {VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO, .image = img, .viewType = VK_IMAGE_VIEW_TYPE_3D, .format = VK_FORMAT_R8G8B8A8_UNORM, .subresourceRange = rg};
+                    VkImageView v = VK_NULL_HANDLE; if (!vk.vkCreateImageView(V.dev, &vi, NULL, &v)) vka_white3d = v;
+                }
+            }
+            VLOG("white 3D stand-in for small 2D textures sampled as 3D: %s", vka_white3d ? "made" : "not made");
+        }
+    }
     static int ph; VkImageView placeholder(uint8_t dim, int storage);
     if (!V.null_desc && !ph && statics()) {   // no null descriptors: the placeholders are made here, outside any pass (their first use records a clear)
         ph = 1; static const uint8_t dims[] = {1, 2, 3, 1 | DMSH_VK_DIM_ARRAY, 3 | DMSH_VK_DIM_ARRAY};
@@ -244,7 +318,7 @@ static struct {
     VkExtent2D own;                                      // Lichii: the area in the targets' own texels (not scaled): the render area shaders read
     int again;                                           // Lichii: every target was drawn in the frames just before too (drawn_again): only such draws are skipped while their pipeline is made asynchronously
     int vrs; uint64_t vrs_serial; view_t vrs_view; uint8_t vrs_has_view, vrs_rate[16];   // Lichii: its shading-rate attachment's image and palette (vrs_key)
-} R;
+ uint32_t setrt; } R;
 // Lichii: the render scale's push constants of the draw or dispatch being bound (nvn_direct.h NVN_DIRECT_SCALE_PUSH_SIZE: the scaled textures' bits, the
 // pixel stage's down factor; no image is scaled: vka_tex.c img_unscale), and the last pushed, which stays while every layout has the same push constant range (vka_dyn_invalidate forgets it)
 static struct { uint32_t tex[4], img[2]; float down, pad; } g_scale_push;
@@ -271,14 +345,72 @@ static int rt_same(const p_set_rt *a, int ha, const p_set_rt *b, int hb) {
     }
     return 1;
 }
+// ---------- Fritchii: drawing into block-compressed textures ----------
+// A game compresses a texture on the GPU by drawing into it through an uncompressed view of one texel a block (Ocarina of Time: a 64x64 BC4 texture through an
+// RGBA16_UINT view). Vulkan cannot draw into a compressed image, so the pass draws into a stand-in image of the view's format at block size, filled from the texture
+// before the pass and copied back into it after (vkCmdCopyImage between size-compatible uncompressed and compressed formats). Level 0, one layer
+enum { NBCRT = 16 };
+static struct { vka_img *im; uint64_t serial; VkFormat f; VkImage img; VkDeviceMemory mem; VkImageView view; uint32_t bw, bh; } g_bcrt[NBCRT];
+static struct { vka_img *im; int k; } g_bcrt_pass[8]; static int g_nbcrt_pass;   // the pass's stand-ins, copied back at its end (vka_rp_end)
+static int bc_dims(VkFormat f, uint32_t *bw, uint32_t *bh, uint32_t *bytes) {   // block size of a compressed format, 0 = not one handled
+    *bw = *bh = 4;
+    switch (f) {
+    case VK_FORMAT_BC1_RGB_UNORM_BLOCK: case VK_FORMAT_BC1_RGB_SRGB_BLOCK: case VK_FORMAT_BC1_RGBA_UNORM_BLOCK: case VK_FORMAT_BC1_RGBA_SRGB_BLOCK:
+    case VK_FORMAT_BC4_UNORM_BLOCK: case VK_FORMAT_BC4_SNORM_BLOCK: *bytes = 8; return 1;
+    case VK_FORMAT_BC2_UNORM_BLOCK: case VK_FORMAT_BC2_SRGB_BLOCK: case VK_FORMAT_BC3_UNORM_BLOCK: case VK_FORMAT_BC3_SRGB_BLOCK:
+    case VK_FORMAT_BC5_UNORM_BLOCK: case VK_FORMAT_BC5_SNORM_BLOCK: case VK_FORMAT_BC6H_UFLOAT_BLOCK: case VK_FORMAT_BC6H_SFLOAT_BLOCK:
+    case VK_FORMAT_BC7_UNORM_BLOCK: case VK_FORMAT_BC7_SRGB_BLOCK: *bytes = 16; return 1;
+    default: return 0;
+    }
+}
+static void bc_copy(VkImage src, VkImage dst, uint32_t w, uint32_t h) {   // w, h: the source's texels
+    VkImageCopy c = {{VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1}, {0, 0, 0}, {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1}, {0, 0, 0}, {w, h, 1}};
+    vk.vkCmdCopyImage(g_cb, src, VK_IMAGE_LAYOUT_GENERAL, dst, VK_IMAGE_LAYOUT_GENERAL, 1, &c);
+}
+// The stand-in of compressed image im for a view of format f (bytes a texel): its view, filled from im (no pass open); VK_NULL_HANDLE = none
+static VkImageView bcrt_begin(vka_img *im, const vka_fmt *f, int *slot) {
+    uint32_t bw, bh, bytes; if (!bc_dims(im->f.vk, &bw, &bh, &bytes) || f->kind >= 3 || (uint32_t)f->bpb != bytes || im->samples > 1) return VK_NULL_HANDLE;
+    const uint32_t w = (im->w + bw - 1) / bw, h = (im->h + bh - 1) / bh;
+    int k = -1, free_k = -1;
+    for (int i = 0; i < NBCRT; i++) { if (g_bcrt[i].im == im && g_bcrt[i].serial == im->serial && g_bcrt[i].f == f->vk) { k = i; break; } if (!g_bcrt[i].im && free_k < 0) free_k = i; }
+    if (k < 0) {
+        if (free_k < 0) { VRED_ONCE("more than 16 block-compressed textures drawn into: the others are not drawn into"); return VK_NULL_HANDLE; }
+        k = free_k;
+        VkImageCreateInfo ii = {VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO, .imageType = VK_IMAGE_TYPE_2D, .format = f->vk, .extent = {w, h, 1}, .mipLevels = 1, .arrayLayers = 1, .samples = VK_SAMPLE_COUNT_1_BIT,
+                                .tiling = VK_IMAGE_TILING_OPTIMAL, .usage = VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_TRANSFER_SRC_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT};
+        VkImage img = VK_NULL_HANDLE; VkDeviceMemory mem = VK_NULL_HANDLE; VkImageView view = VK_NULL_HANDLE; VkMemoryRequirements mr; uint32_t t = UINT32_MAX;
+        if (!vk.vkCreateImage(V.dev, &ii, NULL, &img)) { vk.vkGetImageMemoryRequirements(V.dev, img, &mr); t = vka_mem_type(mr.memoryTypeBits, VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT, 0); }
+        VkMemoryAllocateInfo ai = {VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO, .allocationSize = t == UINT32_MAX ? 0 : mr.size, .memoryTypeIndex = t};
+        VkImageViewCreateInfo vi = {VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO, .viewType = VK_IMAGE_VIEW_TYPE_2D, .format = f->vk, .subresourceRange = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1}};
+        if (!img || t == UINT32_MAX || vk.vkAllocateMemory(V.dev, &ai, NULL, &mem) || vk.vkBindImageMemory(V.dev, img, mem, 0) || ((vi.image = img), vk.vkCreateImageView(V.dev, &vi, NULL, &view))) {
+            VRED_ONCE("a stand-in for drawing into a block-compressed texture not made: not drawn into");
+            if (img) vk.vkDestroyImage(V.dev, img, NULL);
+            if (mem) vk.vkFreeMemory(V.dev, mem, NULL);
+            return VK_NULL_HANDLE; }
+        vka_mem_grew(mr.size);
+        vka_img_barrier(g_cb, img, VK_IMAGE_ASPECT_COLOR_BIT, VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_GENERAL);
+        g_bcrt[k] = (typeof(g_bcrt[0])){im, im->serial, f->vk, img, mem, view, w, h};
+        static _Atomic int n; if (atomic_fetch_add(&n, 1) < 8) VLOG("drawing into block-compressed texture serial %llu (%ux%u VkFormat %d) through a %ux%u stand-in of VkFormat %d", (unsigned long long)im->serial, im->w, im->h, im->f.vk, w, h, f->vk);
+    }
+    bc_copy(im->img, g_bcrt[k].img, im->w, im->h);   // (the texture's blocks as the stand-in's texels: the pass may draw only some)
+    vka_barrier(g_cb);
+    *slot = k;
+    return g_bcrt[k].view;
+}
 // Game barriers (OP_BARRIER) that came with a pass open: taken inside it (DM_VK_BAR_KEEP), ended it at once, ended it later at a draw that needed it (bar_hazard)
 static uint64_t g_bar_in, g_bar_kept, g_bar_late;
 void vka_rp_end(void) {
     if (PC.n) pc_flush();
     if (!R.on) return;
+    { void vka_oq_pass_end(VkCommandBuffer cb); vka_oq_pass_end(g_cb); }   // Lichii: samples-passed counters (vka_exec.c)
     vk.vkCmdEndRendering(g_cb);
-    vka_barrier(g_cb);   // the pass's writes before whatever reads them next (copies, the present, the next pass's samples)
+    if (VKA_ENV("DM_VK_RP_BAR", 1))   // Fritchii: after the pass's own stages and writes only (vka_barrier_from)
+        vka_barrier_from(g_cb, VK_PIPELINE_STAGE_ALL_GRAPHICS_BIT, VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT | VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT | VK_ACCESS_SHADER_WRITE_BIT);   // the pass's writes before whatever reads them next (copies, the present, the next pass's samples). DM_VK_RP_BAR=0: only the game's barriers
     R.on = 0; vka_tex_feedback(NULL, NULL, 0);
+    if (g_nbcrt_pass) {   // Fritchii: the stand-ins back into their block-compressed textures (bcrt_begin)
+        for (int i = 0; i < g_nbcrt_pass; i++) { const int k = g_bcrt_pass[i].k; if (g_bcrt[k].im == g_bcrt_pass[i].im) bc_copy(g_bcrt[k].img, g_bcrt[k].im->img, g_bcrt[k].bw, g_bcrt[k].bh); }
+        g_nbcrt_pass = 0; vka_barrier(g_cb);
+    }
     if (vka_nan_on()) vka_nan_pass(g_cb, R.cim, R.clv, R.cl0, R.nci);
 }
 static void rt_range(const vka_img *im, const view_t *v, int has_v, uint32_t *lv, uint32_t *l0, uint32_t *nl) {
@@ -328,6 +460,7 @@ static uint8_t vrs_rate(uint8_t e) {
     return e < 12 ? rate[e] : 0;
 }
 static int vrs_want(const vka_dstate *d, vrs_key *k) {
+    if (!VKA_ENV("DM_VK_VRS", 1)) { memset(k, 0, sizeof *k); return 0; }   // DM_VK_VRS=0: no shading-rate attachment (full rate)
     memset(k, 0, sizeof *k);
     if (!d->vrs.tex || d->rast_discard) return 0;
     if (d->vrs.tex->magic != MAGIC('T', 'E', 'X', 0)) { VRED_ONCE("the bound shading-rate image's snapshot is no longer a texture (its command memory was reused): drawn at full rate"); return 0; }
@@ -411,7 +544,7 @@ static int rp_begin(const p_set_rt *rt, int has_rt, const vka_dstate *d) {
     if (vka_scale_on()) rp_scale_targets(rt, has_rt);
     VkRenderingAttachmentInfo ca[8], da = {0}, sa; uint32_t w = UINT32_MAX, h = UINT32_MAX, layers = UINT32_MAX, samples = 0, ow = UINT32_MAX, oh = UINT32_MAX;
     vka_img *fb_im[9]; uint32_t fb_lv[9]; int nfb = 0;   // the attachments' images and levels (vka_tex_feedback)
-    memset(&R, 0, sizeof R);
+    memset(&R, 0, sizeof R); g_nbcrt_pass = 0;
     if (has_rt) R.rt = *rt; R.has_rt = has_rt;
     int n = has_rt ? (rt->n < 8 ? rt->n : 8) : 0;
     for (int i = 0; i < n; i++) {
@@ -419,8 +552,30 @@ static int rp_begin(const p_set_rt *rt, int has_rt, const vka_dstate *d) {
         R.cf[i] = VK_FORMAT_UNDEFINED;
         const tex_t *t = rt->color[i]; if (!t) continue;
         vka_img *im = vka_tex_get(t, g_cb); vka_fmt f;
+        {   // Fritchii, DM_VK_RT_TRACE=1: each distinct render target (the game's texture and the image the replay attaches), to compare with the normal renderer's passes
+            static int on = -1; if (on < 0) on = (int)VKA_ENV("DM_VK_RT_TRACE", 0);
+            static uint64_t seen[512]; static int ns;
+            if (on && im) { uint64_t key = im->serial << 8 | (uint64_t)i; int k = 0; for (; k < ns && seen[k] != key; k++) {}
+                if (k == ns && ns < 512) { seen[ns++] = key; VLOG("rt trace: slot %d game texture %ux%u format %#x serial %llu storage %#llx -> image serial %llu %ux%u VkFormat %d", i, t->d.width, t->d.height, t->d.format,
+                    (unsigned long long)t->serial, (unsigned long long)nvn_direct_guest_of((uint64_t)(uintptr_t)t->mem), (unsigned long long)im->serial, im->w, im->h, (int)im->f.vk); } }
+        }
         if (!im || !vka_fmt_of(rt->has_cview[i] && rt->cview[i].set_format ? rt->cview[i].format : t->d.format, &f)) continue;
-        if (!(im->usage & VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT) || f.kind >= 3) { VRED_ONCE("colour target %d (format %#x) cannot be a Vulkan colour attachment: not drawn into", i, t->d.format); continue; }
+        if (!(im->usage & VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT) && f.kind < 3 && g_nbcrt_pass < 8) {   // Fritchii: a block-compressed texture (above rp_begin)
+            int k; VkImageView v = bcrt_begin(im, &f, &k);
+            if (v) {
+                ca[i].imageView = v; R.cf[i] = f.view; R.ckind[i] = f.kind; samples = 1;
+                g_bcrt_pass[g_nbcrt_pass].im = im; g_bcrt_pass[g_nbcrt_pass++].k = k;
+                R.cnl[i] = 1; R.cext[i] = (VkExtent2D){g_bcrt[k].bw, g_bcrt[k].bh};
+                if (g_bcrt[k].bw < w) w = g_bcrt[k].bw; if (g_bcrt[k].bh < h) h = g_bcrt[k].bh; if (1 < layers) layers = 1;
+                if (g_bcrt[k].bw < ow) ow = g_bcrt[k].bw; if (g_bcrt[k].bh < oh) oh = g_bcrt[k].bh;
+                vka_img_written(im);
+                continue;
+            }
+        }
+        if (!(im->usage & VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT) || f.kind >= 3) { static _Atomic int nr; static uint64_t ncount;
+            if (atomic_fetch_add(&nr, 1) < 12) VRED("colour target %d (format %#x, view format %#x set %d, %ux%u levels %u, VkFormat %d usage %#x, serial %llu) cannot be a Vulkan colour attachment: not drawn into",
+                                                     i, t->d.format, rt->has_cview[i] ? rt->cview[i].format : 0, rt->has_cview[i] && rt->cview[i].set_format, im->w, im->h, im->levels, im->f.vk, im->usage, (unsigned long long)im->serial);
+            if (++ncount % 600 == 0) VRED("colour targets not drawn into: %llu so far", (unsigned long long)ncount); continue; }
         if (im->depth > 1 && !(im->usage & VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT)) continue;   // its slices are drawn into through 2D-array views (img_create)
         uint32_t lv, l0, nl; rt_range(im, &rt->cview[i], rt->has_cview[i], &lv, &l0, &nl);
         if (lv >= im->levels || !nl) continue;
@@ -500,7 +655,15 @@ static int rp_begin(const p_set_rt *rt, int has_rt, const vka_dstate *d) {
         vka_gp_pass(b);
     }
     rts_note(w, h, d, dp || sp);
+    {   // Fritchii: a pass whose SET_RT had emulated mesh draws in the frame before gets a part of its own with a pre command buffer (vka_exec.c vka_pre_split)
+        extern uint32_t g_setrt_n; int vka_pre_split(void); uint64_t vka_frame(void);
+        static uint64_t fr = ~0ull; if (vka_frame() != fr) { fr = vka_frame(); memcpy(g_pre_want, g_pre_seen, sizeof g_pre_want); memset(g_pre_seen, 0, sizeof g_pre_seen); g_pre_done = ~0u; }
+        static int on = -1; if (on < 0) on = (int)VKA_ENV("DM_VK_MESH_PRE", 0);
+        const uint32_t o = g_setrt_n & 1023; R.setrt = o;
+        if (on && g_pre_done != o && (g_pre_want[o >> 6] >> (o & 63) & 1)) { g_pre_done = o; vka_pre_split(); }
+    }
     vk.vkCmdBeginRendering(g_cb, &ri);
+    { void vka_oq_pass_begin(VkCommandBuffer cb); vka_oq_pass_begin(g_cb); }   // Lichii: samples-passed counters (vka_exec.c)
     R.on = 1; vka_n_rp++; if (g_dyn_filter == 2) vka_dyn_invalidate();   // DM_VK_DYN_FILTER=2: the dynamic state set again at each pass (bisect)
     for (int k = 0; k < nlate; k++) { VkClearAttachment c = {late[k]->asp, late[k]->ci >= 0 ? (uint32_t)late[k]->ci : 0, late[k]->in}; VkClearRect cr = {late[k]->rc, 0, layers}; vk.vkCmdClearAttachments(g_cb, 1, &c, 1, &cr); }
     PC.n = 0;
@@ -672,13 +835,20 @@ static int cpu_read(uint64_t addr, void *out, size_t n) {   // guest bytes as th
     if (vka_addr(addr, n, NULL, NULL, NULL)) { memcpy(out, (const void *)(uintptr_t)nvn_direct_host_of(addr), n); return 1; }
     return !plat_mem_read(addr, out, n);
 }
+uint64_t vka_n_mesh_draws;
+VkCommandBuffer vka_draw_cb(void) { return g_cb; }
 static int rd_cb(void *ctx, uint64_t addr, void *out, size_t n) { (void)ctx; return cpu_read(addr, out, n); }
+#include <stdarg.h>
+void vka_bind_log(const char *fmt, ...) {   // Lichii: vka_bind.c's traces, in the replay's log
+    char m[512]; va_list ap; va_start(ap, fmt); vsnprintf(m, sizeof m, fmt, ap); va_end(ap); VLOG("%s", m);
+}
 // A uniform buffer: bound in place when Vulkan's offset alignment allows, else a copy of what the CPU sees now (a GPU write earlier in this submission is missed: logged)
 static int ubo_desc(uint64_t addr, uint64_t size, VkDescriptorBufferInfo *bi) {
     if (!size || size > V.ub_range) size = size ? V.ub_range : 65536 < V.ub_range ? 65536 : V.ub_range;
     VkBuffer b; VkDeviceSize o;
     uint64_t run = vka_addr_run(addr, size, &b, &o);
-    if (run && !(o % V.ub_align) && !(addr % V.ub_align)) { *bi = (VkDescriptorBufferInfo){b, o, run}; return 1; }
+    static int snap = -1; if (snap < 0) snap = (int)VKA_ENV("DM_VK_UBO_COPY", 0);   // DM_VK_UBO_COPY=1: every uniform buffer a copy of the CPU's bytes at replay (none read in place)
+    if (!snap && run && !(o % V.ub_align) && !(addr % V.ub_align)) { *bi = (VkDescriptorBufferInfo){b, o, run}; return 1; }
     vka_span s; if (!vka_scratch(size, V.ub_align, &s)) return 0;
     if (!cpu_read(addr, s.ptr, size)) { memset(s.ptr, 0, size); VRED_ONCE("uniform buffer at %#llx is not readable: it reads zeros", (unsigned long long)addr); }
     else if (run) VRED_ONCE("uniform buffer at %#llx is not %llu-byte aligned: bound as a copy of the CPU's bytes", (unsigned long long)addr, (unsigned long long)V.ub_align);
@@ -819,6 +989,13 @@ static inline uint64_t cntvct(void) { uint64_t v; __asm__ volatile("mrs %0, cntv
 typedef struct { VkWriteDescriptorSet w[512]; VkDescriptorBufferInfo bi[512]; VkDescriptorImageInfo ii[512]; VkBufferView bv[512]; uint32_t n; } writes_t;
 static writes_t g_w;
 static vka_res g_res[512];   // the NaN scan's own walk (DM_VK_NANSCAN_FS)
+// Fritchii, DM_VK_BIND_TRACE_FS=<key>: every binding of that shader's first 2 draws, logged with what it was given (a draw's inputs, to compare with what the game meant)
+static int bind_trace(const vka_shader *sh) {
+    static const char *e; static int ei; if (!ei) { e = getenv("DM_VK_BIND_TRACE_FS"); ei = 1; }   // (a list of keys: any stage, compute included)
+    if (!e || !sh) return 0;
+    char kx[17]; snprintf(kx, sizeof kx, "%016llx", (unsigned long long)sh->key);
+    static _Atomic int n; return strstr(e, kx) && atomic_load(&n) < 16 * 64 && (atomic_fetch_add(&n, 1), 1);
+}
 // One stage's results as descriptor writes. 0 = the draw cannot run (logged)
 static int stage_writes(const vka_dstate *d, int st, const vka_shader *sh, const vka_res *r, int n, int pool, c0_at *c0) {
     for (int i = 0; i < n; i++) {
@@ -832,6 +1009,18 @@ static int stage_writes(const vka_dstate *d, int st, const vka_shader *sh, const
             int storage = r[i].desc == VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
             switch (r[i].what) {
             case VKA_R_BUF: ok = storage ? ssbo_desc(r[i].addr, r[i].size, bi) : ubo_desc(r[i].addr, r[i].size, bi);
+                if (ok && storage) fog_bind(sh->key, r[i].binding, r[i].addr, bi);
+                {   // Fritchii, FRITCHII_SSBO_WATCH=<key>:<binding>: that shader's storage buffer is watched; every shader binding storage over it is logged once (its writers)
+                    extern uint64_t vka_watch_addr; static uint64_t wk = ~0ull; static unsigned wb; uint64_t wa = vka_watch_addr; if (wk == ~0ull) { const char *ev = getenv("FRITCHII_SSBO_WATCH"); wk = 0; if (ev) sscanf(ev, "%llx:%u", (unsigned long long *)&wk, &wb); }
+                    if (wk && storage) {
+                        if (sh->key == wk && r[i].binding == wb) vka_watch_addr = wa = r[i].addr;
+                        if (wa && r[i].addr < wa + 0xc0 && wa < r[i].addr + (r[i].size ? r[i].size : bi->range) && (r[i].flags & DMSH_VK_BF_RW || sh->key == wk)) {   // (any overlap with its 192 bytes)
+                            static _Atomic int nlog; uint64_t vka_exec_queue_serial(void), vka_exec_cur_fence(void);
+                            if (atomic_fetch_add(&nlog, 1) < 600) { char md[300] = ""; void vka_mem_describe(uint64_t, char *, size_t); vka_mem_describe(r[i].addr, md, sizeof md);
+                              VLOG("ssbo watch: shader %016llx stage %d binding %u %s (+%#llx), queue %llu fence %llu: VkBuffer %p + %#llx range %#llx; %s", (unsigned long long)sh->key, st, r[i].binding, (r[i].flags & DMSH_VK_BF_RW) ? "WRITES" : "reads", (unsigned long long)(wa - r[i].addr), (unsigned long long)vka_exec_queue_serial(), (unsigned long long)vka_exec_cur_fence(), ok ? (void *)bi->buffer : NULL, ok ? (unsigned long long)bi->offset : 0ull, ok ? (unsigned long long)bi->range : 0ull, md); }
+                        }
+                    }
+                }
                 if (ok && storage && (r[i].flags & DMSH_VK_BF_RW)) vka_tex_gw_opaque(r[i].addr, bi->range);   // the shader may store into it
                 break;
             case VKA_R_C1: if (sh->c1_len) *bi = (VkDescriptorBufferInfo){sh->c1.buf, sh->c1.off, (sh->c1_len + 15) & ~(VkDeviceSize)15}; else ok = 0; break;
@@ -852,11 +1041,26 @@ static int stage_writes(const vka_dstate *d, int st, const vka_shader *sh, const
             case VKA_R_GMEM_MAP: ok = gmem_map(bi); break;
             case VKA_R_GMEM_LOG: ok = gmem_log(bi); break;
             case VKA_R_SHARED_SPILL: ok = st == 5 && g_spill_range && g_spill.buf; if (ok) *bi = (VkDescriptorBufferInfo){g_spill.buf, g_spill.off, g_spill_range}; break;
+            case VKA_R_MESH_OUT: ok = g_mesh_out.buffer != VK_NULL_HANDLE; if (ok) *bi = g_mesh_out; break;   // (Fritchii: the mesh emulation, mesh_fb_draw)
             case VKA_R_LOOP_GUARD: ok = sh->loop_guard.buf != VK_NULL_HANDLE; if (ok) *bi = (VkDescriptorBufferInfo){sh->loop_guard.buf, sh->loop_guard.off, 16}; break;   // (Lichii, nvn_recompile.c)
             default: ok = 0; break;
             }
+            if (!ok && r[i].what == VKA_R_BUF && getenv("FRITCHII_UNBOUND_LOG")) {   // Fritchii: each shader's unbound buffers, once per shader and binding
+                static uint64_t seen[256]; static _Atomic int ns; const uint64_t k = sh->key ^ ((uint64_t)r[i].binding << 56) ^ ((uint64_t)st << 48); int found = 0;
+                for (int j = 0; j < ns && j < 256; j++) found |= seen[j] == k;
+                if (!found) { int j = atomic_fetch_add(&ns, 1); if (j < 256) { seen[j] = k; uint64_t vka_exec_queue_serial(void);
+                    VLOG("unbound: shader %016llx stage %d binding %u %s %s at %#llx size %#llx, queue %llu", (unsigned long long)sh->key, st, r[i].binding, storage ? "storage" : "uniform", (r[i].flags & DMSH_VK_BF_RW) ? "written" : "read", (unsigned long long)r[i].addr, (unsigned long long)r[i].size, (unsigned long long)vka_exec_queue_serial()); } }
+            }
             if (!ok) { if (V.null_desc) *bi = (VkDescriptorBufferInfo){VK_NULL_HANDLE, 0, VK_WHOLE_SIZE}; else *bi = (VkDescriptorBufferInfo){storage ? g_sink.buf : g_zero.buf, storage ? g_sink.off : g_zero.off, 65536}; }
             w->pBufferInfo = bi;
+            if (bind_trace(sh) && r[i].what == VKA_R_BUF && r[i].size && r[i].size <= (1u << 20)) {   // (its bytes as the CPU sees them now, to <DM_TEMP>/cb_<binding>.bin)
+                static uint8_t buf[1 << 20]; const char *t = getenv("DM_TEMP");
+                if (t && cpu_read(r[i].addr, buf, r[i].size)) { char path[600]; snprintf(path, sizeof path, "%s/cb_%u.bin", t, r[i].binding); FILE *f = fopen(path, "wb"); if (f) { fwrite(buf, 1, r[i].size, f); fclose(f); } }
+            }
+            if (bind_trace(sh)) VLOG("bind trace %016llx: binding %u buffer what %d addr %#llx size %#llx -> %s range %#llx", (unsigned long long)sh->key, r[i].binding, r[i].what, (unsigned long long)r[i].addr, (unsigned long long)r[i].size, ok ? "bound" : "UNBOUND", (unsigned long long)bi->range);
+            if (!ok && bind_trace(sh)) { uint64_t nvn_direct_guest_of(uint64_t); const void *nvn_direct_readable(uint64_t); void vka_mem_describe(uint64_t, char *, size_t); char md[600];
+                vka_mem_describe(r[i].addr, md, sizeof md); uint64_t g = nvn_direct_guest_of(r[i].addr);
+                VLOG("bind trace %016llx: binding %u unbound: guest %#llx (%s arena), readable %d; segments: %s", (unsigned long long)sh->key, r[i].binding, (unsigned long long)g, g != r[i].addr ? "in" : "not in", nvn_direct_readable(r[i].addr) != NULL, md); }
             break; }
         case VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER: case VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE: case VK_DESCRIPTOR_TYPE_SAMPLER: case VK_DESCRIPTOR_TYPE_STORAGE_IMAGE: {
             int storage = r[i].desc == VK_DESCRIPTOR_TYPE_STORAGE_IMAGE; uint64_t ti_ = g_prof ? cntvct() : 0;
@@ -864,6 +1068,14 @@ static int stage_writes(const vka_dstate *d, int st, const vka_shader *sh, const
             if (r[i].desc != VK_DESCRIPTOR_TYPE_SAMPLER) {
                 int tid = (r[i].what == VKA_R_TEX || r[i].what == VKA_R_IMG) ? r[i].tid : 0, scaled = 0;
                 if (tid) v = vka_tex_id_view_rec(tid, g_cb, r[i].dim, storage, &lay, &scaled);
+                {   // Fritchii, FRITCHII_SAMPLE_LOG=<w>x<h>x<d>: each shader that binds an image of that size (once per shader and binding)
+                    static int sw = -1, shh, sd; if (sw < 0) { const char *ev = getenv("FRITCHII_SAMPLE_LOG"); sw = 0; if (ev) sscanf(ev, "%dx%dx%d", &sw, &shh, &sd); }
+                    if (sw && tid) { vka_img *im = vka_tex_id_img(tid, g_cb);
+                        if (im && (int)im->w == sw && (int)im->h == shh && (int)(im->depth > 1 ? im->depth : im->layers) == sd) {
+                            static uint64_t seen[256]; static int ns; uint64_t kk = sh->key ^ ((uint64_t)r[i].binding << 56) ^ ((uint64_t)st << 52); int f = 0;
+                            for (int q = 0; q < ns; q++) f |= seen[q] == kk;
+                            if (!f && ns < 256) { seen[ns++] = kk; VLOG("sample log: shader %016llx stage %d binding %u %s serial %llu %ux%ux%u format %#x", (unsigned long long)sh->key, st, r[i].binding, storage ? "storage" : "sampled", (unsigned long long)im->serial, im->w, im->h, im->depth, im->d.format); } } }
+                }
                 if (scaled && r[i].what == VKA_R_TEX && r[i].binding >= sh->scale_tex_binding && r[i].binding - sh->scale_tex_binding < sh->scale_tex_bits) {   // (the render scale: RescalingPass's bit)
                     unsigned b = sh->scale_tex_bit + r[i].binding - sh->scale_tex_binding; g_scale_push.tex[b >> 5] |= 1u << (b & 31); }
                 // A 2D texture in a 3D or cube slot: what the game leaves bound where a shader's branch does not sample (DKB's materials keep a 1x1 2D texture in their volume slot 12).
@@ -872,6 +1084,9 @@ static int stage_writes(const vka_dstate *d, int st, const vka_shader *sh, const
                 if (tid && !v && (dd == 2 || dd == 3) && (tt == NVN_TEXTURE_TARGET_2D || tt == NVN_TEXTURE_TARGET_2D_ARRAY)) {
                     static _Atomic int noted; if (!atomic_exchange(&noted, 1)) { char why[320]; vka_tex_id_desc(tid, why, sizeof why);
                         VLOG("%s binding fallback: shader %016llx binding %u, texture ID %d is a 2D texture (%s): it reads as zeros (the shader may leave it unused)", dd == 2 ? "3D" : "cube", (unsigned long long)sh->key, r[i].binding, tid, why); }
+                } else if (tid && !v && getenv("FRITCHII_UNBOUND_TEX_LOG") && sh->key == strtoull(getenv("FRITCHII_UNBOUND_TEX_LOG"), NULL, 16)) {   // Fritchii: that shader's unresolved textures, every time
+                    char why[320]; vka_tex_id_desc(tid, why, sizeof why); uint64_t vka_present_filled(void);
+                    VLOG("unbound texture: present %llu shader %016llx binding %u texture ID %d shape %#x: %s", (unsigned long long)vka_present_filled(), (unsigned long long)sh->key, r[i].binding, tid, r[i].dim, why);
                 } else if (tid && !v) { static _Atomic int nm; if (atomic_fetch_add(&nm, 1) < 8) { char why[320]; vka_tex_id_desc(tid, why, sizeof why);
                     VRED("shader %016llx binding %u: texture ID %d has no view of shape %#x%s: it reads as unbound (%s)", (unsigned long long)sh->key, r[i].binding, tid, r[i].dim, storage ? " (storage)" : "", why); } }
                 if (!v && !V.null_desc) v = placeholder(r[i].dim, storage);
@@ -882,6 +1097,9 @@ static int stage_writes(const vka_dstate *d, int st, const vka_shader *sh, const
                 if (!s) s = vka_samp_default();
             }
             *ii = (VkDescriptorImageInfo){s, v, lay};
+            if (bind_trace(sh)) { char why[320] = ""; int tid = (r[i].what == VKA_R_TEX || r[i].what == VKA_R_IMG) ? r[i].tid : 0; if (tid) vka_tex_id_desc(tid, why, sizeof why);
+                vka_img *tim = tid ? vka_tex_id_img(tid, g_cb) : NULL;
+                VLOG("bind trace %016llx: binding %u image dim %#x tid %d sid %d -> view %s %p image %p mem %p+%#llx z%d (%s)", (unsigned long long)sh->key, r[i].binding, r[i].dim, tid, r[i].sid, v ? "ok" : "NULL", (void *)v, tim ? (void *)tim->img : NULL, tim ? (void *)tim->m.dm : NULL, tim ? (unsigned long long)tim->m.off : 0ull, tim ? (int)tim->m.z : -1, why); }
             w->pImageInfo = ii; if (g_prof) { g_ps[4] += cntvct() - ti_; g_ps[5]++; }
             break; }
         case VK_DESCRIPTOR_TYPE_UNIFORM_TEXEL_BUFFER: case VK_DESCRIPTOR_TYPE_STORAGE_TEXEL_BUFFER:
@@ -902,7 +1120,7 @@ static void walk_all(const vka_dstate *d, vka_shader *const sh[VKA_NSTAGE]) {
     uint64_t t0_ = g_prof ? cntvct() : 0;
     for (int st = 0; st < VKA_NSTAGE; st++) {
         vka_shader *s = sh[st]; g_wk.n[st] = 0; g_wk.pool[st] = 0; if (!s) continue;
-        g_wk.n[st] = vka_walk(&d->b, st, s->e, s->b, s->lib->h->ssbo_align, V.sb_align, rd_cb, NULL, g_wk.r[st], 512, &g_wk.pool[st], g_wk.why[st], sizeof g_wk.why[st]);
+        g_wk.n[st] = vka_walk(&d->b, st, s->e, s->b, s->lib->h->ssbo_align, V.sb_align, rd_cb, NULL, g_wk.r[st], 512, &g_wk.pool[st], g_wk.why[st], sizeof g_wk.why[st], s->hprog, s->hprog_words);
     }
     if (g_prof) g_ps[0] += cntvct() - t0_;
 }
@@ -1028,6 +1246,16 @@ static int bind_sets(const vka_dstate *d, vka_shader *const sh[VKA_NSTAGE], cons
     const uint32_t npre = g_w.n;
     if (fs_own && !stage_bind(d, sh, 1, c0, &any_pool)) return 0;
     const uint32_t nall = g_w.n;
+    {   // DM_VK_WATCH_FS=<key>: the descriptor writes of that pixel shader's last draws, dumped at a device loss (vka_watch_dump)
+        static uint64_t wk = ~0ull; if (wk == ~0ull) { const char *e = getenv("DM_VK_WATCH_FS"); wk = e ? strtoull(e, NULL, 16) : 0; }
+        if (wk && sh[1] && sh[1]->key == wk) {
+            extern char vka_watch[4][4096]; extern unsigned vka_watch_n; char *o = vka_watch[vka_watch_n++ % 4]; size_t at = 0; o[0] = 0;
+            for (uint32_t i = 0; i < nall && at < 4000; i++) { const VkWriteDescriptorSet *w = &g_w.w[i];
+                if (w->pBufferInfo) at += (size_t)snprintf(o + at, 4096 - at, " b%u:t%d buf %llx +%llx r%llx", w->dstBinding, w->descriptorType, (unsigned long long)(uintptr_t)w->pBufferInfo->buffer, (unsigned long long)w->pBufferInfo->offset, (unsigned long long)w->pBufferInfo->range);
+                else if (w->pImageInfo) at += (size_t)snprintf(o + at, 4096 - at, " b%u:t%d view %llx smp %llx", w->dstBinding, w->descriptorType, (unsigned long long)(uintptr_t)w->pImageInfo->imageView, (unsigned long long)(uintptr_t)w->pImageInfo->sampler);
+                else if (w->pTexelBufferView) at += (size_t)snprintf(o + at, 4096 - at, " b%u:t%d tbv %llx", w->dstBinding, w->descriptorType, (unsigned long long)(uintptr_t)*w->pTexelBufferView); }
+        }
+    }
     g_w.n = npre;   // set 0: the writes before the pixel shader's
     uint64_t t2_ = g_prof ? cntvct() : 0;
     if (lay->push) { int ps = g_w.n ? push_same(bp, lay->layout) : 1;
@@ -1243,17 +1471,145 @@ static int mesh_records(const p_draw *dw, vka_span *s) {
         const uint32_t w[3] = {0, 1, 1}; memcpy(s->ptr + 12 * (size_t)i, w, 12);
         c[i] = (VkBufferCopy){o + (VkDeviceSize)i * st, s->off + 12 * (VkDeviceSize)i, 4};
     }
+    { extern const volatile uint32_t *vka_mrec_last; vka_mrec_last = (const volatile uint32_t *)s->ptr; }   // (the crumbs: the count the draw read, at a device loss)
     vka_rp_end(); vka_barrier(g_cb);
     vk.vkCmdCopyBuffer(g_cb, b, s->buf, n, c);
     vka_barrier(g_cb);
     free(c);
     return 1;
 }
+// ---------- Fritchii: the mesh emulation ----------
+// A mesh draw without a task program, on a device where native mesh draws lose the device (DM_VK_MESH_FB, default 1): the mesh program's compute shader writes each
+// workgroup's block into the submission slot's output buffer (device-local, MESH_FB_MB a slot, given back with the slot's fence), then the draw goes on as a draw of
+// group_vertices vertices a workgroup with the emulation's vertex shader (nvn_recompile.c vka_rc_mesh_fb). An indirect draw's count is the GPU's: a one-invocation pass
+// (vulkan_nvn_direct_mesh_args.comp) turns its record into the dispatch's and the draw's arguments. A draw that does not fit the room left is drawn natively
+#include "video_core/host_shaders/vulkan_nvn_direct_mesh_args_comp_spv.h"
+enum { MESH_FB_MB = 1024, MESH_FB_MAX_IND = 2048, MESH_FB_SEGS = 8 };   // MESH_FB_MAX_IND: the workgroups an indirect draw gets room for (its count is clamped there)
+// One device-local ring every submission slot shares (MESH_FB_MB): a slot's submission keeps the ranges it took until its fence; a range wanted again is waited for first
+static struct { VkBuffer buf; VkDeviceMemory mem; VkDeviceSize head; int failed; } g_mr;
+static struct { VkDeviceSize lo[MESH_FB_SEGS], hi[MESH_FB_SEGS]; int n; } g_mseg[NSLOT];
+static uint64_t g_fb_draws, g_fb_native;
+static struct { VkDescriptorSetLayout dsl; VkPipelineLayout layout; VkPipeline pipe; int failed; } g_margs;
+static struct { const vka_mesh_fb *fb; uint32_t groups; VkDeviceSize args; } g_fbd;   // the draw in progress (vka_draw)
+static VkDeviceSize g_mo_peak, g_mo_req_max, g_mo_full, g_mo_sub, g_mo_waits; static unsigned g_mo_subs;
+uint64_t vka_slot_fence(unsigned slot);   // vka_exec.c: the fence of the slot's last submission (0: the one being recorded)
+void vka_mesh_fb_sub_begin(unsigned slot) {
+    if (g_mo_sub > g_mo_peak) g_mo_peak = g_mo_sub;
+    g_mo_sub = 0; g_mseg[slot % NSLOT].n = 0;   // (its last submission is done: vka_exec.c waits for its fence before reusing the slot)
+    if (++g_mo_subs % 600 == 0) { VLOG("mesh emulation: %llu draws emulated, %llu native; output peak %.1f MiB a submission, largest request %.1f MiB, %llu requests that did not fit, %llu waits for the ring",
+                                       (unsigned long long)g_fb_draws, (unsigned long long)g_fb_native, g_mo_peak / 1048576.0, g_mo_req_max / 1048576.0, (unsigned long long)g_mo_full, (unsigned long long)g_mo_waits); g_mo_peak = 0; }
+}
+static int mesh_fb_room(VkDeviceSize n, VkDeviceSize align, VkDeviceSize *off) {
+    const VkDeviceSize cap = (VkDeviceSize)MESH_FB_MB << 20;
+    if (!g_mr.buf && !g_mr.failed) {
+        g_mr.failed = 1;
+        VkBufferCreateInfo bi = {VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO, .size = cap, .usage = VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_INDIRECT_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT};
+        VkMemoryRequirements mr = {0}; uint32_t t = UINT32_MAX;
+        if (!vk.vkCreateBuffer(V.dev, &bi, NULL, &g_mr.buf)) { vk.vkGetBufferMemoryRequirements(V.dev, g_mr.buf, &mr); t = vka_mem_type(mr.memoryTypeBits, VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT, 0); }
+        VkMemoryAllocateInfo ai = {VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO, .allocationSize = t == UINT32_MAX ? 0 : mr.size, .memoryTypeIndex = t};
+        if (!g_mr.buf || t == UINT32_MAX || vk.vkAllocateMemory(V.dev, &ai, NULL, &g_mr.mem) || vk.vkBindBufferMemory(V.dev, g_mr.buf, g_mr.mem, 0)) {
+            VRED("mesh emulation output ring (%d MiB) not made: mesh draws are native", MESH_FB_MB);
+            if (g_mr.buf) vk.vkDestroyBuffer(V.dev, g_mr.buf, NULL);
+            if (g_mr.mem) vk.vkFreeMemory(V.dev, g_mr.mem, NULL);
+            g_mr.buf = VK_NULL_HANDLE; g_mr.mem = VK_NULL_HANDLE; return 0; }
+        vka_mem_grew(mr.size); g_mr.failed = 0;
+    }
+    if (!g_mr.buf) return 0;
+    if (n > g_mo_req_max) g_mo_req_max = n;
+    if (n > cap / 4) { g_mo_full++; return 0; }
+    VkDeviceSize at = (g_mr.head + align - 1) / align * align;
+    if (at + n > cap) at = 0;   // (wraps)
+    typeof(g_mseg[0]) *me = &g_mseg[g_slot];
+    for (int k = 0; k < me->n; k++) if (at < me->hi[k] && me->lo[k] < at + n) { g_mo_full++; return 0; }   // this submission would overwrite itself
+    if (me->n == MESH_FB_SEGS && !(me->n && me->hi[me->n - 1] == at)) { g_mo_full++; return 0; }
+    for (unsigned s = 0; s < NSLOT; s++) {   // earlier submissions still on the GPU over that range: waited for
+        if (s == g_slot || !g_mseg[s].n) continue;
+        int hit = 0; for (int k = 0; k < g_mseg[s].n; k++) hit |= at < g_mseg[s].hi[k] && g_mseg[s].lo[k] < at + n;
+        if (!hit) continue;
+        const uint64_t f = vka_slot_fence(s);
+        if (f && vka_done() < f) { g_mo_waits++; if (!vka_wait_done(f, 2000000000ull)) { g_mo_full++; return 0; } }
+        g_mseg[s].n = 0;
+    }
+    if (me->n && me->hi[me->n - 1] == at) me->hi[me->n - 1] = at + n;
+    else { me->lo[me->n] = at; me->hi[me->n] = at + n; me->n++; }
+    g_mr.head = at + n; g_mo_sub += n;
+    *off = at; return 1;
+}
+static int mesh_args_pipeline(void) {
+    if (g_margs.pipe || g_margs.failed) return g_margs.pipe != VK_NULL_HANDLE;
+    g_margs.failed = 1;
+    const VkDescriptorSetLayoutBinding b[2] = {{0, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 1, VK_SHADER_STAGE_COMPUTE_BIT, NULL}, {1, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 1, VK_SHADER_STAGE_COMPUTE_BIT, NULL}};
+    VkDescriptorSetLayoutCreateInfo li = {VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO, .flags = V.push_desc ? VK_DESCRIPTOR_SET_LAYOUT_CREATE_PUSH_DESCRIPTOR_BIT_KHR : 0, .bindingCount = 2, .pBindings = b};
+    VkPushConstantRange pr = {VK_SHADER_STAGE_COMPUTE_BIT, 0, 12};
+    VkShaderModuleCreateInfo mi = {VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO, .codeSize = sizeof VULKAN_NVN_DIRECT_MESH_ARGS_COMP_SPV, .pCode = VULKAN_NVN_DIRECT_MESH_ARGS_COMP_SPV};
+    VkShaderModule m = VK_NULL_HANDLE; VkResult r = vk.vkCreateDescriptorSetLayout(V.dev, &li, NULL, &g_margs.dsl);
+    VkPipelineLayoutCreateInfo pi = {VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO, .setLayoutCount = 1, .pSetLayouts = &g_margs.dsl, .pushConstantRangeCount = 1, .pPushConstantRanges = &pr};
+    if (!r) r = vk.vkCreatePipelineLayout(V.dev, &pi, NULL, &g_margs.layout);
+    if (!r) r = vk.vkCreateShaderModule(V.dev, &mi, NULL, &m);
+    VkComputePipelineCreateInfo ci = {VK_STRUCTURE_TYPE_COMPUTE_PIPELINE_CREATE_INFO, .stage = {VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO, .stage = VK_SHADER_STAGE_COMPUTE_BIT, .module = m, .pName = "main"}, .layout = g_margs.layout};
+    if (!r) r = vk.vkCreateComputePipelines(V.dev, VK_NULL_HANDLE, 1, &ci, NULL, &g_margs.pipe);
+    if (m) vk.vkDestroyShaderModule(V.dev, m, NULL);
+    if (r) { VRED("mesh emulation arguments pipeline: %d; indirect mesh draws are native", r); g_margs.pipe = VK_NULL_HANDLE; return 0; }
+    g_margs.failed = 0; return 1;
+}
+static void walk_all(const vka_dstate *d, vka_shader *const sh[VKA_NSTAGE]);
+static int bind_sets(const vka_dstate *d, vka_shader *const sh[VKA_NSTAGE], const vka_layout *lay, VkPipelineBindPoint bp, c0_at *c0);
+// The emulation's compute pass of mesh draw dw (no pass open after): 1 with g_fbd and g_mesh_out set for the draw; 0: draw it natively
+static const char *g_fb_why;
+static int mesh_fb_compute(const vka_dstate *d, const vka_mesh_fb *fb, const p_draw *dw) {
+    g_fb_why = "";
+    const VkDeviceSize bw = (VkDeviceSize)fb->block_words * 4, room = ((VkDeviceSize)MESH_FB_MB << 20) / 4;
+    uint32_t maxg = (uint32_t)((room / 4) / bw); if (maxg > V.mesh_groups[0]) maxg = V.mesh_groups[0];
+    if (dw->ind && maxg > MESH_FB_MAX_IND) maxg = MESH_FB_MAX_IND;
+    uint32_t g = 0; VkBuffer rb = VK_NULL_HANDLE; VkDeviceSize ro = 0, rbase = 0;
+    if (!dw->ind) { g = (uint32_t)dw->count; if (!g || g > maxg) { g_fb_why = "count past the room"; return 0; } }
+    else {
+        if (!mesh_args_pipeline() || !vka_addr(dw->ind, 4, &rb, &ro, NULL) || (ro & 3)) { g_fb_why = "record not placed"; return 0; }
+        rbase = ro / V.sb_align * V.sb_align;
+    }
+    vka_shader *c5[VKA_NSTAGE] = {0}; c5[5] = fb->cs;
+    vka_layout lay; if (!vka_layout_of(c5, 1, &lay)) { g_fb_why = "no layout"; return 0; }
+    VkPipeline p = vka_cs_pipeline(fb->cs, &lay); if (!p) { g_fb_why = "no compute pipeline (yet)"; return 0; }
+    VkDeviceSize out = 0, args = 0, outn = dw->ind ? (VkDeviceSize)maxg * bw : (VkDeviceSize)g * bw;
+    if (!mesh_fb_room(outn, V.sb_align, &out)) { g_fb_why = "output buffer full"; return 0; }
+    if (dw->ind && !mesh_fb_room(32, V.sb_align, &args)) { g_fb_why = "output buffer full"; return 0; }
+    { extern uint32_t g_setrt_n; const uint32_t o = R.on ? R.setrt : g_setrt_n & 1023; g_pre_seen[o >> 6] |= 1ull << (o & 63); }
+    VkCommandBuffer vka_pre_cb(void); VkCommandBuffer pre = R.on ? vka_pre_cb() : VK_NULL_HANDLE, part = g_cb;
+    if (pre) g_cb = pre;   // (the pass stays open in the part: these run before it)
+    else vka_rp_end();
+    VkBuffer ob = g_mr.buf;
+    if (dw->ind) {   // the record's count, as the dispatch's and the draw's arguments
+        VkDescriptorBufferInfo bi[2] = {{rb, rbase, ro - rbase + 4}, {ob, args, 32}};
+        VkWriteDescriptorSet w[2] = {{VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET, .dstBinding = 0, .descriptorCount = 1, .descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, .pBufferInfo = &bi[0]},
+                                     {VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET, .dstBinding = 1, .descriptorCount = 1, .descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, .pBufferInfo = &bi[1]}};
+        vk.vkCmdBindPipeline(g_cb, VK_PIPELINE_BIND_POINT_COMPUTE, g_margs.pipe);
+        if (V.push_desc) vk.vkCmdPushDescriptorSetKHR(g_cb, VK_PIPELINE_BIND_POINT_COMPUTE, g_margs.layout, 0, 2, w);
+        else { VkDescriptorSet st = set_alloc(g_margs.dsl); if (!st) { g_cb = part; return 0; }
+               w[0].dstSet = w[1].dstSet = st; vk.vkUpdateDescriptorSets(V.dev, 2, w, 0, NULL); vk.vkCmdBindDescriptorSets(g_cb, VK_PIPELINE_BIND_POINT_COMPUTE, g_margs.layout, 0, 1, &st, 0, NULL); }
+        const uint32_t pc[3] = {(uint32_t)((ro - rbase) / 4), fb->group_vertices, maxg};
+        vk.vkCmdPushConstants(g_cb, g_margs.layout, VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof pc, pc);
+        vk.vkCmdDispatch(g_cb, 1, 1, 1);
+        vka_barrier(g_cb);
+    }
+    g_mesh_out = (VkDescriptorBufferInfo){ob, out, outn};
+    vka_shader *w7[VKA_NSTAGE] = {0}; w7[7] = fb->cs;   // (walked as the mesh stage: its constant buffers, textures and storage buffers)
+    walk_all(d, w7);
+    c0_at c0 = {0};
+    if (!bind_sets(d, w7, &lay, VK_PIPELINE_BIND_POINT_COMPUTE, &c0)) { g_cb = part; vka_dyn_invalidate(); g_fb_why = "descriptors not bound"; return 0; }
+    vk.vkCmdBindPipeline(g_cb, VK_PIPELINE_BIND_POINT_COMPUTE, p);
+    if (dw->ind) vk.vkCmdDispatchIndirect(g_cb, ob, args); else vk.vkCmdDispatch(g_cb, g, 1, 1);
+    if (!pre) vka_barrier(g_cb);   // (a pre command buffer ends with one: vka_exec.c pre_submit)
+    g_cb = part;
+    vka_dyn_invalidate();   // (the compute pipeline's push constants and descriptors disturb the draws' ones)
+    g_fbd.fb = fb; g_fbd.groups = g; g_fbd.args = args;
+    return 1;
+}
 void vka_draw(vka_dstate *d, const p_set_rt *rt, int has_rt, const p_scissor *sc, int has_sc, const p_draw *dw, const p_draw_idx *di) {
     if (!g_cb || !draws_on() || !statics()) { g_skipped++, vka_skip_line[__LINE__ & 2047]++; return; }
     if (!d->inited) vka_dstate_reset(d);
     // An NVN2 mesh draw (hle_nvn.c): a multi-draw of them is one record, drawn whole below
-    const int mesh = dw && (dw->prim == NVN_PRIM_MESH || dw->prim == NVN_PRIM_MESH_3D);
+    int mesh = dw && (dw->prim == NVN_PRIM_MESH || dw->prim == NVN_PRIM_MESH_3D);
+    g_fbd.fb = NULL;
     uint64_t mdi = mesh ? 0 : dw ? dw->mdi_cnt : di->mdi_cnt; int mdi_i = dw ? dw->mdi_i : di->mdi_i;
     // An indirect-count multi-draw (hle_nvn.c records one draw per possible record): on a device with drawIndirectCount the first record draws them all with the count the
     // GPU reads (vkCmdDraw*IndirectCount, at most mdi_max), and the other records are skipped; else each record reads the count on the CPU at replay
@@ -1288,6 +1644,26 @@ void vka_draw(vka_dstate *d, const p_set_rt *rt, int has_rt, const p_scissor *sc
         if (!dw->ind && (dw->count <= 0 || (dw->prim == NVN_PRIM_MESH_3D && (dw->instances <= 0 || dw->base_instance <= 0)))) return;
         if (dw->ind && (!vk.vkCmdDrawMeshTasksIndirectEXT || !vk.vkCmdDrawMeshTasksIndirectCountEXT)) SKIP("indirect mesh draw on a device without vkCmdDrawMeshTasksIndirect(Count)EXT: skipped");
         if (d->tf_on) VRED_ONCE("transform feedback with a mesh draw: drawn without capture");
+        { static int st = -1, sp = -1; if (st < 0) { st = (int)VKA_ENV("DM_VK_SKIP_TASK", 0); sp = (int)VKA_ENV("DM_VK_SKIP_MESHPRIM", 0); }   // diagnostics: mesh draws with a task program / per-primitive outputs skipped
+          if ((st && sh[6]) || (sp && ((sh[7]->e->flags & DMSH_VK_F_MESH_PRIM) || (sh[1] && (sh[1]->e->flags & DMSH_VK_F_MESH_PRIM))))) { g_skipped++; return; } }   // DM_VK_SKIP_TASK=1: mesh draws with a task program skipped (diagnostic)
+        static int fb_on = -1; if (fb_on < 0) fb_on = (int)VKA_ENV("DM_VK_MESH_FB", 1);   // Fritchii: the mesh emulation (above vka_draw)
+        if (fb_on) {
+            const char *no = sh[6] ? "a task program" : (sh[7]->e->flags & DMSH_VK_F_MESH_PRIM) ? "per-primitive outputs" : (sh[1] && (sh[1]->e->flags & DMSH_VK_F_MESH_PRIM)) ? "a pixel shader with per-primitive inputs"
+                           : dw->prim != NVN_PRIM_MESH ? "a 3D mesh draw" : dw->ind && (dw->mdi_cnt || dw->mdi_max > 1) ? "a multi-draw" : NULL;
+            if (!no) {   // DM_VK_MESH_FB_SKIP=<keys>: those mesh programs drawn natively (to find one the emulation draws wrong)
+                static const char *skip; static int si; if (!si) { skip = getenv("DM_VK_MESH_FB_SKIP"); si = 1; }
+                char kx[17]; snprintf(kx, sizeof kx, "%016llx", (unsigned long long)sh[7]->key);
+                if (skip && strstr(skip, kx)) no = "DM_VK_MESH_FB_SKIP";
+                static uint64_t em[256]; static int ne; int k3 = 0; for (; k3 < ne && em[k3] != sh[7]->key; k3++) {}
+                if (k3 == ne && ne < 256) { em[ne++] = sh[7]->key; VLOG("mesh emulation: program %016llx (pixel %016llx)", (unsigned long long)sh[7]->key, sh[1] ? (unsigned long long)sh[1]->key : 0ull); }
+            }
+            const vka_mesh_fb *fb = no ? NULL : vka_prog_mesh_fb(mp);
+            if (!no && !fb) no = "no emulation made";
+            if (!no && !mesh_fb_compute(d, fb, dw)) no = g_fb_why;
+            if (!no) { sh[0] = fb->vs; sh[6] = sh[7] = NULL; mesh = 0; g_fb_draws++; }
+            else { g_fb_native++; static uint64_t seen[64]; static int ns; int k2 = 0; for (; k2 < ns && seen[k2] != sh[7]->key; k2++) {}
+                   if (k2 == ns && ns < 64) { seen[ns++] = sh[7]->key; VRED("mesh draw of %016llx drawn natively: %s", (unsigned long long)sh[7]->key, no); } }
+        }
     } else {
         for (int st = 0; st < 5; st++) if (!resolve(d->bst[st], st, &sh[st], &bad)) SKIP("draw skipped: a program without shaders");
         if (bad) { g_skipped++, vka_skip_line[__LINE__ & 2047]++; return; }   // a refused or missing shader (logged when it was made)
@@ -1299,7 +1675,8 @@ void vka_draw(vka_dstate *d, const p_set_rt *rt, int has_rt, const p_scissor *sc
     if (d->poly.cull == NVN_FACE_FRONT_AND_BACK && !d->rast_discard) return;
     int prim = dw ? dw->prim : di->prim, expand = 0;
     VkPrimitiveTopology topo = VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST;   // (a mesh pipeline's: every translated mesh shader outputs triangles)
-    if (!mesh) {
+    if (g_fbd.fb) topo = g_fbd.fb->topology == 2 ? VK_PRIMITIVE_TOPOLOGY_POINT_LIST : g_fbd.fb->topology == 1 ? VK_PRIMITIVE_TOPOLOGY_LINE_LIST : VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST;
+    else if (!mesh) {
         topo = topology(prim, &expand);
         if (expand < 0) SKIP("primitive type %d not on Vulkan: the draw is skipped", prim);
         if (topo == VK_PRIMITIVE_TOPOLOGY_PATCH_LIST) {   // (Lichii: the patch size is the pipeline's)
@@ -1331,8 +1708,8 @@ void vka_draw(vka_dstate *d, const p_set_rt *rt, int has_rt, const p_scissor *sc
     walk_all(d, sh);
     if (make_images(d, sh, 1)) { vka_rp_end(); make_images(d, sh, 0); }
     if (R.on && R.bar_pending && bar_hazard(sh, d)) { g_bar_late++; vka_rp_end(); }   // the game barrier taken inside the pass is needed here: the pass ends (its full barrier) first
-    if (vka_nan_on() >= 2 && sh[1] && !d->rast_discard && vka_nan_probe(sh[1]->key)) {   // DM_VK_NANSCAN_FS: this draw's sampled textures, scanned before it
-        char why[8]; int n = vka_walk(&d->b, 1, sh[1]->e, sh[1]->b, sh[1]->lib->h->ssbo_align, 0, rd_cb, NULL, g_res, 512, NULL, why, sizeof why), m = 0;
+    if (vka_nan_on() >= 2 && sh[1] && !d->rast_discard && R.area.extent.width >= (uint32_t)VKA_ENV("FRITCHII_NANSCAN_MIN_W", 0) && vka_nan_probe(sh[1]->key)) {   // DM_VK_NANSCAN_FS: this draw's sampled textures, scanned before it (Fritchii: FRITCHII_NANSCAN_MIN_W: only passes at least that wide)
+        char why[8]; int n = vka_walk(&d->b, 1, sh[1]->e, sh[1]->b, sh[1]->lib->h->ssbo_align, 0, rd_cb, NULL, g_res, 512, NULL, why, sizeof why, sh[1]->hprog, sh[1]->hprog_words), m = 0;
         static vka_img *ims[64]; static int bs[64], ts[64];
         for (int i = 0; i < n && m < 64; i++) if (g_res[i].what == VKA_R_TEX && g_res[i].tid) { ims[m] = vka_tex_id_img(g_res[i].tid, g_cb); bs[m] = g_res[i].binding; ts[m++] = g_res[i].tid;
             static _Atomic int nd; if (atomic_fetch_add(&nd, 1) < 32) { char why[320]; vka_tex_id_desc(g_res[i].tid, why, sizeof why); vka_img *im = ims[m - 1];
@@ -1343,7 +1720,11 @@ void vka_draw(vka_dstate *d, const p_set_rt *rt, int has_rt, const p_scissor *sc
         vka_nan_inputs(g_cb, ims, bs, ts, m);
     }
     vka_span mrec = {0};
-    if (mesh && ind && dw->prim == NVN_PRIM_MESH && !mesh_records(dw, &mrec))
+    // DM_VK_MESH_CPU=1 (test only): {count, first} mesh records read on the CPU at replay and drawn directly, without mesh_records' pass break. Ocarina of Time's
+    // foliage records are written by the GPU (its culling): read this way most of its foliage disappeared
+    static int mesh_cpu = -1; if (mesh_cpu < 0) mesh_cpu = (int)VKA_ENV("DM_VK_MESH_CPU", 0);
+    const int mcpu = mesh_cpu && mesh && ind && dw->prim == NVN_PRIM_MESH && !dw->mdi_cnt;
+    if (!mcpu && mesh && ind && dw->prim == NVN_PRIM_MESH && !mesh_records(dw, &mrec))
         SKIP("indirect mesh draw: records at %#llx (%d, stride %d) not in one placed segment: skipped", (unsigned long long)ind, dw->mdi_max, dw->mdi_stride);
     if (!rp_begin(rt, has_rt, d)) { g_skipped++, vka_skip_line[__LINE__ & 2047]++; return; }
     if (!R.swrite && draw_writes(sh, d)) R.swrite = 1;   // (a game barrier in this pass from now on ends it: vka_rp_game_barrier)
@@ -1420,8 +1801,25 @@ void vka_draw(vka_dstate *d, const p_set_rt *rt, int has_rt, const p_scissor *sc
         }
     }
     if (src1_used) VRED_ONCE("a SRC1 blend factor with no dual-source module (MOD_DUAL; the profile's dual_want.tsv) or no dualSrcBlend: the second source reads as zero");
+    {   // Fritchii, DM_VK_BLEND_TRACE_FS=<key>: that shader's first draws' blend state (the game's and the Vulkan factors made of it)
+        static uint64_t bk = ~0ull; if (bk == ~0ull) { const char *e = getenv("DM_VK_BLEND_TRACE_FS"); bk = e ? strtoull(e, NULL, 16) : 0; }
+        static _Atomic int nb;
+        if (bk && fs && fs->key == bk && atomic_fetch_add(&nb, 1) < 4) {
+            const blend_st b = d->blend[0];
+            VLOG("blend trace %016llx: enable %#x variant %d src1_used %d; NVN target 0 src_rgb %d dst_rgb %d eq_rgb %d src_a %d dst_a %d eq_a %d adv %d; Vulkan att0 en %d src %d dst %d op %d srca %d dsta %d opa %d mask %#x; blend colour %g %g %g %g",
+                 (unsigned long long)bk, d->color.blend_en, variant, src1_used, (int)b.src_rgb, (int)b.dst_rgb, (int)b.eq_rgb, (int)b.src_a, (int)b.dst_a, (int)b.eq_a, (int)b.adv,
+                 k.att[0].en, k.att[0].src, k.att[0].dst, k.att[0].op, k.att[0].srca, k.att[0].dsta, k.att[0].opa, k.att[0].mask, d->blend_color[0], d->blend_color[1], d->blend_color[2], d->blend_color[3]);
+        }
+    }
 
     PT(3);
+    {   // DM_VK_SKIP_FS=<keys>: draws with those pixel shaders skipped (to find one that hangs the GPU or draws wrong); DM_VK_FS_LIST=1: each pixel shader drawn, logged once
+        static const char *skip; static int on = -1, list; if (on < 0) { skip = getenv("DM_VK_SKIP_FS"); list = VKA_ENV("DM_VK_FS_LIST", 0) != 0; on = skip || list; }
+        if (on && sh[1]) {
+            char kx[17]; snprintf(kx, sizeof kx, "%016llx", (unsigned long long)sh[1]->key);
+            if (list) { static uint64_t seen[4096]; static int ns; int i = 0; for (; i < ns && seen[i] != sh[1]->key; i++) {} if (i == ns && ns < 4096) { seen[ns++] = sh[1]->key; VLOG("fs drawn: %s", kx); } }
+            if (skip && strstr(skip, kx)) { g_skipped++; return; }
+        } }
     if (!mesh) vin_build(d, sh[0], &k);
     PT(4);
     VkPipeline p = vka_gfx_pipeline(sh, &lay, &k, !R.again);
@@ -1502,12 +1900,22 @@ void vka_draw(vka_dstate *d, const p_set_rt *rt, int has_rt, const p_scissor *sc
     PT(7);
     // The draw
     uint32_t inst = (uint32_t)((dw ? dw->instances : di->instances) > 0 ? (dw ? dw->instances : di->instances) : 1), binst = d->b.base_instance;
-    if (mesh && !ind) {   // count workgroups of the task shader, or of the mesh shader without one (the device's limit per dimension: maxTaskWorkGroupCount / maxMeshWorkGroupCount, 65535 on the Adreno 840)
+    if (mesh) vka_n_mesh_draws++;   // Lichii: the GPU profiler's mesh draws (vka_gprof.c)
+    if (g_fbd.fb) {   // Fritchii: the mesh emulation's draw (mesh_fb_compute)
+        if (!dw->ind) vk.vkCmdDraw(g_cb, g_fbd.groups * g_fbd.fb->group_vertices, 1, 0, 0);
+        else vk.vkCmdDrawIndirect(g_cb, g_mesh_out.buffer, g_fbd.args + 16, 1, 16);
+    } else if (mesh && !ind) {   // count workgroups of the task shader, or of the mesh shader without one (the device's limit per dimension: maxTaskWorkGroupCount / maxMeshWorkGroupCount, 65535 on the Adreno 840)
         const int d3 = dw->prim == NVN_PRIM_MESH_3D;
         const uint32_t g[3] = {(uint32_t)dw->count, d3 ? (uint32_t)dw->instances : 1, d3 ? (uint32_t)dw->base_instance : 1}, *maxg = sh[6] ? V.task_groups : V.mesh_groups;
         static uint32_t largest; if (g[0] > largest) { largest = g[0]; static _Atomic int n; if (atomic_fetch_add(&n, 1) < 8) VLOG("mesh draw: largest so far %u workgroups (task %016llx mesh %016llx)", largest, sh[6] ? (unsigned long long)sh[6]->key : 0ull, (unsigned long long)sh[7]->key); }
         if (g[0] > maxg[0] || g[1] > maxg[1] || g[2] > maxg[2]) SKIP("mesh draw of %ux%ux%u workgroups: more than the device's %ux%ux%u; skipped", g[0], g[1], g[2], maxg[0], maxg[1], maxg[2]);
         vk.vkCmdDrawMeshTasksEXT(g_cb, g[0], g[1], g[2]);
+    } else if (mcpu) {
+        const uint32_t n = dw->mdi_max > 0 ? (uint32_t)dw->mdi_max : 1, st = dw->mdi_stride > 0 ? (uint32_t)dw->mdi_stride : 8, *maxg = sh[6] ? V.task_groups : V.mesh_groups;
+        for (uint32_t i = 0; i < n; i++) { uint32_t x = 0;
+            if (!cpu_read(ind + (uint64_t)i * st, &x, 4)) SKIP("indirect mesh draw: record at %#llx not readable: skipped", (unsigned long long)(ind + (uint64_t)i * st));
+            if (x > maxg[0]) x = maxg[0];
+            if (x) vk.vkCmdDrawMeshTasksEXT(g_cb, x, 1, 1); }
     } else if (mesh) {   // indirect: {x, y, z} records as they are, {count, first} ones as mesh_records made them; a count the GPU reads where the device can
         uint32_t n = dw->mdi_max > 0 ? (uint32_t)dw->mdi_max : 1, st = mrec.buf ? 12 : dw->mdi_stride > 0 ? (uint32_t)dw->mdi_stride : 12;
         VkBuffer b = mrec.buf; VkDeviceSize o = mrec.off;
@@ -1559,14 +1967,134 @@ void vka_draw(vka_dstate *d, const p_set_rt *rt, int has_rt, const p_scissor *sc
                    if (mdi_gpu && vka_addr(ind, (uint64_t)(di->mdi_max - 1) * (uint32_t)di->mdi_stride + 20, NULL, NULL, NULL) && vka_addr(mdi, 4, &cb_, &co_, NULL) && !(co_ & 3) && di->mdi_stride >= 20 && !(di->mdi_stride & 3))
                        vk.vkCmdDrawIndexedIndirectCount(g_cb, b, o, cb_, co_, (uint32_t)di->mdi_max, (uint32_t)di->mdi_stride);
                    else if (mdi_gpu) SKIP("indirect-count multi-draw: records at %#llx (%d, stride %d) or count at %#llx not in one placed segment: skipped", (unsigned long long)ind, di->mdi_max, di->mdi_stride, (unsigned long long)mdi);
-                   else vk.vkCmdDrawIndexedIndirect(g_cb, b, o, 1, 20); }
+                   else {
+                       static int chk = -1; if (chk < 0) chk = (int)VKA_ENV("DM_VK_IND_CHECK", 0);
+                       if (chk) {   // the arguments as the CPU sees them now: indices past the index buffer's placed segment, or huge counts
+                           void *nvn_direct_writable(uint64_t); const uint32_t *w = nvn_direct_writable(ind);
+                           if (w && (w[0] > 4000000u || w[1] > 100000u || !vka_addr(di->ibuf, (uint64_t)isz * ((uint64_t)w[2] + w[0] + 1), NULL, NULL, NULL))) {
+                               static _Atomic int n; if (atomic_fetch_add(&n, 1) < 40) VRED("indirect indexed draw %016llx/%016llx at %#llx: count %u instances %u first %u base %d baseinst %u (index buffer %#llx, %u bytes each)%s",
+                                   sh[0] ? (unsigned long long)sh[0]->key : 0ull, sh[1] ? (unsigned long long)sh[1]->key : 0ull, (unsigned long long)ind, w[0], w[1], w[2], (int)w[3], w[4], (unsigned long long)di->ibuf, (unsigned)isz,
+                                   vka_addr(di->ibuf, (uint64_t)isz * ((uint64_t)w[2] + w[0] + 1), NULL, NULL, NULL) ? "" : ": past the placed segment"); }
+                       }
+                       static int cpu = -1; if (cpu < 0) cpu = (int)VKA_ENV("DM_VK_IND_CPU", 0);   // DM_VK_IND_CPU=1: the arguments read now and drawn directly
+                       void *nvn_direct_writable(uint64_t); const uint32_t *w = cpu ? nvn_direct_writable(ind) : NULL;
+                       if (w) { if (w[0] && w[1]) vk.vkCmdDrawIndexed(g_cb, w[0], w[1], w[2], (int32_t)w[3], w[4]); }
+                       else vk.vkCmdDrawIndexedIndirect(g_cb, b, o, 1, 20);
+                   } }
         else vk.vkCmdDrawIndexed(g_cb, (uint32_t)di->count, inst, 0, di->base_vertex, binst);
     }
+    { void vka_crumb(VkCommandBuffer, uint64_t, uint64_t, uint64_t); extern const volatile uint32_t *vka_mrec_last;
+      vka_crumb(g_cb, sh[7] ? sh[7]->key : sh[0] ? sh[0]->key : 0, sh[1] ? sh[1]->key : 0, mrec.buf && vka_mrec_last ? (1ull << 62) | (uint64_t)(uintptr_t)vka_mrec_last : (uint64_t)ind ? (uint64_t)ind : ((uint64_t)(uint32_t)inst << 32 | (uint32_t)(di ? di->count : dw->count))); }
     g_draws++;
     PT(8);
     if (vka_nan_on() >= 2 && vka_nan_split(R.cim, R.nci)) vka_rp_end();   // DM_VK_NANSCAN=2: a scan inside the game's pass
 }
 
+// Fritchii: Ocarina of Time's No sharpening (oot_anti_aliasing, docs/nx2/oot-network-bypass.md) in Direct NVN. The game runs a prepass on the tonemapped image, two
+// passes, then the tensor network, which writes the scene image (same format and size as the tonemapped one). With No sharpening the network's store is replaced by a copy
+// of the image the prepass samples, and while that copy works the three passes before it are skipped too (a failed copy runs the whole chain next frame).
+// Keys are the translated compute shaders' (game build E0F3CCFA...). FRITCHII_OOT_BYPASS=0 / 1 overrides the setting
+#define OOT_PRE 0xf8965bffbdf51d78ull
+#define OOT_NET 0x8df148d58b7cbe8eull
+static int g_oot_src, g_oot_ok;
+static int oot_bypass(uint64_t key) {
+    static int on = -1; if (on < 0) { int fritchii_oot_no_sharpening(void); on = (int)VKA_ENV("FRITCHII_OOT_BYPASS", -1); if (on < 0) on = fritchii_oot_no_sharpening(); if (on) VLOG("Ocarina of Time: No sharpening: the anti-aliasing network is replaced by a copy"); }
+    if (!on || (key != OOT_PRE && key != 0xd17eefaff4f0bc23ull && key != 0xa335c1db6270c355ull && key != OOT_NET)) return 0;
+    const vka_res *r = g_wk.r[5]; int n = g_wk.n[5];
+    if (key == OOT_PRE) { g_oot_src = 0; for (int i = 0; i < n; i++) if (r[i].what == VKA_R_TEX && r[i].tid && r[i].desc != VK_DESCRIPTOR_TYPE_STORAGE_IMAGE) { g_oot_src = r[i].tid; break; } }
+    if (key != OOT_NET) return g_oot_ok;
+    int dst = 0; uint8_t ddim = 0; for (int i = 0; i < n; i++) if (r[i].tid && r[i].desc == VK_DESCRIPTOR_TYPE_STORAGE_IMAGE) { dst = r[i].tid; ddim = r[i].dim; }
+    g_oot_ok = 0;
+    if (!g_oot_src || !dst) return 0;
+    VkImageLayout lay; int sc = 0;
+    if (!vka_tex_id_view_rec(g_oot_src, g_cb, 0x1, 0, &lay, &sc) || !vka_tex_id_view_rec(dst, g_cb, ddim, 1, &lay, &sc)) return 0;   // (their bookkeeping: read, written by the GPU)
+    vka_img *a = vka_tex_id_img(g_oot_src, g_cb), *b = vka_tex_id_img(dst, g_cb);
+    if (!a || !b || a == b || a->w != b->w || a->h != b->h || a->f.vk != b->f.vk || a->samples > 1 || b->samples > 1) {
+        static int nw; if (nw++ < 4) VLOG("Ocarina of Time: No sharpening: unexpected network images (%ux%u, %ux%u): the network runs", a ? a->w : 0, a ? a->h : 0, b ? b->w : 0, b ? b->h : 0);
+        return 0;
+    }
+    vka_barrier(g_cb);
+    VkImageCopy c = {{VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1}, {0, 0, 0}, {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1}, {0, 0, 0}, {a->w, a->h, 1}};
+    vk.vkCmdCopyImage(g_cb, a->img, VK_IMAGE_LAYOUT_GENERAL, b->img, VK_IMAGE_LAYOUT_GENERAL, 1, &c);
+    vka_barrier(g_cb);
+    g_oot_ok = 1;
+    return 1;
+}
+// Fritchii: Ocarina of Time's movie network (the title screen's movie: 14 dispatches, ~30 ms of GPU a frame with emulated tensor operations) replaced by a bilinear copy of
+// the decoded frame into the network's output, as the normal renderer does (kepler_compute.cpp, oot_movie_upscale). The network's first pass (OOT_MOVIE_IN) samples the
+// decoded frame and stores no image: it opens a window of skipped dispatches; the first one in it that stores an image upscaling the frame is replaced by the copy
+// and closes it. A failed copy runs the network for the rest of the session
+#include "video_core/host_shaders/vulkan_nvn_direct_oot_movie_comp_spv.h"
+#define OOT_MOVIE_IN 0xba079f68ae288dbaull
+static struct { VkDescriptorSetLayout dsl; VkPipelineLayout layout; VkPipeline pipe; VkSampler smp; int failed; } g_mov;
+static int g_mov_src, g_mov_left, g_mov_off = -1;
+static int movie_pipeline(void) {
+    if (g_mov.pipe || g_mov.failed) return g_mov.pipe != VK_NULL_HANDLE;
+    g_mov.failed = 1;
+    const VkDescriptorSetLayoutBinding b[2] = {{0, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, 1, VK_SHADER_STAGE_COMPUTE_BIT, NULL}, {1, VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, 1, VK_SHADER_STAGE_COMPUTE_BIT, NULL}};
+    VkDescriptorSetLayoutCreateInfo li = {VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO, .flags = V.push_desc ? VK_DESCRIPTOR_SET_LAYOUT_CREATE_PUSH_DESCRIPTOR_BIT_KHR : 0, .bindingCount = 2, .pBindings = b};
+    VkPushConstantRange pr = {VK_SHADER_STAGE_COMPUTE_BIT, 0, 12};
+    VkSamplerCreateInfo si = {VK_STRUCTURE_TYPE_SAMPLER_CREATE_INFO, .magFilter = VK_FILTER_LINEAR, .minFilter = VK_FILTER_LINEAR, .mipmapMode = VK_SAMPLER_MIPMAP_MODE_NEAREST,
+                              .addressModeU = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE, .addressModeV = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE, .addressModeW = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE};
+    VkShaderModuleCreateInfo mi = {VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO, .codeSize = sizeof VULKAN_NVN_DIRECT_OOT_MOVIE_COMP_SPV, .pCode = VULKAN_NVN_DIRECT_OOT_MOVIE_COMP_SPV};
+    VkShaderModule m = VK_NULL_HANDLE; VkResult r = vk.vkCreateDescriptorSetLayout(V.dev, &li, NULL, &g_mov.dsl);
+    VkPipelineLayoutCreateInfo pi = {VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO, .setLayoutCount = 1, .pSetLayouts = &g_mov.dsl, .pushConstantRangeCount = 1, .pPushConstantRanges = &pr};
+    if (!r) r = vk.vkCreatePipelineLayout(V.dev, &pi, NULL, &g_mov.layout);
+    if (!r) r = vk.vkCreateSampler(V.dev, &si, NULL, &g_mov.smp);
+    if (!r) r = vk.vkCreateShaderModule(V.dev, &mi, NULL, &m);
+    VkComputePipelineCreateInfo ci = {VK_STRUCTURE_TYPE_COMPUTE_PIPELINE_CREATE_INFO, .stage = {VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO, .stage = VK_SHADER_STAGE_COMPUTE_BIT, .module = m, .pName = "main"}, .layout = g_mov.layout};
+    if (!r) r = vk.vkCreateComputePipelines(V.dev, VK_NULL_HANDLE, 1, &ci, NULL, &g_mov.pipe);
+    if (m) vk.vkDestroyShaderModule(V.dev, m, NULL);
+    if (r) { VRED("Ocarina of Time movie copy pipeline: %d; the movie network runs", r); g_mov.pipe = VK_NULL_HANDLE; return 0; }
+    g_mov.failed = 0; return 1;
+}
+static int movie_copy(int src, int dst, uint8_t ddim) {   // 1 = the copy is recorded
+    if (!movie_pipeline()) return 0;
+    VkImageLayout sl = VK_IMAGE_LAYOUT_GENERAL, dl = VK_IMAGE_LAYOUT_GENERAL; int sc = 0;
+    VkImageView sv = vka_tex_id_view_rec(src, g_cb, 0x1, 0, &sl, &sc), dv = sv ? vka_tex_id_view_rec(dst, g_cb, ddim, 1, &dl, &sc) : VK_NULL_HANDLE;
+    vka_img *b = vka_tex_id_img(dst, g_cb);
+    if (!sv || !dv || !b) return 0;
+    { static int once; vka_img *a = vka_tex_id_img(src, g_cb); if (!once++ && a) VLOG("Ocarina of Time movie copy: source NVN format %#x (VkFormat %d, view format %d, sRGB %d) %ux%u -> output NVN format %#x (VkFormat %d) %ux%u", a->d.format, a->f.vk, a->f.view, a->f.srgb, a->w, a->h, b->d.format, b->f.vk, b->w, b->h); }
+    VkDescriptorImageInfo ii[2] = {{g_mov.smp, sv, sl}, {VK_NULL_HANDLE, dv, dl}};
+    VkWriteDescriptorSet w[2] = {{VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET, .dstBinding = 0, .descriptorCount = 1, .descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, .pImageInfo = &ii[0]},
+                                 {VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET, .dstBinding = 1, .descriptorCount = 1, .descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, .pImageInfo = &ii[1]}};
+    vka_barrier(g_cb);
+    vk.vkCmdBindPipeline(g_cb, VK_PIPELINE_BIND_POINT_COMPUTE, g_mov.pipe);
+    if (V.push_desc) vk.vkCmdPushDescriptorSetKHR(g_cb, VK_PIPELINE_BIND_POINT_COMPUTE, g_mov.layout, 0, 2, w);
+    else { VkDescriptorSet st = set_alloc(g_mov.dsl); if (!st) return 0;
+           w[0].dstSet = w[1].dstSet = st; vk.vkUpdateDescriptorSets(V.dev, 2, w, 0, NULL); vk.vkCmdBindDescriptorSets(g_cb, VK_PIPELINE_BIND_POINT_COMPUTE, g_mov.layout, 0, 1, &st, 0, NULL); }
+    // (no sRGB decode: with it the movie came out far darker than the game's own network draws it, brightness 64 against 115; FRITCHII_OOT_MOVIE_DECODE=1 decodes)
+    const uint32_t pc[3] = {b->w, b->h, (uint32_t)VKA_ENV("FRITCHII_OOT_MOVIE_DECODE", 0)};
+    vk.vkCmdPushConstants(g_cb, g_mov.layout, VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof pc, pc);
+    vk.vkCmdDispatch(g_cb, (b->w + 7) / 8, (b->h + 7) / 8, 1);
+    vka_barrier(g_cb);
+    vka_dyn_invalidate();
+    return 1;
+}
+static int oot_movie(uint64_t key) {
+    if (g_mov_off < 0) { int fritchii_oot_movie_bilinear(void); g_mov_off = !fritchii_oot_movie_bilinear(); if (!g_mov_off) VLOG("Ocarina of Time: movies drawn with a bilinear copy in place of the game's movie network (oot_movie_upscale)"); }
+    if (g_mov_off) return 0;
+    const vka_res *r = g_wk.r[5]; int n = g_wk.n[5];
+    int nsamp = 0, samp = 0, nstore = 0, dst = 0; uint8_t ddim = 0;
+    for (int i = 0; i < n; i++) if (r[i].tid && (r[i].what == VKA_R_TEX || r[i].what == VKA_R_IMG)) {
+        if (r[i].desc == VK_DESCRIPTOR_TYPE_STORAGE_IMAGE) { nstore++; dst = r[i].tid; ddim = r[i].dim; } else { nsamp++; samp = r[i].tid; } }
+    if (key == OOT_MOVIE_IN && nsamp == 1 && !nstore) { g_mov_src = samp; g_mov_left = 32; return 1; }
+    if (g_mov_left <= 0) return 0;
+    if (nstore && g_mov_src) {
+        vka_img *a = vka_tex_id_img(g_mov_src, g_cb), *b = vka_tex_id_img(dst, g_cb);
+        if (a && b && a != b && b->w > a->w && b->w <= 4 * a->w) {
+            const uint64_t ca = (uint64_t)b->w * a->h, cb = (uint64_t)b->h * a->w;
+            if ((ca > cb ? ca - cb : cb - ca) * 32 <= ca) {   // the same aspect: the network's output
+                g_mov_left = 0;
+                if (movie_copy(g_mov_src, dst, ddim)) return 1;
+                g_mov_off = 1; VRED("Ocarina of Time: the movie copy failed: the movie network runs from now on");
+                return 0;
+            }
+        }
+    }
+    g_mov_left--;
+    return 1;
+}
 int dm_sdk_ounce(void);
 static int g_nvn2 = -1;
 void vka_set_nvn2(int on) { g_nvn2 = on != 0; }
@@ -1581,6 +2109,13 @@ void vka_dispatch(vka_dstate *d, const p_dispatch *dp) {
     if (!resolve(d->cprog, 5, &sh[5], &bad)) SKIP("dispatch skipped: a program without shaders");
     if (bad) { g_skipped++, vka_skip_line[__LINE__ & 2047]++; return; }
     if (!sh[5]) SKIP("dispatch with no compute shader bound: skipped");
+    {   // DM_VK_SKIP_CS=<keys>: those compute shaders' dispatches skipped; DM_VK_CS_LIST=1: each compute shader dispatched, logged once (diagnostics)
+        static const char *skip; static int on = -1, list; if (on < 0) { skip = getenv("DM_VK_SKIP_CS"); list = VKA_ENV("DM_VK_CS_LIST", 0) != 0; on = skip || list; }
+        if (on) {
+            char kx[17]; snprintf(kx, sizeof kx, "%016llx", (unsigned long long)sh[5]->key);
+            if (list) { static uint64_t seen[2048]; static int ns; int i = 0; for (; i < ns && seen[i] != sh[5]->key; i++) {} if (i == ns && ns < 2048) { seen[ns++] = sh[5]->key; VLOG("cs dispatched: %s", kx); } }
+            if (skip && strstr(skip, kx)) { g_skipped++; return; }
+        } }
     vka_layout lay; if (!vka_layout_of(sh, 1, &lay)) SKIP("dispatch skipped: no pipeline layout");
     VkPipeline p = vka_cs_pipeline(sh[5], &lay);
     if (vka_nan_on()) vka_tex_watch_dispatch(sh[5]->key);
@@ -1597,7 +2132,19 @@ void vka_dispatch(vka_dstate *d, const p_dispatch *dp) {
     }
     c0_at c0 = {0};
     walk_all(d, sh);
+    if (oot_bypass(sh[5]->key) || oot_movie(sh[5]->key)) { g_dispatches++; return; }
+    vka_img *pims[32]; int pbs[32], pn = 0;   // Fritchii, FRITCHII_CS_PROBE (vka_nanscan.c)
+    { static int on = -1; if (on < 0) on = getenv("FRITCHII_CS_PROBE") != NULL;
+      if (on) { void vka_cs_probe_dump(VkCommandBuffer, uint64_t, int, vka_img *const *, const int *, int);
+                for (int i = 0; i < g_wk.n[5] && pn < 32; i++) if (g_wk.r[5][i].tid && (g_wk.r[5][i].what == VKA_R_TEX || g_wk.r[5][i].what == VKA_R_IMG)) { pims[pn] = vka_tex_id_img(g_wk.r[5][i].tid, g_cb); pbs[pn++] = (int)g_wk.r[5][i].binding; }
+                int vka_probe_turn(uint64_t, int); if (!vka_probe_turn(sh[5]->key, 0)) pn = 0; else { vka_cs_probe_dump(g_cb, sh[5]->key, 0, pims, pbs, pn); if (!pn) pn = -1; } } }   // (-1: its turn, no images)
     if (!bind_sets(d, sh, &lay, VK_PIPELINE_BIND_POINT_COMPUTE, &c0)) { g_skipped++, vka_skip_line[__LINE__ & 2047]++; return; }
+    VkDescriptorBufferInfo pbuf[16]; int pbb[16], pnb = 0;   // Fritchii, FRITCHII_CS_PROBE: the storage buffers, dumped before and after
+    if (pn) { void vka_cs_probe_buf(VkCommandBuffer, uint64_t, int, VkBuffer, VkDeviceSize, VkDeviceSize, int);
+        for (uint32_t i = 0; i < g_w.n && pnb < 16; i++) if (g_w.w[i].descriptorType == VK_DESCRIPTOR_TYPE_STORAGE_BUFFER && g_w.w[i].pBufferInfo && g_w.w[i].pBufferInfo->range <= (1u << 20)) {
+            pbuf[pnb] = *g_w.w[i].pBufferInfo; pbb[pnb++] = (int)g_w.w[i].dstBinding; }
+        for (int i = 0; i < pnb; i++) vka_cs_probe_buf(g_cb, sh[5]->key, 0, pbuf[i].buffer, pbuf[i].offset, pbuf[i].range, pbb[i]);
+        vka_dyn_invalidate(); if (!bind_sets(d, sh, &lay, VK_PIPELINE_BIND_POINT_COMPUTE, &c0)) { g_skipped++; return; } }
     if (dp->ind && c0.buf) {   // the group counts the GPU wrote, into c0's dispatch words before the dispatch reads them (nvn_mtl.m g_c0_dim_buf); NVN2 reads them at c0 + 4 too
         VkBufferCopy c[2] = {{io, c0.off + DMSH_C0_DISPATCH, 12}, {io, c0.off + DMSH_C0_DISPATCH_NVN2, 12}};
         vk.vkCmdCopyBuffer(g_cb, ib, c0.buf, d->b.nvn2 ? 2 : 1, c);
@@ -1606,18 +2153,24 @@ void vka_dispatch(vka_dstate *d, const p_dispatch *dp) {
     // DM_VK_DISPATCH_LOG=1: one line per dispatch (its index in the submission's run of dispatches since the last log reset, key, groups, workgroup, shared memory, flags);
     // DM_VK_DISPATCH_SKIP=<from>[,<to>]: dispatches from..to (default: to the end) are recorded without their vkCmdDispatch, to find the one that writes a wrong picture
     uint64_t vka_frame(void); static unsigned long long nd; static uint64_t fr = ~0ull; static int lg; if (vka_frame() != fr) { fr = vka_frame(); lg = (int)VKA_ENV("DM_VK_DISPATCH_LOG", 0); nd = 0; }
-    unsigned long long di = nd++; const char *sk = getenv("DM_VK_DISPATCH_SKIP"); int skip = 0;
+    unsigned long long di = nd++; static const char *sk; static int ski; if (!ski) { sk = getenv("DM_VK_DISPATCH_SKIP"); ski = 1; } int skip = 0;   // (read once: getenv scans the environment)
     if (sk && *sk) { char *e; unsigned long long a = strtoull(sk, &e, 10), b = *e == ',' ? strtoull(e + 1, NULL, 10) : ~0ull; skip = di >= a && di <= b; }
-    if (lg) VLOG("dispatch %llu: %016llx groups %d,%d,%d%s local %u,%u,%u shared %u flags %#x%s", di, (unsigned long long)sh[5]->key, dp->x, dp->y, dp->z, dp->ind ? " (indirect)" : "",
+    uint64_t vka_exec_queue_serial(void);
+    uint64_t vka_exec_cur_fence(void);
+    if (lg) VLOG("dispatch %llu (queue %llu fence %llu): %016llx groups %d,%d,%d%s local %u,%u,%u shared %u flags %#x%s", di, (unsigned long long)vka_exec_queue_serial(), (unsigned long long)vka_exec_cur_fence(), (unsigned long long)sh[5]->key, dp->x, dp->y, dp->z, dp->ind ? " (indirect)" : "",
                  sh[5]->e->local[0], sh[5]->e->local[1], sh[5]->e->local[2], sh[5]->e->shared, sh[5]->e->flags, skip ? " SKIPPED" : "");
     if (skip) { vka_barrier(g_cb); g_dispatches++; return; }
+    if (vka_gp_active) { char gd[96]; snprintf(gd, sizeof gd, "cs %016llx groups %d,%d,%d local %u,%u,%u", (unsigned long long)sh[5]->key, dp->x, dp->y, dp->z, sh[5]->e->local[0], sh[5]->e->local[1], sh[5]->e->local[2]); vka_gp_pass(gd); }
     vk.vkCmdBindPipeline(g_cb, VK_PIPELINE_BIND_POINT_COMPUTE, p);
     if (dp->ind) vk.vkCmdDispatchIndirect(g_cb, ib, io);
     else if (dp->x > 0 && dp->y > 0 && dp->z > 0) {
         if (sb && (uint64_t)dp->x * dp->y * dp->z > ns) spill_dispatch((uint32_t)dp->x, (uint32_t)dp->y, (uint32_t)dp->z, ns);
         else vk.vkCmdDispatch(g_cb, (uint32_t)dp->x, (uint32_t)dp->y, (uint32_t)dp->z);
     }
-    vka_barrier(g_cb);   // (also frees the shared memory spill buffer for the next dispatch)
+    { void vka_crumb(VkCommandBuffer, uint64_t, uint64_t, uint64_t); vka_crumb(g_cb, sh[5]->key, 5, dp->ind ? 1ull << 63 : (uint64_t)(uint32_t)dp->x << 32 | (uint32_t)dp->y * (uint32_t)dp->z); }
+    if (sb || VKA_ENV("DM_VK_CS_BAR", 1)) vka_barrier_from(g_cb, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, VK_ACCESS_SHADER_WRITE_BIT);   // (Fritchii: after the dispatch's writes)   // DM_VK_CS_BAR=0: only the game's barriers (~0.6 ms less in Ocarina of Time, but its HUD flickered)   // (also frees the shared memory spill buffer for the next dispatch). DM_VK_CS_BAR=0: only the game's own barriers
+    for (int i = 0; i < pnb; i++) { void vka_cs_probe_buf(VkCommandBuffer, uint64_t, int, VkBuffer, VkDeviceSize, VkDeviceSize, int); vka_cs_probe_buf(g_cb, sh[5]->key, 1, pbuf[i].buffer, pbuf[i].offset, pbuf[i].range, pbb[i]); }
+    if (pn) { void vka_cs_probe_dump(VkCommandBuffer, uint64_t, int, vka_img *const *, const int *, int); int vka_probe_turn(uint64_t, int); vka_cs_probe_dump(g_cb, sh[5]->key, 1, pims, pbs, pn); vka_probe_turn(sh[5]->key, 1); }
     g_dispatches++;
 }
 void vka_draw_stats(uint64_t *draws, uint64_t *skipped, uint64_t *dispatches, uint64_t *pipelines) {

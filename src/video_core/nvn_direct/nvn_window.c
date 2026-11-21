@@ -125,16 +125,26 @@ NVN(nvnQueueAcquireTexture, NVNqueueAcquireTextureResult, NVNqueue* q, NVNwindow
 }
 // The image goes to the replay's present queue (mtl_present: after every submission before it);
 // Lichii's present on this thread then shows it (nvn_direct_present_take, core/nvn_hook.cpp).
+static _Atomic uint64_t g_last_present_fence, g_presents_all;   // (nvn_dispatch.c FRITCHII_NVN_SYNC_SUBMIT)
+uint64_t nvn_window_last_present_fence(void) { return atomic_load(&g_last_present_fence); }
+uint64_t nvn_window_presents(void) { return atomic_load(&g_presents_all); }
 NVN(nvnQueuePresentTexture, void, NVNqueue* q, NVNwindow* w, int idx) {
     win_t* o = (win_t*)w;
     o->presents++;
     atomic_fetch_add(&g_frame, 1);
     if (idx < 0 || idx >= o->ntex || !o->tex[idx]) return;
     o->pfence[idx] = o->last_pfence = nvn_direct_present_queue_fence = ((const queue_t*)q)->last_fence;
+    atomic_store(&g_last_present_fence, o->last_pfence); atomic_fetch_add(&g_presents_all, 1);
     const int interval = o->interval > 0 ? o->interval : 1;
     const int has_crop = o->crop[2] > 0 && o->crop[3] > 0;
     nvn_cap_present(CTX(o->tex[idx]), has_crop ? o->crop : NULL); // DM_NVN_CAPTURE
+    const uint64_t t0 = now_ns();
     nvn_direct_present_note(mtl_present(CTX(o->tex[idx]), interval / 60.0, has_crop ? o->crop : NULL), (uint32_t)interval);
+    void nvn_wait_stats(uint64_t present_ns);
+    nvn_wait_stats(now_ns() - t0);
+    // Lichii: the replay's frame number (vka_frame) follows the game's presents. Nothing set it, so every submission was frame 0: the frame-based
+    // decisions (a draw into targets not drawn in the last frames is never skipped, the profiler, the frame statistics) saw one endless frame
+    mtl_set_frame(atomic_load(&g_frame));
 }
 
 // ---------- Window state and HDR metadata ----------

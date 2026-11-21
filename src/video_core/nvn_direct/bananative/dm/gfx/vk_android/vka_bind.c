@@ -3,8 +3,11 @@
 #include "vka_bind.h"
 #include "nvn_direct_front.h"
 #include <stdarg.h>
+#include <stdatomic.h>
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
+void vka_bind_log(const char *fmt, ...);   // Lichii: vka_draw.c (the replay's log)
 
 _Static_assert(DMSH_C2_TEX + DMSH_C2_ROW * DMSH_C2_TEX_SLOTS == DMSH_C2_SEPTEX && DMSH_C2_SEPTEX + DMSH_C2_ROW * DMSH_C2_SEP_SLOTS == DMSH_C2_SAMP
                && DMSH_C2_SAMP + DMSH_C2_ROW * DMSH_C2_SEP_SLOTS <= DMSH_DRV_SIZE, "NVN driver handle tables");
@@ -42,15 +45,109 @@ static int samp_of(const vka_bstate *s, int st, const dmsh_vk_bind *b, unsigned 
     }
 }
 
+// ---------- Lichii: handle programs (shader_recompiler/shader_info.h EvaluateHandleProgram, HandleOp) ----------
+// A stack machine over 32-bit words whose constant buffer and storage buffer reads are the draw's: the replay's driver banks (vka_drv_fill), its uniform
+// buffers, and the storage buffers the program's descriptors point at, as VideoCommon::EvaluateTextureHandle reads them for the GPU emulation
+typedef struct { const vka_bstate *s; int st; vka_read_fn rd; void *ctx; uint32_t ssbo_align; const uint32_t *ssbo; uint32_t nssbo;
+                 uint8_t drv[3][DMSH_DRV_SIZE]; uint8_t have[3]; } hp_ctx;
+static uint32_t hp_cbuf(hp_ctx *x, uint32_t bank, uint32_t off) {
+    uint32_t v = 0;
+    int i = bank == 0 ? 0 : bank == 2 ? 1 : bank == DMSH_PUSH_BANK ? 2 : -1;
+    if (i >= 0) {
+        if (!x->have[i]) { vka_drv_fill(x->s, x->st, (int)bank, 0, x->drv[i]); x->have[i] = 1; }
+        if (off + 4 <= vka_drv_size((int)bank)) memcpy(&v, x->drv[i] + off, 4);
+        return v;
+    }
+    if (bank >= 3 && bank < 19) return (uint32_t)ubo_word(x->s, x->st, (int)bank - 3, off, 4, x->rd, x->ctx);
+    return 0;   // c1: the shader's own constants, which no program seen reads
+}
+static uint64_t hp_mem64(hp_ctx *x, uint64_t guest) {   // a word at a game address (the game's pointers and c0's storage table hold those)
+    uint64_t v = 0;
+    return guest && x->rd(x->ctx, nvn_direct_host_of(guest), &v, 8) ? v : 0;
+}
+static int hp_trace;   // DM_VK_HPROG_TRACE: the reads of the evaluation being traced
+static uint32_t hp_storage(hp_ctx *x, uint32_t binding, uint32_t off) {
+    if (binding >= x->nssbo) return 0;
+    const uint32_t *d = x->ssbo + 3 * binding;   // cbuf index, cbuf offset, indirect offset (VideoCommon::StorageBufferBase)
+    uint64_t base = (uint64_t)hp_cbuf(x, d[0], d[1]) | (uint64_t)hp_cbuf(x, d[0], d[1] + 4) << 32, b0 = base;
+    if (base && d[2] != ~0u) base = hp_mem64(x, base + d[2]);
+    uint32_t v = 0; int got = 0;
+    if (base) { base &= ~(uint64_t)((x->ssbo_align ? x->ssbo_align : 1) - 1); got = x->rd(x->ctx, nvn_direct_host_of(base + off), &v, 4); }
+    if (hp_trace) vka_bind_log("hprog:   storage %u (c%u+%#x ind %#x) ptr %#llx base %#llx + %#x -> %s %#x", binding, d[0], d[1], d[2], (unsigned long long)b0, (unsigned long long)base, off, got ? "read" : "unread", v);
+    return got ? v : 0;
+}
+static int hp_eval(hp_ctx *x, const uint32_t *code, uint32_t len, uint32_t element, uint32_t *out) {
+    uint32_t stack[64], slots[256]; unsigned size = 0;
+    memset(slots, 0, sizeof slots);
+#define POP() (size ? stack[--size] : 0u)
+#define PUSH(v) do { if (size < 64) stack[size++] = (v); } while (0)
+    for (uint32_t pc = 0; pc < len;) {
+        const uint32_t op = code[pc++];
+#define OPERAND() (pc < len ? code[pc++] : 0u)
+        switch (op) {
+        case 0: PUSH(OPERAND()); continue;                                                    // Immediate
+        case 1: { uint32_t i = OPERAND(), o = OPERAND(), v = hp_cbuf(x, i, o); if (hp_trace) vka_bind_log("hprog:   c%u+%#x -> %#x", i, o, v); PUSH(v); continue; }  // Cbuf
+        case 2: { uint32_t i = OPERAND(), o = POP(); PUSH(hp_cbuf(x, i, o)); continue; }      // CbufDynamic
+        case 3: { uint32_t b = OPERAND(), o = POP(); PUSH(hp_storage(x, b, o)); continue; }   // Storage
+        case 13: { uint32_t a = POP(); PUSH(0u - a); continue; }                              // Neg
+        case 14: { uint32_t a = POP(); PUSH(~a); continue; }                                  // Not
+        case 32: { uint32_t a = POP(); PUSH(a == 0); continue; }                              // LNot
+        case 33: { uint32_t f = POP(), t = POP(), c = POP(); PUSH(c ? t : f); continue; }     // Select
+        case 34: { uint32_t s = OPERAND(); if (s < 256 && size) slots[s] = stack[size - 1]; continue; }   // Tee
+        case 35: { uint32_t s = OPERAND(); PUSH(s < 256 ? slots[s] : 0u); continue; }        // Load
+        case 36: PUSH(element); continue;                                                     // Index
+        }
+#undef OPERAND
+        const uint32_t b = POP(), a = POP(); const int32_t sa = (int32_t)a, sb = (int32_t)b;
+        switch (op) {
+        case 4: PUSH(a + b); break; case 5: PUSH(a - b); break; case 6: PUSH(a * b); break;
+        case 7: PUSH(a & b); break; case 8: PUSH(a | b); break; case 9: PUSH(a ^ b); break;
+        case 10: PUSH(b >= 32 ? 0u : a << b); break; case 11: PUSH(b >= 32 ? 0u : a >> b); break;
+        case 12: PUSH((uint32_t)(sa >> (b >= 32 ? 31 : b))); break;
+        case 15: PUSH(a < b ? a : b); break; case 16: PUSH(a > b ? a : b); break;
+        case 17: PUSH((uint32_t)(sa < sb ? sa : sb)); break; case 18: PUSH((uint32_t)(sa > sb ? sa : sb)); break;
+        case 19: PUSH(sa < sb); break; case 20: PUSH(sa <= sb); break; case 21: PUSH(sa > sb); break; case 22: PUSH(sa >= sb); break;
+        case 23: PUSH(a < b); break; case 24: PUSH(a <= b); break; case 25: PUSH(a > b); break; case 26: PUSH(a >= b); break;
+        case 27: PUSH(a == b); break; case 28: PUSH(a != b); break;
+        case 29: PUSH(a && b); break; case 30: PUSH(a || b); break; case 31: PUSH(!a != !b); break;
+        default: return 0;
+        }
+    }
+#undef POP
+#undef PUSH
+    if (size != 1) return 0;
+    *out = stack[0];
+    return 1;
+}
+// Program p of a shader's handle programs (nvn_direct.h layout), with its storage buffer descriptors; 0 when it has none
+static int hp_find(const uint32_t *w, uint32_t n, unsigned p, const uint32_t **code, uint32_t *len, const uint32_t **ssbo, uint32_t *nssbo) {
+    if (!w || n < 2) return 0;
+    uint32_t np = w[0], at = 1;
+    for (uint32_t i = 0; i < np; i++) {
+        if (at >= n) return 0;
+        uint32_t l = w[at++];
+        if (at + l > n) return 0;
+        if (i == p) { *code = w + at; *len = l; }
+        at += l;
+    }
+    if (p >= np || at >= n) return 0;
+    *nssbo = w[at++];
+    if (at + 3 * (size_t)*nssbo > n) return 0;
+    *ssbo = w + at;
+    return 1;
+}
+
 static int refuse(char *why, size_t n, const char *fmt, ...) {
     if (why && n) { va_list ap; va_start(ap, fmt); vsnprintf(why, n, fmt, ap); va_end(ap); }
     return VKA_WALK_REFUSE;
 }
 
 int vka_walk(const vka_bstate *s, int st, const dmsh_vk_entry *e, const dmsh_vk_bind *bs, uint32_t ssbo_align, uint64_t dev_align, vka_read_fn rd, void *ctx,
-             vka_res *out, int max, int *uses_pool, char *why, size_t whyn) {
+             vka_res *out, int max, int *uses_pool, char *why, size_t whyn, const uint32_t *hprog, uint32_t hprog_words) {
     int n = 0;
     if (st < 0 || st >= VKA_NSTAGE) return refuse(why, whyn, "NVN stage %d", st);
+    static _Thread_local hp_ctx hx;   // (the driver banks a program reads, filled once a walk)
+    hx.s = s; hx.st = st; hx.rd = rd; hx.ctx = ctx; hx.ssbo_align = ssbo_align; memset(hx.have, 0, sizeof hx.have);
     for (unsigned i = 0; i < e->bind_count; i++) {
         const dmsh_vk_bind *b = &bs[i];
         if (b->kind == DMSH_VK_KIND_UNKNOWN) return refuse(why, whyn, "binding %u has no placed kind", b->binding);
@@ -70,6 +167,7 @@ int vka_walk(const vka_bstate *s, int st, const dmsh_vk_entry *e, const dmsh_vk_
             case DMSH_VK_KIND_DRVCB: r.what = VKA_R_DRV; r.bank = (int16_t)reg; break;
             case VKA_KIND_NVN2_CS_C0: r.what = VKA_R_DRV; r.bank = VKA_BANK_NVN2_CS_C0; break;
             case VKA_KIND_LOOP_GUARD: r.what = VKA_R_LOOP_GUARD; break;
+            case VKA_KIND_MESH_OUT: r.what = VKA_R_MESH_OUT; break;
             case DMSH_VK_KIND_SBUF: case DMSH_VK_KIND_UBO_PTR: {
                 const vka_range *u = noslot || reg >= 16 ? NULL : b->kind == DMSH_VK_KIND_SBUF ? &s->ssbo[st][reg] : &s->ubo[st][reg];
                 if (u && u->addr) { r.what = VKA_R_BUF; r.addr = u->addr; r.size = u->size; }
@@ -84,6 +182,38 @@ int vka_walk(const vka_bstate *s, int st, const dmsh_vk_entry *e, const dmsh_vk_
                         : noslot ? 0 : (int)(vka_tex_slot(s, st, (unsigned)reg) & 0xfffff);
                 int sid = b->skind ? samp_of(s, st, b, k, rd, ctx) : 0;
                 if (tid) { r.what = VKA_R_TEX; r.tid = tid; r.sid = sid; }
+                break; }
+            case VKA_KIND_SBUF_IND: case VKA_KIND_SBUF_UBO_IND: {   // Lichii: the pointer's table entry holds the buffer's address (a game address)
+                uint64_t p = b->kind == VKA_KIND_SBUF_IND ? (reg >= 0 && reg < 16 ? s->ssbo[st][reg].addr : 0) : ubo_word(s, st, reg, b->off, 8, rd, ctx), a = 0;
+                if (p && rd && rd(ctx, nvn_direct_host_of(p + b->soff), &a, 8) && a) { r.what = VKA_R_BUF; r.addr = nvn_direct_host_of(a); r.size = 0; }
+                {   // Fritchii, FRITCHII_SBUF_IND_TRACE=<key>: that shader's table reads (the table, the entry, the pointer and the words around it)
+                    static uint64_t tk = ~0ull; if (tk == ~0ull) { const char *ev = getenv("FRITCHII_SBUF_IND_TRACE"); tk = ev ? strtoull(ev, NULL, 16) : 0; }
+                    static _Atomic int nt;
+                    if (tk && e->key == tk && atomic_fetch_add(&nt, 1) < 40) {
+                        uint64_t w[4] = {0}; if (p && rd) rd(ctx, nvn_direct_host_of(p + (b->soff & ~31u)), w, sizeof w);
+                        vka_bind_log("sbuf_ind: shader %016llx binding %u kind %d slot %d: table %#llx + %#x -> %#llx; words at the entry's 32 bytes: %llx %llx %llx %llx",
+                                     (unsigned long long)e->key, b->binding, b->kind, reg, (unsigned long long)p, b->soff, (unsigned long long)a, (unsigned long long)w[0], (unsigned long long)w[1], (unsigned long long)w[2], (unsigned long long)w[3]);
+                    }
+                }
+                break; }
+            case VKA_KIND_TEX_HPROG: {   // Lichii: the handle the program computes from this draw's words (a combined handle: texture and sampler)
+                const uint32_t *code, *ssbo; uint32_t len, nssbo, h = 0;
+                if (!rd || !hp_find(hprog, hprog_words, (unsigned)reg, &code, &len, &ssbo, &nssbo))
+                    return refuse(why, whyn, "binding %u: handle program %d not kept", b->binding, reg);
+                hx.ssbo = ssbo; hx.nssbo = nssbo;
+                static int on = -1; static _Atomic int nlog;   // DM_VK_HPROG_TRACE=1: the first evaluations, with their reads
+                if (on < 0) { const char *ev = getenv("DM_VK_HPROG_TRACE"); on = ev && *ev == '1'; }
+                hp_trace = on && k == 0 && atomic_load(&nlog) < 300;
+                const int ok = hp_eval(&hx, code, len, k, &h);
+                if (ok && (h & 0xfffff)) { r.what = VKA_R_TEX; r.tid = ubo_tex_id(s, h); r.sid = ubo_samp_id(s, h); }
+                {
+                    if (hp_trace && atomic_fetch_add(&nlog, 1) < 300) {
+                        char cs[200]; int at = 0;
+                        for (uint32_t w = 0; w < len && w < 24 && at < 180; w++) at += snprintf(cs + at, sizeof cs - at, "%x ", code[w]);
+                        vka_bind_log("hprog: shader %016llx stage %d binding %u (count %u) program %d: %s handle %#x -> texture %d sampler %d (nvn2 %d) code [%u] %s",
+                                     (unsigned long long)e->key, st, b->binding, cnt, reg, ok ? "ok" : "malformed", h, r.tid, r.sid, s->nvn2, len, cs);
+                    }
+                }
                 break; }
             case DMSH_VK_KIND_TBUF: {
                 int tid = noslot ? 0 : (int)(vka_tex_slot(s, st, (unsigned)reg) & 0xfffff);

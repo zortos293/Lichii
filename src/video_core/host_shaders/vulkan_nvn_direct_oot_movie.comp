@@ -1,0 +1,32 @@
+// SPDX-FileCopyrightText: Copyright 2026 Eden Emulator Project
+// SPDX-License-Identifier: GPL-3.0-or-later
+
+// NVN2 direct mode, Ocarina of Time's movies with oot_movie_upscale at Bilinear: the decoded frame
+// scaled into the movie network's output image in place of the network, as the normal renderer's
+// blit_color_srgb_to_linear (the network decodes sRGB itself).
+
+#version 450
+
+layout(local_size_x = 8, local_size_y = 8) in;
+
+layout(binding = 0) uniform sampler2D src;
+layout(binding = 1) uniform writeonly image2D dst;
+
+layout(push_constant) uniform PushConstants {
+    uvec2 size;     // the output's
+    uint decode;    // 1: sRGB decode of the colour channels
+};
+
+void main() {
+    const uvec2 p = gl_GlobalInvocationID.xy;
+    if (any(greaterThanEqual(p, size))) {
+        return;
+    }
+    vec4 value = textureLod(src, (vec2(p) + 0.5) / vec2(size), 0.0);
+    if (decode != 0u) {
+        const vec3 low = value.rgb / 12.92;
+        const vec3 high = pow((value.rgb + 0.055) / 1.055, vec3(2.4));
+        value.rgb = mix(high, low, lessThan(value.rgb, vec3(0.04045)));
+    }
+    imageStore(dst, ivec2(p), value);
+}
