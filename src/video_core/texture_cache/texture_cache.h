@@ -67,6 +67,16 @@ namespace VideoCommon {
     return enabled;
 }
 
+/// Small readback images (CpuReadDownloads, AsyncReadbackLands): Switch 2 titles only by default;
+/// EDEN_NX2_READBACK_TARGETS=0/1 forces it.
+[[nodiscard]] inline bool SmallReadbacks() {
+    static const int forced = [] {
+        const char* value = std::getenv("EDEN_NX2_READBACK_TARGETS");
+        return value == nullptr ? -1 : (value[0] == '0' ? 0 : 1);
+    }();
+    return forced >= 0 ? forced == 1 : Tegra::g_nx2_ampere.load(std::memory_order_relaxed);
+}
+
 using Tegra::Texture::TICEntry;
 using Tegra::Texture::TSCEntry;
 using VideoCore::Surface::GetFormatType;
@@ -2688,11 +2698,12 @@ std::optional<VideoCore::RasterizerDownloadArea> TextureCache<P>::GetFlushArea(D
         }
         area->start_address = (std::min)(area->start_address, image.cpu_addr);
         area->end_address = (std::max)(area->end_address, image.cpu_addr_end);
+        const bool small_readbacks = SmallReadbacks();
         for (auto image_view_id : image.image_view_ids) {
             auto& image_view = slot_image_views[image_view_id];
             image_view.flags |= ImageViewFlagBits::PreemtiveDownload;
         }
-        area->preemtive &= image.info.forced_flushed;
+        area->preemtive &= !CpuReadDownloads(image, small_readbacks);
         image.info.forced_flushed = true;
     });
     // Write-backs still on the GPU: DownloadMemory lands them.
@@ -3312,17 +3323,27 @@ void TextureCache<P>::PopAsyncFlushes() {
             auto& download_info = download_ids[i - 1];
             auto& download_buffer = download_map[download_info.async_buffer_id];
             if (download_info.is_swizzle) {
-                const ImageBase& image = download_info.GetImage(slot_images);
+                ImageBase& image = download_info.GetImage(slot_images);
                 const auto copies = FullDownloadCopies(image.info);
                 download_buffer.offset -= Common::AlignUp(image.unswizzled_size_bytes, 64);
                 std::span<u8> download_span =
                     download_buffer.mapped_span.subspan(download_buffer.offset);
+                if (SkipStaleReadbackWriteBack(image, download_info.tick, SmallReadbacks())) {
+                    continue;
+                }
                 // Newer data written meanwhile stays: a write-back queued after this flush was
                 // committed can land before it pops, and the snapshot is older.
+                // This can overwrite guest writes made after the commit, as on the stock path; no
+                // CpuModified skip, since that flag is per page and would drop valid landings.
                 KeepRanges keep;
                 KeepNewerLanded(image, download_info.tick, keep);
                 if (WriteBackImage(image, copies, download_span, keep)) {
                     NoteFlushed(image, download_info.tick);
+                    // Guest memory holds its current contents, as after DownloadMemory: a CPU
+                    // read then downloads nothing.
+                    if (AsyncReadbackLands(image, download_info.tick, SmallReadbacks())) {
+                        image.flags &= ~ImageFlagBits::GpuModified;
+                    }
                 }
             } else {
                 const BufferDownload& buffer_info = slot_buffer_downloads[download_info.object_id];
@@ -5892,6 +5913,17 @@ void TextureCache<P>::PrepareImage(ImageId image_id, bool is_modification, bool 
             VideoCommon::Nx2FastDraw::Break(VideoCommon::Nx2FastDraw::Reason::Invalidation);
         }
         MarkModification(image);
+        // A small image the CPU reads back (CpuReadDownloads) downloads at the next fence, so the
+        // read usually finds it landed instead of waiting for the GPU. Any write: The Duskbloods'
+        // auto-exposure ring is written by 2D blits.
+        if (image.info.forced_flushed && image.guest_size_bytes <= 0x1000 && SmallReadbacks() &&
+            IsDownloadable(image) &&
+            std::ranges::none_of(uncommitted_downloads, [image_id](const PendingDownload& download) {
+                return download.is_swizzle && !download.retired_image &&
+                       download.object_id == image_id;
+            })) {
+            uncommitted_downloads.emplace_back(PendingDownload{true, 0, image_id});
+        }
         if (drawing_render_targets && image.first_written_frame == 0) {
             image.first_written_frame = frame_tick + 1;
         }

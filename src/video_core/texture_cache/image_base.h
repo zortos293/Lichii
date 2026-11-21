@@ -198,6 +198,40 @@ void NoteStorageWrite(ImageBase& image, u32 levels_before, const SubresourceRang
 [[nodiscard]] bool HoldsStorageWrites(const ImageBase& image,
                                       const SubresourceRange& range) noexcept;
 
+/// Whether a guest CPU read of this GPU-written image downloads it, instead of trusting what its
+/// first read left in guest memory (later downloads are queued only when a view is bound anew).
+/// With `small_readbacks`, images of at most 4 KiB always download: The Duskbloods writes its
+/// 8x1 RG32F auto-exposure ring with 2D blits, which bind no view, so each slot kept its
+/// first-read value and the light intensity built from it flickered every 4th frame. Usually
+/// the download PrepareImage queues at the write lands first (AsyncReadbackLands) and the read
+/// finds nothing GPU-modified; this covers a read that comes before it.
+[[nodiscard]] inline bool CpuReadDownloads(const ImageBase& image, bool small_readbacks) noexcept {
+    return !image.info.forced_flushed || (small_readbacks && image.guest_size_bytes <= 0x1000);
+}
+
+/// Whether an asynchronous download of a small readback image (CpuReadDownloads), staged at
+/// modification tick `download_tick`, leaves guest memory with the image's current contents
+/// once written back, so the image is no longer GPU-modified. Not once the GPU wrote it again
+/// or the guest wrote its memory, or it was uploaded again since (RefreshContents sets load_tick
+/// to the counter, which the staged write then raised above it).
+[[nodiscard]] inline bool AsyncReadbackLands(const ImageBase& image, u64 download_tick,
+                                             bool small_readbacks) noexcept {
+    return small_readbacks && image.guest_size_bytes <= 0x1000 &&
+           image.modification_tick == download_tick && image.load_tick < download_tick &&
+           False(image.flags & ImageFlagBits::CpuModified);
+}
+
+/// Whether the write-back of a small readback image's async download, staged at
+/// `download_tick`, is skipped because the GPU wrote the image since: a synchronous read may
+/// already have put the newer data in guest memory, and either a newer download is queued or
+/// GpuModified makes the next read download. Also once it was uploaded again since
+/// (load_tick >= download_tick), so the snapshot is older than the guest's bytes.
+[[nodiscard]] inline bool SkipStaleReadbackWriteBack(const ImageBase& image, u64 download_tick,
+                                                     bool small_readbacks) noexcept {
+    return small_readbacks && image.guest_size_bytes <= 0x1000 &&
+           (image.modification_tick != download_tick || image.load_tick >= download_tick);
+}
+
 /// Sets an image's modification tick and raises its aliases' newest_alias_tick to it.
 template <typename Images>
 void SetModificationTick(Images& images, ImageBase& image, u64 tick) {
