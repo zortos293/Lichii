@@ -123,7 +123,7 @@ private:
     void wheelEvent(QWheelEvent* event) override;
 
     /// Handle key press events.
-    void keyPressEvent(QKeyEvent* event) override;
+    bool event(QEvent* event) override;
 
     /// Handle combobox list refresh
     bool eventFilter(QObject* object, QEvent* event) override;

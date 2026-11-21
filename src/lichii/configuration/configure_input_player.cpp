@@ -1590,14 +1590,18 @@ void ConfigureInputPlayer::wheelEvent(QWheelEvent* event) {
     input_subsystem->GetMouse()->NotifyChanged();
 }
 
-void ConfigureInputPlayer::keyPressEvent(QKeyEvent* event) {
-    if (!input_setter || !event) {
-        return;
+bool ConfigureInputPlayer::event(QEvent* event) {
+    // QWidget::event moves focus on Tab and Backtab before keyPressEvent ever runs (with a
+    // keyboard grab too), and Escape was filtered out by hand, so neither could be mapped
+    // (#2212). While a capture runs, every key is a candidate binding: take it here, before
+    // the base class can route it anywhere else. With no capture active the base class keeps
+    // its behavior, Escape included.
+    if (input_setter && event != nullptr && event->type() == QEvent::KeyPress) {
+        auto* key_event = static_cast<QKeyEvent*>(event);
+        input_subsystem->GetKeyboard()->PressKey(key_event->key());
+        return true;
     }
-    event->ignore();
-    if (event->key() != Qt::Key_Escape) {
-        input_subsystem->GetKeyboard()->PressKey(event->key());
-    }
+    return QWidget::event(event);
 }
 
 bool ConfigureInputPlayer::eventFilter(QObject* object, QEvent* event) {
