@@ -5674,7 +5674,7 @@ void TextureCacheRuntime::TranscodeAstcToBcn(
 }
 
 void TextureCacheRuntime::TransitionImageLayout(Image& image) {
-    if (!image.ExchangeInitialization()) {
+    if (!image.IsInitialized()) {
         VkImageMemoryBarrier barrier{
             .sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER,
             .pNext = nullptr,
@@ -5698,6 +5698,9 @@ void TextureCacheRuntime::TransitionImageLayout(Image& image) {
             cmdbuf.PipelineBarrier(vk::PIPELINE_STAGE_GRAPHICS_COMPUTE,
                                    vk::PIPELINE_STAGE_GRAPHICS_COMPUTE, 0, barrier);
         });
+        // Only once the barrier is recorded: Record can fail to allocate, and the image would
+        // stay marked initialized with its layout still undefined.
+        void(image.ExchangeInitialization());
     }
 }
 

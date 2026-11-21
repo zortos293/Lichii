@@ -581,6 +581,11 @@ public:
         return original_image.GetMemoryBlock();
     }
 
+    /// Returns true when the image is already initialized
+    [[nodiscard]] bool IsInitialized() const noexcept {
+        return initialized;
+    }
+
     /// Returns true when the image is already initialized and mark it as initialized
     [[nodiscard]] bool ExchangeInitialization() noexcept {
         return std::exchange(initialized, true);
