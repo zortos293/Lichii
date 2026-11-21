@@ -214,6 +214,8 @@ add_library(audio_core STATIC
     sink/sink_details.h
     sink/sink_stream.cpp
     sink/sink_stream.h
+    sink/stream_standby.cpp
+    sink/stream_standby.h
 )
 
 if (MSVC)
