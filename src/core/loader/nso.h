@@ -67,7 +67,10 @@ struct NSOHeader {
 static_assert(sizeof(NSOHeader) == 0x100, "NSOHeader has incorrect size.");
 static_assert(std::is_trivially_copyable_v<NSOHeader>, "NSOHeader must be trivially copyable.");
 
-constexpr u32 NSO_ARGUMENT_DATA_ALLOCATION_SIZE = 0x9000;
+// The console's loader (Atmosphere's ldr) refuses program arguments of this size or more, and
+// gives a process an argument block of AlignUp(2 * sizeof(u32) + 2 * size + this, page): 0x9000
+// bytes for short arguments.
+constexpr u32 NSO_ARGUMENT_BUFFER_SIZE = 0x8000;
 
 struct NSOArgumentHeader {
     u32_le allocated_size;

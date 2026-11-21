@@ -115,11 +115,28 @@ std::optional<VAddr> AppLoader_NSO::LoadModule(Kernel::KProcess& process, Core::
             return std::nullopt;
         }
     }
-    // The whole image, the argument block and .bss included, is sized and aligned in u32 below:
-    // check its extent in 64 bits before allocating, so a segment near the top of the address
-    // space can neither wrap that arithmetic nor ask for gigabytes.
-    const bool pass_arguments =
-        should_pass_arguments && !Settings::values.program_args.GetValue().empty();
+    // One copy, taken once: the setting can be assigned from the UI thread while this runs, and
+    // the block is sized from the same bytes it is filled with.
+    const std::string arg_data = Settings::values.program_args.GetValue();
+    // Sized as the console's loader sizes it, which also refuses longer arguments: the block,
+    // its header included, then always holds them, and libnx has the room it needs after them
+    // to split them into argv. Longer arguments are left out rather than cut, which could fall
+    // inside one and change what the program gets: it starts with an empty argv. The setting
+    // applies to every title, so refusing to load would make each one fail.
+    const bool arguments_fit = arg_data.size() < NSO_ARGUMENT_BUFFER_SIZE;
+    if (should_pass_arguments && !arguments_fit) {
+        LOG_ERROR(Loader,
+                  "{}: starting without its program arguments: they are {:#x} bytes, the console "
+                  "accepts less than {:#x}",
+                  nso_file.GetName(), arg_data.size(), NSO_ARGUMENT_BUFFER_SIZE);
+    }
+    const bool pass_arguments = should_pass_arguments && !arg_data.empty() && arguments_fit;
+    const u32 argument_block_size =
+        pass_arguments
+            ? static_cast<u32>(Common::AlignUp(2 * sizeof(u32) + 2 * arg_data.size() +
+                                                   NSO_ARGUMENT_BUFFER_SIZE,
+                                               Core::Memory::LICHII_PAGESIZE))
+            : 0;
     // A Split or PostData patch appends its section after the image when it is copied in, and
     // the image size is narrowed to u32 after that: count the section too.
     const size_t post_patch_size = [&]() -> size_t {
@@ -134,8 +151,11 @@ std::optional<VAddr> AppLoader_NSO::LoadModule(Kernel::KProcess& process, Core::
 #endif
         return 0;
     }();
+    // The whole image, the argument block and .bss included, is sized and aligned in u32 below:
+    // check its extent in 64 bits before allocating, so a segment near the top of the address
+    // space can neither wrap that arithmetic nor ask for gigabytes.
     const u64 aligned_extent =
-        (u64{module_start} + segments_end + (pass_arguments ? NSO_ARGUMENT_DATA_ALLOCATION_SIZE : 0) +
+        (u64{module_start} + segments_end + argument_block_size +
          nso_header.segments[2].bss_size + Core::Memory::LICHII_PAGEMASK) &
         ~u64{Core::Memory::LICHII_PAGEMASK};
     const u64 image_extent = aligned_extent + post_patch_size;
@@ -219,12 +239,10 @@ std::optional<VAddr> AppLoader_NSO::LoadModule(Kernel::KProcess& process, Core::
     }
 
     if (pass_arguments) {
-        const auto arg_data{Settings::values.program_args.GetValue()};
-
-        codeset.DataSegment().size += NSO_ARGUMENT_DATA_ALLOCATION_SIZE;
-        NSOArgumentHeader args_header{NSO_ARGUMENT_DATA_ALLOCATION_SIZE, static_cast<u32_le>(arg_data.size()), {}};
+        codeset.DataSegment().size += argument_block_size;
+        NSOArgumentHeader args_header{argument_block_size, static_cast<u32_le>(arg_data.size()), {}};
         const auto end_offset = codeset.memory.size();
-        codeset.memory.resize(u32(codeset.memory.size()) + NSO_ARGUMENT_DATA_ALLOCATION_SIZE);
+        codeset.memory.resize(u32(codeset.memory.size()) + argument_block_size);
         std::memcpy(codeset.memory.data() + end_offset, &args_header, sizeof(NSOArgumentHeader));
         std::memcpy(codeset.memory.data() + end_offset + sizeof(NSOArgumentHeader), arg_data.data(), arg_data.size());
     }
