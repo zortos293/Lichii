@@ -5,6 +5,8 @@
 
 #pragma once
 
+#include <array>
+
 #include "common/common_types.h"
 
 namespace Shader {
@@ -121,6 +123,28 @@ struct Profile {
     bool has_broken_spirv_subgroup_mask_vector_extract_dynamic{};
     bool has_broken_spirv_subgroup_shuffle{};
     bool has_broken_spirv_fragment_shuffle{};
+    /// 16-bit floats in shaders (shaderFloat16). The software HMMA rounds to fp16 with a native
+    /// conversion only with them; a profile without it rounds in software, to the same values.
+    bool support_float16{};
+    /// Converting f32 to f16 rounds to nearest even and keeps f16 subnormals without any execution
+    /// mode, whatever the device reports in its float controls (Apple GPUs: MoltenVK reports no
+    /// fp16 denorm preservation, but Metal's conversion keeps them). Implies 16-bit floats.
+    bool fp16_conversion_rounds_rte_with_denorms{};
+    /// Subgroup shuffles with a per-lane index are slow (Apple GPUs through MoltenVK): the software
+    /// HMMA exchanges its fragments through shared memory instead
+    bool has_slow_dynamic_shuffle{};
+    /// A compute pipeline can require full subgroups (VK_EXT_subgroup_size_control)
+    bool support_compute_full_subgroups{};
+    /// Compute subgroups are guest warps, 32 lanes (Device::AreComputeSubgroupsGuestWarps)
+    bool compute_subgroups_are_guest_warps{};
+    /// compute_subgroups_are_guest_warps was probed on the device, and holds only for the
+    /// workgroups the probe ran (Backend::SPIRV::IsSubgroupProbeShape)
+    bool compute_subgroup_layout_probed{};
+    /// The device's compute workgroup limits: the subgroup probe's workgroups are within them
+    std::array<u32, 3> max_compute_workgroup_size{};
+    u32 max_compute_workgroup_invocations{};
+    /// Shaders can ask for maximal reconvergence (SPV_KHR_maximal_reconvergence)
+    bool support_maximal_reconvergence{};
     /// The guest's HMMA.16816.F16 runs on a cooperative matrix, in compute shaders
     bool support_cooperative_hmma{};
     /// Without the above, HMMA runs on 16x16x16 cooperative matrices through shared memory
