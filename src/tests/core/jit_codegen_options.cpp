@@ -25,6 +25,7 @@ extern char** environ;
 #endif
 
 #include "common/common_types.h"
+#include "tests/core/host_cpu_features.h"
 
 // dynarmic's internal headers are written for dynarmic's own warning flags. This test pulls them
 // into a target built with the project's -Werror=shadow, which they do not pass on GCC.
@@ -38,6 +39,7 @@ extern char** environ;
 #include "dynarmic/interface/exclusive_monitor.h"
 #include "dynarmic/ir/basic_block.h"
 #include "dynarmic/ir/opcodes.h"
+#include "dynarmic/ir/opt_passes.h"
 #ifdef __GNUC__
 #pragma GCC diagnostic pop
 #endif
@@ -173,13 +175,44 @@ std::vector<Encoding> TestableEncodings() {
     return result;
 }
 
+/// The arm64 backend asserts on these opcodes (UNREACHABLE emitters), so an arm64 host skips
+/// the instructions that still use them after the passes the JIT runs. The scalar half-precision
+/// ones need FEAT_FP16 on the host.
+bool UnimplementedOnHost([[maybe_unused]] IR::Block& block) {
+#if defined(__aarch64__) || defined(_M_ARM64)
+    using enum IR::Opcode;
+    static constexpr std::array unimplemented{
+        FPRecipEstimate16, FPRecipExponent16, FPRecipStepFused16, FPRSqrtEstimate16,
+        FPRSqrtStepFused16, FPHalfToFixedS16, FPHalfToFixedU16, FPVectorEqual16, FPVectorMulAdd16,
+        FPVectorNeg16, FPVectorRecipEstimate16, FPVectorRecipStepFused16, FPVectorRSqrtEstimate16,
+        FPVectorRSqrtStepFused16, FPVectorToSignedFixed16, FPVectorToUnsignedFixed16,
+        SM4AccessSubstitutionBox, VectorEqual128, VectorSignExtend64, VectorSignedMultiply16,
+        VectorSignedMultiply32, VectorUnsignedMultiply16, VectorUnsignedMultiply32,
+    };
+    static constexpr std::array needs_fp16{
+        FPMulAdd16, FPMulSub16, FPRoundInt16, FPHalfToFixedS32, FPHalfToFixedS64,
+        FPHalfToFixedU32, FPHalfToFixedU64,
+    };
+    static const bool has_fp16 = Tests::HostHasScalarFP16();
+    Optimization::Optimize(block, A64::UserConfig{}, {});
+    return std::any_of(block.instructions.begin(), block.instructions.end(), [](const IR::Inst& inst) {
+        const auto contains = [&inst](const auto& list) {
+            return std::find(list.begin(), list.end(), inst.GetOpcode()) != list.end();
+        };
+        return contains(unimplemented) || (!has_fp16 && contains(needs_fp16));
+    });
+#else
+    return false;
+#endif
+}
+
 bool ShouldTest(u32 instruction, u64 pc, bool is_last) {
     const A64::LocationDescriptor location{pc, {}};
     IR::Block block{location};
     if (!A64::TranslateSingleInstruction(block, location, instruction) && !is_last) {
         return false;
     }
-    return std::none_of(block.instructions.begin(), block.instructions.end(), [](const IR::Inst& inst) {
+    const bool host_state = std::any_of(block.instructions.begin(), block.instructions.end(), [](const IR::Inst& inst) {
         switch (inst.GetOpcode()) {
         case IR::Opcode::A64ExceptionRaised:
         case IR::Opcode::A64CallSupervisor:
@@ -191,6 +224,7 @@ bool ShouldTest(u32 instruction, u64 pc, bool is_last) {
             return false;
         }
     });
+    return !host_state && !UnimplementedOnHost(block);
 }
 
 /// A branch back into the block would loop forever without a cycle counter.

@@ -6,6 +6,7 @@
  * SPDX-License-Identifier: 0BSD
  */
 
+#include <oaknut/feature_detection/feature_detection.hpp>
 #include <oaknut/oaknut.hpp>
 
 #include "dynarmic/backend/arm64/a32_jitstate.h"
@@ -22,6 +23,36 @@
 namespace Dynarmic::Backend::Arm64 {
 
 using namespace oaknut::util;
+
+namespace {
+
+/// Half-precision data processing (FEAT_FP16, ARMv8.2): oaknut has no scalar H forms of these,
+/// so they are emitted from their encodings. Without the feature they stay unimplemented.
+bool HostHasFP16() {
+    static const bool has_fp16 = oaknut::detect_features().has(oaknut::CpuFeature::FP16);
+    return has_fp16;
+}
+
+void RequireFP16() {
+    if (!HostHasFP16()) {
+        UNREACHABLE();
+    }
+}
+
+std::uint32_t Rd(int index) {
+    return static_cast<std::uint32_t>(index);
+}
+
+std::uint32_t Rn(int index) {
+    return static_cast<std::uint32_t>(index) << 5;
+}
+
+/// FRINT<mode> Hd, Hn
+void EmitFRINTH(oaknut::CodeGenerator& code, std::uint32_t base, oaknut::HReg Hd, oaknut::HReg Hn) {
+    code.dw(base | Rn(Hn.index()) | Rd(Hd.index()));
+}
+
+}  // namespace
 
 template<std::size_t bitsize, typename EmitFn>
 static void EmitTwoOp(oaknut::CodeGenerator&, EmitContext& ctx, IR::Inst* inst, EmitFn emit) {
@@ -186,10 +217,12 @@ static void EmitFromFixed(oaknut::CodeGenerator& code, EmitContext& ctx, IR::Ins
 
 template<>
 void EmitIR<IR::Opcode::FPAbs16>(oaknut::CodeGenerator& code, EmitContext& ctx, IR::Inst* inst) {
-    (void)code;
-    (void)ctx;
-    (void)inst;
-    UNREACHABLE();
+    // A bit operation (FABS ignores FZ16 and raises nothing): done on the integer value.
+    auto args = ctx.reg_alloc.GetArgumentInfo(inst);
+    auto Wresult = ctx.reg_alloc.WriteW(inst);
+    auto Woperand = ctx.reg_alloc.ReadW(args[0]);
+    RegAlloc::Realize(Wresult, Woperand);
+    code.AND(Wresult, Woperand, 0x7FFF);
 }
 
 template<>
@@ -313,10 +346,11 @@ void EmitIR<IR::Opcode::FPMul64>(oaknut::CodeGenerator& code, EmitContext& ctx, 
 
 template<>
 void EmitIR<IR::Opcode::FPMulAdd16>(oaknut::CodeGenerator& code, EmitContext& ctx, IR::Inst* inst) {
-    (void)code;
-    (void)ctx;
-    (void)inst;
-    UNREACHABLE();
+    RequireFP16();
+    // FMADD Hd, Hn, Hm, Ha
+    EmitFourOp<16>(code, ctx, inst, [&](auto& Hresult, auto& Ha, auto& H1, auto& H2) {
+        code.dw(0x1FC00000 | (static_cast<std::uint32_t>(H2->index()) << 16) | (static_cast<std::uint32_t>(Ha->index()) << 10) | Rn(H1->index()) | Rd(Hresult->index()));
+    });
 }
 
 template<>
@@ -331,10 +365,11 @@ void EmitIR<IR::Opcode::FPMulAdd64>(oaknut::CodeGenerator& code, EmitContext& ct
 
 template<>
 void EmitIR<IR::Opcode::FPMulSub16>(oaknut::CodeGenerator& code, EmitContext& ctx, IR::Inst* inst) {
-    (void)code;
-    (void)ctx;
-    (void)inst;
-    UNREACHABLE();
+    RequireFP16();
+    // FMSUB Hd, Hn, Hm, Ha
+    EmitFourOp<16>(code, ctx, inst, [&](auto& Hresult, auto& Ha, auto& H1, auto& H2) {
+        code.dw(0x1FC08000 | (static_cast<std::uint32_t>(H2->index()) << 16) | (static_cast<std::uint32_t>(Ha->index()) << 10) | Rn(H1->index()) | Rd(Hresult->index()));
+    });
 }
 
 template<>
@@ -359,10 +394,11 @@ void EmitIR<IR::Opcode::FPMulX64>(oaknut::CodeGenerator& code, EmitContext& ctx,
 
 template<>
 void EmitIR<IR::Opcode::FPNeg16>(oaknut::CodeGenerator& code, EmitContext& ctx, IR::Inst* inst) {
-    (void)code;
-    (void)ctx;
-    (void)inst;
-    UNREACHABLE();
+    auto args = ctx.reg_alloc.GetArgumentInfo(inst);
+    auto Wresult = ctx.reg_alloc.WriteW(inst);
+    auto Woperand = ctx.reg_alloc.ReadW(args[0]);
+    RegAlloc::Realize(Wresult, Woperand);
+    code.EOR(Wresult, Woperand, 0x8000);
 }
 
 template<>
@@ -431,10 +467,40 @@ void EmitIR<IR::Opcode::FPRecipStepFused64>(oaknut::CodeGenerator& code, EmitCon
 
 template<>
 void EmitIR<IR::Opcode::FPRoundInt16>(oaknut::CodeGenerator& code, EmitContext& ctx, IR::Inst* inst) {
-    (void)code;
-    (void)ctx;
-    (void)inst;
-    UNREACHABLE();
+    RequireFP16();
+    const auto rounding_mode = static_cast<FP::RoundingMode>(inst->GetArg(1).GetU8());
+    const bool exact = inst->GetArg(2).GetU1();
+
+    auto args = ctx.reg_alloc.GetArgumentInfo(inst);
+    auto Hresult = ctx.reg_alloc.WriteH(inst);
+    auto Hoperand = ctx.reg_alloc.ReadH(args[0]);
+    RegAlloc::Realize(Hresult, Hoperand);
+    ctx.fpsr.Load();
+
+    if (exact) {
+        ASSERT(ctx.FPCR().RMode() == rounding_mode);
+        EmitFRINTH(code, 0x1EE74000, Hresult, Hoperand);  // FRINTX
+        return;
+    }
+    switch (rounding_mode) {
+    case FP::RoundingMode::ToNearest_TieEven:
+        EmitFRINTH(code, 0x1EE44000, Hresult, Hoperand);  // FRINTN
+        break;
+    case FP::RoundingMode::TowardsPlusInfinity:
+        EmitFRINTH(code, 0x1EE4C000, Hresult, Hoperand);  // FRINTP
+        break;
+    case FP::RoundingMode::TowardsMinusInfinity:
+        EmitFRINTH(code, 0x1EE54000, Hresult, Hoperand);  // FRINTM
+        break;
+    case FP::RoundingMode::TowardsZero:
+        EmitFRINTH(code, 0x1EE5C000, Hresult, Hoperand);  // FRINTZ
+        break;
+    case FP::RoundingMode::ToNearest_TieAwayFromZero:
+        EmitFRINTH(code, 0x1EE64000, Hresult, Hoperand);  // FRINTA
+        break;
+    default:
+        UNREACHABLE();
+    }
 }
 
 template<>
@@ -643,6 +709,50 @@ void EmitIR<IR::Opcode::FPDoubleToFixedU64>(oaknut::CodeGenerator& code, EmitCon
     EmitToFixed<64, 64, false>(code, ctx, inst);
 }
 
+/// FCVT<mode><S|U> from a half to a 32 or 64-bit integer, or FCVTZ<S|U> to fixed point.
+template<std::size_t bitsize_to, bool is_signed>
+void EmitHalfToFixed(oaknut::CodeGenerator& code, EmitContext& ctx, IR::Inst* inst) {
+    RequireFP16();
+    auto args = ctx.reg_alloc.GetArgumentInfo(inst);
+    auto Rto = ctx.reg_alloc.WriteReg<bitsize_to>(inst);
+    auto Hfrom = ctx.reg_alloc.ReadH(args[0]);
+    const std::size_t fbits = args[1].GetImmediateU8();
+    const auto rounding_mode = static_cast<FP::RoundingMode>(args[2].GetImmediateU8());
+    RegAlloc::Realize(Rto, Hfrom);
+    ctx.fpsr.Load();
+
+    const std::uint32_t sf = bitsize_to == 64 ? 0x80000000 : 0;
+    const std::uint32_t u = is_signed ? 0 : 0x10000;
+    const std::uint32_t operands = Rn(Hfrom->index()) | Rd(Rto->index());
+    if (fbits != 0) {
+        ASSERT(rounding_mode == FP::RoundingMode::TowardsZero);
+        // FCVTZ<S|U> (scalar, fixed-point): scale = 64 - fbits
+        code.dw(0x1ED80000 | sf | u | (static_cast<std::uint32_t>(64 - fbits) << 10) | operands);
+        return;
+    }
+    std::uint32_t base;
+    switch (rounding_mode) {
+    case FP::RoundingMode::ToNearest_TieEven:
+        base = 0x1EE00000;  // FCVTN<S|U>
+        break;
+    case FP::RoundingMode::TowardsPlusInfinity:
+        base = 0x1EE80000;  // FCVTP<S|U>
+        break;
+    case FP::RoundingMode::TowardsMinusInfinity:
+        base = 0x1EF00000;  // FCVTM<S|U>
+        break;
+    case FP::RoundingMode::TowardsZero:
+        base = 0x1EF80000;  // FCVTZ<S|U>
+        break;
+    case FP::RoundingMode::ToNearest_TieAwayFromZero:
+        base = 0x1EE40000;  // FCVTA<S|U>
+        break;
+    default:
+        UNREACHABLE();
+    }
+    code.dw(base | sf | u | operands);
+}
+
 template<>
 void EmitIR<IR::Opcode::FPHalfToFixedS16>(oaknut::CodeGenerator& code, EmitContext& ctx, IR::Inst* inst) {
     (void)code;
@@ -653,18 +763,12 @@ void EmitIR<IR::Opcode::FPHalfToFixedS16>(oaknut::CodeGenerator& code, EmitConte
 
 template<>
 void EmitIR<IR::Opcode::FPHalfToFixedS32>(oaknut::CodeGenerator& code, EmitContext& ctx, IR::Inst* inst) {
-    (void)code;
-    (void)ctx;
-    (void)inst;
-    UNREACHABLE();
+    EmitHalfToFixed<32, true>(code, ctx, inst);
 }
 
 template<>
 void EmitIR<IR::Opcode::FPHalfToFixedS64>(oaknut::CodeGenerator& code, EmitContext& ctx, IR::Inst* inst) {
-    (void)code;
-    (void)ctx;
-    (void)inst;
-    UNREACHABLE();
+    EmitHalfToFixed<64, true>(code, ctx, inst);
 }
 
 template<>
@@ -677,18 +781,12 @@ void EmitIR<IR::Opcode::FPHalfToFixedU16>(oaknut::CodeGenerator& code, EmitConte
 
 template<>
 void EmitIR<IR::Opcode::FPHalfToFixedU32>(oaknut::CodeGenerator& code, EmitContext& ctx, IR::Inst* inst) {
-    (void)code;
-    (void)ctx;
-    (void)inst;
-    UNREACHABLE();
+    EmitHalfToFixed<32, false>(code, ctx, inst);
 }
 
 template<>
 void EmitIR<IR::Opcode::FPHalfToFixedU64>(oaknut::CodeGenerator& code, EmitContext& ctx, IR::Inst* inst) {
-    (void)code;
-    (void)ctx;
-    (void)inst;
-    UNREACHABLE();
+    EmitHalfToFixed<64, false>(code, ctx, inst);
 }
 
 template<>
