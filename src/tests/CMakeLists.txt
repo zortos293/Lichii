@@ -233,6 +233,7 @@ add_executable(tests
     common/host_memory_failure.cpp
     common/host_memory_test_access.h
     core/host_memory_failure.cpp
+    common/library_exceptions.cpp
     common/memory_detect.cpp
     common/multi_level_page_table.cpp
     common/nextendo.cpp
