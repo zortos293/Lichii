@@ -38,6 +38,7 @@ extern char** environ;
 #include "dynarmic/interface/exclusive_monitor.h"
 #include "dynarmic/ir/basic_block.h"
 #include "dynarmic/ir/opcodes.h"
+#include "dynarmic/ir/opt_passes.h"
 #ifdef __GNUC__
 #pragma GCC diagnostic pop
 #endif
@@ -173,13 +174,44 @@ std::vector<Encoding> TestableEncodings() {
     return result;
 }
 
+/// The arm64 backend asserts on these opcodes (UNREACHABLE emitters), so an arm64 host skips
+/// the instructions that still use them after the passes the JIT runs.
+bool UnimplementedOnHost([[maybe_unused]] IR::Block& block) {
+#if defined(__aarch64__) || defined(_M_ARM64)
+    using enum IR::Opcode;
+    static constexpr std::array unimplemented{
+        FPAbs16, FPMulAdd16, FPMulSub16, FPNeg16, FPRecipEstimate16, FPRecipExponent16,
+        FPRecipStepFused16, FPRoundInt16, FPRSqrtEstimate16, FPRSqrtStepFused16,
+        FPHalfToFixedS16, FPHalfToFixedS32, FPHalfToFixedS64, FPHalfToFixedU16, FPHalfToFixedU32,
+        FPHalfToFixedU64, FPVectorEqual16, FPVectorMulAdd16, FPVectorNeg16, FPVectorRecipEstimate16,
+        FPVectorRecipStepFused16, FPVectorRSqrtEstimate16, FPVectorRSqrtStepFused16,
+        FPVectorToSignedFixed16, FPVectorToUnsignedFixed16, SignedSaturatedAdd8,
+        SignedSaturatedAdd16, SignedSaturatedAdd32, SignedSaturatedAdd64,
+        SignedSaturatedDoublingMultiplyReturnHigh16, SignedSaturatedDoublingMultiplyReturnHigh32,
+        SignedSaturatedSub8, SignedSaturatedSub16, SignedSaturatedSub32, SignedSaturatedSub64,
+        UnsignedSaturatedAdd8, UnsignedSaturatedAdd16, UnsignedSaturatedAdd32,
+        UnsignedSaturatedAdd64, UnsignedSaturatedSub8, UnsignedSaturatedSub16,
+        UnsignedSaturatedSub32, UnsignedSaturatedSub64, SM4AccessSubstitutionBox, VectorEqual128,
+        VectorSignExtend64, VectorSignedMultiply16, VectorSignedMultiply32,
+        VectorUnsignedMultiply16, VectorUnsignedMultiply32,
+    };
+    Optimization::Optimize(block, A64::UserConfig{}, {});
+    return std::any_of(block.instructions.begin(), block.instructions.end(), [](const IR::Inst& inst) {
+        return std::find(unimplemented.begin(), unimplemented.end(), inst.GetOpcode()) !=
+               unimplemented.end();
+    });
+#else
+    return false;
+#endif
+}
+
 bool ShouldTest(u32 instruction, u64 pc, bool is_last) {
     const A64::LocationDescriptor location{pc, {}};
     IR::Block block{location};
     if (!A64::TranslateSingleInstruction(block, location, instruction) && !is_last) {
         return false;
     }
-    return std::none_of(block.instructions.begin(), block.instructions.end(), [](const IR::Inst& inst) {
+    const bool host_state = std::any_of(block.instructions.begin(), block.instructions.end(), [](const IR::Inst& inst) {
         switch (inst.GetOpcode()) {
         case IR::Opcode::A64ExceptionRaised:
         case IR::Opcode::A64CallSupervisor:
@@ -191,6 +223,7 @@ bool ShouldTest(u32 instruction, u64 pc, bool is_last) {
             return false;
         }
     });
+    return !host_state && !UnimplementedOnHost(block);
 }
 
 /// A branch back into the block would loop forever without a cycle counter.
