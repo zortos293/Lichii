@@ -1,16 +1,21 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 
 #include <algorithm>
+#include <array>
 #include <filesystem>
 #include <fstream>
 #include <map>
 #include <random>
 #include <sstream>
+#include <string>
+#include <system_error>
 #include <type_traits>
 #include <catch2/catch_test_macros.hpp>
 #include <fmt/format.h>
 #include "common/fs/path_util.h"
+#include "common/logging.h"
 #include "common/recommended_settings.h"
+#include "common/scope_exit.h"
 #include "common/settings.h"
 #include "frontend_common/config.h"
 #include "frontend_common/recommended_settings.h"
@@ -31,6 +36,7 @@ public:
 
     using Config::Reload;
     using Config::SaveValues;
+    using Config::ReadScreenshotValues;
 
 private:
     void ReloadAllValues() override {}
@@ -609,6 +615,46 @@ TEST_CASE("DLSS config round-trips choices and publishes per-game overrides",
     Settings::values.nvidia_dlss_preset.SetGlobal(true);
     Settings::RefreshNvidiaDlssRuntimeSettings();
     CHECK(Settings::GetNvidiaDlssRuntimeSettings().preset == Settings::NvidiaDlssPreset::K);
+}
+
+TEST_CASE("A fresh config keeps the data paths without an error", "[config]") {
+    // A new configuration has no path settings, and the readers passed the empty values on to
+    // SetEdenPath: "Filesystem object at new_path= is not a directory" for the NAND, SD, load,
+    // dump, TAS and screenshot paths at every start.
+    using Common::FS::EdenPath;
+    ConfigDirectory directory;
+    // The log file stays where the first test to initialize the log put it: other tests read it
+    // back through Log::FilePath, so this one doesn't move or remove it.
+    Common::Log::Initialize();
+    // Every class at every level, so a missing error line cannot be a filtered one. The ring has
+    // no getter for its capacity, so it is turned off afterwards, as the other ring tests do.
+    Common::Log::SetGlobalFilter(Common::Log::Filter{Common::Log::Level::Trace});
+    Common::Log::SetRingCapacity(0);
+    Common::Log::SetRingCapacity(256);
+    SCOPE_EXIT {
+        Common::Log::SetRingCapacity(0);
+        Common::Log::Filter filter;
+        filter.ParseFilterString(Settings::values.log_filter.GetValue());
+        Common::Log::SetGlobalFilter(filter);
+    };
+    constexpr std::array paths{EdenPath::NANDDir, EdenPath::SDMCDir, EdenPath::LoadDir,
+                               EdenPath::DumpDir, EdenPath::TASDir,  EdenPath::ScreenshotsDir};
+    std::map<EdenPath, std::filesystem::path> before;
+    for (const EdenPath path : paths) {
+        before[path] = Common::FS::GetEdenPath(path);
+    }
+    FileConfig config{std::string{"qt-config"}};
+    // The screenshot path is read by the frontends' configs (Qt), not by Config's own reload.
+    config.ReadScreenshotValues();
+    // Read the ring at once, so later lines cannot push the error lines out of it.
+    const auto lines = Common::Log::ReadRing(0);
+    for (const auto& line : lines) {
+        INFO(line.text);
+        CHECK(line.text.find("new_path= is not a directory") == std::string::npos);
+    }
+    for (const EdenPath path : paths) {
+        CHECK(Common::FS::GetEdenPath(path) == before[path]);
+    }
 }
 
 TEST_CASE("Precompile All Shaders sets only that game's precache to Always", "[config]") {
