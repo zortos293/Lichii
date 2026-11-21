@@ -7,6 +7,8 @@ New entries go under `## [Unreleased]`; `tools/ci/bump-version.sh` turns them in
 ## [Unreleased]
 
 - Fix unit-test linking when the OpenGL shader backends are disabled.
+- Fire Emblem: Fortune's Weave (Vulkan): write back GPU-written images the texture cache drops,
+  as for The Duskbloods, which fixes the striped sky and white bloom after leaving a menu (#1951).
 
 ## [0.1.0]
 
