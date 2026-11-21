@@ -604,6 +604,8 @@ PipelineCache::PipelineCache(Tegra::MaxwellDeviceMemoryManager& device_memory_,
     if (driver_id == VK_DRIVER_ID_MESA_TURNIP) {
         supported_subgroup_stages &= ~(1u << static_cast<u32>(Shader::Stage::Geometry));
     }
+    // PCI vendor ID Apple's own GPUs report (not Intel or AMD GPUs in a Mac).
+    const bool is_apple_gpu = device.GetVendorID() == 0x106B;
     profile = Shader::Profile{
         .supported_spirv = device.SupportedSpirvVersion(),
         .unified_descriptor_binding = true,
@@ -706,6 +708,14 @@ PipelineCache::PipelineCache(Tegra::MaxwellDeviceMemoryManager& device_memory_,
             device.GetDriverVersion() < VK_MAKE_VERSION(512, 672, 0),
         .has_broken_spirv_subgroup_shuffle = driver_id == VK_DRIVER_ID_QUALCOMM_PROPRIETARY,
         .has_broken_spirv_fragment_shuffle = driver_id == VK_DRIVER_ID_AMD_PROPRIETARY,
+        .support_float16 = device.IsFloat16Supported(),
+        // Measured on Apple GPUs only (an M6): Intel and AMD Macs keep the default paths.
+        .fp16_conversion_rounds_rte_with_denorms =
+            device.IsMoltenVK() && is_apple_gpu && device.IsFloat16Supported(),
+        .has_slow_dynamic_shuffle = device.IsMoltenVK() && is_apple_gpu,
+        .support_compute_full_subgroups = device.IsComputeFullSubgroupsSupported(),
+        .compute_subgroups_are_guest_warps = device.AreComputeSubgroupsGuestWarps(),
+        .support_maximal_reconvergence = device.IsKhrShaderMaximalReconvergenceSupported(),
         .max_subgroup_size = device.GetMaxSubgroupSize(),
         .has_broken_robust =
             device.IsNvidia() && device.GetNvidiaArch() <= NvidiaArchitecture::Arch_Pascal,
@@ -3720,6 +3730,8 @@ ComputePipelineCacheEntry PipelineCache::CreateComputePipeline(
                     max_shared_memory / 1024);
         program.shared_memory_size = max_shared_memory;
     }
+    // Before a deferred pipeline copies the info: its HMMA path sets what the pipeline requires.
+    Shader::Backend::SPIRV::PrepareHmma(profile, program);
     std::unique_ptr<ComputePipeline> pipeline;
     const u64 ir_bytes = emit_pools ? IrBytes(std::span(&program, 1)) : 0;
     if (auto ir_reservation = emit_pools ? queued_ir.TryReserve(ir_bytes) : nullptr) {

@@ -419,7 +419,7 @@ void SetupDenormControl(const Profile& profile, const IR::Program& program, Emit
             LOG_DEBUG(Shader_SPIRV, "Fp32 denorm preserve used in shader without host support");
         }
     }
-    if (ctx.native_half_rounding) {
+    if (ctx.native_half_rounding_modes) {
         // The software matrix functions convert to fp16 natively (emit_spirv_tensor.cpp).
         ctx.AddCapability(spv::Capability::DenormPreserve);
         ctx.AddCapability(spv::Capability::RoundingModeRTE);
@@ -670,15 +670,69 @@ void PatchMeshInstructions(std::vector<u32>& code, const EmitContext& ctx) {
 }
 } // Anonymous namespace
 
-std::vector<u32> EmitSPIRV(const Profile& profile, const RuntimeInfo& runtime_info, IR::Program& program, Bindings& bindings) {
+namespace {
+struct HmmaPlan {
+    std::optional<u32> tensor_scratch_word;
+    bool cooperative_hmma;
+    std::optional<u32> software_hmma_scratch_word;
+};
+
+HmmaPlan PlanHmma(const Profile& profile, IR::Program& program) {
+    // Looked at again for each plan, in case the IR changed since the last one.
+    program.hmma_summary.reset();
     const std::optional<u32> tensor_scratch_word{ReserveCooperativeHmmaScratch(profile, program)};
     const bool cooperative_hmma{tensor_scratch_word.has_value() ||
                                 UsesCooperativeHmma(profile, program)};
+    const std::optional<u32> software_hmma_scratch_word{
+        cooperative_hmma ? std::nullopt : ReserveSoftwareHmmaScratch(profile, program)};
+    if (!tensor_scratch_word && !software_hmma_scratch_word) {
+        // An earlier emission's area, with another profile, that no path uses now.
+        ReleaseHmmaScratch(program);
+    }
+    return {
+        .tensor_scratch_word = tensor_scratch_word,
+        .cooperative_hmma = cooperative_hmma,
+        .software_hmma_scratch_word = software_hmma_scratch_word,
+    };
+}
+
+void SetHmmaRequirements(IR::Program& program, const HmmaPlan& plan) {
+    program.info.uses_cooperative_matrix = plan.cooperative_hmma;
+    program.info.requires_full_guest_warps = plan.software_hmma_scratch_word.has_value();
+}
+} // Anonymous namespace
+
+void PrepareHmma(const Profile& profile, IR::Program& program) {
+    SetHmmaRequirements(program, PlanHmma(profile, program));
+    program.hmma_prepared = true;
+}
+
+std::vector<u32> EmitSPIRV(const Profile& profile, const RuntimeInfo& runtime_info, IR::Program& program, Bindings& bindings) {
+    const HmmaPlan plan{PlanHmma(profile, program)};
+    if (program.hmma_prepared) {
+        // A deferred pipeline copied these flags before this emission: SPIR-V that needs others
+        // would run on a pipeline built without them.
+        if (program.info.uses_cooperative_matrix != plan.cooperative_hmma ||
+            program.info.requires_full_guest_warps != plan.software_hmma_scratch_word.has_value()) {
+            throw LogicError("HMMA plan changed after PrepareHmma");
+        }
+    } else {
+        SetHmmaRequirements(program, plan);
+    }
+    const auto [tensor_scratch_word, cooperative_hmma, software_hmma_scratch_word] = plan;
     EmitContext ctx{profile, runtime_info, program, bindings, cooperative_hmma};
     ctx.tensor_scratch_word = tensor_scratch_word;
+    ctx.software_hmma_scratch_word = software_hmma_scratch_word;
     DefineSoftwareMatrixFunctions(ctx, program);
     const Id main{DefineMain(ctx, program)};
     DefineEntryPoint(program, ctx, main);
+    if (software_hmma_scratch_word && profile.support_maximal_reconvergence) {
+        // The staged HMMA exchange waits on subgroup barriers: lanes that took different paths
+        // through the ifs and loops before it meet again there (HmmaInConvergedFlow keeps every
+        // HMMA itself out of them).
+        ctx.AddExtension("SPV_KHR_maximal_reconvergence");
+        ctx.AddExecutionMode(main, spv::ExecutionMode::MaximallyReconvergesKHR);
+    }
     if (profile.support_float_controls) {
         ctx.AddExtension("SPV_KHR_float_controls");
         SetupDenormControl(profile, program, ctx, main);
@@ -693,7 +747,9 @@ std::vector<u32> EmitSPIRV(const Profile& profile, const RuntimeInfo& runtime_in
     if (ctx.cooperative_hmma) {
         PatchCooperativeHmma(code, *ctx.cooperative_hmma);
     }
-    program.info.uses_cooperative_matrix = ctx.cooperative_hmma.has_value();
+    if (program.info.uses_cooperative_matrix != ctx.cooperative_hmma.has_value()) {
+        throw LogicError("Cooperative matrix use differs from the HMMA plan");
+    }
     return code;
 }
 

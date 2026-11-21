@@ -33,6 +33,13 @@ constexpr u32 RESCALING_LAYOUT_DOWN_FACTOR_OFFSET = offsetof(RescalingLayout, do
 constexpr u32 RENDERAREA_LAYOUT_OFFSET = offsetof(RenderAreaLayout, render_area);
 
 [[nodiscard]] std::vector<u32> EmitSPIRV(const Profile& profile, const RuntimeInfo& runtime_info, IR::Program& program, Bindings& bindings);
+
+/// Chooses how the program's HMMA runs, reserves the shared memory that needs, and sets the
+/// pipeline requirements in its info (uses_cooperative_matrix, requires_full_guest_warps). A
+/// pipeline that copies the info before its SPIR-V is emitted (a deferred compute build) calls
+/// it first; EmitSPIRV then makes the same plan and throws if it disagrees. Without it, EmitSPIRV
+/// sets the requirements itself.
+void PrepareHmma(const Profile& profile, IR::Program& program);
 [[nodiscard]] inline std::vector<u32> EmitSPIRV(const Profile& profile, IR::Program& program) {
     Bindings binding;
     return EmitSPIRV(profile, {}, program, binding);

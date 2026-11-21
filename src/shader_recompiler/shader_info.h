@@ -380,6 +380,9 @@ struct Info {
     bool binds_unmapped_pointer_word{};
     /// Set by the SPIR-V backend when HMMA runs on cooperative matrices, which need full subgroups
     bool uses_cooperative_matrix{};
+    /// The software HMMA exchanges fragments through per-warp shared memory, indexed by SubgroupId:
+    /// the pipeline must run full 32-lane subgroups
+    bool requires_full_guest_warps{};
     /// Native global accesses whose pointer is chosen at run time: every storage buffer descriptor
     /// is a candidate and its bound length (not an NVN size word) limits the range.
     bool native_global_bounds{};
