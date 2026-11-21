@@ -6,15 +6,20 @@
 
 #pragma once
 
+#include <algorithm>
 #include <array>
 #include <map>
 #include <string>
 #include <string_view>
 #include <utility>
 
+#include <QByteArray>
+#include <QByteArrayView>
+#include <QCache>
 #include <QCoreApplication>
 #include <QFileInfo>
 #include <QImage>
+#include <QMutex>
 #include <QObject>
 #include <QPainter>
 #include <QPainterPath>
@@ -47,7 +52,7 @@ Q_DECLARE_METATYPE(GameListItemType);
  * @return QPixmap default icon
  */
 static bool IsLichiiTheme() {
-    return UISettings::values.theme == "lichii";
+    return UISettings::IsLichiiTheme();
 }
 
 static QPixmap GetDefaultIcon(u32 size) {
@@ -136,8 +141,91 @@ public:
     static constexpr int FullPathRole = SortRole + 2;
     static constexpr int ProgramIdRole = SortRole + 3;
     static constexpr int FileTypeRole = SortRole + 4;
-    /// True when the picture comes from the game or its custom artwork, not the default art.
     static constexpr int HasIconRole = SortRole + 5;
+    static constexpr int CardIconRole = SortRole + 6;
+    // Index of the game directory (UISettings::values.game_dirs) a game came from. Set on the
+    // flat model so the grid can browse folders by filtering on it, where games live at the top
+    // level instead of under their folder row.
+    static constexpr int OwnerDirRole = SortRole + 7;
+    static constexpr int CardArtDataRole = SortRole + 8;
+
+    /// Bounded, shared store for card-sized artwork: decode and scale each game's artwork once
+    /// and keep at most MaxCost bytes resident instead of decoding it into every item.
+    class CardArtCache {
+    public:
+        static QPixmap Lookup(const QString& key) {
+            const QMutexLocker lock{&Mutex()};
+            if (auto* cached = Cache().object(key)) {
+                return *cached;
+            }
+            return {};
+        }
+
+        static void Insert(const QString& key, const QPixmap& pixmap) {
+            if (pixmap.isNull()) {
+                return;
+            }
+            const QMutexLocker lock{&Mutex()};
+            Cache().insert(key, new QPixmap(pixmap),
+                           static_cast<int>(std::min<qint64>(
+                               qint64(pixmap.width()) * pixmap.height() * pixmap.depth() / 8,
+                               MaxCost)));
+        }
+
+    private:
+        static QCache<QString, QPixmap>& Cache() {
+            static QCache<QString, QPixmap> cache{MaxCost};
+            return cache;
+        }
+
+        static QMutex& Mutex() {
+            static QMutex mutex;
+            return mutex;
+        }
+
+        static constexpr int MaxCost = 32 * 1024 * 1024;
+    };
+
+    static QString CardArtKey(u64 program_id, const QString& game_path,
+                              const std::vector<u8>& picture_data) {
+        const auto icon_hash = qHash(QByteArrayView{
+            reinterpret_cast<const char*>(picture_data.data()),
+            static_cast<qsizetype>(picture_data.size())});
+        return QStringLiteral("%1|%2|%3")
+            .arg(qulonglong(program_id))
+            .arg(game_path)
+            .arg(static_cast<qulonglong>(icon_hash));
+    }
+
+    static QByteArray CardArtData(const std::vector<u8>& picture_data) {
+        if (picture_data.empty()) {
+            return {};
+        }
+        return {reinterpret_cast<const char*>(picture_data.data()),
+                static_cast<qsizetype>(picture_data.size())};
+    }
+
+    static QImage ScaleCardArtImage(const QImage& picture, int card_target) {
+        if (std::max(picture.width(), picture.height()) > card_target) {
+            return picture.scaled(card_target, card_target, Qt::KeepAspectRatio,
+                                  Qt::SmoothTransformation);
+        }
+        return picture;
+    }
+
+    static QPixmap ScaleCardArt(const QPixmap& picture) {
+        const int card_target =
+            static_cast<int>(std::max<u32>(UISettings::CurrentGameIconSize().GetValue(), u32{384}));
+        return QPixmap::fromImage(ScaleCardArtImage(picture.toImage(), card_target));
+    }
+
+    static QImage ReloadCardArtImage(const QByteArray& data, int card_target) {
+        QImage picture;
+        if (data.isEmpty() || !picture.loadFromData(data)) {
+            return {};
+        }
+        return ScaleCardArtImage(picture, card_target);
+    }
 
     GameListItemPath() = default;
     GameListItemPath(const QString& game_path, const std::vector<u8>& picture_data,
@@ -170,11 +258,6 @@ public:
 
         setData(tooltip, Qt::ToolTipRole);
 
-        SetPicture(this, picture_data);
-    }
-
-    /// Shows an image file as a game's picture, or the default art when it is not an image.
-    static void SetPicture(QStandardItem* item, const std::vector<u8>& picture_data) {
         const u32 size = UISettings::CurrentGameIconSize().GetValue();
 
         QPixmap picture;
@@ -183,10 +266,47 @@ public:
         if (!has_icon) {
             picture = GetDefaultIcon(size);
         }
+        // Decode and scale the card artwork once, then keep its key and source bytes in the model
+        // item so cache eviction can release the high-resolution pixmap.
+        const QString card_cache_key =
+            has_icon ? CardArtKey(program_id, game_path, picture_data) : QString{};
+        QPixmap card_picture = has_icon ? CardArtCache::Lookup(card_cache_key) : QPixmap{};
+        if (has_icon && card_picture.isNull()) {
+            card_picture = ScaleCardArt(picture);
+            CardArtCache::Insert(card_cache_key, card_picture);
+        }
         picture = picture.scaled(size, size, Qt::IgnoreAspectRatio, Qt::SmoothTransformation);
 
-        item->setData(RoundedIcon(picture), Qt::DecorationRole);
+        setData(RoundedIcon(picture), Qt::DecorationRole);
+        setData(has_icon, HasIconRole);
+        setData(card_cache_key, CardIconRole);
+        setData(CardArtData(picture_data), CardArtDataRole);
+    }
+
+    /// Shows an image file as a game's picture in place, or the default art when it is not one.
+    static void SetPicture(QStandardItem* item, const std::vector<u8>& picture_data) {
+        if (item == nullptr || picture_data.empty()) {
+            return;
+        }
+        const u32 size = UISettings::CurrentGameIconSize().GetValue();
+        QPixmap picture;
+        const bool has_icon =
+            picture.loadFromData(picture_data.data(), static_cast<u32>(picture_data.size()));
+        if (!has_icon) {
+            picture = GetDefaultIcon(size);
+        }
+        item->setData(RoundedIcon(picture.scaled(size, size, Qt::IgnoreAspectRatio,
+                                                 Qt::SmoothTransformation)),
+                      Qt::DecorationRole);
         item->setData(has_icon, HasIconRole);
+        QString card_cache_key;
+        if (has_icon) {
+            card_cache_key = CardArtKey(item->data(ProgramIdRole).toULongLong(),
+                                        item->data(FullPathRole).toString(), picture_data);
+            CardArtCache::Insert(card_cache_key, ScaleCardArt(picture));
+        }
+        item->setData(card_cache_key, CardIconRole);
+        item->setData(CardArtData(picture_data), CardArtDataRole);
     }
 
     int type() const override {
@@ -362,6 +482,9 @@ public:
 class GameListDir : public GameListItem {
 public:
     static constexpr int GameDirRole = Qt::UserRole + 2;
+    // Number of games found for this directory. Set on the flat (grid/carousel) model, where
+    // games live at the top level and a folder card cannot count them as child rows.
+    static constexpr int GameCountRole = Qt::UserRole + 9;
 
     explicit GameListDir(UISettings::GameDir& directory,
                          GameListItemType dir_type_ = GameListItemType::CustomDir)

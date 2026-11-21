@@ -34,6 +34,7 @@
 #include "qt_common/util/game.h"
 #include "lichii/compatibility_report.h"
 #include "lichii/hotkeys.h"
+#include "lichii/loading_screen.h"
 #include "lichii/user_data_migration.h"
 
 #ifdef __unix__
@@ -57,6 +58,7 @@ class GRenderWindow;
 class LoadingScreen;
 class OverlayDialog;
 class BugReportDialog;
+class ClassicLoadingScreen;
 class ControllerDialog;
 class QLabel;
 class MultiplayerState;
@@ -449,7 +451,7 @@ private slots:
     void ResetWindowSize900();
     void ResetWindowSize1080();
 
-    void SetGameListMode(Settings::GameListMode mode);
+    void SetGameListMode(Settings::GameListMode mode, bool update_library_style = true);
     void SetGridView();
     void SetTreeView();
     void SetCarouselView();
@@ -477,6 +479,11 @@ private slots:
     /// True while the emulation thread's teardown still makes progress (Common::ShutdownProgress
     /// moved since the last call), for at most MaxEmuThreadShutdownMs after it was asked to stop.
     bool EmulationShutdownProgressing();
+
+    /// Shows the first-run setup for theme and library style, then records the choices (the
+    /// library style fallback when the dialog is dismissed).
+    void PromptFirstRunSetup();
+    void ScheduleDeferredLibraryStylePrompt();
 
 #ifdef ENABLE_UPDATE_CHECKER
     // A manual check reports every outcome and ignores the skipped release and remind-later time.
@@ -574,6 +581,16 @@ private:
     GRenderWindow* render_window = nullptr;
     GameList* game_list = nullptr;
     LoadingScreen* loading_screen = nullptr;
+    /// The original loading screen and closing dialog, used by every theme but Lichii Modern.
+    ClassicLoadingScreen* classic_loading_screen = nullptr;
+    /// Whether the running game uses the modern loading screen, chosen when it boots.
+    bool modern_loading_screen = true;
+    /// Artwork captured before emulation starts, so shutdown never reads a loader being torn down.
+    LoadingScreen::Snapshot closing_snapshot;
+    /// Set when a direct launch skipped the first-run setup; the setup is shown once the
+    /// interactive library session comes back.
+    bool deferred_library_style_prompt = false;
+    bool session_handoff_in_progress = false;
     QTimer shutdown_timer;
     QTimer emu_terminate_timer;
     QElapsedTimer emu_force_stop_clock;

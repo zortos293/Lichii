@@ -77,6 +77,30 @@
       <item>
        <layout class="QVBoxLayout" name="GeneralVerticalLayout">
         <item>
+         <layout class="QHBoxLayout" name="game_library_style_layout">
+          <item>
+           <widget class="QLabel" name="game_library_style_label">
+            <property name="text">
+             <string>Style:</string>
+            </property>
+           </widget>
+          </item>
+          <item>
+           <widget class="QComboBox" name="game_library_style_combobox"/>
+          </item>
+         </layout>
+        </item>
+        <item>
+         <widget class="QLabel" name="game_library_style_note">
+          <property name="text">
+           <string>Modern uses the card grid; Legacy uses the tree list.</string>
+          </property>
+          <property name="wordWrap">
+           <bool>true</bool>
+          </property>
+         </widget>
+        </item>
+        <item>
          <widget class="QCheckBox" name="show_add_ons">
           <property name="text">
            <string>Show Add-Ons Column</string>

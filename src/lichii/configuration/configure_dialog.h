@@ -78,6 +78,7 @@ private:
     void FitPageWidth();
 
     void HandleApplyButtonClicked();
+    void SetModernStyleEnabled(bool enabled);
 
     void SetConfiguration();
     void UpdateVisibleTabs();

@@ -8,6 +8,7 @@
 #include <array>
 #include <filesystem>
 #include <map>
+#include <memory>
 #include <optional>
 #include <span>
 #include <string>
@@ -298,6 +299,8 @@ public:
 
     bool AddTicket(const Ticket& ticket);
 
+    static std::unique_ptr<KeyManager> CreateForDirectory(const std::filesystem::path& keys_dir);
+
     void ReloadKeys();
     /// Forgets every key, keyblob and ticket, then reads the key files again, leaving the manager
     /// as a new one would be. ReloadKeys only adds to what is loaded.
@@ -306,6 +309,9 @@ public:
 
 private:
     KeyManager();
+    void ClearKeys();
+    void ReloadKeys(const std::filesystem::path& keys_dir);
+    void LoadKeysFrom(const std::filesystem::path& keys_dir);
 
     std::map<KeyIndex<S128KeyType>, Key128> s128_keys;
     std::map<KeyIndex<S256KeyType>, Key256> s256_keys;

@@ -4,7 +4,10 @@
 #include "game/game_list.h"
 #include "game/search_field.h"
 
+#include <QHBoxLayout>
 #include <QKeyEvent>
+#include <QLabel>
+#include <QLineEdit>
 #include <QToolButton>
 
 // TODO: Remove GameList dependence?
@@ -108,6 +111,74 @@ GameListSearchField::GameListSearchField(GameList* parent) : QWidget{parent} {
     layout_filter->addWidget(button_filter_close);
     setLayout(layout_filter);
     RetranslateUI();
+}
+
+void GameListSearchField::SetModernMode(bool modern) {
+    setProperty("modernLibrary", modern);
+    if (!modern) {
+        layout_filter->setContentsMargins(8, 8, 8, 8);
+        layout_filter->setSpacing(10);
+        edit_filter->setMinimumHeight(0);
+        label_filter->setObjectName(QString{});
+        edit_filter->setObjectName(QString{});
+        label_filter_result->setObjectName(QString{});
+        button_filter_close->setObjectName(QString{});
+        button_filter_close->setText(QStringLiteral("X"));
+        button_filter_close->setCursor(Qt::ArrowCursor);
+        button_filter_close->setAutoRaise(false);
+        button_filter_close->setMinimumSize(0, 0);
+        button_filter_close->setMaximumSize(QWIDGETSIZE_MAX, QWIDGETSIZE_MAX);
+        button_filter_close->setToolTip(QString{});
+        setObjectName(QString{});
+        setStyleSheet(QString{});
+        button_filter_close->setStyleSheet(
+            QStringLiteral("QToolButton{ border: none; padding: 0px; color: "
+                           "#000000; font-weight: bold; background: #F0F0F0; }"
+                           "QToolButton:hover{ border: none; padding: 0px; color: "
+                           "#EEEEEE; font-weight: bold; background: #E81123}"));
+        return;
+    }
+
+    // Compact modern search bar: keep the whole field around 36px tall.
+    layout_filter->setContentsMargins(8, 3, 8, 3);
+    layout_filter->setSpacing(8);
+    label_filter->setObjectName(QStringLiteral("gameListFilterLabel"));
+    edit_filter->setMinimumHeight(26);
+    edit_filter->setObjectName(QStringLiteral("gameListFilterEdit"));
+    label_filter_result->setObjectName(QStringLiteral("gameListFilterResult"));
+    button_filter_close->setObjectName(QStringLiteral("gameListFilterClose"));
+    button_filter_close->setText(QStringLiteral("×"));
+    button_filter_close->setCursor(Qt::PointingHandCursor);
+    button_filter_close->setAutoRaise(true);
+    button_filter_close->setFixedSize(26, 26);
+    button_filter_close->setToolTip(tr("Close filter"));
+    button_filter_close->setStyleSheet({});
+    setObjectName(QStringLiteral("gameListSearchField"));
+    setStyleSheet(QStringLiteral(
+        "QLineEdit#gameListFilterEdit {"
+        "  border: 1px solid palette(mid);"
+        "  border-radius: 10px;"
+        "  padding: 4px 10px;"
+        "  selection-background-color: palette(highlight);"
+        "}"
+        "QLineEdit#gameListFilterEdit:focus {"
+        "  border: 1px solid palette(highlight);"
+        "}"
+        "QToolButton#gameListFilterClose {"
+        "  border: 1px solid transparent;"
+        "  border-radius: 8px;"
+        "  font-size: 16px;"
+        "  font-weight: 600;"
+        "  padding: 0;"
+        "  color: palette(text);"
+        "}"
+        "QToolButton#gameListFilterClose:hover {"
+        "  background-color: palette(alternate-base);"
+        "  border-color: palette(mid);"
+        "}"
+        "QToolButton#gameListFilterClose:pressed {"
+        "  background-color: palette(midlight);"
+        "}"));
 }
 
 void GameListSearchField::changeEvent(QEvent* event) {

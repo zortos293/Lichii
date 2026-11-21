@@ -41,11 +41,13 @@
 #include "install_dialog.h"
 
 #include "bootmanager.h"
+#include "classic_loading_screen.h"
 #include "loading_screen.h"
 #include "qt_common/util/vk.h"
 #include "ryujinx_dialog.h"
 #include "set_play_time_dialog.h"
 #include "util/util.h"
+#include "lichii/first_run_setup_dialog.h"
 #include "lichii/game/game_list.h"
 #include "lichii/nup_dialogs.h"
 #include "lichii/recommended_settings_dialog.h"
@@ -89,6 +91,8 @@
 #include <QCheckBox>
 #include <QClipboard>
 #include <QDate>
+#include <QDialog>
+#include <QDialogButtonBox>
 #include <QDesktopServices>
 #include <QDir>
 #include <QElapsedTimer>
@@ -96,15 +100,22 @@
 #include <QFileDialog>
 #include <QFileInfo>
 #include <QFutureWatcher>
+#include <QFont>
 #include <QGuiApplication>
 #include <QImage>
 #include <QInputDialog>
+#include <QLabel>
 #include <QMimeData>
 #include <QPalette>
 #include <QProgressDialog>
+#include <QPushButton>
+#include <QRadioButton>
 #include <QScreen>
 #include <QShortcut>
+#include <QStyle>
 #include <QStatusBar>
+#include <QToolBar>
+#include <QVBoxLayout>
 #include <QtConcurrentRun>
 
 #ifdef __APPLE__
@@ -620,8 +631,9 @@ MainWindow::MainWindow(bool has_broken_vulkan)
     if (Settings::values.use_dev_keys.GetValue()) {
         Core::Crypto::KeyManager::Instance().ReloadKeys();
     }
-
-    std::optional<Core::LaunchParams> launch;
+    // Parse launch arguments once, before the first-run setup: a direct game launch must boot
+    // without being blocked by a modal dialog.
+    std::optional<Core::LaunchParams> startup_lp;
     if (QStringList args = QApplication::arguments(); args.size() >= 2) {
         QList<QByteArray> qba{};
         for (auto const& e : args) {
@@ -631,17 +643,36 @@ MainWindow::MainWindow(bool has_broken_vulkan)
         for (auto& e : qba) {
             args_cstr.push_back(e.data());
         }
-        launch =
+
+        startup_lp =
             Core::ParseLaunchParams(*QtCommon::system, args_cstr.size(), args_cstr.data(), nullptr);
     }
-    const bool launch_home = launch && launch->filepath.empty() && !launch->launch_setup &&
-                             launch->launch_qlaunch;
-    const bool launching_content =
-        launch && (!launch->filepath.empty() || launch->launch_setup || launch->launch_qlaunch ||
-                   launch->launch_hlaunch);
+    const bool launch_home = startup_lp && startup_lp->filepath.empty() &&
+                             !startup_lp->launch_setup && startup_lp->launch_qlaunch;
+    const bool direct_launch = startup_lp &&
+                               (!startup_lp->filepath.empty() || startup_lp->launch_setup ||
+                                startup_lp->launch_qlaunch || startup_lp->launch_hlaunch);
+
+    if (!UISettings::values.has_selected_game_library_style.GetValue() ||
+        UISettings::values.first_start.GetValue()) {
+        if (direct_launch) {
+            // Defer the first-run setup until the interactive library session comes back after
+            // this launch; do not record choices while the user never picked them.
+            deferred_library_style_prompt = true;
+        } else {
+            PromptFirstRunSetup();
+        }
+    }
+
+    if (launch_home) {
+        game_list->SetScanEnabled(false);
+    }
+    SetGameListMode(UISettings::values.game_list_mode.GetValue(), false);
+    game_list->SetScanEnabled(true);
+
     const auto build = WhatsNewDialog::ParseBuildTag(Common::g_build_release_tag);
     const auto whats_new_action = WhatsNewDialog::OnStartup(
-        build, UISettings::values.last_seen_release.GetValue(), first_start, launching_content,
+        build, UISettings::values.last_seen_release.GetValue(), first_start, direct_launch,
         LICHII_USE_PENDING_RELEASE_NOTES);
     if (whats_new_action == WhatsNewDialog::StartupAction::Remember) {
         config->SaveLastSeenRelease(build);
@@ -649,9 +680,6 @@ MainWindow::MainWindow(bool has_broken_vulkan)
     if (!launch_home) {
         game_list->PopulateAsync(UISettings::values.game_dirs);
     }
-
-    // Set up game list mode checkboxes.
-    SetGameListMode(UISettings::values.game_list_mode.GetValue());
 
     // make sure menubar has the arrow cursor instead of inheriting from this
     ui->menubar->setCursor(QCursor());
@@ -707,6 +735,8 @@ MainWindow::MainWindow(bool has_broken_vulkan)
     // to prevent the UI from blowing up.
     UpdateUITheme();
 
+    // The launch arguments were parsed before first-run setup so direct launches remain
+    // non-interactive until the user returns to the library.
     // Once FixProfiles has read the configured NAND and -u may have picked another user.
     Common::Nextendo::MigrateAccountFile(
         Service::Account::Nextendo::CurrentProfile(*QtCommon::system));
@@ -752,16 +782,16 @@ MainWindow::MainWindow(bool has_broken_vulkan)
 
     if (launch_home) {
         startup_qlaunch_connection = connect(
-            game_list, &GameList::PopulatingCompleted, this,
-            [this] {
+            game_list, &GameList::PopulatingCompleted, this, [this] {
                 LaunchFirmwareApplet(u64(Service::AM::AppletProgramId::QLaunch), std::nullopt);
+                ScheduleDeferredLibraryStylePrompt();
             },
             Qt::SingleShotConnection);
         game_list->PopulateAsync(UISettings::values.game_dirs);
     }
 
-    if (launch) {
-        const auto& lp = *launch;
+    if (startup_lp) {
+        const auto& lp = *startup_lp;
 
         // Override fullscreen setting if gamepath or argument is provided
         if (!lp.filepath.empty() || lp.fullscreen) {
@@ -782,10 +812,62 @@ MainWindow::MainWindow(bool has_broken_vulkan)
         }
     }
 
+    if (!launch_home) {
+        ScheduleDeferredLibraryStylePrompt();
+    }
     if (whats_new_action == WhatsNewDialog::StartupAction::Show) {
         startup_whats_new_pending = true;
         QTimer::singleShot(0, this, &MainWindow::MaybeShowStartupWhatsNew);
     }
+}
+
+void MainWindow::ScheduleDeferredLibraryStylePrompt() {
+    if (!deferred_library_style_prompt || emulation_running || boot_in_progress ||
+        session_handoff_in_progress || close_pending) {
+        return;
+    }
+    QTimer::singleShot(0, this, [this] {
+        if (!deferred_library_style_prompt || emulation_running || boot_in_progress ||
+            session_handoff_in_progress || close_pending) {
+            return;
+        }
+        deferred_library_style_prompt = false;
+        if (!UISettings::values.has_selected_game_library_style.GetValue() ||
+            UISettings::values.first_start.GetValue()) {
+            PromptFirstRunSetup();
+            SetGameListMode(UISettings::values.game_list_mode.GetValue(), false);
+            game_list->SetScanEnabled(true);
+            game_list->PopulateAsync(UISettings::values.game_dirs);
+        }
+    });
+}
+
+void MainWindow::PromptFirstRunSetup() {
+    game_list->SetScanEnabled(false);
+    FirstRunSetupDialog dialog(this);
+    UISettings::GameLibraryStyle style = UISettings::GameLibraryStyle::Modern;
+
+    if (dialog.exec() == QDialog::Accepted) {
+        style = dialog.selected_library_style();
+        UISettings::values.theme =
+            UISettings::themes[static_cast<size_t>(dialog.selected_theme())].second;
+        UpdateUITheme();
+    } else {
+        // Dismissing the chooser is a completed choice too, so persist the fallback instead of
+        // asking again on the next start.
+        style = UISettings::values.game_list_mode.GetValue() == Settings::GameListMode::TreeView
+                    ? UISettings::GameLibraryStyle::Classic
+                    : UISettings::GameLibraryStyle::Modern;
+    }
+
+    UISettings::values.game_library_style = static_cast<u8>(style);
+    UISettings::values.has_selected_game_library_style = true;
+    SetGameListMode(style == UISettings::GameLibraryStyle::Modern
+                        ? Settings::GameListMode::GridView
+                        : Settings::GameListMode::TreeView,
+                    false);
+    config->SaveAllValues();
+    OnCheckFirmwareDecryption(false);
 }
 
 MainWindow::~MainWindow() {
@@ -1180,7 +1262,18 @@ void MainWindow::InitializeWidgets() {
     ui->horizontalLayout->addWidget(loading_screen);
     connect(loading_screen, &LoadingScreen::Hidden, this, [&] {
         loading_screen->Clear();
-        if (emulation_running) {
+        if (emulation_running && modern_loading_screen) {
+            render_window->show();
+            render_window->setFocus();
+        }
+    });
+
+    classic_loading_screen = new ClassicLoadingScreen(this);
+    classic_loading_screen->hide();
+    ui->horizontalLayout->addWidget(classic_loading_screen);
+    connect(classic_loading_screen, &ClassicLoadingScreen::Hidden, this, [&] {
+        classic_loading_screen->Clear();
+        if (emulation_running && !modern_loading_screen) {
             render_window->show();
             render_window->setFocus();
         }
@@ -2392,6 +2485,7 @@ void MainWindow::BootGame(const QString& filename, Service::AM::FrontendAppletPa
         if (!emulation_running && !close_pending) {
             game_list->SetScanEnabled(true);
             game_list->PopulateAsync(UISettings::values.game_dirs);
+            ScheduleDeferredLibraryStylePrompt();
             if (startup_whats_new_pending) {
                 QTimer::singleShot(0, this, &MainWindow::MaybeShowStartupWhatsNew);
             }
@@ -2638,12 +2732,24 @@ void MainWindow::BootGame(const QString& filename, Service::AM::FrontendAppletPa
 
     connect(QtCommon::emu_thread.get(), &EmuThread::LoadProgress, loading_screen,
             &LoadingScreen::OnLoadProgress, Qt::QueuedConnection);
+    connect(QtCommon::emu_thread.get(), &EmuThread::LoadProgress, classic_loading_screen,
+            &ClassicLoadingScreen::OnLoadProgress, Qt::QueuedConnection);
 
     connect(
         QtCommon::emu_thread.get(), &EmuThread::ShaderCacheReloadStarted, this,
         [this] {
-            loading_screen->Prepare(QtCommon::system->GetAppLoader());
-            loading_screen->show();
+            // A queued reload callback that arrives after shutdown must not touch the loader the
+            // emulation thread is already tearing down.
+            if (QtCommon::system->IsShuttingDown()) {
+                return;
+            }
+            if (modern_loading_screen) {
+                loading_screen->Prepare(closing_snapshot);
+                loading_screen->show();
+            } else {
+                classic_loading_screen->Prepare(QtCommon::system->GetAppLoader());
+                classic_loading_screen->show();
+            }
             render_window->hide();
         },
         Qt::QueuedConnection);
@@ -2651,7 +2757,11 @@ void MainWindow::BootGame(const QString& filename, Service::AM::FrontendAppletPa
     connect(
         QtCommon::emu_thread.get(), &EmuThread::ShaderCacheReloadFinished, this,
         [this] {
-            loading_screen->OnLoadComplete();
+            if (modern_loading_screen) {
+                loading_screen->OnLoadComplete();
+            } else {
+                classic_loading_screen->OnLoadComplete();
+            }
         },
         Qt::QueuedConnection);
 
@@ -2716,8 +2826,22 @@ void MainWindow::BootGame(const QString& filename, Service::AM::FrontendAppletPa
     const auto gpu_vendor = QtCommon::system->GPU().Renderer().GetDeviceVendor();
     UpdateWindowTitle(title_name, title_version, gpu_vendor);
 
-    loading_screen->Prepare(QtCommon::system->GetAppLoader());
-    loading_screen->show();
+    // Only the Lichii Modern theme uses the modern loading and closing screens; every other theme
+    // keeps the original ones. Read at boot, so a theme change applies to the next game.
+    modern_loading_screen = UISettings::values.theme == std::string("lichii_modern");
+    if (!modern_loading_screen) {
+        classic_loading_screen->Prepare(QtCommon::system->GetAppLoader());
+        classic_loading_screen->show();
+    }
+    closing_snapshot = LoadingScreen::SnapshotLoader(QtCommon::system->GetAppLoader());
+    // Same icon the game library shows; the installed control data covers loaders without one.
+    if (closing_snapshot.icon.empty() && metadata.second != nullptr) {
+        closing_snapshot.icon = metadata.second->ReadAllBytes();
+    }
+    if (modern_loading_screen) {
+        loading_screen->Prepare(closing_snapshot);
+        loading_screen->show();
+    }
 
     emulation_running = true;
     if (ui->action_Fullscreen->isChecked()) {
@@ -2824,10 +2948,18 @@ bool MainWindow::OnShutdownBegin() {
 }
 
 void MainWindow::OnShutdownBeginDialog() {
-    shutdown_dialog =
-        new OverlayDialog(this, *QtCommon::system, QString{}, tr("Closing software..."), QString{},
-                          QString{}, Qt::AlignHCenter | Qt::AlignVCenter);
-    shutdown_dialog->open();
+    if (!modern_loading_screen) {
+        shutdown_dialog =
+            new OverlayDialog(this, *QtCommon::system, QString{}, tr("Closing software..."),
+                              QString{}, QString{}, Qt::AlignHCenter | Qt::AlignVCenter);
+        shutdown_dialog->open();
+        return;
+    }
+    loading_screen->PrepareClosing(closing_snapshot);
+    game_list->hide();
+    game_list_placeholder->hide();
+    render_window->hide();
+    loading_screen->show();
 }
 
 /// Ends the process at once: no destructors, no atexit handlers, no flush of C streams.
@@ -2984,12 +3116,16 @@ void MainWindow::OnEmulationStopped() {
     render_window->hide();
     loading_screen->hide();
     loading_screen->Clear();
+    classic_loading_screen->hide();
+    classic_loading_screen->Clear();
+    closing_snapshot = {};
     if (game_list->IsEmpty()) {
         game_list_placeholder->show();
     } else {
         game_list->show();
     }
     game_list->SetFilterFocus();
+
     tas_label->clear();
     input_subsystem->GetTas()->Stop();
     OnTasStateChanged();
@@ -3035,7 +3171,10 @@ void MainWindow::OnEmulationStopped() {
     LOG_INFO(Frontend, "Emulation cleanup completed");
     if (close_pending) {
         QTimer::singleShot(0, this, &QWidget::close);
-    } else if (!boot_in_progress) {
+    } else if (!boot_in_progress && !session_handoff_in_progress) {
+        if (deferred_library_style_prompt && isVisible()) {
+            ScheduleDeferredLibraryStylePrompt();
+        }
         game_list->SetScanEnabled(true);
         game_list->PopulateAsync(UISettings::values.game_dirs);
         if (startup_whats_new_pending) {
@@ -3960,7 +4099,11 @@ bool MainWindow::ConfirmShutdownGame() {
 }
 
 void MainWindow::OnLoadComplete() {
-    loading_screen->OnLoadComplete();
+    if (modern_loading_screen) {
+        loading_screen->OnLoadComplete();
+    } else {
+        classic_loading_screen->OnLoadComplete();
+    }
 
     perf_overlay = new PerformanceOverlay(this);
     perf_overlay->setVisible(ui->action_Show_Performance_Overlay->isChecked());
@@ -4037,6 +4180,11 @@ void MainWindow::OnLaunchInNewSession(u64 program_id) {
     }
     LOG_INFO(Frontend, "HOME Menu launch of {:016X} in a new session from {}", program_id,
              filename.toStdString());
+    session_handoff_in_progress = true;
+    SCOPE_EXIT {
+        session_handoff_in_progress = false;
+        ScheduleDeferredLibraryStylePrompt();
+    };
     ShutdownGame();
 
     auto params = ApplicationAppletParameters();
@@ -4302,13 +4450,40 @@ void MainWindow::ResetWindowSize1080() {
     ResetWindowSize(Layout::ScreenDocked::Width, Layout::ScreenDocked::Height);
 }
 
-void MainWindow::SetGameListMode(Settings::GameListMode mode) {
+void MainWindow::SetGameListMode(Settings::GameListMode mode, bool update_library_style) {
     ui->action_Grid_View->setChecked(mode == Settings::GameListMode::GridView);
     ui->action_Tree_View->setChecked(mode == Settings::GameListMode::TreeView);
     ui->action_Carousel_View->setChecked(mode == Settings::GameListMode::CarouselView);
 
     UISettings::values.game_list_mode = mode;
+    const bool modern_library = mode == Settings::GameListMode::GridView;
+    if (property("modernLibrary").toBool() != modern_library) {
+        setProperty("modernLibrary", modern_library);
+        ui->centralwidget->setProperty("modernLibrary", modern_library);
+        const auto repolish = [](QWidget* widget) {
+            widget->style()->unpolish(widget);
+            widget->style()->polish(widget);
+            widget->update();
+        };
+        repolish(this);
+        repolish(ui->centralwidget);
+        repolish(ui->menubar);
+        repolish(statusBar());
+        for (auto* toolbar : findChildren<QToolBar*>()) {
+            repolish(toolbar);
+        }
+    }
+    if (update_library_style && mode != Settings::GameListMode::CarouselView) {
+        UISettings::values.game_library_style =
+            static_cast<u8>(mode == Settings::GameListMode::GridView
+                                ? UISettings::GameLibraryStyle::Modern
+                                : UISettings::GameLibraryStyle::Classic);
+        UISettings::values.has_selected_game_library_style = true;
+    }
     ui->action_Show_Game_Name->setEnabled(mode != Settings::GameListMode::TreeView);
+
+    // The search field styles itself from the library style, so it has to follow the switch.
+    game_list->SetModernLibrary(modern_library);
 
     CheckIconSize();
     game_list->ResetViewMode();
@@ -4362,6 +4537,7 @@ void MainWindow::ToggleShowGameName() {
 
 void MainWindow::OnConfigure() {
     const auto old_theme = UISettings::values.theme;
+    const auto old_library_style = UISettings::values.game_library_style.GetValue();
     const bool old_discord_presence = UISettings::values.enable_discord_presence.GetValue();
     const auto old_language_index = Settings::values.language_index.GetValue();
     const bool old_gamemode = UISettings::values.enable_gamemode.GetValue();
@@ -4387,6 +4563,8 @@ void MainWindow::OnConfigure() {
             &MainWindow::OnGameListRefresh);
 
     const auto result = configure_dialog.exec();
+    // `Reset to Defaults` clears the flag during Apply, so remember it before comparing styles.
+    const bool reset_requested = UISettings::values.reset_to_defaults;
     if (result != QDialog::Accepted && !UISettings::values.configuration_applied &&
         !UISettings::values.reset_to_defaults) {
         // Runs if the user hit Cancel or closed the window, and did not ever press the Apply button
@@ -4433,6 +4611,17 @@ void MainWindow::OnConfigure() {
         SetDefaultUIGeometry();
         RestoreUIState();
     }
+    if (UISettings::values.game_library_style.GetValue() != old_library_style || reset_requested) {
+        // Defaults return to the first-run state, so the setup asks again.
+        UISettings::values.has_selected_game_library_style = !reset_requested;
+        SetGameListMode(static_cast<UISettings::GameLibraryStyle>(
+                                UISettings::values.game_library_style.GetValue()) ==
+                                UISettings::GameLibraryStyle::Modern
+                            ? Settings::GameListMode::GridView
+                            : Settings::GameListMode::TreeView,
+                        false);
+    }
+
     InitializeHotkeys();
 
     if (UISettings::values.theme != old_theme) {
@@ -6613,7 +6802,7 @@ void MainWindow::filterBarSetChecked(bool state) {
 static void AdjustLinkColor() {
     QPalette new_pal(qApp->palette());
 
-    if (UISettings::values.theme == "lichii")
+    if (UISettings::IsLichiiTheme())
         new_pal.setColor(QPalette::Link, QColor(0xf4, 0x5a, 0x85));
     else if (UISettings::IsDarkTheme())
         new_pal.setColor(QPalette::Link, QColor(0, 190, 255, 255));
@@ -6731,7 +6920,7 @@ void MainWindow::UpdateUITheme() {
         current_theme = default_theme;
 
     static bool lichii_palette = false;
-    if (current_theme == QStringLiteral("lichii")) {
+    if (UISettings::IsLichiiTheme()) {
         qApp->setPalette(LichiiPalette());
         lichii_palette = true;
     } else if (lichii_palette) {
@@ -6770,7 +6959,15 @@ void MainWindow::UpdateUITheme() {
     QFile f(theme_uri);
     if (f.open(QFile::ReadOnly | QFile::Text)) {
         QTextStream ts(&f);
-        qApp->setStyleSheet(ts.readAll());
+        QString style_sheet = ts.readAll();
+        if (current_theme == QStringLiteral("lichii_modern")) {
+            // Lichii Modern only adds the modern library rules to the Lichii Dark stylesheet.
+            QFile base(QStringLiteral(":lichii/style.qss"));
+            if (base.open(QFile::ReadOnly | QFile::Text)) {
+                style_sheet = QTextStream(&base).readAll() + QLatin1Char('\n') + style_sheet;
+            }
+        }
+        qApp->setStyleSheet(style_sheet);
         setStyleSheet(ts.readAll());
     } else {
         LOG_ERROR(Frontend, "Unable to set style \"{}\", stylesheet file not found",

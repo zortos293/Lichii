@@ -18,6 +18,7 @@ class GameListSearchField : public QWidget {
 public:
     explicit GameListSearchField(GameList* parent = nullptr);
 
+    void SetModernMode(bool modern);
     QString filterText() const;
     void setFilterResult(int visible_, int total_);
 

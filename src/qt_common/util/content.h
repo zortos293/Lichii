@@ -35,7 +35,8 @@ inline const QString GetKeyInstallResultString(FirmwareManager::KeyInstallResult
     return LOOKUP_ENUM(result, KeyInstallSuccess);
 }
 
-void InstallFirmware(const QString& location, bool recursive);
+bool InstallFirmware(const QString& location, bool recursive);
+bool InstallFirmwareZip(const QString& location);
 QString UnzipFirmwareToTmp(const QString& location);
 
 bool CheckKeys();
@@ -43,6 +44,7 @@ void InstallFirmware();
 void InstallFirmwareZip();
 
 // Keys //
+FirmwareManager::KeyInstallResult InstallKeys(const QString& location);
 void InstallKeys();
 
 // Content //
