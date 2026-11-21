@@ -1149,6 +1149,7 @@ SDLDriver::~SDLDriver() {
 std::vector<Common::ParamPackage> SDLDriver::GetInputDevices() const {
     std::vector<Common::ParamPackage> devices;
     ::Common::unordered_map<int, std::shared_ptr<SDLJoystick>> joycon_pairs;
+    std::scoped_lock lock{joystick_map_mutex};
     for (const auto& [key, value] : joystick_map) {
         for (const auto& joystick : value) {
             if (!joystick->GetSDLJoystick()) {

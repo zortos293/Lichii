@@ -752,6 +752,14 @@ void EmulatedController::SetMotionParam(std::size_t index, Common::ParamPackage 
     ReloadInput();
 }
 
+void EmulatedController::SetInputParams(const ButtonParams& buttons, const StickParams& sticks,
+                                        const ControllerMotionParams& motions) {
+    button_params = buttons;
+    stick_params = sticks;
+    motion_params = motions;
+    ReloadInput();
+}
+
 void EmulatedController::StartMotionCalibration() {
     for (ControllerMotionInfo& motion : controller.motion_values) {
         motion.emulated.Calibrate();

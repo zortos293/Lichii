@@ -58,6 +58,8 @@
 #include "lichii/nx_tools.h"
 #endif
 
+#include "lichii/controller_hotswap.h"
+
 #include "applets/qt_amiibo_settings.h"
 #include "applets/qt_controller.h"
 #include "applets/qt_error.h"
@@ -6258,6 +6260,12 @@ void MainWindow::UpdateInputDrivers() {
     if (!input_subsystem)
         return;
     input_subsystem->PumpEvents();
+    if (QtCommon::system) {
+        if (!controller_hot_swap) {
+            controller_hot_swap = std::make_unique<ControllerHotSwap>();
+        }
+        controller_hot_swap->Update(QtCommon::system->HIDCore(), *input_subsystem);
+    }
 }
 
 void MainWindow::HideMouseCursor() {

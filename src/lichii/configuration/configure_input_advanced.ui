@@ -2773,6 +2773,22 @@
                        </property>
                      </widget>
                    </item>
+                   <item row="10" column="0">
+                     <widget class="QCheckBox" name="controller_hot_swap">
+                       <property name="toolTip">
+                         <string>When a player's controller disconnects, it switches to another connected controller on its own, like PCSX2. The saved mapping comes back when the original controller reconnects.</string>
+                       </property>
+                       <property name="minimumSize">
+                         <size>
+                           <width>0</width>
+                           <height>23</height>
+                         </size>
+                       </property>
+                       <property name="text">
+                         <string>Hot-swap controllers automatically</string>
+                       </property>
+                     </widget>
+                   </item>
                  </layout>
                </widget>
              </item>

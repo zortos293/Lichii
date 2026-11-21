@@ -180,6 +180,8 @@ add_executable(lichii
     game/game_card.h game/game_card.cpp
     game/search_field.h game/search_field.cpp
 
+    controller_hotswap.cpp
+    controller_hotswap.h
     hotkeys.cpp
     hotkeys.h
     install_dialog.cpp

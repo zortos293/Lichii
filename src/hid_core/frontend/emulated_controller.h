@@ -311,6 +311,10 @@ public:
      */
     void SetMotionParam(std::size_t index, Common::ParamPackage param);
 
+    /// Replaces every button, stick and motion binding at once without touching the settings
+    void SetInputParams(const ButtonParams& buttons, const StickParams& sticks,
+                        const ControllerMotionParams& motions);
+
     /// Auto calibrates the current motion devices
     void StartMotionCalibration();
 
