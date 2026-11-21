@@ -32,6 +32,7 @@
 #include "video_core/memory_manager.h"
 #include "video_core/nx2_debug_control.h"
 #include "video_core/nx2_profile.h"
+#include "video_core/pipeline_cache_policy.h"
 #include "video_core/shader_cache.h"
 #include "video_core/shader_cache_v2/cache.h"
 #include "video_core/shader_cache_v2/records.h"
@@ -576,6 +577,21 @@ const ShaderInfo* ShaderCache::MakeShaderInfo(GenericEnvironment& env, VAddr cpu
     info->lowered_native = env.LoweredNative();
     if (const auto record = env.TakeProgramRecord(); record && shader_cache_v2) {
         shader_cache_v2->RecordProgram(*record);
+    }
+    if (info->lowered_native && env.ShaderStage() == Shader::Stage::VertexB) {
+        // The hardware only fetches the attributes in the input map, so a read outside it is
+        // never valid (none of Ocarina of Time's 1,250 cached vertex programs makes one).
+        std::array<std::array<bool, 4>, Tegra::Engines::Maxwell3D::Regs::NumVertexAttributes>
+            input_generic{};
+        for (size_t index = 0; index < input_generic.size(); ++index) {
+            input_generic[index] = env.SPH().vtg.InputGeneric(index);
+        }
+        info->vertex_attribute_mask = VertexAttributeMask(input_generic);
+    } else if (env.ShaderStage() == Shader::Stage::Task ||
+               env.ShaderStage() == Shader::Stage::Mesh) {
+        // Task and mesh pipelines have no vertex input (Ocarina of Time: 191 keys for 31 sets of
+        // shaders, split only by the attribute registers).
+        info->vertex_attribute_mask = 0;
     }
     const size_t size_bytes{env.SourceSizeBytes() ? env.SourceSizeBytes() : info->size_bytes};
     const ShaderInfo* const result{info.get()};

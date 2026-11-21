@@ -138,7 +138,21 @@ public:
                            TextureCache& texture_cache, VideoCore::ShaderNotify& shader_notify_);
     ~PipelineCache();
 
+    /// The pipeline for the current 3D state, built or queued when it isn't cached; null when
+    /// the shaders can't be used.
     [[nodiscard]] GraphicsPipeline* CurrentGraphicsPipeline();
+
+    /// Saves the unmasked register attribute types for the next CurrentGraphicsPipeline refresh.
+    /// Delta draws that skip that lookup must call this when they clear Dirty::VertexInput.
+    void SaveVertexAttributeTypes(u64 attribute_types) noexcept {
+        if (dynamic_features.has_dynamic_vertex_input) {
+            vertex_attribute_types = attribute_types;
+        }
+    }
+
+    /// Whether register attribute types match pipeline's key after the same masking CurrentGraphicsPipeline uses.
+    [[nodiscard]] bool DynamicAttributeTypesMatch(u64 attribute_types,
+                                                  const GraphicsPipeline& pipeline) const noexcept;
 
     void TickFrame();
 
@@ -154,6 +168,7 @@ public:
     ///                              every image level it writes holds storage writes.
     [[nodiscard]] bool SkipUnbuiltDispatch(ComputePipeline& pipeline, bool outputs_hold_gpu_data);
 
+    /// Loads the title's disk caches and builds or queues their pipelines.
     void LoadDiskResources(u64 title_id, std::stop_token stop_loading,
                            const VideoCore::DiskResourceLoadCallback& callback);
 
@@ -310,6 +325,7 @@ private:
     std::optional<std::chrono::steady_clock::time_point> prebuild_load_begin;
 
     GraphicsPipelineCacheKey graphics_key{};
+    u64 vertex_attribute_types{}; ///< graphics_key's attribute types before the program's mask
     GraphicsPipeline* current_pipeline{};
     /// Native mesh draws' vertex input, lent by the first key of each pipeline
     MeshVertexInputs<GraphicsPipelineCacheKey> mesh_vertex_inputs;

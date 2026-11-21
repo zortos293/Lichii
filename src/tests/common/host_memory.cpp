@@ -8,7 +8,9 @@
 #include <chrono>
 #include <cstdio>
 #include <cstring>
+#include <optional>
 #include <thread>
+#include <utility>
 #include <vector>
 
 #include <catch2/catch_test_macros.hpp>
@@ -29,6 +31,9 @@ using namespace Common::Literals;
 
 static constexpr size_t VIRTUAL_SIZE = 1ULL << 39;
 static constexpr size_t BACKING_SIZE = 4_GiB;
+// The move tests hold two buffers at once; Windows commits each backing buffer in full.
+static constexpr size_t MOVE_VIRTUAL_SIZE = 1_GiB;
+static constexpr size_t MOVE_BACKING_SIZE = 64_MiB;
 static constexpr auto PERMS = Common::MemoryPermission::ReadWrite;
 static constexpr auto HEAP = false;
 
@@ -420,3 +425,65 @@ TEST_CASE("HostMemory: Protect within a view, across views and over a gap", "[co
     REQUIRE(mem.BackingBasePointer()[0x200000] == 7);
 }
 #endif
+TEST_CASE("HostMemory: Move construction transfers the buffer and its mappings", "[common][host_memory_move]") {
+    HostMemory source(MOVE_BACKING_SIZE, MOVE_VIRTUAL_SIZE);
+    u8* const backing = source.BackingBasePointer();
+    u8* const view = source.VirtualBasePointer();
+    REQUIRE(backing != nullptr);
+    backing[0x1234] = 0x5a;
+    if (view != nullptr) {
+        // Map before the move so the test proves existing mappings survive, not that Map works
+        // after a broken move.
+        source.Map(0x40000, 0x80000, 0x10000, PERMS, HEAP);
+        source.VirtualBasePointer()[0x40000] = 7;
+        REQUIRE(source.BackingBasePointer()[0x80000] == 7);
+    }
+
+    HostMemory moved(std::move(source));
+    REQUIRE(moved.BackingBasePointer() == backing);
+    REQUIRE(moved.VirtualBasePointer() == view);
+    REQUIRE(moved.VirtualSize() == MOVE_VIRTUAL_SIZE);
+    REQUIRE(moved.BackingBasePointer()[0x1234] == 0x5a);
+    // The moved-from object owns nothing, so destroying both releases the buffer once.
+    REQUIRE(source.BackingBasePointer() == nullptr);
+    REQUIRE(source.VirtualBasePointer() == nullptr);
+    REQUIRE(source.VirtualSize() == 0);
+    if (view != nullptr) {
+        REQUIRE(moved.VirtualBasePointer()[0x40000] == 7);
+        REQUIRE(moved.BackingBasePointer()[0x80000] == 7);
+    }
+}
+
+TEST_CASE("HostMemory: Move assignment releases the old buffer and keeps the new one", "[common][host_memory_move]") {
+    HostMemory target(MOVE_BACKING_SIZE, MOVE_VIRTUAL_SIZE);
+    HostMemory source(MOVE_BACKING_SIZE, MOVE_VIRTUAL_SIZE);
+    u8* const backing = source.BackingBasePointer();
+    REQUIRE(backing != nullptr);
+    REQUIRE(target.BackingBasePointer() != nullptr);
+    REQUIRE(target.BackingBasePointer() != backing);
+    backing[0] = 0x11;
+
+    target = std::move(source);
+    REQUIRE(target.BackingBasePointer() == backing);
+    REQUIRE(target.BackingBasePointer()[0] == 0x11);
+    REQUIRE(source.BackingBasePointer() == nullptr);
+
+    // Assigning to itself keeps the buffer.
+    HostMemory& alias = target;
+    target = std::move(alias);
+    REQUIRE(target.BackingBasePointer() == backing);
+    REQUIRE(target.BackingBasePointer()[0] == 0x11);
+}
+
+TEST_CASE("HostMemory: Repeated create and destroy cycles succeed", "[common][host_memory_move]") {
+    // ShutdownMainProcess destroys the guest RAM after every Switch 2 game and the next Load
+    // creates it again; each cycle must give the buffer back.
+    for (int cycle = 0; cycle < 8; ++cycle) {
+        std::optional<HostMemory> memory;
+        memory.emplace(BACKING_SIZE, VIRTUAL_SIZE);
+        REQUIRE(memory->BackingBasePointer() != nullptr);
+        memory->BackingBasePointer()[BACKING_SIZE - 1] = static_cast<u8>(cycle);
+        CHECK(memory->BackingBasePointer()[BACKING_SIZE - 1] == static_cast<u8>(cycle));
+        memory.reset();
+    }
+}
