@@ -1226,3 +1226,33 @@ TEST_CASE("Cached compute failures retain their cause and the current dispatch a
     CHECK(entry->second.Get(false, 0x2120633c00, other) == nullptr);
     REQUIRE_THROWS_AS(entry->second.Get(true, 0x2120633c00, other), Shader::RuntimeError);
 }
+
+TEST_CASE("Clearing the boot strikes moves an unreplaced unread driver blob aside (#2165)",
+          "[pipeline_cache_files][boot_strikes]") {
+    TempDir temp;
+    const auto blob = VideoCommon::VersionedPipelineCachePath(temp.path, "vulkan_pipelines",
+                                                              VideoCommon::VulkanPipelineCacheVersion);
+    const std::string suspect = "suspect driver blob bytes";
+    WriteCache(blob, Magic, VideoCommon::VulkanPipelineCacheVersion, suspect);
+    REQUIRE(std::filesystem::exists(blob));
+
+    // The recovery session held every save (its fresh cache never outgrew the baseline), then
+    // ended clean: the strikes may only go once the blob they indict is out of the read path
+    REQUIRE(VideoCommon::QuarantineUnreadDriverBlob(blob));
+    // The next boot finds nothing at the usual path and starts the driver cache fresh
+    CHECK_FALSE(std::filesystem::exists(blob));
+    // ... while the suspect blob stays on disk for diagnosis, bytes unchanged
+    auto quarantined = blob;
+    quarantined += ".unread";
+    REQUIRE(std::filesystem::exists(quarantined));
+    const u32 version = VideoCommon::VulkanPipelineCacheVersion;
+    std::string expected(Magic.data(), Magic.size());
+    expected.append(reinterpret_cast<const char*>(&version), sizeof(version));
+    expected += suspect;
+    CHECK(ReadAll(quarantined) == expected);
+
+    // A later quarantine replaces an earlier one rather than failing or piling up
+    WriteCache(blob, Magic, VideoCommon::VulkanPipelineCacheVersion, "second");
+    CHECK(VideoCommon::QuarantineUnreadDriverBlob(blob));
+    CHECK_FALSE(std::filesystem::exists(blob));
+}

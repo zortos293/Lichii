@@ -8,6 +8,7 @@
 #include <cstdlib>
 #include <cstring>
 #include <filesystem>
+#include <fstream>
 #include <memory>
 #include <optional>
 #include <span>
@@ -36,6 +37,7 @@
 #include "video_core/memory_manager.h"
 #include "video_core/native_lowering.h"
 #include "video_core/nx2_debug_control.h"
+#include "video_core/pipeline_cache_files.h"
 #include "video_core/renderer_null/null_rasterizer.h"
 #include "video_core/shader_cache_v2/cache.h"
 #include "video_core/shader_cache_v2/cache_file.h"
@@ -542,4 +544,65 @@ TEST_CASE("Shader cache v2: compute environments take recorded programs with eve
     REQUIRE_FALSE(VideoCore::Nx2Debug::AnyRejected());
     REQUIRE(fixture.Environment(texture.inputs.native_code_address, &cache).LoweredNative() ==
             texture_code);
+}
+
+TEST_CASE("Shader cache v2: boot strike count reads back what was written",
+          "[video_core][shader_cache_v2]") {
+    TempDir temp;
+    const auto marker = temp.path / "cache.bin.booting";
+    REQUIRE(VideoCommon::ReadBootStrikes(marker) == 0);
+    // Empty, as an in-flight load (or a build that kept no count) leaves it
+    { const std::ofstream stream(marker, std::ios::binary); }
+    REQUIRE(VideoCommon::ReadBootStrikes(marker) == 1);
+    VideoCommon::WriteBootStrikes(marker, 3);
+    REQUIRE(VideoCommon::ReadBootStrikes(marker) == 3);
+    // Content a crash cut short reads as one strike
+    {
+        std::ofstream stream(marker, std::ios::binary | std::ios::trunc);
+        stream << "3\x00";
+    }
+    REQUIRE(VideoCommon::ReadBootStrikes(marker) == 3);
+    {
+        std::ofstream stream(marker, std::ios::binary | std::ios::trunc);
+        stream << "garbage";
+    }
+    REQUIRE(VideoCommon::ReadBootStrikes(marker) == 1);
+    std::error_code error;
+    std::filesystem::remove(marker, error);
+    REQUIRE(VideoCommon::ReadBootStrikes(marker) == 0);
+}
+
+TEST_CASE("Shader cache v2: a recovery boot builds nothing and leaves the driver blob unread",
+          "[video_core][shader_cache_v2]") {
+    // A clean boot (the marker lock held, no strike) builds at boot and reads the blob
+    const auto clean = VideoCommon::PlanBootCache(true, false, 0);
+    CHECK(clean.build_at_boot);
+    CHECK(clean.read_driver_cache);
+    // A recovery boot (strikes on the marker) does neither: the blob the crashed session left
+    // is why the boot crashed, and it stays on disk for diagnosis (#2165)
+    for (const u32 strikes : {1u, 2u, 7u}) {
+        const auto recovery = VideoCommon::PlanBootCache(true, false, strikes);
+        CHECK_FALSE(recovery.build_at_boot);
+        CHECK_FALSE(recovery.read_driver_cache);
+    }
+    // Beside another emulator's load the boot builds nothing and reads no blob either
+    const auto busy = VideoCommon::PlanBootCache(false, true, 0);
+    CHECK_FALSE(busy.build_at_boot);
+    CHECK_FALSE(busy.read_driver_cache);
+    // No other emulator around: the lock is just not needed, the boot builds and reads
+    const auto unlocked = VideoCommon::PlanBootCache(false, false, 0);
+    CHECK(unlocked.build_at_boot);
+    CHECK(unlocked.read_driver_cache);
+}
+
+TEST_CASE("Shader cache v2: a boot that left the driver blob unread replaces it only once the "
+          "fresh cache has content",
+          "[video_core][shader_cache_v2]") {
+    // A normal boot replaces the on-disk blob as it always has, empty fresh cache or not
+    CHECK(VideoCommon::MayReplaceUnreadDriverBlob(false, 0, 32));
+    // An empty fresh cache still serializes its header: the unread blob is kept for diagnosis
+    CHECK_FALSE(VideoCommon::MayReplaceUnreadDriverBlob(true, 32, 32));
+    CHECK_FALSE(VideoCommon::MayReplaceUnreadDriverBlob(true, 0, 32));
+    // Once the fresh cache holds more than an empty one, the old file is replaced (#2165)
+    CHECK(VideoCommon::MayReplaceUnreadDriverBlob(true, 4096, 32));
 }

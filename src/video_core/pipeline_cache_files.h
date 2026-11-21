@@ -3,11 +3,14 @@
 
 #include <algorithm>
 #include <array>
+#include <charconv>
 #include <chrono>
 #include <filesystem>
 #include <fstream>
+#include <iterator>
 #include <optional>
 #include <span>
+#include <string>
 #include <string_view>
 #include <system_error>
 
@@ -235,6 +238,82 @@ inline PipelineCacheClear ClearPipelineCache(const std::filesystem::path& direct
         }
     }
     return PipelineCacheClear::Cleared;
+}
+
+/// Consecutive sessions of a title that ended without a healthy cache checkpoint, kept next to
+/// the v2 cache as a small decimal count. An empty file (an in-flight load, or one a build that
+/// kept no count left) reads as one strike, as does content a crash cut short. The boot load
+/// writes the count before any driver work; a session that reaches its used-pipeline checkpoint
+/// or a clean close removes the file, so the next boot after a crash builds nothing cached.
+[[nodiscard]] inline u32 ReadBootStrikes(const std::filesystem::path& marker) {
+    std::error_code error;
+    if (!std::filesystem::exists(marker, error) || error) {
+        return 0;
+    }
+    std::ifstream stream(marker, std::ios::binary);
+    const std::string content{std::istreambuf_iterator<char>(stream),
+                              std::istreambuf_iterator<char>()};
+    const auto begin = content.find_first_not_of(" \t\r\n");
+    if (begin == std::string::npos) {
+        return 1;
+    }
+    u32 strikes{};
+    const auto* const first = content.data() + begin;
+    const auto* const last = content.data() + content.size();
+    if (std::from_chars(first, last, strikes).ec != std::errc{} || strikes == 0) {
+        return 1;
+    }
+    return strikes;
+}
+
+/// One small truncating write; a crash can leave garbage, which ReadBootStrikes reads as one
+/// strike.
+inline void WriteBootStrikes(const std::filesystem::path& marker, u32 strikes) {
+    std::ofstream stream(marker, std::ios::binary | std::ios::trunc);
+    stream << strikes << '\n';
+}
+
+/// What a boot does with a title's shader cache files, from the boot marker's state (#2165).
+/// Only a boot free of strikes, with no other emulator loading, builds cached pipelines at boot
+/// and reads the driver pipeline cache blob. A recovery boot (strikes on the marker) or one
+/// beside another emulator's load builds nothing at boot and leaves the blob unread: the blob a
+/// crashed session left is why the next boot crashed, and feeding it back to the driver can
+/// crash the recovery boot the same way; it stays on disk, untouched, for diagnosis.
+struct BootCachePlan {
+    bool build_at_boot;
+    bool read_driver_cache;
+};
+
+[[nodiscard]] inline BootCachePlan PlanBootCache(bool lock_held, bool lock_busy,
+                                                 u32 boot_strikes) noexcept {
+    const bool build_at_boot = lock_held ? boot_strikes == 0 : !lock_busy;
+    return {build_at_boot, build_at_boot};
+}
+
+/// Whether this session's fresh driver pipeline cache blob may replace the file on disk. A boot
+/// that left that file unread (a recovery, or one beside another emulator's load) keeps it for
+/// diagnosis until the fresh cache holds more than an empty one. The empty size is not zero:
+/// an empty cache still serializes its header, so the baseline is measured right after the fresh
+/// cache is created (#2165).
+[[nodiscard]] constexpr bool MayReplaceUnreadDriverBlob(bool blob_left_unread,
+                                                        size_t fresh_blob_size,
+                                                        size_t empty_blob_size) noexcept {
+    return !blob_left_unread || fresh_blob_size > empty_blob_size;
+}
+
+/// Moves a driver pipeline cache blob a boot left unread aside before the boot strikes clear.
+/// Clearing the strikes tells the next boot the on-disk blob is safe to read; a blob this
+/// session never read and never replaced has not earned that, so it moves to <file>.unread,
+/// still on disk for diagnosis, and the next boot starts the driver cache fresh. An earlier
+/// quarantine is replaced. False when the move failed: the strikes must stand (#2165).
+[[nodiscard]] inline bool QuarantineUnreadDriverBlob(const std::filesystem::path& filename) {
+    auto quarantine = filename;
+    quarantine += ".unread";
+    std::error_code error;
+    std::filesystem::remove(quarantine, error);
+    error.clear();
+    std::filesystem::rename(filename, quarantine, error);
+    return !error;
 }
 
 } // namespace VideoCommon
