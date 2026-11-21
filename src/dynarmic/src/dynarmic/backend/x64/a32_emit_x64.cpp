@@ -1251,7 +1251,7 @@ bool EmitTerminalImpl(A32EmitX64& e, IR::Term::CheckHalt terminal, IR::LocationD
 
 }
 
-bool A32EmitX64::EmitLeafTerminal(IR::Term::LeafTerminal const& terminal, IR::LocationDescriptor initial_location, bool is_single_step) noexcept {
+bool A32EmitX64::EmitLeafTerminal(IR::Term::LeafTerminal const& terminal, IR::LocationDescriptor initial_location, bool is_single_step){
     if (auto const x = std::get_if<IR::Term::ReturnToDispatch>(&terminal))
         return EmitTerminalImpl(*this, *x, initial_location, is_single_step);
     if (auto const x = std::get_if<IR::Term::LinkBlock>(&terminal))
@@ -1265,7 +1265,7 @@ bool A32EmitX64::EmitLeafTerminal(IR::Term::LeafTerminal const& terminal, IR::Lo
     UNREACHABLE();
 }
 
-bool A32EmitX64::EmitTerminal(IR::Term::Terminal const& terminal, IR::LocationDescriptor initial_location, bool is_single_step) noexcept {
+bool A32EmitX64::EmitTerminal(IR::Term::Terminal const& terminal, IR::LocationDescriptor initial_location, bool is_single_step){
     if (auto const e = std::get_if<IR::Term::LeafTerminal>(&terminal))
         return EmitLeafTerminal(*e, initial_location, is_single_step);
     if (auto const x = std::get_if<IR::Term::If>(&terminal))

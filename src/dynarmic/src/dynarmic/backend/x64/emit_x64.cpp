@@ -97,6 +97,7 @@ void EmitX64::EmitCallHostFunction(EmitContext& ctx, IR::Inst* inst) {
     auto args = ctx.reg_alloc.GetArgumentInfo(inst);
     ctx.reg_alloc.HostCall(code, nullptr, args[1], args[2], args[3]);
     auto target = args[0].GetImmediateU64();
+    code.EnterHostMxcsr();
     if (IsWithin2G(uintptr_t(code.getCurr()), target)) {
         auto const f = std::bit_cast<void(*)(void)>(target);
         code.call(f);
@@ -104,6 +105,7 @@ void EmitX64::EmitCallHostFunction(EmitContext& ctx, IR::Inst* inst) {
         code.mov(rax, target);
         code.call(rax);
     }
+    code.LeaveHostMxcsr();
 }
 
 void EmitX64::PushRSBHelper(Xbyak::Reg64 loc_desc_reg, Xbyak::Reg64 index_reg, IR::LocationDescriptor target) {
@@ -389,6 +391,9 @@ void EmitX64::AddPatchLocation(const IR::LocationDescriptor& target_desc, PatchK
     const size_t offset = code.getCurr<const u8*>() - static_cast<const u8*>(code.getCode());
     ASSERT(offset > 0 && offset < (size_t(1) << 30));
     const u32 entry = u32(offset << 2) | u32(kind);
+    if (block_capture) {
+        block_capture->patch_sites.push_back({target_desc.Value(), kind, code.getCurr<const u8*>()});
+    }
     PatchInformation& patch_info = patch_information[target_desc];
     for (u32& slot : patch_info.first) {
         if (slot == 0) {

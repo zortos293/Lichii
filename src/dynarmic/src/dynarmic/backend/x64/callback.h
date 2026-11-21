@@ -9,6 +9,7 @@
 #pragma once
 
 #include <functional>
+#include <optional>
 #include <vector>
 
 #include "common/common_types.h"
@@ -55,12 +56,21 @@ public:
 
     using Callback::EmitCall;
 
+    u64 Arg() const { return arg; }
+    /// The same call with its first argument read from [ABI_JIT_PTR + offset] at run time.
+    ArgCallback WithArgFromJitState(s32 offset) const {
+        ArgCallback copy = *this;
+        copy.arg_jit_offset = offset;
+        return copy;
+    }
+
     void EmitCall(BlockOfCode& code, std::function<void(RegList)> fn) const override;
     void EmitCallWithReturnPointer(BlockOfCode& code, std::function<void(Xbyak::Reg64, RegList)> fn) const override;
 
 private:
     void (*fn)();
     u64 arg;
+    std::optional<s32> arg_jit_offset;
 };
 
 }  // namespace Dynarmic::Backend::X64

@@ -18,6 +18,7 @@
 
 #include "dynarmic/backend/block_range_information.h"
 #include "dynarmic/backend/x64/a64_jitstate.h"
+#include "dynarmic/backend/x64/devirtualize.h"
 #include "dynarmic/backend/x64/emit_x64.h"
 #include "dynarmic/backend/x64/reg_alloc.h"
 #include "dynarmic/frontend/A64/a64_location_descriptor.h"
@@ -55,6 +56,8 @@ public:
     /// Emit host machine code for a basic block with intermediate representation `block`.
     /// @note block is modified.
     BlockDescriptor Emit(IR::Block& block) noexcept;
+    /// Emit's work; may throw Xbyak::Error, which Emit reports with the block's PC.
+    BlockDescriptor EmitBlock(IR::Block& block);
 
     void ClearCache() override;
 
@@ -120,8 +123,8 @@ public:
     void EmitExclusiveWriteMemoryInline(A64EmitContext& ctx, IR::Inst* inst);
 
     // Terminal instruction emitters
-    bool EmitLeafTerminal(IR::Term::LeafTerminal const& terminal, IR::LocationDescriptor initial_location, bool is_single_step) noexcept override;
-    bool EmitTerminal(IR::Term::Terminal const& terminal, IR::LocationDescriptor initial_location, bool is_single_step) noexcept override;
+    bool EmitLeafTerminal(IR::Term::LeafTerminal const& terminal, IR::LocationDescriptor initial_location, bool is_single_step) override;
+    bool EmitTerminal(IR::Term::Terminal const& terminal, IR::LocationDescriptor initial_location, bool is_single_step) override;
 
     // Patching
     void Unpatch(const IR::LocationDescriptor& target_desc) override;
@@ -140,6 +143,26 @@ public:
     size_t fast_dispatch_set_size = 1;
     /// EmitA64SetCheckBit left the check bit in ZF for the CheckBit terminal.
     bool check_bit_in_zf = false;
+
+    /// A UserCallbacks member call; with core_independent_code `this` comes from the JIT state.
+    /// Every core's callbacks object has the same type, so the devirtualized target is the same.
+    template<auto mfp>
+    ArgCallback UserCallback() const {
+        const ArgCallback callback = Devirtualize<mfp>(conf.callbacks);
+        if (!conf.core_independent_code) {
+            return callback;
+        }
+        ASSERT(callback.Arg() == std::bit_cast<u64>(conf.callbacks));
+        return callback.WithArgFromJitState(s32(offsetof(A64JitState, callbacks)));
+    }
+    /// reg = a per-Jit pointer: from the JIT state with core_independent_code, else `value`.
+    void EmitLoadJitPointer(Xbyak::Reg64 reg, size_t jit_state_offset, u64 value) const;
+    /// reg = &conf (the Jit's UserConfig).
+    void EmitLoadUserConfig(Xbyak::Reg64 reg) const;
+    /// With core_independent_code: where this processor's exclusive slot pointer is.
+    std::optional<s32> OwnExclusiveSlotOffset() const;
+    /// reg = this processor's exclusive-monitor address (or value) slot.
+    void EmitLoadExclusiveSlot(Xbyak::Reg64 reg, bool value_slot) const;
     /// host_call_return: the guest return address of the block's BL/BLR, pushed as a host call
     /// frame right before the terminal.
     std::optional<IR::LocationDescriptor> call_return_target;
@@ -150,6 +173,8 @@ public:
     // Compact block exits (conf.compact_block_exits): one shared unlinked-exit stub per target
     // descriptor, created while a block that links to it is emitted, and kept until ClearCache.
     ::Common::unordered_map<u64, CodePtr> exit_stubs;
+    /// exit_stubs inverted: stub -> target descriptor.
+    ::Common::unordered_map<CodePtr, u64> exit_stub_targets;
     std::vector<std::pair<u64, Xbyak::Label*>> pending_exit_stubs;
     bool emitting_block = false;
     Xbyak::Label* PendingExitStub(const IR::LocationDescriptor& target);

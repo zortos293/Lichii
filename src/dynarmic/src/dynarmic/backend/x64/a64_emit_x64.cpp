@@ -6,9 +6,13 @@
  * SPDX-License-Identifier: 0BSD
  */
 
+#include "dynarmic/backend/x64/exclusive_monitor_friend.h"
 #include "dynarmic/backend/x64/a64_emit_x64.h"
 
 #include <algorithm>
+#include <cstdio>
+#include <exception>
+#include <bit>
 #include <fmt/format.h>
 #include <fmt/ostream.h>
 #include "common/assert.h"
@@ -86,6 +90,22 @@ A64EmitX64::A64EmitX64(BlockOfCode& code, A64::UserConfig conf, A64::Jit* jit_in
 A64EmitX64::~A64EmitX64() = default;
 
 A64EmitX64::BlockDescriptor A64EmitX64::Emit(IR::Block& block) noexcept {
+    // An Xbyak error (code buffer overrun, a jump out of range, a bad operand) must not end the
+    // process silently through std::terminate: say which block and which error.
+    try {
+        return EmitBlock(block);
+    } catch (const Xbyak::Error& e) {
+        std::fprintf(stderr, "dynarmic: emitting the A64 block at %#llx failed: Xbyak error %d (%s)\n",
+                     static_cast<unsigned long long>(A64::LocationDescriptor{block.Location()}.PC()), int(e), e.what());
+        UNREACHABLE_MSG("dynarmic: emitting the A64 block at {:#x} (location {:#x}) failed: Xbyak error {} ({})",
+                        A64::LocationDescriptor{block.Location()}.PC(), block.Location().Value(), int(e), e.what());
+    } catch (const std::exception& e) {
+        UNREACHABLE_MSG("dynarmic: emitting the A64 block at {:#x} (location {:#x}) failed: {}",
+                        A64::LocationDescriptor{block.Location()}.PC(), block.Location().Value(), e.what());
+    }
+}
+
+A64EmitX64::BlockDescriptor A64EmitX64::EmitBlock(IR::Block& block) {
     if (conf.very_verbose_debugging_output) [[unlikely]] {
         std::puts(IR::DumpBlock(block).c_str());
     }
@@ -236,12 +256,18 @@ finish_this_inst:
     const bool far_code = code.HasFarCode();
     if (far_code) {
         code.SwitchToFarCode();
+        if (block_capture) {
+            block_capture->far_begin = code.getCurr<const u8*>();
+        }
     }
     FlushPendingExitStubs();
     emitting_block = false;
     for (auto& deferred_emit : ctx.far_deferred_emits)
         deferred_emit();
     if (far_code) {
+        if (block_capture) {
+            block_capture->far_end = code.getCurr<const u8*>();
+        }
         code.SwitchToNearCode();
     }
     for (auto& deferred_emit : ctx.deferred_emits)
@@ -265,6 +291,7 @@ finish_this_inst:
 void A64EmitX64::ClearCache() {
     EmitX64::ClearCache();
     exit_stubs.clear();
+    exit_stub_targets.clear();
     pending_exit_stubs.clear();
     block_ranges.ClearCache();
     ClearFastDispatchTable();
@@ -406,6 +433,35 @@ void A64EmitX64::EmitA64SetCheckBit(A64EmitContext& ctx, IR::Inst* inst) {
         return;
     }
     code.mov(CheckBitAddress(), to_store);
+}
+
+void A64EmitX64::EmitLoadJitPointer(Xbyak::Reg64 reg, size_t jit_state_offset, u64 value) const {
+    if (conf.core_independent_code) {
+        code.mov(reg, qword[code.ABI_JIT_PTR + jit_state_offset]);
+    } else {
+        code.mov(reg, value);
+    }
+}
+
+void A64EmitX64::EmitLoadUserConfig(Xbyak::Reg64 reg) const {
+    EmitLoadJitPointer(reg, offsetof(A64JitState, user_config), std::bit_cast<u64>(&conf));
+}
+
+void A64EmitX64::EmitLoadExclusiveSlot(Xbyak::Reg64 reg, bool value_slot) const {
+    if (value_slot) {
+        EmitLoadJitPointer(reg, offsetof(A64JitState, exclusive_value_slot),
+                           std::bit_cast<u64>(GetExclusiveMonitorValuePointer(conf.global_monitor, conf.processor_id)));
+    } else {
+        EmitLoadJitPointer(reg, offsetof(A64JitState, exclusive_address_slot),
+                           std::bit_cast<u64>(GetExclusiveMonitorAddressPointer(conf.global_monitor, conf.processor_id)));
+    }
+}
+
+std::optional<s32> A64EmitX64::OwnExclusiveSlotOffset() const {
+    if (conf.core_independent_code) {
+        return s32(offsetof(A64JitState, exclusive_address_slot));
+    }
+    return std::nullopt;
 }
 
 Xbyak::Address A64EmitX64::CheckBitAddress() const {
@@ -689,9 +745,11 @@ void A64EmitX64::EmitA64CallSupervisor(A64EmitContext& ctx, IR::Inst* inst) {
     auto args = ctx.reg_alloc.GetArgumentInfo(inst);
     ASSERT(args[0].IsImmediate());
     const u32 imm = args[0].GetImmediateU32();
-    Devirtualize<&A64::UserCallbacks::CallSVC>(conf.callbacks).EmitCall(code, [&](RegList param) {
+    code.EnterHostMxcsr();
+    UserCallback<&A64::UserCallbacks::CallSVC>().EmitCall(code, [&](RegList param) {
         code.mov(param[0], imm);
     });
+    code.LeaveHostMxcsr();
     // The kernel would have to execute ERET to get here, which would clear exclusive state.
     code.mov(code.byte[code.ABI_JIT_PTR + offsetof(A64JitState, exclusive_state)], u8(0));
 }
@@ -702,22 +760,28 @@ void A64EmitX64::EmitA64ExceptionRaised(A64EmitContext& ctx, IR::Inst* inst) {
     ASSERT(args[0].IsImmediate() && args[1].IsImmediate());
     const u64 pc = args[0].GetImmediateU64();
     const u64 exception = args[1].GetImmediateU64();
-    Devirtualize<&A64::UserCallbacks::ExceptionRaised>(conf.callbacks).EmitCall(code, [&](RegList param) {
+    code.EnterHostMxcsr();
+    UserCallback<&A64::UserCallbacks::ExceptionRaised>().EmitCall(code, [&](RegList param) {
         code.mov(param[0], pc);
         code.mov(param[1], exception);
     });
+    code.LeaveHostMxcsr();
 }
 
 void A64EmitX64::EmitA64DataCacheOperationRaised(A64EmitContext& ctx, IR::Inst* inst) {
     auto args = ctx.reg_alloc.GetArgumentInfo(inst);
     ctx.reg_alloc.HostCall(code, nullptr, {}, args[1], args[2]);
-    Devirtualize<&A64::UserCallbacks::DataCacheOperationRaised>(conf.callbacks).EmitCall(code);
+    code.EnterHostMxcsr();
+    UserCallback<&A64::UserCallbacks::DataCacheOperationRaised>().EmitCall(code);
+    code.LeaveHostMxcsr();
 }
 
 void A64EmitX64::EmitA64InstructionCacheOperationRaised(A64EmitContext& ctx, IR::Inst* inst) {
     auto args = ctx.reg_alloc.GetArgumentInfo(inst);
     ctx.reg_alloc.HostCall(code, nullptr, {}, args[0], args[1]);
-    Devirtualize<&A64::UserCallbacks::InstructionCacheOperationRaised>(conf.callbacks).EmitCall(code);
+    code.EnterHostMxcsr();
+    UserCallback<&A64::UserCallbacks::InstructionCacheOperationRaised>().EmitCall(code);
+    code.LeaveHostMxcsr();
 }
 
 void A64EmitX64::EmitA64DataSynchronizationBarrier(A64EmitContext&, IR::Inst*) {
@@ -735,7 +799,9 @@ void A64EmitX64::EmitA64InstructionSynchronizationBarrier(A64EmitContext& ctx, I
     }
 
     ctx.reg_alloc.HostCall(code, nullptr);
-    Devirtualize<&A64::UserCallbacks::InstructionSynchronizationBarrierRaised>(conf.callbacks).EmitCall(code);
+    code.EnterHostMxcsr();
+    UserCallback<&A64::UserCallbacks::InstructionSynchronizationBarrierRaised>().EmitCall(code);
+    code.LeaveHostMxcsr();
 }
 
 void A64EmitX64::EmitA64GetCNTFRQ(A64EmitContext& ctx, IR::Inst* inst) {
@@ -776,7 +842,11 @@ void A64EmitX64::EmitA64GetCNTPCT(A64EmitContext& ctx, IR::Inst* inst) {
         code.mov(tmp, reinterpret_cast<u64>(conf.inline_cntpct_factor));
         code.mul(qword[tmp]);
         if (conf.inline_cntpct_last) {
-            code.mov(tmp, reinterpret_cast<u64>(conf.inline_cntpct_last));
+            if (conf.core_independent_code) {
+                code.mov(tmp, qword[code.ABI_JIT_PTR + offsetof(A64JitState, inline_cntpct_last)]);
+            } else {
+                code.mov(tmp, reinterpret_cast<u64>(conf.inline_cntpct_last));
+            }
             if (conf.inline_cntpct_spin_ticks != 0) {
                 Xbyak::Label no_pause;
                 code.mov(rax, rdx);
@@ -800,7 +870,9 @@ void A64EmitX64::EmitA64GetCNTPCT(A64EmitContext& ctx, IR::Inst* inst) {
     if (!conf.wall_clock_cntpct) {
         code.UpdateTicks();
     }
-    Devirtualize<&A64::UserCallbacks::GetCNTPCT>(conf.callbacks).EmitCall(code);
+    code.EnterHostMxcsr();
+    UserCallback<&A64::UserCallbacks::GetCNTPCT>().EmitCall(code);
+    code.LeaveHostMxcsr();
 }
 
 void A64EmitX64::EmitA64GetCTR(A64EmitContext& ctx, IR::Inst* inst) {
@@ -818,7 +890,7 @@ void A64EmitX64::EmitA64GetDCZID(A64EmitContext& ctx, IR::Inst* inst) {
 void A64EmitX64::EmitA64GetTPIDR(A64EmitContext& ctx, IR::Inst* inst) {
     const Xbyak::Reg64 result = ctx.reg_alloc.ScratchGpr(code);
     if (conf.tpidr_el0) {
-        code.mov(result, u64(conf.tpidr_el0));
+        EmitLoadJitPointer(result, offsetof(A64JitState, tpidr_el0), u64(conf.tpidr_el0));
         code.mov(result, qword[result]);
     } else {
         code.xor_(result.cvt32(), result.cvt32());
@@ -829,7 +901,7 @@ void A64EmitX64::EmitA64GetTPIDR(A64EmitContext& ctx, IR::Inst* inst) {
 void A64EmitX64::EmitA64GetTPIDRRO(A64EmitContext& ctx, IR::Inst* inst) {
     const Xbyak::Reg64 result = ctx.reg_alloc.ScratchGpr(code);
     if (conf.tpidrro_el0) {
-        code.mov(result, u64(conf.tpidrro_el0));
+        EmitLoadJitPointer(result, offsetof(A64JitState, tpidrro_el0), u64(conf.tpidrro_el0));
         code.mov(result, qword[result]);
     } else {
         code.xor_(result.cvt32(), result.cvt32());
@@ -842,7 +914,7 @@ void A64EmitX64::EmitA64SetTPIDR(A64EmitContext& ctx, IR::Inst* inst) {
     const Xbyak::Reg64 value = ctx.reg_alloc.UseGpr(code, args[0]);
     const Xbyak::Reg64 addr = ctx.reg_alloc.ScratchGpr(code);
     if (conf.tpidr_el0) {
-        code.mov(addr, u64(conf.tpidr_el0));
+        EmitLoadJitPointer(addr, offsetof(A64JitState, tpidr_el0), u64(conf.tpidr_el0));
         code.mov(qword[addr], value);
     }
 }
@@ -1018,7 +1090,7 @@ bool EmitTerminalImpl(A64EmitX64& e, IR::Term::CheckHalt terminal, IR::LocationD
 
 }
 
-bool A64EmitX64::EmitLeafTerminal(IR::Term::LeafTerminal const& terminal, IR::LocationDescriptor initial_location, bool is_single_step) noexcept {
+bool A64EmitX64::EmitLeafTerminal(IR::Term::LeafTerminal const& terminal, IR::LocationDescriptor initial_location, bool is_single_step){
     if (auto const x = std::get_if<IR::Term::ReturnToDispatch>(&terminal))
         return EmitTerminalImpl(*this, *x, initial_location, is_single_step);
     if (auto const x = std::get_if<IR::Term::LinkBlock>(&terminal))
@@ -1032,7 +1104,7 @@ bool A64EmitX64::EmitLeafTerminal(IR::Term::LeafTerminal const& terminal, IR::Lo
     UNREACHABLE();
 }
 
-bool A64EmitX64::EmitTerminal(IR::Term::Terminal const& terminal, IR::LocationDescriptor initial_location, bool is_single_step) noexcept {
+bool A64EmitX64::EmitTerminal(IR::Term::Terminal const& terminal, IR::LocationDescriptor initial_location, bool is_single_step){
     if (auto const x = std::get_if<IR::Term::LeafTerminal>(&terminal))
         return EmitLeafTerminal(*x, initial_location, is_single_step);
     if (auto const x = std::get_if<IR::Term::If>(&terminal))
@@ -1065,6 +1137,10 @@ void A64EmitX64::FlushPendingExitStubs() {
     for (const auto& [value, label] : pending_exit_stubs) {
         code.L(*label);
         exit_stubs[value] = code.getCurr<CodePtr>();
+        exit_stub_targets[code.getCurr<CodePtr>()] = value;
+        if (block_capture) {
+            block_capture->exit_stubs.emplace_back(value, code.getCurr<const u8*>());
+        }
         code.mov(rax, A64::LocationDescriptor{IR::LocationDescriptor{value}}.PC());
         code.mov(qword[code.ABI_JIT_PTR + offsetof(A64JitState, pc)], rax);
         code.ReturnFromRunCode();

@@ -135,6 +135,18 @@ void A32EmitX64::GenFastmemFallbacks() {
 
 static void RecordFastmemFault(const A32::UserConfig&, bool) {}
 
+void A32EmitX64::EmitLoadUserConfig(Xbyak::Reg64 reg) const {
+    code.mov(reg, std::bit_cast<u64>(&conf));
+}
+
+void A32EmitX64::EmitLoadExclusiveSlot(Xbyak::Reg64 reg, bool value_slot) const {
+    if (value_slot) {
+        code.mov(reg, std::bit_cast<u64>(GetExclusiveMonitorValuePointer(conf.global_monitor, conf.processor_id)));
+    } else {
+        code.mov(reg, std::bit_cast<u64>(GetExclusiveMonitorAddressPointer(conf.global_monitor, conf.processor_id)));
+    }
+}
+
 #define Axx A32
 #include "dynarmic/backend/x64/emit_x64_memory.cpp.inc"
 #undef Axx

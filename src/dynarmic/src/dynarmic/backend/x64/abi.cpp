@@ -40,7 +40,7 @@ static FrameInfo CalculateFrameInfo(const size_t num_gprs, const size_t num_xmms
     };
 }
 
-static void ABI_PushRegistersAndAdjustStack(BlockOfCode& code, const size_t frame_size, std::bitset<32> regs) noexcept {
+static void ABI_PushRegistersAndAdjustStack(BlockOfCode& code, const size_t frame_size, std::bitset<32> regs) {
     using namespace Xbyak::util;
 
     const size_t num_gprs = (ABI_ALL_GPRS & regs).count();
@@ -65,7 +65,7 @@ static void ABI_PushRegistersAndAdjustStack(BlockOfCode& code, const size_t fram
     }
 }
 
-static void ABI_PopRegistersAndAdjustStack(BlockOfCode& code, const size_t frame_size, std::bitset<32> regs) noexcept {
+static void ABI_PopRegistersAndAdjustStack(BlockOfCode& code, const size_t frame_size, std::bitset<32> regs) {
     using namespace Xbyak::util;
 
     const size_t num_gprs = (ABI_ALL_GPRS & regs).count();

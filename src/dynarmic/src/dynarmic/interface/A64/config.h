@@ -24,6 +24,8 @@ class ExclusiveMonitor;
 namespace Dynarmic {
 namespace A64 {
 
+class CodeImage;
+
 using VAddr = std::uint64_t;
 
 using Vector = std::array<std::uint64_t, 2>;
@@ -355,6 +357,20 @@ struct UserConfig {
     /// returns. Spills and the check bit move into the JIT state; the host stack holds one frame
     /// per guest call.
     bool host_call_return = false;
+
+    /// x64 only. Emitted code holds no per-Jit pointers: the UserCallbacks object, this config,
+    /// the TPIDR pointers and this processor's exclusive-monitor slots are read from the JIT
+    /// state instead of being immediates, so a block compiled for one core is valid for every
+    /// core with the same config otherwise (the step towards one code cache per process).
+    bool core_independent_code = false;
+
+    /// x64 only, with core_independent_code (ignored without). Compiled blocks are recorded in
+    /// this image and blocks it holds are installed instead of compiled (see CodeImage). Null: off.
+    std::shared_ptr<CodeImage> code_image;
+
+    /// With code_image: every installed block is also compiled, and both, and the installed
+    /// copy decoded back, must give the same image record (CodeImage::Statistics::verify_mismatches).
+    bool code_image_verify = false;
 
     /// This option relates to translation. Generally when we run into an unpredictable
     /// instruction the ExceptionRaised callback is called. If this is true, we define

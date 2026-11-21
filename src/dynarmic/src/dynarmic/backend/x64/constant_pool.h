@@ -30,6 +30,11 @@ public:
     ConstantPool(BlockOfCode& code, size_t size);
 
     Xbyak::Address GetConstant(BlockOfCode& code, const Xbyak::AddressFrame& frame, u64 lower, u64 upper = 0);
+    /// Where the constant (lower, upper) is, adding it if new.
+    const void* GetConstantAddress(u64 lower, u64 upper);
+    std::span<const u8> Storage() const {
+        return {reinterpret_cast<const u8*>(pool.data()), pool.size_bytes()};
+    }
 
 private:
     static constexpr size_t align_size = 16;  // bytes

@@ -14,6 +14,7 @@ add_library(dynarmic STATIC
     backend/exception_handler.h
     common/always_false.h
     common/cast_util.h
+    common/hash.h
     common/crypto/aes.cpp
     common/crypto/aes.h
     common/crypto/crc32.cpp
@@ -132,6 +133,7 @@ add_library(dynarmic STATIC
     frontend/A64/translate/a64_translate.cpp
     frontend/A64/translate/a64_translate.h
     interface/A64/a64.h
+    interface/A64/code_image.h
     interface/A64/config.h
 )
 
@@ -150,6 +152,8 @@ if ("x86_64" IN_LIST ARCHITECTURE)
         backend/x64/block_of_code.h
         backend/x64/callback.cpp
         backend/x64/callback.h
+        backend/x64/code_image.cpp
+        backend/x64/code_image.h
         backend/x64/constant_pool.cpp
         backend/x64/constant_pool.h
         backend/x64/constants.h
@@ -182,6 +186,8 @@ if ("x86_64" IN_LIST ARCHITECTURE)
         backend/x64/stack_layout.h
         backend/x64/verbose_debugging_output.cpp
         backend/x64/verbose_debugging_output.h
+        backend/x64/x64_decode.cpp
+        backend/x64/x64_decode.h
         common/spin_lock_x64.cpp
         common/spin_lock_x64.h
         # A32

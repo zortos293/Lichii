@@ -18,6 +18,7 @@
 
 #include "dynarmic/backend/block_range_information.h"
 #include "dynarmic/backend/x64/a32_jitstate.h"
+#include "dynarmic/backend/x64/devirtualize.h"
 #include "dynarmic/backend/x64/emit_x64.h"
 #include "dynarmic/backend/x64/reg_alloc.h"
 #include "dynarmic/frontend/A32/a32_location_descriptor.h"
@@ -46,6 +47,14 @@ struct A32EmitContext final : public EmitContext {
 
 class A32EmitX64 final : public EmitX64 {
 public:
+    template<auto mfp>
+    ArgCallback UserCallback() const {
+        return Devirtualize<mfp>(conf.callbacks);
+    }
+    void EmitLoadUserConfig(Xbyak::Reg64 reg) const;
+    void EmitLoadExclusiveSlot(Xbyak::Reg64 reg, bool value_slot) const;
+    std::optional<s32> OwnExclusiveSlotOffset() const { return std::nullopt; }
+
     A32EmitX64(BlockOfCode& code, A32::UserConfig conf, A32::Jit* jit_interface);
     ~A32EmitX64() override;
 
@@ -117,8 +126,8 @@ public:
 
     // Terminal instruction emitters
     void EmitSetUpperLocationDescriptor(IR::LocationDescriptor new_location, IR::LocationDescriptor old_location);
-    bool EmitLeafTerminal(IR::Term::LeafTerminal const& terminal, IR::LocationDescriptor initial_location, bool is_single_step) noexcept override;
-    bool EmitTerminal(IR::Term::Terminal const& terminal, IR::LocationDescriptor initial_location, bool is_single_step) noexcept override;
+    bool EmitLeafTerminal(IR::Term::LeafTerminal const& terminal, IR::LocationDescriptor initial_location, bool is_single_step) override;
+    bool EmitTerminal(IR::Term::Terminal const& terminal, IR::LocationDescriptor initial_location, bool is_single_step) override;
 
     // Patching
     void Unpatch(const IR::LocationDescriptor& target_desc) override;

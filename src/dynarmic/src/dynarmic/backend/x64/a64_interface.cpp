@@ -9,6 +9,7 @@
 #include <cstring>
 #include <memory>
 #include <mutex>
+#include <xmmintrin.h>
 
 #include <boost/icl/interval_set.hpp>
 #include "common/assert.h"
@@ -19,7 +20,9 @@
 #include "dynarmic/backend/x64/a64_emit_x64.h"
 #include "dynarmic/backend/x64/a64_jitstate.h"
 #include "dynarmic/backend/x64/block_of_code.h"
+#include "dynarmic/backend/x64/code_image.h"
 #include "dynarmic/backend/x64/devirtualize.h"
+#include "dynarmic/backend/x64/exclusive_monitor_friend.h"
 #include "dynarmic/backend/x64/jitstate_info.h"
 #include "dynarmic/common/atomic.h"
 #include "dynarmic/frontend/A64/translate/a64_translate.h"
@@ -86,6 +89,24 @@ public:
         , polyfill_options(GenPolyfillOptions(block_of_code))
     {
         ASSERT(conf.page_table_address_space_bits >= 12 && conf.page_table_address_space_bits <= 64);
+        SetJitStatePointers();
+        // Code without per-Jit pointers only: otherwise the option is ignored.
+        if (conf.code_image && conf.core_independent_code) {
+            code_image_link.emplace(conf.code_image, this->conf, block_of_code, emitter);
+        }
+    }
+
+    // The per-Jit values that core-independent code reads through the JIT state.
+    void SetJitStatePointers() {
+        jit_state.callbacks = conf.callbacks;
+        jit_state.user_config = &conf;
+        jit_state.tpidrro_el0 = conf.tpidrro_el0;
+        jit_state.tpidr_el0 = conf.tpidr_el0;
+        jit_state.inline_cntpct_last = conf.inline_cntpct_last;
+        if (conf.global_monitor) {
+            jit_state.exclusive_address_slot = GetExclusiveMonitorAddressPointer(conf.global_monitor, conf.processor_id);
+            jit_state.exclusive_value_slot = GetExclusiveMonitorValuePointer(conf.global_monitor, conf.processor_id);
+        }
     }
 
     ~Impl() = default;
@@ -137,6 +158,7 @@ public:
     void Reset() {
         ASSERT(!is_executing);
         jit_state = {};
+        SetJitStatePointers();
     }
 
     void HaltExecution(HaltReason hr) {
@@ -267,6 +289,16 @@ private:
         if (auto block = emitter.GetBasicBlock(descriptor))
             return block->entrypoint;
 
+        // The dispatcher looks blocks up with the guest's MXCSR loaded. Compiling runs host code
+        // that does FP arithmetic (hash table load factors), which would raise flags the guest
+        // reads back as FPSR exceptions (IXC on the first run of a block) and run under the
+        // guest's rounding and flush modes: evict and compile with the default MXCSR.
+        struct HostMxcsr {
+            const u32 saved = _mm_getcsr();
+            HostMxcsr() { _mm_setcsr(0x1F80); }
+            ~HostMxcsr() { _mm_setcsr(saved); }
+        } const host_mxcsr;
+
         constexpr size_t MINIMUM_REMAINING_CODESIZE = 1 * 1024 * 1024;
         if (block_of_code.SpaceRemaining() < MINIMUM_REMAINING_CODESIZE) {
             // Immediately evacuate cache
@@ -274,6 +306,12 @@ private:
             PerformRequestedCacheInvalidation(HaltReason::CacheInvalidation);
         }
         block_of_code.EnsureMemoryCommitted(MINIMUM_REMAINING_CODESIZE);
+
+        if (code_image_link) {
+            if (const auto installed = code_image_link->TryLoad(descriptor)) {
+                return *installed;
+            }
+        }
 
         // JIT Compile
         const auto get_code = [this](u64 vaddr) { return conf.callbacks->MemoryReadCode(vaddr); };
@@ -285,7 +323,14 @@ private:
         if (conf.counters) {
             ++conf.counters->blocks_compiled;
         }
-        return emitter.Emit(ir_block).entrypoint;
+        BlockCapture capture;
+        emitter.block_capture = code_image_link ? &capture : nullptr;
+        const auto emitted = emitter.Emit(ir_block);
+        emitter.block_capture = nullptr;
+        if (code_image_link) {
+            code_image_link->Record(ir_block, emitted.entrypoint, emitted.size, capture);
+        }
+        return emitted.entrypoint;
     }
 
     void PerformRequestedCacheInvalidation(HaltReason hr) {
@@ -319,6 +364,7 @@ private:
     BlockOfCode block_of_code;
     A64EmitX64 emitter;
     Optimization::PolyfillOptions polyfill_options;
+    std::optional<CodeImageLink> code_image_link;
     bool is_executing = false;
     bool invalidate_entire_cache = false;
     boost::icl::interval_set<u64> invalid_cache_ranges;

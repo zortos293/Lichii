@@ -97,7 +97,7 @@ void HostLocInfo::AddValue(HostLoc loc, IR::Inst* inst) noexcept {
 }
 
 #ifndef NDEBUG
-void HostLocInfo::EmitVerboseDebuggingOutput(BlockOfCode& code, size_t host_loc_index) const noexcept {
+void HostLocInfo::EmitVerboseDebuggingOutput(BlockOfCode& code, size_t host_loc_index) const {
     using namespace Xbyak::util;
     for (auto const value : values) {
         code.mov(code.ABI_PARAM1, rsp);
@@ -241,31 +241,31 @@ void RegAlloc::RegisterPseudoOperation(const IR::Inst* inst) noexcept {
     }
 }
 
-Xbyak::Reg64 RegAlloc::UseScratchGpr(BlockOfCode& code, Argument& arg) noexcept {
+Xbyak::Reg64 RegAlloc::UseScratchGpr(BlockOfCode& code, Argument& arg) {
     ASSERT(!arg.allocated);
     arg.allocated = true;
     return HostLocToReg64(UseScratchImpl(code, arg.value, gpr_order));
 }
 
-Xbyak::Xmm RegAlloc::UseScratchXmm(BlockOfCode& code, Argument& arg) noexcept {
+Xbyak::Xmm RegAlloc::UseScratchXmm(BlockOfCode& code, Argument& arg) {
     ASSERT(!arg.allocated);
     arg.allocated = true;
     return HostLocToXmm(UseScratchImpl(code, arg.value, xmm_order));
 }
 
-void RegAlloc::UseScratch(BlockOfCode& code, Argument& arg, HostLoc host_loc) noexcept {
+void RegAlloc::UseScratch(BlockOfCode& code, Argument& arg, HostLoc host_loc) {
     ASSERT(!arg.allocated);
     arg.allocated = true;
     UseScratchImpl(code, arg.value, BuildRegSet({host_loc}));
 }
 
-void RegAlloc::DefineValue(BlockOfCode& code, IR::Inst* inst, const Xbyak::Reg& reg) noexcept {
+void RegAlloc::DefineValue(BlockOfCode& code, IR::Inst* inst, const Xbyak::Reg& reg) {
     ASSERT(reg.getKind() == Xbyak::Operand::XMM || reg.getKind() == Xbyak::Operand::REG);
     const auto hostloc = static_cast<HostLoc>(reg.getIdx() + static_cast<size_t>(reg.getKind() == Xbyak::Operand::XMM ? HostLoc::XMM0 : HostLoc::RAX));
     DefineValueImpl(code, inst, hostloc);
 }
 
-void RegAlloc::DefineValue(BlockOfCode& code, IR::Inst* inst, Argument& arg) noexcept {
+void RegAlloc::DefineValue(BlockOfCode& code, IR::Inst* inst, Argument& arg) {
     ASSERT(!arg.allocated);
     arg.allocated = true;
     DefineValueImpl(code, inst, arg.value);
@@ -278,7 +278,7 @@ void RegAlloc::Release(const Xbyak::Reg& reg) noexcept {
     SetOccupied(hostloc, !LocInfo(hostloc).values.empty());
 }
 
-HostLoc RegAlloc::UseImpl(BlockOfCode& code, IR::Value use_value, std::bitset<32> desired_locations) noexcept {
+HostLoc RegAlloc::UseImpl(BlockOfCode& code, IR::Value use_value, std::bitset<32> desired_locations) {
     if (use_value.IsImmediate()) {
         return LoadImmediate(code, use_value, ScratchImpl(code, desired_locations));
     }
@@ -311,7 +311,7 @@ HostLoc RegAlloc::UseImpl(BlockOfCode& code, IR::Value use_value, std::bitset<32
     return destination_location;
 }
 
-HostLoc RegAlloc::UseScratchImpl(BlockOfCode& code, IR::Value use_value, std::bitset<32> desired_locations) noexcept {
+HostLoc RegAlloc::UseScratchImpl(BlockOfCode& code, IR::Value use_value, std::bitset<32> desired_locations) {
     if (use_value.IsImmediate()) {
         return LoadImmediate(code, use_value, ScratchImpl(code, desired_locations));
     }
@@ -349,7 +349,7 @@ HostLoc RegAlloc::UseScratchImpl(BlockOfCode& code, IR::Value use_value, std::bi
     return destination_location;
 }
 
-HostLoc RegAlloc::ScratchImpl(BlockOfCode& code, std::bitset<32> desired_locations) noexcept {
+HostLoc RegAlloc::ScratchImpl(BlockOfCode& code, std::bitset<32> desired_locations) {
     const HostLoc location = SelectARegister(desired_locations);
     MoveOutOfTheWay(code, location);
     LocInfo(location).WriteLock();
@@ -364,7 +364,7 @@ void RegAlloc::HostCall(
     const std::optional<Argument::copyable_reference> arg1,
     const std::optional<Argument::copyable_reference> arg2,
     const std::optional<Argument::copyable_reference> arg3
-) noexcept {
+) {
     constexpr size_t args_count = 4;
     constexpr std::array<HostLoc, args_count> args_hostloc = {ABI_PARAM1, ABI_PARAM2, ABI_PARAM3, ABI_PARAM4};
     const std::array<std::optional<Argument::copyable_reference>, args_count> args = {arg0, arg1, arg2, arg3};
@@ -419,14 +419,14 @@ void RegAlloc::HostCall(
     }
 }
 
-void RegAlloc::AllocStackSpace(BlockOfCode& code, const size_t stack_space) noexcept {
+void RegAlloc::AllocStackSpace(BlockOfCode& code, const size_t stack_space) {
     ASSERT(stack_space < size_t((std::numeric_limits<s32>::max)()));
     ASSERT(reserved_stack_space == 0);
     reserved_stack_space = stack_space;
     code.sub(code.rsp, u32(stack_space));
 }
 
-void RegAlloc::ReleaseStackSpace(BlockOfCode& code, const size_t stack_space) noexcept {
+void RegAlloc::ReleaseStackSpace(BlockOfCode& code, const size_t stack_space) {
     ASSERT(stack_space < size_t((std::numeric_limits<s32>::max)()));
     ASSERT(reserved_stack_space == stack_space);
     reserved_stack_space = 0;
@@ -516,7 +516,7 @@ std::optional<HostLoc> RegAlloc::ValueLocation(const IR::Inst* value) const noex
 
 // The checks that scan every location for def_inst are debug-only: per IR instruction they cost as
 // much as the rest of register allocation.
-void RegAlloc::DefineValueImpl(BlockOfCode& code, IR::Inst* def_inst, HostLoc host_loc) noexcept {
+void RegAlloc::DefineValueImpl(BlockOfCode& code, IR::Inst* def_inst, HostLoc host_loc) {
     DEBUG_ASSERT(!ValueLocation(def_inst) && "def_inst has already been defined");
     LocInfo(host_loc).AddValue(host_loc, def_inst);
     MarkDirty(host_loc);
@@ -524,7 +524,7 @@ void RegAlloc::DefineValueImpl(BlockOfCode& code, IR::Inst* def_inst, HostLoc ho
     DEBUG_ASSERT(*ValueLocation(def_inst) == host_loc);
 }
 
-void RegAlloc::DefineValueImpl(BlockOfCode& code, IR::Inst* def_inst, const IR::Value& use_inst) noexcept {
+void RegAlloc::DefineValueImpl(BlockOfCode& code, IR::Inst* def_inst, const IR::Value& use_inst) {
     DEBUG_ASSERT(!ValueLocation(def_inst) && "def_inst has already been defined");
     if (use_inst.IsImmediate()) {
         const HostLoc location = ScratchImpl(code, gpr_order);
@@ -537,7 +537,7 @@ void RegAlloc::DefineValueImpl(BlockOfCode& code, IR::Inst* def_inst, const IR::
     }
 }
 
-void RegAlloc::Move(BlockOfCode& code, HostLoc to, HostLoc from) noexcept {
+void RegAlloc::Move(BlockOfCode& code, HostLoc to, HostLoc from) {
     const size_t bit_width = LocInfo(from).GetMaxBitWidth();
     ASSERT(LocInfo(to).IsEmpty() && !LocInfo(from).IsLocked());
     ASSERT(bit_width <= HostLocBitWidth(to));
@@ -551,12 +551,12 @@ void RegAlloc::Move(BlockOfCode& code, HostLoc to, HostLoc from) noexcept {
         touched_regs |= u32(1) << size_t(to);
 }
 
-void RegAlloc::CopyToScratch(BlockOfCode& code, size_t bit_width, HostLoc to, HostLoc from) noexcept {
+void RegAlloc::CopyToScratch(BlockOfCode& code, size_t bit_width, HostLoc to, HostLoc from) {
     ASSERT(LocInfo(to).IsEmpty() && !LocInfo(from).IsEmpty());
     EmitMove(code, bit_width, to, from);
 }
 
-void RegAlloc::Exchange(BlockOfCode& code, HostLoc a, HostLoc b) noexcept {
+void RegAlloc::Exchange(BlockOfCode& code, HostLoc a, HostLoc b) {
     ASSERT(!LocInfo(a).IsLocked() && !LocInfo(b).IsLocked());
     ASSERT(LocInfo(a).GetMaxBitWidth() <= HostLocBitWidth(b));
     ASSERT(LocInfo(b).GetMaxBitWidth() <= HostLocBitWidth(a));
@@ -579,14 +579,14 @@ void RegAlloc::Exchange(BlockOfCode& code, HostLoc a, HostLoc b) noexcept {
     }
 }
 
-void RegAlloc::MoveOutOfTheWay(BlockOfCode& code, HostLoc reg) noexcept {
+void RegAlloc::MoveOutOfTheWay(BlockOfCode& code, HostLoc reg) {
     ASSERT(!LocInfo(reg).IsLocked());
     if (!LocInfo(reg).IsEmpty()) {
         SpillRegister(code, reg);
     }
 }
 
-void RegAlloc::SpillRegister(BlockOfCode& code, HostLoc loc) noexcept {
+void RegAlloc::SpillRegister(BlockOfCode& code, HostLoc loc) {
     ASSERT(HostLocIsRegister(loc) && "Only registers can be spilled");
     ASSERT(!LocInfo(loc).IsEmpty() && "There is no need to spill unoccupied registers");
     ASSERT(!LocInfo(loc).IsLocked() && "Registers that have been allocated must not be spilt");
@@ -645,7 +645,7 @@ HostLoc RegAlloc::FindFreeSpill(bool is_xmm) const noexcept {
         else code.OPCODE(__VA_ARGS__); \
     }()
 
-HostLoc RegAlloc::LoadImmediate(BlockOfCode& code, IR::Value imm, HostLoc host_loc) noexcept {
+HostLoc RegAlloc::LoadImmediate(BlockOfCode& code, IR::Value imm, HostLoc host_loc) {
     ASSERT(imm.IsImmediate() && "imm is not an immediate");
     if (HostLocIsGPR(host_loc)) {
         const Xbyak::Reg64 reg = HostLocToReg64(host_loc);
@@ -669,7 +669,7 @@ HostLoc RegAlloc::LoadImmediate(BlockOfCode& code, IR::Value imm, HostLoc host_l
     return host_loc;
 }
 
-void RegAlloc::EmitMove(BlockOfCode& code, const size_t bit_width, const HostLoc to, const HostLoc from) noexcept {
+void RegAlloc::EmitMove(BlockOfCode& code, const size_t bit_width, const HostLoc to, const HostLoc from) {
     auto const spill_to_op_arg_helper = [&](HostLoc loc, size_t reserved_stack_space) {
         ASSERT(HostLocIsSpill(loc));
         size_t i = size_t(loc) - size_t(HostLoc::FirstSpill);
@@ -761,7 +761,7 @@ void RegAlloc::EmitMove(BlockOfCode& code, const size_t bit_width, const HostLoc
 }
 #undef MAYBE_AVX
 
-void RegAlloc::EmitExchange(BlockOfCode& code, const HostLoc a, const HostLoc b) noexcept {
+void RegAlloc::EmitExchange(BlockOfCode& code, const HostLoc a, const HostLoc b) {
     ASSERT(HostLocIsGPR(a) && HostLocIsGPR(b) && "Exchanging XMM registers is uneeded OR invalid emit");
     code.xchg(HostLocToReg64(a), HostLocToReg64(b));
 }

@@ -17,6 +17,7 @@ struct JitStateInfo {
     JitStateInfo(const JitStateType&, size_t rsb_ptr_mask_ = JitStateType::RSB_PTR_MASK)
             : offsetof_guest_MXCSR(offsetof(JitStateType, guest_MXCSR))
             , offsetof_asimd_MXCSR(offsetof(JitStateType, asimd_MXCSR))
+            , offsetof_host_MXCSR(offsetof(JitStateType, host_MXCSR))
             , offsetof_rsb_ptr(offsetof(JitStateType, rsb_ptr))
             , rsb_ptr_mask(rsb_ptr_mask_ & JitStateType::RSB_PTR_MASK)
             , offsetof_rsb_location_descriptors(offsetof(JitStateType, rsb_location_descriptors))
@@ -28,6 +29,7 @@ struct JitStateInfo {
 
     const size_t offsetof_guest_MXCSR;
     const size_t offsetof_asimd_MXCSR;
+    const size_t offsetof_host_MXCSR;
     const size_t offsetof_rsb_ptr;
     const size_t rsb_ptr_mask;
     const size_t offsetof_rsb_location_descriptors;

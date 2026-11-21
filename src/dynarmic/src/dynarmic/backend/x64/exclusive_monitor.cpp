@@ -15,7 +15,13 @@
 namespace Dynarmic {
 
 ExclusiveMonitor::ExclusiveMonitor(std::size_t processor_count)
-        : reservations(processor_count) {}
+        : reservations(processor_count) {
+    // The first SpinLock use generates the lock code (call_once): do it here, on the host's
+    // MXCSR. Done lazily from an exclusive access, that host code ran under the guest's MXCSR
+    // and left a stray inexact flag (FPSR.IXC) in it.
+    lock.Lock();
+    lock.Unlock();
+}
 
 size_t ExclusiveMonitor::GetProcessorCount() const {
     return reservations.size();

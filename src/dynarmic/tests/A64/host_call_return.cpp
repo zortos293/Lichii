@@ -7,12 +7,16 @@
 // callee and blocks that spill.
 
 #include <array>
+#include <cstring>
+#include <optional>
+#include <vector>
 
 #include <catch2/catch_test_macros.hpp>
 #include <oaknut/oaknut.hpp>
 
 #include "./testenv.h"
 #include "dynarmic/interface/A64/a64.h"
+#include "dynarmic/interface/exclusive_monitor.h"
 
 using namespace Dynarmic;
 using namespace oaknut::util;
@@ -211,4 +215,93 @@ TEST_CASE("A64: host_call_return spills", "[a64][host_call_return]") {
         code.RET();
     });
     REQUIRE(r.sp == 0x80000);
+}
+
+namespace {
+class FlatMemoryEnv final : public A64::UserCallbacks {
+public:
+    std::array<u32, 0x1000> mem{};
+    A64::Jit* jit = nullptr;
+    template<typename T>
+    T Rd(u64 a) {
+        T v;
+        std::memcpy(&v, reinterpret_cast<const u8*>(mem.data()) + a, sizeof v);
+        return v;
+    }
+    template<typename T>
+    void Wr(u64 a, T v) { std::memcpy(reinterpret_cast<u8*>(mem.data()) + a, &v, sizeof v); }
+    std::optional<u32> MemoryReadCode(u64 a) override { return Rd<u32>(a); }
+    u64 MemoryRead(u64 a, size_t s) override { return s == 8 ? Rd<u64>(a) : s == 4 ? Rd<u32>(a) : s == 2 ? Rd<u16>(a) : Rd<u8>(a); }
+    A64::Vector MemoryRead128(u64 a) override { return Rd<A64::Vector>(a); }
+    void MemoryWrite(u64 a, u64 v, size_t s) override {
+        if (s == 8) Wr<u64>(a, v); else if (s == 4) Wr<u32>(a, u32(v)); else if (s == 2) Wr<u16>(a, u16(v)); else Wr<u8>(a, u8(v));
+    }
+    void MemoryWrite128(u64 a, A64::Vector v) override { Wr(a, v); }
+    bool MemoryWriteExclusive32(u64 a, u32 v, u32) override { return Wr(a, v), true; }
+    void CallSVC(u32) override { jit->HaltExecution(); }
+    void ExceptionRaised(u64, A64::Exception) override {}
+    void AddTicks(u64) override {}
+    u64 GetTicksRemaining() override { return 1ull << 40; }
+    u64 GetCNTPCT() override { return 0; }
+};
+}  // namespace
+
+// Not host_call_return-specific; lives here for the shared helpers. Run alone
+// (dynarmic_tests "[exclusive_fpsr]") it is the first exclusive access of the process. The memory
+// callbacks are plain memcpy: A64TestEnv's hash map would itself do FP arithmetic under the guest's
+// MXCSR (callbacks run with it loaded).
+TEST_CASE("A64: exclusive accesses leave FPSR alone", "[a64][exclusive_fpsr]") {
+    FlatMemoryEnv env;
+    std::vector<u32> prog;
+    oaknut::VectorCodeGenerator code{prog, nullptr};
+    oaknut::Label loop;
+    code.MOVZ(X20, 0x1000);
+    code.MOVZ(X19, 10);
+    code.l(loop);
+    code.LDAXR(W1, X20);
+    code.ADD(W1, W1, 1);
+    code.STLXR(W2, W1, X20);
+    code.SUBS(X19, X19, 1);
+    code.B(NE, loop);
+    code.SVC(0);
+    std::copy(prog.begin(), prog.end(), env.mem.begin());
+
+    ExclusiveMonitor monitor{1};
+    A64::UserConfig config{};
+    config.callbacks = &env;
+    config.enable_cycle_counting = false;
+    config.global_monitor = &monitor;
+    A64::Jit jit{config};
+    env.jit = &jit;
+    jit.SetPC(0);
+    jit.SetFpsr(0);
+    jit.Run();
+    REQUIRE(env.Rd<u32>(0x1000) == 10);
+    REQUIRE(jit.GetFpsr() == 0);
+}
+
+TEST_CASE("A64: host FP in memory callbacks leaves FPSR alone", "[a64][callback_mxcsr]") {
+    // A64TestEnv::MemoryWrite inserts into a hash map: its rehashes do FP arithmetic (load
+    // factors) inside the callback, which ran under the guest's MXCSR and set FPSR.IXC.
+    HaltOnSvcEnv env;
+    oaknut::VectorCodeGenerator code{env.code_mem, nullptr};
+    oaknut::Label loop;
+    code.MOVZ(X20, 0x4000);
+    code.MOVZ(X19, 2000);
+    code.l(loop);
+    code.STRB(W19, X20, POST_INDEXED, 1);
+    code.SUBS(X19, X19, 1);
+    code.B(NE, loop);
+    code.SVC(0);
+
+    A64::UserConfig config{};
+    config.callbacks = &env;
+    config.enable_cycle_counting = false;
+    A64::Jit jit{config};
+    env.jit = &jit;
+    jit.SetPC(0);
+    jit.SetFpsr(0);
+    jit.Run();
+    REQUIRE(env.modified_memory.size() == 2000);
+    REQUIRE(jit.GetFpsr() == 0);
 }

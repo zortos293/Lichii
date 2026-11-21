@@ -42,6 +42,7 @@ namespace Dynarmic::Backend::X64 {
 
 class A64EmitX64;
 class BlockOfCode;
+struct BlockCapture;
 
 using A64FullVectorWidth = std::integral_constant<size_t, 128>;
 
@@ -119,8 +120,8 @@ public:
 #ifndef NDEBUG
     void EmitVerboseDebuggingOutput(RegAlloc& reg_alloc);
 #endif
-    virtual bool EmitLeafTerminal(IR::Term::LeafTerminal const& terminal, IR::LocationDescriptor initial_location, bool is_single_step) noexcept = 0;
-    virtual bool EmitTerminal(IR::Term::Terminal const& terminal, IR::LocationDescriptor initial_location, bool is_single_step) noexcept = 0;
+    virtual bool EmitLeafTerminal(IR::Term::LeafTerminal const& terminal, IR::LocationDescriptor initial_location, bool is_single_step) = 0;
+    virtual bool EmitTerminal(IR::Term::Terminal const& terminal, IR::LocationDescriptor initial_location, bool is_single_step) = 0;
 
     // Patching
     enum class PatchKind : u32 { Jg, Jz, Jmp, MovRcx };
@@ -140,6 +141,10 @@ public:
     virtual void EmitPatchJmp(const IR::LocationDescriptor& target_desc, CodePtr target_code_ptr = nullptr) = 0;
     virtual void EmitPatchMovRcx(CodePtr target_code_ptr = nullptr) = 0;
 
+    /// While set, Emit (and the helpers it calls) note in it what a code image needs to know
+    /// about the block being emitted.
+    BlockCapture* block_capture = nullptr;
+
     // State
     BlockOfCode& code;
     ExceptionHandler exception_handler;
@@ -148,6 +153,35 @@ public:
 
     // We need materialized protected members
     friend class A64EmitX64;
+};
+
+/// What one Emit created besides the block's near code (EmitX64::block_capture).
+struct BlockCapture {
+    struct PatchSite {
+        u64 target;
+        EmitX64::PatchKind kind;
+        const u8* site;
+    };
+    /// The block's part of the far code region (empty without one).
+    const u8* far_begin = nullptr;
+    const u8* far_end = nullptr;
+    std::vector<PatchSite> patch_sites;
+    /// Indirect-branch cache entries the block's sites use.
+    std::vector<size_t> indirect_branch_entries;
+    /// Exit stubs the block created in its far code: target descriptor, stub.
+    std::vector<std::pair<u64, const u8*>> exit_stubs;
+    struct FastmemPatch {
+        const u8* rip;
+        const u8* resume;
+        const u8* callback;
+        u32 inst_name;
+        bool recompile;
+        u64 location;
+    };
+    /// The fastmem patch records the block added.
+    std::vector<FastmemPatch> fastmem_patches;
+    /// The block calls a host function (A64CallHostFunction).
+    bool calls_host_function = false;
 };
 
 }  // namespace Dynarmic::Backend::X64

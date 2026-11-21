@@ -1330,6 +1330,13 @@ if (HAS_HYPERVISOR)
     target_link_libraries(core PRIVATE "${HYPERVISOR_FRAMEWORK}")
 endif()
 
+if (ARCHITECTURE_x86_64)
+    target_sources(core PRIVATE
+        arm/dynarmic/dynarmic_code_image.cpp
+        arm/dynarmic/dynarmic_code_image.h
+    )
+endif()
+
 if (ARCHITECTURE_x86_64 OR ARCHITECTURE_arm64 OR ARCHITECTURE_riscv64 OR ARCHITECTURE_loongarch64)
     target_sources(core PRIVATE
         arm/dynarmic/arm_dynarmic.h

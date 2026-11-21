@@ -12,6 +12,7 @@
 #include <functional>
 #include <memory>
 #include <optional>
+#include <span>
 #include <type_traits>
 #include <utility>
 #include <vector>
@@ -75,6 +76,11 @@ public:
     void SwitchMxcsrOnEntry();
     /// Code emitter: Makes saved host MXCSR the current MXCSR
     void SwitchMxcsrOnExit();
+    /// Around a call from guest code into host code (UserCallbacks, host functions): the host
+    /// code runs under the host thread's MXCSR, so its own FP neither sets guest FPSR flags nor
+    /// runs under the guest's rounding and flush-to-zero modes. Flags, memory only.
+    void EnterHostMxcsr();
+    void LeaveHostMxcsr();
     /// Code emitter: Enter standard ASIMD MXCSR region
     void EnterStandardASIMD();
     /// Code emitter: Leave standard ASIMD MXCSR region
@@ -138,6 +144,23 @@ public:
     const void* GetForceReturnFromRunCodeAddress() const {
         return return_from_run_code[FORCE_RETURN];
     }
+
+    /// The four dispatcher return entries (plain, MXCSR already exited, forced, both).
+    const std::array<const void*, 4>& GetReturnFromRunCodeAddresses() const {
+        return return_from_run_code;
+    }
+
+    /// The constant pool's storage, in the code space.
+    std::span<const u8> GetConstantPoolRange() const {
+        return constant_pool.Storage();
+    }
+    /// Where the constant (lower, upper) is in the pool, adding it if new.
+    const void* GetConstantAddress(u64 lower, u64 upper) {
+        return constant_pool.GetConstantAddress(lower, upper);
+    }
+
+    /// This host's CPU features (the ones code generation depends on).
+    static HostFeature HostFeatures() noexcept;
 
     void int3() { db(0xCC); }
 

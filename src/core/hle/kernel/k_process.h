@@ -7,6 +7,11 @@
 
 #include <atomic>
 #include <map>
+#include <memory>
+#include <string>
+#include <string_view>
+#include <utility>
+#include <vector>
 
 #include "core/arm/arm_interface.h"
 #include "core/file_sys/program_metadata.h"
@@ -21,6 +26,14 @@
 #include "core/hle/kernel/k_thread.h"
 #include "core/hle/kernel/k_thread_local_page.h"
 #include "core/memory.h"
+
+namespace Core {
+class DynarmicCodeImageFile;
+}
+
+namespace Dynarmic::A64 {
+class CodeImage;
+}
 
 namespace Kernel {
 
@@ -124,6 +137,12 @@ private:
     std::atomic<u64> m_mkw_frame_mode_address{};
     std::atomic<u64> m_frame_interval_address{};
     std::atomic<u64> m_frame_interval_source_address{};
+    /// Build IDs of the loaded modules, in load order (the guest code image's key).
+    std::vector<std::string> m_module_build_ids;
+#ifdef ARCHITECTURE_x86_64
+    /// The process's persisted translated code (64-bit applications).
+    std::unique_ptr<Core::DynarmicCodeImageFile> m_code_image_file;
+#endif
     std::atomic<s64> m_num_process_switches{};
     std::atomic<s64> m_num_thread_switches{};
     std::atomic<s64> m_num_fpu_switches{};
@@ -228,6 +247,9 @@ public:
         m_frame_interval_source_address.store(source, std::memory_order_relaxed);
         m_frame_interval_address.store(interval, std::memory_order_relaxed);
     }
+
+    /// The guest code image the process's Jits share (null: none).
+    std::shared_ptr<Dynarmic::A64::CodeImage> GetDynarmicCodeImage() const;
 
     u64 GetProcessId() const {
         return m_process_id;

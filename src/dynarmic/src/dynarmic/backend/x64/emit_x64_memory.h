@@ -387,7 +387,8 @@ void EmitExclusiveUnlock(BlockOfCode& code, const UserConfig& conf, Xbyak::Reg64
 }
 
 template<typename UserConfig>
-void EmitExclusiveTestAndClear(BlockOfCode& code, const UserConfig& conf, Xbyak::Reg64 vaddr, Xbyak::Reg64 pointer, Xbyak::Reg64 tmp) {
+void EmitExclusiveTestAndClear(BlockOfCode& code, const UserConfig& conf, Xbyak::Reg64 vaddr, Xbyak::Reg64 pointer, Xbyak::Reg64 tmp,
+                               std::optional<s32> own_slot_jit_offset = std::nullopt) {
     if (conf.HasOptimization(OptimizationFlag::Unsafe_IgnoreGlobalMonitor)) {
         return;
     }
@@ -395,11 +396,18 @@ void EmitExclusiveTestAndClear(BlockOfCode& code, const UserConfig& conf, Xbyak:
     code.mov(tmp, 0xDEAD'DEAD'DEAD'DEAD);
     const size_t processor_count = GetExclusiveMonitorProcessorCount(conf.global_monitor);
     for (size_t processor_index = 0; processor_index < processor_count; processor_index++) {
-        if (processor_index == conf.processor_id) {
-            continue;
-        }
         Xbyak::Label ok;
-        code.mov(pointer, std::bit_cast<u64>(GetExclusiveMonitorAddressPointer(conf.global_monitor, processor_index)));
+        if (own_slot_jit_offset) {
+            // Core-independent code: this processor's slot is known at run time only.
+            code.mov(pointer, std::bit_cast<u64>(GetExclusiveMonitorAddressPointer(conf.global_monitor, processor_index)));
+            code.cmp(pointer, qword[code.ABI_JIT_PTR + *own_slot_jit_offset]);
+            code.je(ok, code.T_NEAR);
+        } else {
+            if (processor_index == conf.processor_id) {
+                continue;
+            }
+            code.mov(pointer, std::bit_cast<u64>(GetExclusiveMonitorAddressPointer(conf.global_monitor, processor_index)));
+        }
         code.cmp(qword[pointer], vaddr);
         code.jne(ok, code.T_NEAR);
         code.mov(qword[pointer], tmp);

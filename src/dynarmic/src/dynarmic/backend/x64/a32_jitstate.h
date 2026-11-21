@@ -47,6 +47,7 @@ struct A32JitState {
 
     // For internal use (See: BlockOfCode::RunCode)
     u32 guest_MXCSR = 0x00001f80;
+    u32 host_MXCSR = 0x00001f80;  // the host thread's, saved on entry for host callbacks
     u32 asimd_MXCSR = 0x00009fc0;
     volatile u32 halt_reason = 0;
 

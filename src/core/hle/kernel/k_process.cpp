@@ -22,6 +22,9 @@
 #ifdef HAS_HYPERVISOR
 #include "core/arm/hypervisor/arm_hypervisor.h"
 #endif
+#ifdef ARCHITECTURE_x86_64
+#include "core/arm/dynarmic/dynarmic_code_image.h"
+#endif
 #ifdef HAS_NCE
 #include "core/arm/nce/arm_nce.h"
 #endif
@@ -129,6 +132,11 @@ void GenerateRandom(std::span<u64> out_random) {
 } // namespace
 
 void KProcess::Finalize(KernelCore& kernel) {
+#ifdef ARCHITECTURE_x86_64
+    // Writes the guest code image.
+    m_code_image_file.reset();
+#endif
+
     // Delete the process local region.
     this->DeleteThreadLocalRegion(kernel, m_plr_address);
 
@@ -940,6 +948,14 @@ Result KProcess::Run(KernelCore& kernel, s32 priority, size_t stack_size) {
     // Ensure that we haven't already allocated stack.
     ASSERT(m_main_thread_stack_size == 0);
 
+#ifdef ARCHITECTURE_x86_64
+    // Every module is loaded: the guest code image of this program and module set.
+    if (m_code_image_file) {
+        m_code_image_file->Open(m_program_id, kernel.System().GetApplicationProcessBuildID(),
+                                m_module_build_ids);
+    }
+#endif
+
     // Ensure that we're allocating a valid stack.
     stack_size = Common::AlignUp(stack_size, PageSize);
     R_UNLESS(stack_size + m_code_size <= m_max_process_memory, ResultOutOfMemory);
@@ -1290,6 +1306,15 @@ Result KProcess::LoadFromMetadata(KernelCore& kernel, const FileSys::ProgramMeta
     R_SUCCEED();
 }
 
+std::shared_ptr<Dynarmic::A64::CodeImage> KProcess::GetDynarmicCodeImage() const {
+#ifdef ARCHITECTURE_x86_64
+    if (m_code_image_file) {
+        return m_code_image_file->Image();
+    }
+#endif
+    return nullptr;
+}
+
 void KProcess::LoadModule(KernelCore& kernel, CodeSet code_set, KProcessAddress base_addr) {
     const auto ReprotectSegment = [&](const CodeSet::Segment& segment, Svc::MemoryPermission permission) {
         m_page_table.SetProcessMemoryPermission(segment.addr + base_addr, segment.size, permission);
@@ -1355,6 +1380,11 @@ void KProcess::InitializeInterfaces(KernelCore& kernel) {
     } else
 #endif
         if (this->Is64Bit()) {
+#ifdef ARCHITECTURE_x86_64
+        if (this->IsApplication()) {
+            m_code_image_file = std::make_unique<Core::DynarmicCodeImageFile>();
+        }
+#endif
         for (size_t i = 0; i < Core::Hardware::NUM_CPU_CORES; i++) {
             m_arm_interfaces[i] = std::make_unique<Core::ArmDynarmic64>(
                 kernel.System(), kernel.IsMulticore(), this,
