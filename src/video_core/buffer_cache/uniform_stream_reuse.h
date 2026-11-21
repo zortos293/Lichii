@@ -11,6 +11,7 @@
 #include <span>
 #include <type_traits>
 
+#include "common/cityhash.h"
 #include "common/common_types.h"
 
 namespace VideoCommon {
@@ -46,10 +47,20 @@ public:
     static constexpr u32 MaxBytes = 4096; // BufferCache's DEFAULT_SKIP_CACHE_SIZE
     static constexpr size_t NumStages = 5;
     static constexpr size_t NumSlots = 18; // Maxwell constant buffers per stage
-    /// After this many binds in a row with other bytes than the slot's last, the slot's next
-    /// DirectBinds binds skip the compare (per-draw matrices change every bind).
-    static constexpr u16 MissStreak = 8;
-    static constexpr u16 DirectBinds = 64;
+    /// Higher miss tolerance to prevent premature cache deactivation during multi-kart pack rendering
+    static constexpr u16 MissStreak = 32;
+    static constexpr u16 DirectBinds = 16;
+    /// Multi-entry associative history per slot to allow round-robin reuse across 12+ karts
+    static constexpr size_t HistoryWays = 16;
+
+    struct HistoryEntry {
+        Ref ref{};
+        u64 tick{};
+        u64 device_addr{};
+        u32 size{};
+        u64 hash{};
+        std::array<u8, MaxBytes> bytes{};
+    };
 
     struct Slot {
         Ref ref{};
@@ -58,7 +69,10 @@ public:
         u32 size{};        // 0: nothing streamed yet
         u16 misses{};      ///< Binds in a row whose bytes differed from the slot's last
         u16 direct{};      ///< Binds left that copy without comparing
+        u64 hash{};
+        u8 history_next{};
         std::array<u8, MaxBytes> bytes{};
+        std::array<HistoryEntry, HistoryWays> history{};
     };
 
     void Reset() noexcept {
@@ -68,6 +82,14 @@ public:
                 slot.tick = 0;
                 slot.misses = 0;
                 slot.direct = 0;
+                slot.hash = 0;
+                slot.history_next = 0;
+                for (auto& h : slot.history) {
+                    h.size = 0;
+                    h.tick = 0;
+                    h.device_addr = 0;
+                    h.hash = 0;
+                }
             }
         }
     }
@@ -113,6 +135,7 @@ template <class Runtime, class DeviceMemory>
         --slot.direct;
         device_memory.ReadBlockUnsafe(device_addr, slot.bytes.data(), size);
         slot.size = size;
+        slot.hash = Common::CityHash64(reinterpret_cast<const char*>(slot.bytes.data()), size);
         const std::span<u8> span = runtime.BindMappedUniformBuffer(stage, binding_index, size);
         std::memcpy(span.data(), slot.bytes.data(), size);
         slot.ref = runtime.LastStreamUniformRef();
@@ -121,28 +144,84 @@ template <class Runtime, class DeviceMemory>
     }
     u8* const scratch = reuse.scratch.data();
     device_memory.ReadBlockUnsafe(device_addr, scratch, size);
+    const u64 current_tick = runtime.CurrentTick();
+    const u64 hash = Common::CityHash64(reinterpret_cast<const char*>(scratch), size);
 
+    // 1. Check immediate previous bind
     const bool same_bytes =
-        slot.size == size && std::memcmp(slot.bytes.data(), scratch, size) == 0;
-    if (same_bytes && slot.tick == runtime.CurrentTick()) {
+        slot.size == size && slot.device_addr == device_addr && slot.hash == hash &&
+        std::memcmp(slot.bytes.data(), scratch, size) == 0;
+    if (same_bytes && slot.tick == current_tick) {
         slot.misses = 0;
         runtime.RebindStreamUniform(slot.ref, size);
         return true;
     }
+
+    // 2. Check multi-entry associative history by device_addr (e.g. 12 karts in a race)
+    for (size_t i = 0; i < Reuse::HistoryWays; ++i) {
+        auto& h = slot.history[i];
+        if (h.size == size && h.device_addr == device_addr && h.tick == current_tick) {
+            if (h.hash == hash && std::memcmp(h.bytes.data(), scratch, size) == 0) {
+                // CACHE HIT: Rebind previous allocation for this device_addr
+                slot.misses = 0;
+                slot.ref = h.ref;
+                slot.tick = current_tick;
+                slot.device_addr = device_addr;
+                slot.size = size;
+                slot.hash = hash;
+                std::memcpy(slot.bytes.data(), scratch, size);
+                runtime.RebindStreamUniform(h.ref, size);
+                return true;
+            }
+            // Same device_addr but bytes changed: update this entry directly
+            const std::span<u8> span = runtime.BindMappedUniformBuffer(stage, binding_index, size);
+            std::memcpy(span.data(), scratch, size);
+            const auto new_ref = runtime.LastStreamUniformRef();
+            slot.ref = new_ref;
+            slot.tick = current_tick;
+            slot.device_addr = device_addr;
+            slot.size = size;
+            slot.hash = hash;
+            std::memcpy(slot.bytes.data(), scratch, size);
+
+            h.ref = new_ref;
+            h.tick = current_tick;
+            h.hash = hash;
+            std::memcpy(h.bytes.data(), scratch, size);
+
+            if (++slot.misses >= Reuse::MissStreak) {
+                slot.misses = 0;
+                slot.direct = Reuse::DirectBinds;
+            }
+            return true;
+        }
+    }
+
+    // 3. New device_addr: allocate from stream buffer
     const std::span<u8> span = runtime.BindMappedUniformBuffer(stage, binding_index, size);
     std::memcpy(span.data(), scratch, size);
-    slot.ref = runtime.LastStreamUniformRef();
-    // After the allocation: the tick the stream region is tagged with is the one current now.
-    slot.tick = runtime.CurrentTick();
-    if (same_bytes) {
+    const auto ref = runtime.LastStreamUniformRef();
+
+    slot.ref = ref;
+    slot.tick = current_tick;
+    slot.device_addr = device_addr;
+    slot.size = size;
+    slot.hash = hash;
+    std::memcpy(slot.bytes.data(), scratch, size);
+
+    // Record into round-robin history slot
+    auto& h = slot.history[slot.history_next];
+    slot.history_next = static_cast<u8>((slot.history_next + 1) % Reuse::HistoryWays);
+    h.ref = ref;
+    h.tick = current_tick;
+    h.device_addr = device_addr;
+    h.size = size;
+    h.hash = hash;
+    std::memcpy(h.bytes.data(), scratch, size);
+
+    if (++slot.misses >= Reuse::MissStreak) {
         slot.misses = 0;
-    } else {
-        slot.size = size;
-        std::memcpy(slot.bytes.data(), scratch, size);
-        if (++slot.misses >= Reuse::MissStreak) {
-            slot.misses = 0;
-            slot.direct = Reuse::DirectBinds;
-        }
+        slot.direct = Reuse::DirectBinds;
     }
     return true;
 }
