@@ -11,6 +11,7 @@ add_executable(tests
     video_core/unswizzle_workers.cpp
     video_core/block_linear_swizzle.cpp
     video_core/aftermath_dump.cpp
+    video_core/attachmentless_render_area.cpp
     video_core/frame_dump_schedule.cpp
     video_core/frame_dump_decode.cpp
     video_core/frame_gen_generations.cpp

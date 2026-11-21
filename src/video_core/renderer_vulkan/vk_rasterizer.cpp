@@ -71,6 +71,7 @@
 #include "video_core/renderer_vulkan/vk_texture_cache.h"
 #include "video_core/renderer_vulkan/vk_update_descriptor.h"
 #include "video_core/shader_cache.h"
+#include "video_core/texture_cache/attachmentless_render_area.h"
 #include "video_core/texture_cache/texture_cache_base.h"
 #include "video_core/textures/texture.h"
 #include "video_core/vulkan_common/vulkan_device.h"
@@ -203,18 +204,8 @@ VkViewport GetViewportState(const Device& device, const Maxwell& regs, size_t in
 VkRect2D GetScissorState(const Maxwell& regs, size_t index, u32 up_scale = 1, u32 down_shift = 0) {
     const auto& src = regs.scissor_test[index];
     VkRect2D scissor{};
-    const auto scale_up = [&](s32 value) -> s32 {
-        if (value == 0) {
-            return 0U;
-        }
-        const s32 upset = value * up_scale;
-        s32 acumm = 0;
-        if ((up_scale >> down_shift) == 0) {
-            acumm = upset % 2;
-        }
-        const s32 converted_value = (value * up_scale) >> down_shift;
-        return value < 0 ? std::min<s32>(converted_value - acumm, -1)
-                         : std::max<s32>(converted_value + acumm, 1);
+    const auto scale_up = [&](s32 value) {
+        return VideoCommon::ScaleScissorCoordinate(value, up_scale, down_shift);
     };
 
     const bool lower_left = regs.window_origin.mode != Maxwell::WindowOrigin::Mode::UpperLeft;
