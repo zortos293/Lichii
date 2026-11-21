@@ -1344,6 +1344,11 @@ void ManualContentProvider::ClearAllEntries() {
     multi_version_entries.clear();
 }
 
+void ManualContentProvider::SwapEntries(ManualContentProvider& other) noexcept {
+    entries.swap(other.entries);
+    multi_version_entries.swap(other.multi_version_entries);
+}
+
 void ManualContentProvider::ReplaceApplicationPaths(GameListApplicationPaths paths) {
     application_paths = std::move(paths);
 }

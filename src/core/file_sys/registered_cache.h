@@ -273,6 +273,9 @@ public:
     bool AddEntriesFromContainer(VirtualFile file, bool only_content = false,
                                  std::optional<u64> base_program_id = std::nullopt);
     void ClearAllEntries();
+    // Exchanges the NCA entries (and versioned updates) with other's. Application paths stay:
+    // ReplaceApplicationPaths publishes them only when a scan completes.
+    void SwapEntries(ManualContentProvider& other) noexcept;
 
     /// Publish the paths from the last completed game-list scan, independently of NCA entries.
     void ReplaceApplicationPaths(GameListApplicationPaths paths);
