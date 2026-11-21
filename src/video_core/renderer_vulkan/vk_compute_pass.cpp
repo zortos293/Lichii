@@ -190,6 +190,7 @@ struct AstcPushConstants {
     u32 block_height;
     u32 block_height_mask;
     u32 native_tiling;
+    std::array<u32, 2> level_extent; // texels of the decoded level; offset 32 like the shader
 };
 
 constexpr std::array<VkDescriptorSetLayoutBinding, 2> BC_ENCODER_DESCRIPTOR_SET_BINDINGS{{
@@ -234,7 +235,10 @@ struct BcEncoderPushConstants {
     u32 width;
     u32 height;
     u32 bc3;
-    u32 out_offset; // in 8-byte units
+    u32 out_offset;    // in 8-byte units
+    u32 source_width;  // != width: resample the source level (RescalesUnevenBc)
+    u32 source_height;
+    u32 srgb; // the source holds sRGB colour (bc_encoder.comp)
 };
 
 struct QueriesPrefixScanPushConstants {
@@ -726,10 +730,13 @@ void ASTCDecoderPass::AssembleInto(const VideoCommon::ImageInfo& info, u32 skip,
             const void* const descriptor_data{compute_pass_descriptor_queue.UpdateData()};
             auto params = MakeBlockLinearSwizzle2DParams(swizzle, info);
             params.layer_stride = input_layer_stride;
+            const std::array<u32, 2> level_extent{
+                (std::max)(info.size.width >> swizzle.level, 1U),
+                (std::max)(info.size.height >> swizzle.level, 1U)};
             const u32 num_dispatches_x = Common::DivCeil(swizzle.num_tiles.width, 8U);
             const u32 num_dispatches_y = Common::DivCeil(swizzle.num_tiles.height, 8U);
             scheduler.Record([this, num_dispatches_x, num_dispatches_y, block_dims, params,
-                              descriptor_data](vk::CommandBuffer cmdbuf) {
+                              level_extent, descriptor_data](vk::CommandBuffer cmdbuf) {
                 const AstcPushConstants uniforms{
                     .blocks_dims = block_dims,
                     .layer_stride = params.layer_stride,
@@ -738,6 +745,7 @@ void ASTCDecoderPass::AssembleInto(const VideoCommon::ImageInfo& info, u32 skip,
                     .block_height = params.block_height,
                     .block_height_mask = params.block_height_mask,
                     .native_tiling = params.native_tiling,
+                    .level_extent = level_extent,
                 };
                 const VkDescriptorSet set = descriptor_allocator.Commit();
                 device.GetLogical().UpdateDescriptorSet(set, *descriptor_template, descriptor_data);
@@ -770,8 +778,10 @@ void ASTCDecoderPass::AssembleInto(const VideoCommon::ImageInfo& info, u32 skip,
         ASSERT(params.origin == (std::array<u32, 3>{0, 0, 0}));
         ASSERT(params.destination == (std::array<s32, 3>{0, 0, 0}));
         ASSERT(params.bytes_per_block_log2 == 4);
+        const std::array<u32, 2> level_extent{(std::max)(info.size.width >> swizzle.level, 1U),
+                                              (std::max)(info.size.height >> swizzle.level, 1U)};
         scheduler.Record([this, num_dispatches_x, num_dispatches_y, num_dispatches_z, block_dims,
-                          params, descriptor_data](vk::CommandBuffer cmdbuf) {
+                          params, level_extent, descriptor_data](vk::CommandBuffer cmdbuf) {
             const AstcPushConstants uniforms{
                 .blocks_dims = block_dims,
                 .layer_stride = params.layer_stride,
@@ -780,6 +790,7 @@ void ASTCDecoderPass::AssembleInto(const VideoCommon::ImageInfo& info, u32 skip,
                 .block_height = params.block_height,
                 .block_height_mask = params.block_height_mask,
                 .native_tiling = params.native_tiling,
+                .level_extent = level_extent,
             };
             const VkDescriptorSet set = descriptor_allocator.Commit();
             device.GetLogical().UpdateDescriptorSet(set, *descriptor_template, descriptor_data);
@@ -854,7 +865,8 @@ BcEncoderPass::~BcEncoderPass() = default;
 
 void BcEncoderPass::Encode(VkImageView source, u32 width, u32 height, u32 layers, bool bc3,
                            VkBuffer buffer, VkDeviceSize buffer_offset, VkDeviceSize buffer_size,
-                           VkDeviceSize out_offset) {
+                           VkDeviceSize out_offset, u32 source_width, u32 source_height,
+                           bool srgb) {
     scheduler.RequestOutsideRenderPassOperationContext();
     compute_pass_descriptor_queue.Acquire(scheduler, 2);
     compute_pass_descriptor_queue.AddImage(source);
@@ -867,6 +879,9 @@ void BcEncoderPass::Encode(VkImageView source, u32 width, u32 height, u32 layers
         .height = height,
         .bc3 = bc3 ? 1U : 0U,
         .out_offset = static_cast<u32>(out_offset / 8),
+        .source_width = source_width != 0 ? source_width : width,
+        .source_height = source_height != 0 ? source_height : height,
+        .srgb = srgb ? 1U : 0U,
     };
     const VkPipeline vk_pipeline = *pipeline;
     scheduler.Record([this, vk_pipeline, uniforms, layers, descriptor_data](vk::CommandBuffer cmdbuf) {

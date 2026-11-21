@@ -187,8 +187,11 @@ public:
 
     /// Encodes every layer of one level (`source` is its RGBA8 storage view) into `buffer`,
     /// `out_offset` bytes past `buffer_offset`; blocks are row-major, layer after layer.
+    /// A source of another size (source_width/height, 0 = width/height) is resampled bilinearly,
+    /// in linear light when it holds sRGB colour (srgb).
     void Encode(VkImageView source, u32 width, u32 height, u32 layers, bool bc3, VkBuffer buffer,
-                VkDeviceSize buffer_offset, VkDeviceSize buffer_size, VkDeviceSize out_offset);
+                VkDeviceSize buffer_offset, VkDeviceSize buffer_size, VkDeviceSize out_offset,
+                u32 source_width = 0, u32 source_height = 0, bool srgb = false);
 
 private:
     Scheduler& scheduler;

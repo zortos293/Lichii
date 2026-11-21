@@ -110,7 +110,12 @@ namespace Vulkan {
         vk::Image CreateImage(const VkImageCreateInfo &ci, bool dedicated = false) const;
 
         /// CreateImage, but a null image instead of an exception when there is no memory for it.
-        vk::Image TryCreateImage(const VkImageCreateInfo &ci, bool dedicated = false) const;
+        /// scratch: an image the caller tries again in another shape when this one does not fit.
+        /// It stays within the memory budget (no over-budget retry in host memory), and a miss
+        /// is neither a memory pressure event nor a failed image: the caller makes its last
+        /// attempt without `scratch`, which counts them.
+        vk::Image TryCreateImage(const VkImageCreateInfo &ci, bool dedicated = false,
+                                 bool scratch = false) const;
 
         /// A sparse resident image with nothing bound (reads return zero, writes are dropped), or
         /// a null image when the device can't make one.
@@ -178,7 +183,7 @@ namespace Vulkan {
         /// CreateImage's fallbacks; the image is left null when the result is an error.
         /// may_fail: the caller handles VK_ERROR_OUT_OF_DEVICE_MEMORY (see UsesUnbackedFallback).
         VkResult AllocateImage(const VkImageCreateInfo &ci, bool dedicated, bool may_fail,
-                               vk::Image &image) const;
+                               vk::Image &image, bool scratch = false) const;
 
         /// CreateBuffer's fallbacks; the buffer is left null when the result is an error.
         /// min_alignment over 1 aligns the allocation and skips the separate buffer pool.

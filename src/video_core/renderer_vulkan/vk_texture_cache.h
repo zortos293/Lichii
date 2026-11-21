@@ -626,6 +626,12 @@ public:
 
     bool IsRescaled() const noexcept;
 
+    /// Uneven-mip ASTC re-compressed to BC at a size rounded up to 256 (RescalesUnevenBc, AMD).
+    /// The texture cache keeps these unless an image could not be made.
+    [[nodiscard]] bool IsRescaledBc() const noexcept {
+        return rescaled_bc;
+    }
+
     bool ScaleUp(bool ignore = false);
 
     bool ScaleDown(bool ignore = false);
@@ -747,6 +753,7 @@ private:
     std::vector<vk::ImageView> storage_layer_views; ///< By host level * layers + layer
     VkImageAspectFlags aspect_mask = 0;
     bool initialized = false;
+    bool rescaled_bc = false; ///< RescalesUnevenBc: BC at a rounded-up size (see IsRescaledBc)
 
     std::optional<Framebuffer> scale_framebuffer;
     std::optional<Framebuffer> normal_framebuffer;
