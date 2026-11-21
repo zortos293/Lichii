@@ -12,7 +12,7 @@
 
 #include "core/file_sys/vfs/vfs_types.h"
 
-class QProgressDialog;
+class NupProgressDialog;
 class QWidget;
 
 /// NX archive tools of the game list, run in the process with nxformat:
@@ -33,6 +33,7 @@ public:
     static bool IsNxArchive(const std::string& game_path);
 
     void ConvertToNx(const std::string& game_path);
+    void ExtractNx(const std::string& archive_path);
     void AddToNx(const std::string& archive_path);
     void RemoveFromNx(const std::string& archive_path);
     /// Sets the title, publisher and icon the game list shows, in place.
@@ -55,5 +56,5 @@ private:
     FileSys::VirtualFilesystem vfs;
     QWidget* parent_widget;
     std::shared_ptr<Job> running;
-    QPointer<QProgressDialog> progress;
+    QPointer<NupProgressDialog> progress;
 };

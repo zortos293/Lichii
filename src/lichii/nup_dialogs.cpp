@@ -503,6 +503,23 @@ void NupProgressDialog::SetProgress(const FileSys::Nup::PackProgress& progress) 
     details->setText(text);
 }
 
+void NupProgressDialog::SetByteProgress(u64 done, u64 total, const QString& timing) {
+    if (cancelling) {
+        return;
+    }
+    const double fraction = total == 0 ? 0.0 : double(done) / total;
+    bar->setRange(0, total == 0 || done >= total ? 0 : 1000);
+    bar->setValue(static_cast<int>(std::min(999.0, fraction * 1000)));
+    status->setText(total == 0 ? tr("Preparing...")
+                              : done >= total ? tr("Finishing...")
+                                              : tr("%1%").arg(fraction * 100, 0, 'f', 1));
+    QString text = timing;
+    if (total != 0) {
+        text.prepend(tr("%1 / %2 MB\n").arg(Megabytes(done), Megabytes(total)));
+    }
+    details->setText(text);
+}
+
 void NupProgressDialog::SetCancelling() {
     cancelling = true;
     cancel->setEnabled(false);
