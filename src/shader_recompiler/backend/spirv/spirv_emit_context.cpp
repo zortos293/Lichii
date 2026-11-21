@@ -1257,6 +1257,10 @@ void EmitContext::DefineGlobalMemoryFunctions(const IR::Program& program) {
                 return fallback;
             }
             AddCapability(spv::Capability::VariablePointersStorageBuffer);
+            // The OpSelect below picks among different storage buffers, which only
+            // VariablePointers allows: VariablePointersStorageBuffer keeps a variable pointer
+            // within one buffer (SPIR-V 2.16.1). Devices enable both features (mandatory).
+            AddCapability(spv::Capability::VariablePointers);
             Id ssbo_id{ssbos[candidates[0]].*ssbo_member};
             for (size_t i = 0; i < candidates.size(); ++i) {
                 const Id routed{OpIEqual(U1, route, Const(candidates[i]))};
