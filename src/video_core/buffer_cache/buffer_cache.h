@@ -3884,7 +3884,10 @@ void BufferCache<P>::ChangeRegister(BufferId buffer_id) {
 
 template <class P>
 void BufferCache<P>::TouchBuffer(Buffer& buffer, BufferId buffer_id) noexcept {
-    if (buffer_id != NULL_BUFFER_ID) {
+    // Every bind touches its buffer, and reading the LRU entry was a cache miss for most uniform
+    // buffer binds, though a second touch in the same frame changes nothing.
+    if (buffer_id != NULL_BUFFER_ID && buffer.getLRUTick() != frame_tick) {
+        buffer.setLRUTick(frame_tick);
         lru_cache.Touch(buffer.getLRUID(), frame_tick);
     }
 }
