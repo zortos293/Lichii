@@ -25,6 +25,7 @@
 #include "core/hle/kernel/k_process.h"
 #include "core/hle/kernel/kernel.h"
 #include "core/memory.h"
+#include "tests/common/committed_guest_memory.h"
 #include "tests/core/system_test_context.h"
 #include "video_core/control/channel_state.h"
 #include "video_core/dirty_flags.h"
@@ -199,6 +200,7 @@ struct Fixture {
     std::vector<u32> state_methods;
 
     Fixture() {
+        Tests::CommitFixtureMemory(physical);
         slow.fast_maxwell3d = false;
         fast.fast_maxwell3d = true;
         for (auto* engine : {&slow, &fast}) {

@@ -78,8 +78,21 @@ public:
     /// Bytes Map, Unmap and Protect have covered since start.
     static u64 MappedBytes() noexcept;
 
-    /// Pages the kernel hands out (cleared or not).
-    void MarkUsed(size_t physical_offset, size_t length);
+    /// Pages the kernel hands out (cleared or not). On Windows the guest memory section only
+    /// reserves its pages, and this commits them: false when Windows is out of commit.
+    [[nodiscard]] bool MarkUsed(size_t physical_offset, size_t length);
+
+    /// Windows: commits the section pages behind [physical_offset, physical_offset + length), 64
+    /// KiB at a time and once each. A committed page can't be decommitted again. Elsewhere, and
+    /// when the section was committed whole (EDEN_BACKING_COMMIT_ALL=1), it does nothing. False
+    /// for a range that ends past the backing, and when Windows is out of commit.
+    [[nodiscard]] bool CommitBacking(size_t physical_offset, size_t length);
+
+    /// Bytes of this guest memory committed so far (Windows, reserved section only).
+    [[nodiscard]] u64 CommittedBytes() const noexcept;
+
+    /// Logs the host faults on reserved pages that the fault handler recorded since the last call.
+    void ReportCommitFaults();
 
     /// Pages given back to the kernel: their contents are no longer known to be zero.
     void MarkDirty(size_t physical_offset, size_t length);
@@ -147,10 +160,13 @@ private:
     static constexpr size_t GranuleShift = 16; ///< 64 KiB of backing per state byte
     static constexpr u8 GranuleUsed = 1 << 0;   ///< Handed out at least once
     static constexpr u8 GranuleDirty = 1 << 1;  ///< May hold non-zero data
+    static constexpr u8 GranuleCommitted = 1 << 2; ///< Windows: section pages committed
     std::unique_ptr<std::atomic<u8>[]> granules;
     size_t num_granules{};
     // Windows requires it for kernels whom lack proper support for some functions!
     bool fallback_buffer{false};
+    static constexpr size_t NoCommitLimit = ~size_t{0};
+    size_t commits_left_for_test{NoCommitLimit}; ///< Tests: CommitBacking calls left to succeed
 };
 
 } // namespace Common

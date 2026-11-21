@@ -117,6 +117,7 @@ void DeviceMemory::TrimZeroPages(std::stop_token stop) {
             continue;
         }
         const auto [resident, trimmed] = result;
+        buffer.ReportCommitFaults();
         const auto ms = std::chrono::duration_cast<std::chrono::milliseconds>(
                             std::chrono::steady_clock::now() - start)
                             .count();
@@ -127,8 +128,9 @@ void DeviceMemory::TrimZeroPages(std::stop_token stop) {
         interval = 5s;
         LOG_INFO(HW_Memory,
                  "Trimmed {} MiB of all-zero guest pages out of {} MiB resident in {} ms; the kernel "
-                 "zero-filled {} MiB so far",
-                 trimmed >> 20, resident >> 20, ms, Common::HostMemory::ZeroFilledBytes() >> 20);
+                 "zero-filled {} MiB so far; {} MiB of guest memory committed",
+                 trimmed >> 20, resident >> 20, ms, Common::HostMemory::ZeroFilledBytes() >> 20,
+                 buffer.CommittedBytes() >> 20);
     }
 }
 #endif

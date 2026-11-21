@@ -13,6 +13,7 @@
 #include "core/hle/kernel/k_process.h"
 #include "core/hle/kernel/kernel.h"
 #include "core/memory.h"
+#include "tests/common/committed_guest_memory.h"
 #include "tests/core/system_test_context.h"
 
 TEST_CASE("Memory acquire reads and exclusive publication use mapped backing", "[hwacod_memory]") {
@@ -28,6 +29,7 @@ TEST_CASE("Memory acquire reads and exclusive publication use mapped backing", "
     SCOPE_EXIT { system.Kernel().UnregisterKernelObject(&process); };
     auto& table = process.GetPageTable().GetImpl();
     table.Resize(20, 12);
+    Tests::CommitFixtureMemory(system.DeviceMemory());
     auto* page = system.DeviceMemory().buffer.BackingBasePointer() + 0x10000;
     std::memset(page, 0, 0x1000);
     table.entries.GetAndFault(4).Store(false, Common::PageType::Memory, 1,
@@ -90,6 +92,7 @@ TEST_CASE("Virtual address ranges that wrap past the address space end are inval
     SCOPE_EXIT { system.Kernel().UnregisterKernelObject(&process); };
     auto& table = process.GetPageTable().GetImpl();
     table.Resize(20, 12);
+    Tests::CommitFixtureMemory(system.DeviceMemory());
     auto* page = system.DeviceMemory().buffer.BackingBasePointer() + 0x10000;
     table.entries.GetAndFault(4).Store(false, Common::PageType::Memory, 1,
                                      reinterpret_cast<uintptr_t>(page) - 0x4000);

@@ -25,6 +25,7 @@
 #include "core/hle/kernel/k_process.h"
 #include "core/hle/kernel/kernel.h"
 #include "core/memory.h"
+#include "tests/common/committed_guest_memory.h"
 #include "tests/core/system_test_context.h"
 #include "shader_recompiler/storage_write_extent.h"
 #include "video_core/buffer_cache/buffer_cache.h"
@@ -552,6 +553,7 @@ struct BasicFixture {
 
     BasicFixture() {
         system.Initialize();
+        Tests::CommitFixtureMemory(physical);
         process = std::make_unique<Kernel::KProcess>(system.Kernel());
         auto& table = process->GetPageTable().GetImpl();
         table.Resize(24, 12);
@@ -1010,6 +1012,7 @@ TEST_CASE("Command page readers remain ordered during batch completion", "[buffe
         Runtime runtime;
         std::unique_ptr<Cache> cache = std::make_unique<Cache>(device, runtime);
     } f;
+    Tests::CommitFixtureMemory(f.physical);
     Access::Add(*f.cache, 0x20000, 0x10000);
     Access::Dirty(*f.cache, 0x20000, 0x1000);
     Access::DrawWrite(*f.cache, 0x20000);

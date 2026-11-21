@@ -19,6 +19,7 @@
 #include "core/hle/kernel/k_process.h"
 #include "core/hle/kernel/kernel.h"
 #include "core/memory.h"
+#include "tests/common/committed_guest_memory.h"
 #include "tests/core/system_test_context.h"
 #include "video_core/nx2_debug_control.h"
 
@@ -51,6 +52,7 @@ struct GuestPages {
         system.Initialize();
         auto& table = process.GetPageTable().GetImpl();
         table.Resize(20, 12);
+        Tests::CommitFixtureMemory(system.DeviceMemory());
         backing = system.DeviceMemory().buffer.BackingBasePointer() + 0x10000;
         std::memset(backing, 0, 0x4000);
         MapPage(table, 4, backing + 0x1000, Common::PageType::Memory);

@@ -11,6 +11,7 @@
 #include "core/hle/kernel/k_process.h"
 #include "core/hle/kernel/kernel.h"
 #include "core/memory.h"
+#include "tests/common/committed_guest_memory.h"
 #include "tests/core/system_test_context.h"
 #include "video_core/memory_manager.h"
 #include "video_core/rasterizer_interface.h"
@@ -75,6 +76,7 @@ TEST_CASE("A device mapping resolves through the process it was attributed to",
     Core::System system;
     system.Initialize();
     Core::DeviceMemory physical;
+    Tests::CommitFixtureMemory(physical);
     Tegra::MaxwellDeviceMemoryManager device_memory{physical};
     NullRasterizer rasterizer;
     device_memory.BindInterface(&rasterizer);

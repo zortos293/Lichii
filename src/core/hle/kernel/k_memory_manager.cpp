@@ -236,6 +236,12 @@ KPhysicalAddress KMemoryManager::AllocateAndOpenContinuous(size_t num_pages, siz
         return 0;
     }
 
+    // Windows commits the pages here: out of commit, the allocation fails instead of the access.
+    if (!this->MarkUsed(allocated_block, num_pages)) {
+        chosen_manager->Free(allocated_block, num_pages);
+        return 0;
+    }
+
     // Maintain the optimized memory bitmap, if we should.
     if (m_has_optimized_process[static_cast<size_t>(pool)]) {
         chosen_manager->TrackUnoptimizedAllocation(m_system.Kernel(), allocated_block, num_pages);
@@ -243,14 +249,13 @@ KPhysicalAddress KMemoryManager::AllocateAndOpenContinuous(size_t num_pages, siz
 
     // Open the first reference to the pages.
     chosen_manager->OpenFirst(allocated_block, num_pages);
-    this->MarkUsed(allocated_block, num_pages);
 
     return allocated_block;
 }
 
-void KMemoryManager::MarkUsed(KPhysicalAddress address, size_t num_pages) {
-    m_system.DeviceMemory().buffer.MarkUsed(GetInteger(address) - Core::DramMemoryMap::Base,
-                                            num_pages * PageSize);
+bool KMemoryManager::MarkUsed(KPhysicalAddress address, size_t num_pages) {
+    return m_system.DeviceMemory().buffer.MarkUsed(GetInteger(address) - Core::DramMemoryMap::Base,
+                                                   num_pages * PageSize);
 }
 
 void KMemoryManager::MarkDirty(KPhysicalAddress address, size_t num_pages) {
@@ -265,12 +270,19 @@ Result KMemoryManager::AllocatePageGroupImpl(KPageGroup* out, size_t num_pages, 
     R_UNLESS(0 <= heap_index, ResultOutOfMemory);
 
     // Ensure that we don't leave anything un-freed.
+    // A node can span adjacent managers (AddBlock joins contiguous blocks): free each portion.
     ON_RESULT_FAILURE {
         for (const auto& it : *out) {
-            auto& manager = this->GetManager(it.GetAddress());
-            const size_t node_num_pages = std::min<u64>(
-                it.GetNumPages(), (manager.GetEndAddress() - it.GetAddress()) / PageSize);
-            manager.Free(it.GetAddress(), node_num_pages);
+            KPhysicalAddress cur_address = it.GetAddress();
+            size_t remaining_pages = it.GetNumPages();
+            while (remaining_pages > 0) {
+                auto& manager = this->GetManager(cur_address);
+                const size_t cur_pages =
+                    (std::min)(remaining_pages, manager.GetPageOffsetToEnd(cur_address));
+                manager.Free(cur_address, cur_pages);
+                cur_address += cur_pages * PageSize;
+                remaining_pages -= cur_pages;
+            }
         }
         out->Finalize();
     };
@@ -292,6 +304,10 @@ Result KMemoryManager::AllocatePageGroupImpl(KPageGroup* out, size_t num_pages, 
                     cur_manager->Free(allocated_block, pages_per_alloc);
                 };
 
+                // Windows commits the pages here, before anything tracks the block: out of
+                // commit, the allocation fails instead of the access.
+                R_UNLESS(this->MarkUsed(allocated_block, pages_per_alloc), ResultOutOfMemory);
+
                 // Add the block to our group.
                 R_TRY(out->AddBlock(allocated_block, pages_per_alloc));
 
@@ -308,10 +324,6 @@ Result KMemoryManager::AllocatePageGroupImpl(KPageGroup* out, size_t num_pages, 
 
     // Only succeed if we allocated as many pages as we wanted.
     R_UNLESS(num_pages == 0, ResultOutOfMemory);
-
-    for (const auto& block : *out) {
-        this->MarkUsed(block.GetAddress(), block.GetNumPages());
-    }
 
     // We succeeded!
     R_SUCCEED();

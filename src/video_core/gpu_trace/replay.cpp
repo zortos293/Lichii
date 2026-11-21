@@ -2,6 +2,7 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 
 #include <algorithm>
+#include <atomic>
 #include <chrono>
 #include <cstring>
 #include <fstream>
@@ -155,6 +156,8 @@ private:
     Clock::time_point last_frame;
     u32 presents = 0;
     bool stop = false;
+    /// Set on the GPU thread when a write or SMMU map was dropped; read after WaitForIdle.
+    std::atomic<bool> memory_dropped{false};
 };
 
 bool Replayer::Run(std::string& error) {
@@ -304,6 +307,11 @@ bool Replayer::BringUp(std::string& error) {
             error = fmt::format("memory at {:#x} is outside guest memory", memory.physical_address);
             return false;
         }
+        // No kernel allocated these pages: commit them (Windows reserves guest memory).
+        if (!backing.CommitBacking(memory.physical_address, memory.size)) {
+            error = fmt::format("memory at {:#x} could not be committed", memory.physical_address);
+            return false;
+        }
         std::memcpy(backing.BackingBasePointer() + memory.physical_address, bytes->data(),
                     bytes->size());
     }
@@ -396,7 +404,22 @@ void Replayer::MapGmmu(const GmmuMapRecord& map) {
 
 void Replayer::MapSmmu(const SmmuMapRecord& map) {
     auto& table = process->GetPageTable().GetImpl();
-    auto* const base = system.DeviceMemory().buffer.BackingBasePointer();
+    auto& backing = system.DeviceMemory().buffer;
+    if (map.physical_address > backing.BackingSize() ||
+        map.size > backing.BackingSize() - map.physical_address) {
+        LOG_ERROR(HW_GPU, "GPU trace replay: SMMU map of {:#x}+{:#x} is outside guest memory",
+                  map.physical_address, map.size);
+        memory_dropped = true;
+        return;
+    }
+    // The GPU reads these pages, zero ones the trace skipped included: commit them.
+    if (!backing.CommitBacking(map.physical_address, map.size)) {
+        LOG_ERROR(HW_GPU, "GPU trace replay: SMMU map of {:#x}+{:#x} could not be committed",
+                  map.physical_address, map.size);
+        memory_dropped = true;
+        return;
+    }
+    auto* const base = backing.BackingBasePointer();
     for (u64 offset = 0; offset < map.size; offset += PageSize) {
         const u64 physical = map.physical_address + offset;
         table.entries.GetAndFault(physical >> PageBits)
@@ -430,8 +453,15 @@ void Replayer::InvalidateDevice(u64 physical, u64 size) {
 }
 
 void Replayer::WriteMemory(const MemoryRecord& record, const std::vector<u8>& bytes) {
-    u8* const pointer =
-        system.DeviceMemory().buffer.BackingBasePointer() + record.physical_address;
+    auto& backing = system.DeviceMemory().buffer;
+    // False past the end of guest memory too: the write is dropped, not made out of bounds.
+    if (!backing.CommitBacking(record.physical_address, bytes.size())) {
+        LOG_ERROR(HW_GPU, "GPU trace replay: memory at {:#x}+{:#x} could not be committed",
+                  record.physical_address, bytes.size());
+        memory_dropped = true;
+        return;
+    }
+    u8* const pointer = backing.BackingBasePointer() + record.physical_address;
     std::memcpy(pointer, bytes.data(), bytes.size());
     // The replay writes for the guest CPU: a recording of the replay sees it as one.
     NoteCpuWrite(pointer, bytes.size());
@@ -673,6 +703,16 @@ bool Replayer::Stream(std::string& error) {
         }
     }
     gpu.WaitForIdle();
+    // WaitForIdle's request can run at a tick that comes before the queued memory writes and
+    // maps: an ordered callback runs after them, as in Present.
+    std::promise<void> drained;
+    gpu.RunInOrder([&drained] { drained.set_value(); });
+    drained.get_future().wait();
+    // The GPU then read zeros where the trace had data: the replay's output isn't the trace's.
+    if (memory_dropped) {
+        error = "guest memory for an SMMU map or a memory record could not be committed";
+        return false;
+    }
     if (!options.record.empty()) {
         // The recorder ends at the GPU thread's next command.
         StopRecording();
