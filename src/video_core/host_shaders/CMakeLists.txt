@@ -99,7 +99,8 @@ set(SHADER_FILES
     ${CMAKE_CURRENT_SOURCE_DIR}/sgsr1_shader.vert
     ${CMAKE_CURRENT_SOURCE_DIR}/sgsr1_shader_mobile.frag
     ${CMAKE_CURRENT_SOURCE_DIR}/sgsr1_shader_mobile_edge_direction.frag
-    ${CMAKE_CURRENT_SOURCE_DIR}/frame_gen_optical_flow.comp
+    ${CMAKE_CURRENT_SOURCE_DIR}/frame_gen_luma_downsample.comp
+    ${CMAKE_CURRENT_SOURCE_DIR}/frame_gen_flow_search.comp
     ${CMAKE_CURRENT_SOURCE_DIR}/frame_gen_interpolation.comp
     ${CMAKE_CURRENT_SOURCE_DIR}/dlss_network_probe.comp
     ${CMAKE_CURRENT_SOURCE_DIR}/ocarina_camera_motion.comp
