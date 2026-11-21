@@ -394,12 +394,25 @@ constexpr std::array<VkFormat, 2> OpaqueAstcViewFormats{VK_FORMAT_BC1_RGBA_UNORM
 // Finished decode images wait for the next texture of their shape, up to this much memory.
 constexpr u64 MaxFreeTranscodeBytes = u64{256} << 20;
 
+// Textures smaller than this threshold are decoded on the CPU in nanoseconds to avoid the
+// overhead of allocating descriptor sets, dispatching compute shaders, recording pipeline
+// barriers, and flushing the scheduler for tiny textures (e.g. 16x16 UI icons or glyphs).
+constexpr u32 GpuComputeMinTexels = 64 * 64;
+constexpr u32 GpuComputeMinBytes = 4096;
+
+[[nodiscard]] bool IsGpuComputeSizeEligible(const ImageInfo& info) {
+    const u32 texels = info.size.width * info.size.height;
+    const u32 guest_size = VideoCommon::CalculateGuestSizeInBytes(info);
+    return texels >= GpuComputeMinTexels || guest_size >= GpuComputeMinBytes;
+}
+
 // ASTC that the GPU decodes and re-compresses to BC1/BC3 itself (TranscodeAstcToBcn): no CPU
 // decode, so streamed textures are ready the frame they are first used instead of seconds later.
 [[nodiscard]] bool WillUseGpuBcnTranscode(const Device& device, const ImageInfo& info) {
     if (!IsPixelFormatASTC(info.format) || device.IsOptimalAstcSupported() ||
         IsHugeAstcArray(device, info) || IsUnevenMipRgba8Astc(device, info) ||
-        info.type != ImageType::e2D || info.size.depth != 1) {
+        info.type != ImageType::e2D || info.size.depth != 1 ||
+        !IsGpuComputeSizeEligible(info)) {
         return false;
     }
     return Settings::values.accelerate_astc.GetValue() == Settings::AstcDecodeMode::Gpu &&
@@ -413,7 +426,8 @@ constexpr u64 MaxFreeTranscodeBytes = u64{256} << 20;
     if (IsHugeAstcArray(device, info) || IsUnevenMipRgba8Astc(device, info)) {
         return true;
     }
-    if (Settings::values.accelerate_astc.GetValue() != Settings::AstcDecodeMode::Gpu) {
+    if (Settings::values.accelerate_astc.GetValue() != Settings::AstcDecodeMode::Gpu ||
+        !IsGpuComputeSizeEligible(info)) {
         return false;
     }
     return Settings::GetAstcRecompression() == Settings::AstcRecompression::Uncompressed &&
@@ -1021,9 +1035,9 @@ void CopyBufferToImage(vk::CommandBuffer cmdbuf, VkBuffer src_buffer, VkImage im
     // TODO: Move this to another API
     cmdbuf.PipelineBarrier(
             VK_PIPELINE_STAGE_TRANSFER_BIT,
-            VK_PIPELINE_STAGE_LATE_FRAGMENT_TESTS_BIT |
-            VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT |
-            VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT,
+            vk::PIPELINE_STAGE_GRAPHICS_COMPUTE |
+            VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT |
+            VK_PIPELINE_STAGE_LATE_FRAGMENT_TESTS_BIT,
             0, nullptr, nullptr, write_barrier);
 }
 
