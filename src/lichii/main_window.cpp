@@ -2833,7 +2833,8 @@ bool MainWindow::OnShutdownBegin() {
         return false;
     }
 
-    if (ui->action_Fullscreen->isChecked()) {
+    // Closing Lichii itself (e.g. Alt+F4) leaves from fullscreen; only Stop returns to the list.
+    if (ui->action_Fullscreen->isChecked() && !close_pending) {
         HideFullscreen();
     }
 
