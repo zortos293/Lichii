@@ -110,6 +110,14 @@ struct ProgramKeyInputs {
 /// The lowering stamp of an encoded program, without decoding the rest
 [[nodiscard]] std::optional<u64> ProgramStamp(std::span<const u8> payload);
 
+/// What pipeline keys tell of an encoded program, without decoding the code
+struct ProgramIdentity {
+    u32 stage{}; ///< Shader::Stage
+    u64 unique_hash{};
+    std::array<u8, 80> sph{};
+};
+[[nodiscard]] std::optional<ProgramIdentity> ReadProgramIdentity(std::span<const u8> payload);
+
 /// The graphics pipelines a session used (key hashes), a Used record keyed by the session
 struct UsedRecord {
     /// Orders sessions: the Unix time it started, in nanoseconds

@@ -681,10 +681,13 @@ GraphicsPipeline* RasterizerVulkan::TakeReusableDraw(bool is_indexed, bool is_in
     }
     // Vertex attribute formats are draw parameters with dynamic vertex input (UpdateVertexInput
     // records them for every draw); only the type class of each attribute is in the pipeline key.
+    // Compare the register types after the same masking the key uses, so unread attributes do not
+    // force a full resolve.
+    const u64 register_attribute_types =
+        FixedPipelineState::DynamicAttributeTypes(maxwell3d->regs);
     if (maxwell3d->dirty.flags[Dirty::VertexInput] &&
         (!draw.pipeline->HasDynamicVertexInput() ||
-         FixedPipelineState::DynamicAttributeTypes(maxwell3d->regs) !=
-             draw.pipeline->DynamicAttributeTypes())) {
+         !pipeline_cache.DynamicAttributeTypesMatch(register_attribute_types, *draw.pipeline))) {
         return full(FullDraw::VertexInput);
     }
     const auto& handles = draw.pipeline->HandleConstantBuffers();
@@ -713,6 +716,8 @@ GraphicsPipeline* RasterizerVulkan::TakeReusableDraw(bool is_indexed, bool is_in
         }
     }
     taken_draw = draw;
+    // UpdateVertexInput clears Dirty::VertexInput on this draw; keep the saved types in step.
+    pipeline_cache.SaveVertexAttributeTypes(register_attribute_types);
     return draw.pipeline;
 }
 
