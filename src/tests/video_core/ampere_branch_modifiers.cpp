@@ -127,3 +127,27 @@ TEST_CASE("Ampere branch flags preserve negative and invalid destinations",
                                              0x000fea00}}, 0) == ProgramCaptureState::Result::InvalidTarget);
     }
 }
+
+TEST_CASE("A predicated CALL.REL.NOINC is a jump and does not arm the RET end",
+          "[ampere][capture]") {
+    constexpr Instruction Ret{{0x00007950, 0, 0x03c00000, 0x000fea00}};
+    const auto observe = [&](u32 call_word, u32 call_mode) {
+        const Instruction call{{call_word, 0x20, call_mode, 0x000fea00}};
+        const std::array code{call, Exit, Nop, Ret, Exit};
+        ProgramCaptureState capture;
+        std::array<ProgramCaptureState::Result, 5> results;
+        for (u32 index = 0; index < code.size(); ++index) {
+            results[index] = capture.Observe(code[index], index);
+        }
+        return results;
+    };
+    // The unpredicated call's callee returns: the RET after the main EXIT ends the capture.
+    CHECK(observe(0x00007944, 0x03c00000)[3] == ProgramCaptureState::Result::Complete);
+    // A predicated one jumps to the instruction after the RET, so the RET ends nothing and the
+    // capture runs to the next EXIT.
+    const auto jump = observe(0x00005944, 0x03c00000);
+    CHECK(jump[3] == ProgramCaptureState::Result::Continue);
+    CHECK(jump[4] == ProgramCaptureState::Result::Complete);
+    // Without the NOINC bit it is an ordinary call whatever its predicate.
+    CHECK(observe(0x00005944, 0x03800000)[3] == ProgramCaptureState::Result::Complete);
+}
