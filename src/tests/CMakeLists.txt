@@ -9,6 +9,7 @@ add_executable(tests
     video_core/vulkan_overlay_filter.cpp
     video_core/buffer_cache_ports.cpp
     video_core/unswizzle_workers.cpp
+    video_core/prefault_pages.cpp
     video_core/block_linear_swizzle.cpp
     video_core/aftermath_dump.cpp
     video_core/cdma_pusher_teardown.cpp

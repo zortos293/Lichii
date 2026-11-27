@@ -10,9 +10,8 @@
 
 #include <algorithm>
 #include <array>
-#include <atomic>
 #include <cstring>
-#include <latch>
+#include <memory>
 #include <numeric>
 #include <optional>
 #include <span>
@@ -35,6 +34,7 @@
 #include "video_core/texture_cache/format_lookup_table.h"
 #include "video_core/texture_cache/formatter.h"
 #include "video_core/texture_cache/host_mip_limits.h"
+#include "video_core/texture_cache/prefault_pages.h"
 #include "video_core/texture_cache/samples_helper.h"
 #include "video_core/texture_cache/util.h"
 #include "video_core/textures/astc.h"
@@ -891,34 +891,17 @@ void PrefaultGuestMemory(Tegra::MemoryManager& gpu_memory, GPUVAddr gpu_addr, si
             }
         }
     }
-    constexpr size_t Batch = 64;
+    const size_t page_count = pages.size();
+    const auto work = std::make_shared<PrefaultPages>(std::move(pages));
     constexpr size_t MaxHelpers = 7;
-    std::atomic<size_t> cursor{0};
-    const auto touch = [&] {
-        for (;;) {
-            const size_t first = cursor.fetch_add(Batch, std::memory_order_relaxed);
-            if (first >= pages.size()) {
-                return;
-            }
-            const size_t last = (std::min)(first + Batch, pages.size());
-            for (size_t i = first; i < last; ++i) {
-                static_cast<void>(*static_cast<const volatile u8*>(pages[i]));
-            }
-        }
-    };
-    std::latch helpers{static_cast<std::ptrdiff_t>(MaxHelpers)};
     size_t queued = 0;
     auto& workers = Tegra::Texture::GetThreadWorkers();
-    while (queued < MaxHelpers && (queued + 1) * Batch * 2 <= pages.size() &&
-           workers.TryQueueWork([&] {
-               touch();
-               helpers.count_down();
-           })) {
+    while (queued < MaxHelpers && (queued + 1) * PrefaultPages::Batch * 2 <= page_count &&
+           workers.TryQueueWork([work] { work->Touch(); })) {
         ++queued;
     }
-    helpers.count_down(static_cast<std::ptrdiff_t>(MaxHelpers - queued));
-    touch();
-    helpers.wait();
+    work->Touch();
+    work->Wait();
 }
 
 boost::container::small_vector<BufferImageCopy, 16> UnswizzleImage(
