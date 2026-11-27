@@ -109,6 +109,10 @@ add_library(
     recommended_settings.cpp
     recommended_settings.h
     ring_buffer.h
+    romm_api.cpp
+    romm_api.h
+    romm_config.cpp
+    romm_config.h
     ${CMAKE_CURRENT_BINARY_DIR}/scm_rev.cpp
     scm_rev.h
     scope_exit.h

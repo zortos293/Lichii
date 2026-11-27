@@ -244,6 +244,19 @@
         "repo": "xiph/opus",
         "version": "a3f0ec02b3"
     },
+    "qtkeychain": {
+        "bundled": true,
+        "hash": "b1068ae513d5eab8f300186497ddcce4075e11a2a569deddbc949177efaa27970ed7bdce0b1aff61a021144540e942f60c9259b975601a92c60b8a742754624a",
+        "options": [
+            "BUILD_WITH_QT6 ON",
+            "BUILD_TRANSLATIONS OFF",
+            "BUILD_TEST_APPLICATION OFF",
+            "USE_CREDENTIAL_STORE OFF"
+        ],
+        "package": "Qt6Keychain",
+        "repo": "frankosterfeld/qtkeychain",
+        "version": "0.15.0"
+    },
     "quazip": {
         "hash": "609c240c7f029ac26a37d8fbab51bc16284e05e128b78b9b9c0e95d083538c36047a67d682759ac990e4adb0eeb90f04f1ea7fe2253bbda7e7e3bcce32e53dd8",
         "min_version": "1.3",

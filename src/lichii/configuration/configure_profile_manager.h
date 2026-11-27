@@ -85,6 +85,7 @@ private:
     void SelectUser(const QModelIndex& index);
     void AddUser();
     void EditUser();
+    void OpenRommAccount();
     void ConfirmDeleteUser();
     bool LoadAvatarData();
     std::vector<uint8_t> DecompressYaz0(const FileSys::VirtualFile& file);

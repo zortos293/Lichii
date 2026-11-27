@@ -44,6 +44,7 @@
 #include <QTimer>
 #include <QUrl>
 #include <QtConcurrent/QtConcurrentRun>
+#include "lichii/configuration/configure_per_game_romm.h"
 
 #include "common/fs/fs_util.h"
 #include "common/settings_enums.h"
@@ -351,6 +352,7 @@ ConfigurePerGame::ConfigurePerGame(QWidget* parent, u64 title_id_, const std::st
     system_tab = std::make_unique<ConfigureSystem>(system_, tab_group, *builder, this);
     network_tab = std::make_unique<ConfigureNetwork>(system_, this, true);
     applets_tab = std::make_unique<ConfigureApplets>(system_, tab_group, *builder, this);
+    romm_tab = std::make_unique<ConfigurePerGameRomm>(this, title_id, file_name);
 
     ui->setupUi(this);
 
@@ -362,7 +364,7 @@ ConfigurePerGame::ConfigurePerGame(QWidget* parent, u64 title_id_, const std::st
     info_area->setSizePolicy(QSizePolicy::Maximum, QSizePolicy::Preferred);
     info_area->setWidget(ui->gameInfo);
 
-    const std::array<std::tuple<QWidget*, const char*, QString>, 10> tabs{{
+    const std::array<std::tuple<QWidget*, const char*, QString>, 11> tabs{{
         {addons_tab.get(), "puzzle", tr("Add-Ons")},
         {system_tab.get(), "system", tr("System")},
         {cpu_tab.get(), "cpu", tr("CPU")},
@@ -373,6 +375,7 @@ ConfigurePerGame::ConfigurePerGame(QWidget* parent, u64 title_id_, const std::st
         {input_tab.get(), "gamepad", tr("Input Profiles")},
         {network_tab.get(), "globe", tr("Network")},
         {applets_tab.get(), "apps", tr("Applets")},
+        {romm_tab.get(), "cloud", tr("RomM")},
     }};
     for (const auto& [tab, icon, name] : tabs) {
         if (tab != addons_tab.get() && tab != input_tab.get()) {

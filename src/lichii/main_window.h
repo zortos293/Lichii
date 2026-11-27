@@ -24,6 +24,7 @@
 #include <qaction.h>
 
 #include "common/common_types.h"
+#include "common/uuid.h"
 #include "common/nextendo.h"
 #include "common/nextendo_game_catalog.h"
 #include "common/settings_enums.h"
@@ -433,6 +434,9 @@ private slots:
     void OnApplyRecommendedSettings();
     void OnRestorePreviousSettings();
     void OnDataDialog();
+    void OnRommSettings();
+    void OnRommCatalogue();
+    void OnGameListRommDownloadSave(u64 program_id, const std::string& game_path);
     void OnToggleFilterBar();
     void OnToggleStatusBar();
     void OnTogglePerfOverlay();
@@ -593,6 +597,9 @@ private:
     std::optional<std::pair<u64, std::string>> nextendo_version_check;
     QTimer nextendo_social_timer;
     QFutureWatcher<void> nextendo_social_watcher;
+    // The RomM save push started when a game stops. It runs on a pool thread, so closing the
+    // window has to wait for it or the upload is cut short.
+    QFuture<void> romm_push_future;
     QFutureWatcher<std::optional<Common::Nextendo::ProfilePull>> nextendo_profile_watcher;
     Common::UUID nextendo_profile_user;
     // A forced pull that has to wait for the game to stop or for the running pull.
@@ -654,6 +661,18 @@ private:
     bool close_pending = false;
     // The path to the game currently running
     QString current_game_path;
+    // The title ID of the game currently running, 0 when nothing is booted. Added alongside the
+    // RomM cloud-save hook in BootGame()/OnEmulationStopped() — Eden didn't previously need to
+    // remember this past BootGame()'s own local variable, since GetProfileID()-style "ask fresh
+    // every time" doesn't work for a value used from a background/shutdown context.
+    u64 current_title_id{0};
+    // The active profile's UUID for this boot, resolved once via GetProfileID() at boot time and
+    // reused for the whole session instead of calling GetProfileID() again from RomM's sync code
+    // path — repeated calls would re-show the profile-selection dialog on every sync attempt when
+    // more than one profile exists. std::nullopt when nothing is booted or GetProfileID() failed.
+    std::optional<Common::UUID> current_romm_profile_id;
+    // Whether the running title keeps a per-profile save (true) or a device save (false).
+    bool current_romm_has_user_save{true};
     // Whether a user was set on the command line (skips UserSelector if it's forced to show up)
     bool user_flag_cmd_line = false;
 

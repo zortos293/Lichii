@@ -696,6 +696,29 @@ if (ENABLE_QT)
 
     # QuaZip
     AddJsonPackage(quazip)
+
+    # QtKeychain: system credential store (libsecret/KWallet, macOS Keychain, Windows Credential
+    # Manager) for the RomM login. libsecret is optional on Linux: used when its development files
+    # are present, otherwise only the KWallet backend is built.
+    if (UNIX AND NOT APPLE)
+        find_package(PkgConfig QUIET)
+        if (PkgConfig_FOUND)
+            pkg_check_modules(LIBSECRET QUIET libsecret-1)
+        endif()
+        set(LIBSECRET_SUPPORT ${LIBSECRET_FOUND} CACHE BOOL "Build qtkeychain with libsecret support" FORCE)
+    endif()
+    AddJsonPackage(qtkeychain)
+
+    # qtkeychain's own CMakeLists pins CMAKE_CXX_STANDARD to 11 in its directory scope, and the
+    # cxx_std_17 feature that would normally bump it back up is stripped from Qt6::Platform above,
+    # so its sources would be built as C++11 against Qt6 headers (which require C++17). Force the
+    # project-wide standard on the bundled target; a system-provided one is already built.
+    if (TARGET qt6keychain)
+        get_target_property(_qtkeychain_imported qt6keychain IMPORTED)
+        if (NOT _qtkeychain_imported)
+            set_target_properties(qt6keychain PROPERTIES CXX_STANDARD ${CMAKE_CXX_STANDARD})
+        endif()
+    endif()
 endif()
 
 if (NOT LICHII_STATIC_ROOM AND NOT (LICHII_USE_BUNDLED_FFMPEG OR LICHII_USE_EXTERNAL_FFMPEG))

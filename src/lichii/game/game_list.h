@@ -116,6 +116,7 @@ signals:
     void GameChosen(const QString& game_path, const u64 title_id = 0);
     void OpenFolderRequested(u64 program_id, GameListOpenTarget target,
                              const std::string& game_path);
+    void RommDownloadSaveRequested(u64 program_id, const std::string& game_path);
     void OpenTransferableShaderCacheRequested(u64 program_id);
     void PrepareShaderWarmRequested(u64 program_id, const std::string& game_path);
     void DeleteShaderWarmRequested(u64 program_id);

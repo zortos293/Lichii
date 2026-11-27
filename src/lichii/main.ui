@@ -210,6 +210,13 @@
      <addaction name="action_Desktop"/>
      <addaction name="action_Application_Menu"/>
     </widget>
+    <widget class="QMenu" name="menu_RomM">
+     <property name="title">
+      <string>&amp;RomM</string>
+     </property>
+     <addaction name="action_RomM_Master_Login"/>
+     <addaction name="action_RomM_Catalogue"/>
+    </widget>
     <widget class="QMenu" name="menuInstall_Firmware">
      <property name="title">
       <string>Install &amp;Firmware</string>
@@ -221,6 +228,7 @@
     <addaction name="menuInstall_Firmware"/>
     <addaction name="action_Verify_installed_contents"/>
     <addaction name="action_Data_Manager"/>
+    <addaction name="menu_RomM"/>
     <addaction name="action_Mod_Store"/>
     <addaction name="separator"/>
     <addaction name="menu_cabinet_applet"/>
@@ -613,6 +621,16 @@
   <action name="action_Mod_Store">
    <property name="text">
     <string>&amp;Mod Store</string>
+   </property>
+  </action>
+  <action name="action_RomM_Master_Login">
+   <property name="text">
+    <string>&amp;Master Login</string>
+   </property>
+  </action>
+  <action name="action_RomM_Catalogue">
+   <property name="text">
+    <string>&amp;Catalogue</string>
    </property>
   </action>
   <action name="action_Tree_View">

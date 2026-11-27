@@ -32,6 +32,7 @@
 #include "core/core.h"
 #include "core/hle/service/acc/profile_manager.h"
 #include "core/hle/service/filesystem/filesystem.h"
+#include "lichii/romm_profile_account_dialog.h"
 #include "ui_configure_profile_manager.h"
 #include "lichii/configuration/configure_profile_manager.h"
 #include "lichii/util/limitable_input_dialog.h"
@@ -231,6 +232,7 @@ void ConfigureProfileManager::showContextMenu(const QPoint& pos) {
 
     QAction* edit = menu.addAction(tr("&Edit"));
     QAction* remove = menu.addAction(tr("&Delete"));
+    QAction* romm_account = menu.addAction(tr("&RomM Account..."));
 
     QAction* chosen = menu.exec(tree_view->viewport()->mapToGlobal(pos));
 
@@ -241,6 +243,8 @@ void ConfigureProfileManager::showContextMenu(const QPoint& pos) {
         EditUser();
     } else if (chosen == remove) {
         ConfirmDeleteUser();
+    } else if (chosen == romm_account) {
+        OpenRommAccount();
     }
 }
 
@@ -272,6 +276,25 @@ void ConfigureProfileManager::AddUser() {
     connect(dialog, &QDialog::rejected, dialog, &QObject::deleteLater);
 
     dialog->show();
+}
+
+void ConfigureProfileManager::OpenRommAccount() {
+    const auto user_data = tree_view->currentIndex();
+    const auto user_idx = user_data.row();
+    const auto uuid = profile_manager.GetUser(user_idx);
+    ASSERT(uuid);
+
+    Service::Account::ProfileBase profile{};
+    if (!profile_manager.GetProfileBase(*uuid, profile))
+        return;
+
+    std::string username;
+    username.reserve(32);
+    std::ranges::copy_if(profile.username, std::back_inserter(username),
+                         [](u8 byte) { return byte != 0; });
+
+    RommProfileAccountDialog dialog(*uuid, QString::fromStdString(username), this);
+    dialog.exec();
 }
 
 void ConfigureProfileManager::EditUser() {

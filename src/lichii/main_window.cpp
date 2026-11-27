@@ -14,6 +14,8 @@
 #include <QSysInfo>
 #include <boost/algorithm/string/split.hpp>
 #include "common/fs/path_util.h"
+#include "common/romm_api.h"
+#include "common/romm_config.h"
 #include "common/settings.h"
 #include "common/settings_enums.h"
 #include "common/shutdown_progress.h"
@@ -27,6 +29,10 @@
 
 #include "common/fs/ryujinx_compat.h"
 #include "main_window.h"
+#include "romm_catalog_dialog.h"
+#include "romm_settings_dialog.h"
+#include "romm_secret_store.h"
+#include "romm_sync.h"
 #include "network/network.h"
 #include "qt_common/discord/discord.h"
 #include "ui_main.h"
@@ -465,6 +471,8 @@ MainWindow::MainWindow(bool has_broken_vulkan)
     Common::FS::CreateEdenPaths();
     this->config = std::make_unique<QtConfig>();
     const bool first_start = UISettings::values.first_start.GetValue();
+
+    RommSecretStore::Install();
 
     Common::Log::Filter filter;
     filter.ParseFilterString(Settings::values.log_filter.GetValue());
@@ -1806,6 +1814,8 @@ void MainWindow::ConnectWidgetEvents() {
     connect(game_list, &GameList::GameChosen, this, &MainWindow::OnGameListLoadFile);
     connect(game_list, &GameList::OpenDirectory, this, &MainWindow::OnGameListOpenDirectory);
     connect(game_list, &GameList::OpenFolderRequested, this, &MainWindow::OnGameListOpenFolder);
+    connect(game_list, &GameList::RommDownloadSaveRequested, this,
+            &MainWindow::OnGameListRommDownloadSave);
     connect(game_list, &GameList::OpenTransferableShaderCacheRequested, this,
             [this](u64 program_id) { QtCommon::Path::OpenShaderCache(program_id, this); });
     connect(game_list, &GameList::RemoveInstalledEntryRequested, this,
@@ -2037,6 +2047,8 @@ void MainWindow::ConnectMenuEvents() {
             !Settings::values.recommended_settings_backup.GetValue().empty());
     });
     connect_menu(ui->action_Data_Manager, &MainWindow::OnDataDialog);
+    connect_menu(ui->action_RomM_Master_Login, &MainWindow::OnRommSettings);
+    connect_menu(ui->action_RomM_Catalogue, &MainWindow::OnRommCatalogue);
 
 #if defined(ENABLE_UPDATE_CHECKER) && (defined(__linux__) || defined(_WIN32))
     auto* restore_action = ui->menu_Help->addAction(tr("Restore Previous Version..."));
@@ -2400,6 +2412,48 @@ bool MainWindow::ConfirmLowRamBoot(const QString& filename,
     return box.clickedButton() == continue_button;
 }
 
+namespace {
+
+// Display name of an emulated profile, falling back to its UUID if the profile can't be read.
+// Used to label the RomM device ("Lichii - <name>") and nothing else.
+std::string RommProfileName(const Common::UUID& profile_id) {
+    Service::Account::ProfileBase profile{};
+    if (!QtCommon::system->GetProfileManager().GetProfileBase(profile_id, profile)) {
+        return profile_id.RawString();
+    }
+    return Common::StringFromFixedZeroTerminatedBuffer(
+        reinterpret_cast<const char*>(profile.username.data()), profile.username.size());
+}
+
+// Same control-metadata lookup OnGameListOpenFolder does, but tolerant of a missing loader: a
+// title that can't be inspected defaults to a per-user save (the overwhelmingly common case).
+bool RommTitleHasUserSave(u64 program_id, const std::string& game_path) {
+    // Same rule as "Open Save Data Location" (OnGameListOpenFolder): the device layout is only
+    // used when the NACP explicitly declares a device save and no account save. Some titles
+    // (e.g. NX2 games) report no sizes at all yet create account saves at runtime, so "no sizes"
+    // must still mean "account save". Anything stricter makes RomM look in the device folder
+    // (user id 0) while the game writes under the profile's own id.
+    const auto uses_account_save = [](u64 user_save_size, u64 device_save_size) {
+        return !(device_save_size > 0 && user_save_size == 0);
+    };
+    const FileSys::PatchManager pm{program_id, QtCommon::system->GetFileSystemController(),
+                                   QtCommon::system->GetContentProvider()};
+    if (const auto control = pm.GetControlMetadata().first; control != nullptr) {
+        return uses_account_save(control->GetDefaultNormalSaveSize(),
+                                 control->GetDeviceSaveDataSize());
+    }
+    const auto file = Core::GetGameFileFromPath(QtCommon::vfs, game_path);
+    const auto loader = Loader::GetLoader(*QtCommon::system, file);
+    if (loader == nullptr) {
+        return true;
+    }
+    FileSys::NACP nacp{};
+    loader->ReadControlData(nacp);
+    return uses_account_save(nacp.GetDefaultNormalSaveSize(), nacp.GetDeviceSaveDataSize());
+}
+
+} // Anonymous namespace
+
 void MainWindow::BootGame(const QString& filename, Service::AM::FrontendAppletParameters params,
                           StartGameType type) {
     if (shutdown_game_in_progress) {
@@ -2526,6 +2580,41 @@ void MainWindow::BootGame(const QString& filename, Service::AM::FrontendAppletPa
         }
     }
 
+    // RomM cloud save (opt-in, per-profile — see romm_config.h). Saves are pushed after every
+    // session but only pulled on request (game list context menu) or, at boot, when there is no
+    // local save yet. Deliberately placed *after* the
+    // select_user_on_boot block above and reading its result (Settings::values.current_user)
+    // rather than calling GetProfileID() independently: GetProfileID() has no notion of "a
+    // profile was already chosen for this boot" and would show its own profile-selection dialog
+    // on top of the one above, prompting the person twice for what is really one decision.
+    // Switch 2 containers (NUP/NX) and loose RomFS folders often can't tell the loader their id
+    // before the game is running, but the game list knows it and passes it in params.program_id.
+    // Applet ids (small values) are not a game.
+    u64 romm_title_id = title_id;
+    if (romm_title_id == 0 &&
+        params.program_id > static_cast<u64>(Service::AM::AppletProgramId::MaxProgramId)) {
+        romm_title_id = params.program_id;
+    }
+    current_title_id = romm_title_id;
+    current_romm_profile_id = QtCommon::system->GetProfileManager().GetUser(
+        static_cast<std::size_t>(Settings::values.current_user.GetValue()));
+    if (romm_title_id != 0 && current_romm_profile_id.has_value() &&
+        Common::RommConfig::Profile::HasAccount(*current_romm_profile_id)) {
+        // Worked out once here and reused by the push on shutdown, when the emulated system may
+        // already be tearing down.
+        current_romm_has_user_save = RommTitleHasUserSave(romm_title_id, filename.toStdString());
+        // Only does anything when this profile has no local save for the title (and then asks
+        // before downloading); otherwise it returns without touching the network. Deliberately
+        // synchronous, not QtConcurrent::run: a downloaded save must exist on disk before
+        // LoadROM() below lets the game read it.
+        const std::string romm_profile_name = RommProfileName(*current_romm_profile_id);
+        if (!RommSync::WarnIfLoginUnavailable(*current_romm_profile_id, romm_profile_name)) {
+            RommSync::PullIfNoLocalSave(romm_title_id, *current_romm_profile_id,
+                                        current_romm_has_user_save, romm_profile_name,
+                                        filename.toStdString());
+        }
+    }
+
     // If the user specifies -u (successfully) on the cmd line, don't prompt for a user on first
     // game startup only. If the user stops emulation and starts a new one, go back to the expected
     // behavior of asking.
@@ -2591,6 +2680,17 @@ void MainWindow::BootGame(const QString& filename, Service::AM::FrontendAppletPa
     LOG_INFO(Frontend, "Core load completed: elapsed_ms={}", load_timer.elapsed());
 
     const auto report_program_id = QtCommon::system->GetApplicationProcessProgramID();
+    if (current_title_id == 0 && report_program_id != 0) {
+        // Neither the loader nor the game list gave an id before the boot; the running
+        // application has one. Too late to pull a save for this session, but not to push it.
+        current_title_id = report_program_id;
+        LOG_INFO(Frontend, "RommSync: title id taken from the running application: {:016X}",
+                 report_program_id);
+        if (current_romm_profile_id.has_value() &&
+            Common::RommConfig::Profile::HasAccount(*current_romm_profile_id)) {
+            current_romm_has_user_save = RommTitleHasUserSave(report_program_id, filename.toStdString());
+        }
+    }
     if (Settings::CurrentProgramIsSwitch2() && report_program_id != 0) {
         auto& session = report_session.emplace();
         session.program_id = report_program_id;
@@ -3037,6 +3137,35 @@ void MainWindow::OnEmulationStopped() {
 
     game_list->SetReportableProgramId(report_session ? report_session->program_id : 0);
 
+    // RomM cloud save push (opt-in, per-profile — see romm_config.h). Done here, before any of
+    // the GUI/render teardown below, while current_title_id/current_romm_profile_id and the
+    // emulated filesystem are still exactly as they were during play. Unlike the download
+    // side in BootGame(), this is safe to run on a background thread: nothing reads these save
+    // files again until the next boot of this title, which is far enough away that a running
+    // upload finishing shortly after shutdown poses no realistic conflict. See RommSync::Push's
+    // own comment for the one narrow edge case (an immediate re-boot of the same title racing a
+    // still-in-flight push) that this doesn't try to solve yet.
+    if (current_title_id == 0) {
+        LOG_INFO(Frontend, "RommSync: no save push, the title id of this game is unknown");
+    } else if (!current_romm_profile_id.has_value()) {
+        LOG_INFO(Frontend, "RommSync: no save push, no profile for title_id={:016X}",
+                 current_title_id);
+    } else if (!Common::RommConfig::Profile::HasAccount(*current_romm_profile_id)) {
+        LOG_INFO(Frontend, "RommSync: no save push, this profile has no RomM account");
+    }
+    if (current_title_id != 0 && current_romm_profile_id.has_value() &&
+        Common::RommConfig::Profile::HasAccount(*current_romm_profile_id)) {
+        const u64 push_title_id = current_title_id;
+        const auto push_profile_id = *current_romm_profile_id;
+        const std::string push_profile_name = RommProfileName(push_profile_id);
+        const std::string push_game_path = current_game_path.toStdString();
+        const bool push_has_user_save = current_romm_has_user_save;
+        romm_push_future = QtConcurrent::run([=] {
+            RommSync::Push(push_title_id, push_profile_id, push_has_user_save, push_profile_name,
+                           push_game_path);
+        });
+    }
+
     discord_rpc->Update();
     Common::FeralGamemode::Stop();
 
@@ -3087,6 +3216,9 @@ void MainWindow::OnEmulationStopped() {
     }
 
     current_game_path.clear();
+    current_title_id = 0;
+    current_romm_profile_id.reset();
+    current_romm_has_user_save = true;
 
     // When closing the game, destroy the GLWindow to clear the context after the game is closed
     render_window->ReleaseRenderTarget();
@@ -5191,6 +5323,77 @@ void MainWindow::OnDataDialog() {
     OnGameListRefresh();
 }
 
+void MainWindow::OnGameListRommDownloadSave(u64 program_id, const std::string& game_path) {
+    if (emulation_running) {
+        QMessageBox::warning(this, tr("RomM cloud save"),
+                             tr("Stop the current game before downloading a save."));
+        return;
+    }
+    const auto profile_id = GetProfileID();
+    if (!profile_id.has_value()) {
+        return;
+    }
+    const std::string profile_name = RommProfileName(*profile_id);
+    if (!Common::RommConfig::Profile::HasAccount(*profile_id)) {
+        QMessageBox::information(
+            this, tr("RomM cloud save"),
+            tr("Profile \"%1\" has no RomM account. Add one from the profile's context menu "
+               "(RomM Account...) in the profile manager.")
+                .arg(QString::fromStdString(profile_name)));
+        return;
+    }
+
+    const bool has_user_save = RommTitleHasUserSave(program_id, game_path);
+
+    const auto result =
+        RommSync::DownloadSave(program_id, *profile_id, has_user_save, profile_name, game_path);
+
+    switch (result) {
+    case RommSync::DownloadResult::Downloaded:
+        QMessageBox::information(this, tr("RomM cloud save"), tr("Save downloaded."));
+        break;
+    case RommSync::DownloadResult::NoRemoteSave:
+        QMessageBox::information(this, tr("RomM cloud save"),
+                                 tr("RomM has no saves for this game."));
+        break;
+    case RommSync::DownloadResult::Declined:
+        break;
+    case RommSync::DownloadResult::NotRestorable:
+        QMessageBox::warning(this, tr("RomM cloud save"),
+                             tr("That save couldn't be restored (it has to be a zip archive "
+                                "Lichii can extract), so nothing was changed."));
+        break;
+    case RommSync::DownloadResult::Unavailable:
+        QMessageBox::warning(this, tr("RomM cloud save"),
+                             tr("The save couldn't be downloaded. Check that the game is "
+                                "matched to a RomM entry and that the instance is reachable "
+                                "(see the log for details)."));
+        break;
+    }
+}
+
+void MainWindow::OnRommSettings() {
+    RommSettingsDialog dialog(this);
+    dialog.exec();
+}
+
+void MainWindow::OnRommCatalogue() {
+    if (!Common::RommConfig::GetMasterCredentials().IsSet()) {
+        QMessageBox::information(
+            this, tr("RomM"),
+            tr("Log in first: Tools > RomM > Master Login sets the account used to browse the "
+               "catalogue."));
+        return;
+    }
+    RommCatalogDialog dialog(
+        [this] {
+            game_list->PopulateAsync(UISettings::values.game_dirs);
+            game_list->RefreshExternalContent();
+        },
+        this);
+    dialog.exec();
+}
+
 void MainWindow::OnToggleFilterBar() {
     game_list->SetFilterVisible(ui->action_Show_Filter_Bar->isChecked());
     if (ui->action_Show_Filter_Bar->isChecked())
@@ -6755,6 +6958,24 @@ void MainWindow::closeEvent(QCloseEvent* event) {
         return;
     }
     LOG_INFO(Frontend, "Closing frontend after emulation cleanup");
+
+    // The RomM save push runs on a pool thread and the process ends right after this function:
+    // without waiting, closing the window straight after stopping a game cuts the upload short.
+    if (romm_push_future.isRunning()) {
+        QProgressDialog progress(tr("Uploading the save to RomM..."), QString{}, 0, 0, this);
+        progress.setWindowModality(Qt::ApplicationModal);
+        progress.setCancelButton(nullptr);
+        progress.setMinimumDuration(0);
+        progress.show();
+        QFutureWatcher<void> watcher;
+        QEventLoop loop;
+        connect(&watcher, &QFutureWatcher<void>::finished, &loop, &QEventLoop::quit);
+        QTimer::singleShot(60'000, &loop, &QEventLoop::quit); // Never hang the exit on a dead link.
+        watcher.setFuture(romm_push_future);
+        if (!romm_push_future.isFinished()) {
+            loop.exec();
+        }
+    }
 
     UpdateUISettings();
     game_list->SaveInterfaceLayout();
