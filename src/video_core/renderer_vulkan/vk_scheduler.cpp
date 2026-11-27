@@ -112,7 +112,9 @@ void Scheduler::CommandChunk::ExecuteAll(vk::CommandBuffer cmdbuf,
 
 Scheduler::Scheduler(const Device& device_, StateTracker& state_tracker_)
     : device{device_}, state_tracker{state_tracker_},
-      render_recorders{VideoCommon::GpuSplit::RenderThreadOn()},
+      render_recorders{VideoCommon::GpuSplit::RenderThreadOn() &&
+                       device.GetDriverID() != VK_DRIVER_ID_AMD_PROPRIETARY &&
+                       !device.IsMoltenVK() && device.IsHostQueryResetSupported()},
       buffer_arena{render_recorders && VideoCommon::GpuSplit::RenderSwitch("EDEN_NX2_BUFFER_ARENA")},
       master_semaphore{std::make_unique<MasterSemaphore>(device)},
       command_pool{std::make_unique<CommandPool>(*master_semaphore, device)},

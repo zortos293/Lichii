@@ -617,7 +617,7 @@ RasterizerVulkan::RasterizerVulkan(Core::Frontend::EmuWindow& emu_window_, Tegra
         this);
     VideoCommon::GpuSplit::Get().SetLendHooks(&LendEnter, &LendLeave, this);
     VideoCommon::GpuSplit::Get().ConfigureRenderFollower(
-        scheduler.RenderRecordersEnabled(), scheduler.BufferArenaEnabled(),
+        VideoCommon::GpuSplit::RenderThreadOn(), scheduler.BufferArenaEnabled(),
         device.GetDriverID() != VK_DRIVER_ID_AMD_PROPRIETARY && !device.IsMoltenVK() &&
         device.IsHostQueryResetSupported());
     VideoCommon::GpuSplit::Get().WatchRenderLocks({&buffer_cache.mutex, &texture_cache.mutex});
