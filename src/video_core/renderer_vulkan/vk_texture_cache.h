@@ -22,6 +22,7 @@
 #endif
 #include "video_core/renderer_vulkan/vk_render_pass_cache.h"
 #include "video_core/renderer_vulkan/vk_staging_buffer_pool.h"
+#include "video_core/texture_cache/depth_image_reuse.h"
 #include "video_core/texture_cache/image_view_base.h"
 #include "video_core/vulkan_common/vulkan_memory_allocator.h"
 #include "video_core/vulkan_common/vulkan_wrapper.h"
@@ -111,6 +112,11 @@ public:
     void FreeDeferredStagingBuffer(StagingBufferRef& ref);
 
     void TickFrame();
+
+    bool DepthImageReuseEnabled() const;
+    bool PrepareDepthImageRetirement(bool under_pressure);
+    void RetireDepthImage(Image& image);
+    vk::Image AcquireDepthImage(const VideoCommon::ImageInfo& info);
 
     void FlushDeferredClear();
 
@@ -399,6 +405,8 @@ public:
         bool used_this_frame{};
     };
     std::vector<ColorFeedbackSnapshot> color_feedback_snapshots;
+    std::optional<VideoCommon::DepthImageReusePool<vk::Image>> depth_image_pool;
+    u64 depth_image_pool_frames{};
 };
 
 class Framebuffer {
@@ -534,6 +542,8 @@ public:
 
     Image(Image&&) = default;
     Image& operator=(Image&&) = default;
+
+    void RecycleDepthImage(VideoCommon::DepthImageReusePool<vk::Image>& pool);
 
     u32 HostMipLevels() const noexcept;
 

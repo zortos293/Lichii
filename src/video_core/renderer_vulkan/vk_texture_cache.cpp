@@ -23,6 +23,7 @@
 #include "common/bit_util.h"
 #include "common/div_ceil.h"
 #include "common/literals.h"
+#include "common/memory_detect.h"
 #include "common/settings.h"
 #include "shader_recompiler/byte_addressed_image.h"
 #include "shader_recompiler/exception.h"
@@ -30,6 +31,7 @@
 #include <atomic>
 #include "video_core/gpu_logging/gpu_logging.h"
 #include "video_core/nx2.h"
+#include "video_core/nx2_stutter_trace.h"
 #include "video_core/fsr.h"
 #include "video_core/render_trace.h"
 #include "video_core/renderer_vulkan/vk_texture_cache.h"
@@ -490,6 +492,17 @@ constexpr u64 MaxFreeTranscodeBytes = u64{256} << 20;
 [[nodiscard]] bool IsCubeCompatible(const Device& device, const ImageInfo& info) {
     return info.type == ImageType::e2D && info.resources.layers >= 6 &&
            info.size.width == info.size.height && !device.HasBrokenCubeImageCompatibility();
+}
+
+[[nodiscard]] std::optional<VideoCommon::DepthImageReuseKey> DepthImageKey(const ImageInfo& info) {
+    if (!info.native_tiling || info.is_sparse || info.type != ImageType::e2D ||
+        info.format != PixelFormat::D32_FLOAT || info.num_samples != 1 ||
+        info.resources.levels != 1 || info.resources.layers < 2 || info.resources.layers > 4 ||
+        info.size.width == 0 || info.size.height == 0 || info.size.depth != 1) {
+        return std::nullopt;
+    }
+    return VideoCommon::DepthImageReuseKey{info.size.width, info.size.height,
+                                           static_cast<u32>(info.resources.layers)};
 }
 
 [[nodiscard]] VkImageCreateInfo MakeImageCreateInfo(const Device& device, const ImageInfo& info,
@@ -3183,7 +3196,56 @@ void TextureCacheRuntime::ReleaseMsaaScratchImage(VkImage image) {
     }
 }
 
+bool TextureCacheRuntime::DepthImageReuseEnabled() const {
+    return VideoCommon::AllowDepthImageReuse(Settings::GetCurrentProgramID(),
+                                            device.GetDriverID() == VK_DRIVER_ID_MESA_RADV,
+                                            CanReportMemoryUsage());
+}
+
+bool TextureCacheRuntime::PrepareDepthImageRetirement(bool under_pressure) {
+    using namespace Common::Literals;
+    if (!depth_image_pool || !DepthImageReuseEnabled()) {
+        return false;
+    }
+    const auto commit_room = Common::GetProcessCommitRoom();
+    if (under_pressure || (commit_room && *commit_room < 1_GiB)) {
+        depth_image_pool->Clear();
+        return false;
+    }
+    return true;
+}
+
+void TextureCacheRuntime::RetireDepthImage(Image& image) {
+    image.RecycleDepthImage(*depth_image_pool);
+}
+
+vk::Image TextureCacheRuntime::AcquireDepthImage(const ImageInfo& info) {
+    if (depth_image_pool && DepthImageReuseEnabled()) {
+        if (const auto key = DepthImageKey(info)) {
+            return depth_image_pool->Acquire(*key);
+        }
+    }
+    return {};
+}
+
 void TextureCacheRuntime::TickFrame() {
+    using namespace Common::Literals;
+    if (DepthImageReuseEnabled()) {
+        if (!depth_image_pool) {
+            depth_image_pool.emplace();
+            depth_image_pool_frames = 0;
+        }
+        depth_image_pool->Tick();
+        if (VideoCommon::StutterTrace::Enabled() && ++depth_image_pool_frames % 120 == 0) {
+            LOG_INFO(Render_Vulkan,
+                     "Depth image reuse: frame={} hits={} misses={} recycled={} held={} charged_mib={:.1f}",
+                     depth_image_pool_frames, depth_image_pool->Hits(), depth_image_pool->Misses(),
+                     depth_image_pool->Recycled(), depth_image_pool->Size(),
+                     static_cast<double>(depth_image_pool->Bytes()) / 1_MiB);
+        }
+    } else {
+        depth_image_pool.reset();
+    }
     // Descriptor allocation/capture can submit between the copy and the draw. Retire at the
     // frame boundary, after all consuming draws, rather than using the copy's submission tick.
     for (auto& snapshot : color_feedback_snapshots) {
@@ -3255,8 +3317,13 @@ Image::Image(TextureCacheRuntime& runtime_, const ImageInfo& info_, GPUVAddr gpu
                          sparse, aliased, true);
     };
     const ImageInfo host = TrimmedHostInfo(device, info, host_level_offset);
-    original_image = make(host, layered || sparse_tiles || unwritten,
-                          sparse_tiles && SparseTilesModeOf(device) == SparseTilesMode::Aliased);
+    if (!layered && !sparse_tiles && !unwritten) {
+        original_image = runtime_.AcquireDepthImage(host);
+    }
+    if (!original_image) {
+        original_image = make(host, layered || sparse_tiles || unwritten,
+                              sparse_tiles && SparseTilesModeOf(device) == SparseTilesMode::Aliased);
+    }
     if (original_image.IsUnbacked()) {
         if (layered && InitSparseLayers()) {
             flags |= ImageFlagBits::Unbacked | ImageFlagBits::SparseLayers;
@@ -3360,6 +3427,30 @@ Image::~Image() {
         if (scaled_image) {
             runtime->EraseResolveShadow(*scaled_image);
         }
+    }
+}
+
+void Image::RecycleDepthImage(VideoCommon::DepthImageReusePool<vk::Image>& pool) {
+    const auto key = DepthImageKey(info);
+    if (!key || host_level_offset != 0 ||
+        True(flags & (VideoCommon::ImageFlagBits::Remapped | VideoCommon::ImageFlagBits::Sparse))) {
+        return;
+    }
+    if (!original_image || original_image.IsUnbacked() || sparse_layers.allocator != nullptr ||
+        scaled_image || compute_unswizzle_buffer || scale_framebuffer || normal_framebuffer ||
+        scale_view || normal_view) {
+        return;
+    }
+    const auto has_view = [](const vk::ImageView& view) { return static_cast<bool>(view); };
+    if (std::ranges::any_of(storage_image_views, has_view) ||
+        std::ranges::any_of(storage_layer_views, has_view)) {
+        return;
+    }
+    const auto memory = original_image.GetMemoryBlock();
+    const VkImage handle = *original_image;
+    if (pool.Recycle(*key, original_image, (std::max)(memory.size, memory.block_size)) &&
+        ENABLE_MSAA_RESOLVE_CONSUME) {
+        runtime->EraseResolveShadow(handle);
     }
 }
 

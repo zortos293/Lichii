@@ -526,6 +526,11 @@ void AddSite(Site site, u64 start, u64 end) {
     const u64 ticks = end > start ? end - start : 0;
     g_totals.site_ticks[index].fetch_add(ticks, std::memory_order_relaxed);
     g_totals.site_counts[index].fetch_add(1, std::memory_order_relaxed);
+    if (site == Site::MemoryAllocate && t_thread == static_cast<size_t>(Thread::Back)) {
+        const auto back = static_cast<size_t>(Site::MemoryAllocateBack);
+        g_totals.site_ticks[back].fetch_add(ticks, std::memory_order_relaxed);
+        g_totals.site_counts[back].fetch_add(1, std::memory_order_relaxed);
+    }
     const double ticks_per_ms = g_ticks_per_ms.load(std::memory_order_relaxed);
     if (ticks_per_ms == 0.0 || static_cast<double>(ticks) < LongSiteMs * ticks_per_ms) {
         return;

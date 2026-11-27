@@ -220,6 +220,25 @@ TEST_CASE("StutterTrace: zones keep their own time and sites count on every thre
     Nx2Profile::g_zones_enabled = zones_were_enabled;
 }
 
+TEST_CASE("StutterTrace: device allocations count GPUBack separately", "[stutter_allocations]") {
+    const auto all = static_cast<size_t>(StutterTrace::Site::MemoryAllocate);
+    const auto back = static_cast<size_t>(StutterTrace::Site::MemoryAllocateBack);
+    const auto& totals = StutterTrace::g_totals;
+    const auto all_calls = totals.site_counts[all].load();
+    const auto all_ticks = totals.site_ticks[all].load();
+    const auto back_calls = totals.site_counts[back].load();
+    const auto back_ticks = totals.site_ticks[back].load();
+    {
+        const StutterTrace::ThreadScope named{Thread::Back};
+        StutterTrace::AddSite(StutterTrace::Site::MemoryAllocate, 1, 3);
+    }
+    StutterTrace::AddSite(StutterTrace::Site::MemoryAllocate, 3, 7);
+    REQUIRE(totals.site_counts[all].load() - all_calls == 2);
+    REQUIRE(totals.site_ticks[all].load() - all_ticks == 6);
+    REQUIRE(totals.site_counts[back].load() - back_calls == 1);
+    REQUIRE(totals.site_ticks[back].load() - back_ticks == 2);
+}
+
 TEST_CASE("StutterTrace: sites cost nothing while the trace is off", "[video_core]") {
     const bool was_enabled = StutterTrace::g_enabled;
     StutterTrace::g_enabled = false;

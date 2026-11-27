@@ -467,8 +467,29 @@ VKAPI_ATTR VkResult VKAPI_CALL TimedAllocateMemory(VkDevice device,
                                                    const VkAllocationCallbacks* allocator,
                                                    VkDeviceMemory* memory) {
     using namespace VideoCommon::StutterTrace;
-    const SiteScope site{Site::MemoryAllocate};
-    return g_vma_allocate_memory(device, allocate_info, allocator, memory);
+    if (!Enabled() || t_thread != static_cast<size_t>(Thread::Back)) {
+        const SiteScope site{Site::MemoryAllocate};
+        return g_vma_allocate_memory(device, allocate_info, allocator, memory);
+    }
+    const auto start = std::chrono::steady_clock::now();
+    const u64 start_ticks = SiteScope::Now();
+    const VkResult result = g_vma_allocate_memory(device, allocate_info, allocator, memory);
+    const u64 end_ticks = SiteScope::Now();
+    const auto elapsed = std::chrono::steady_clock::now() - start;
+    AddSite(Site::MemoryAllocate, start_ticks, end_ticks);
+    if (elapsed >= std::chrono::milliseconds{2}) {
+        bool dedicated_info = false;
+        for (auto* next = static_cast<const VkBaseInStructure*>(allocate_info->pNext); next;
+             next = next->pNext) {
+            dedicated_info |= next->sType == VK_STRUCTURE_TYPE_MEMORY_DEDICATED_ALLOCATE_INFO;
+        }
+        LOG_INFO(Render_Vulkan,
+                 "GPUBack vkAllocateMemory: ms={:.2f} bytes={} memory_type={} dedicated_info={} result={}",
+                 std::chrono::duration<double, std::milli>(elapsed).count(),
+                 allocate_info->allocationSize, allocate_info->memoryTypeIndex, dedicated_info,
+                 static_cast<int>(result));
+    }
+    return result;
 }
 
 VKAPI_ATTR void VKAPI_CALL TimedFreeMemory(VkDevice device, VkDeviceMemory memory,

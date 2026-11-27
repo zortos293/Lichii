@@ -1357,10 +1357,26 @@ void TextureCache<P>::TickFrame() {
             scratch->release();
         }
     }
+    bool recycle_depth_images = false;
+    if constexpr (requires { runtime.DepthImageReuseEnabled(); }) {
+        if (runtime.DepthImageReuseEnabled()) {
+            const bool under_pressure =
+                runtime.FailedImages() != seen_failed_images ||
+                runtime.MemoryPressureEvents() != seen_pressure_events ||
+                runtime.GetDeviceMemoryUsage() >= critical_memory;
+            recycle_depth_images = runtime.PrepareDepthImageRetirement(under_pressure);
+        }
+    }
     if constexpr (requires { runtime.CurrentTick(); }) {
         while (!gpu_sentenced_images.empty() &&
                runtime.IsFree(gpu_sentenced_images.front().tick)) {
-            gpu_sentenced_bytes -= gpu_sentenced_images.front().bytes;
+            auto& sentenced = gpu_sentenced_images.front();
+            gpu_sentenced_bytes -= sentenced.bytes;
+            if constexpr (requires { runtime.RetireDepthImage(sentenced.image); }) {
+                if (recycle_depth_images) {
+                    runtime.RetireDepthImage(sentenced.image);
+                }
+            }
             gpu_sentenced_images.pop_front();
         }
         while (!retained_image_keepers.empty() &&
