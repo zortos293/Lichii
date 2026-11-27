@@ -13,6 +13,7 @@
 #include "audio_core/sink/sink_stream.h"
 #include "common/logging.h"
 #include "common/scope_exit.h"
+#include "common/settings.h"
 #include "core/core.h"
 
 namespace AudioCore::Sink {
@@ -247,7 +248,15 @@ SDLSink::SDLSink(std::string_view target_device_name) {
         } else {
             output_device.clear();
         }
-        device_channels = 2;
+        if (Settings::CurrentProgramIsSwitch2() && Settings::GetAudioOutputChannelCount() == 6) {
+            const auto device = output_device.empty()
+                                    ? SDL_AUDIO_DEVICE_DEFAULT_PLAYBACK
+                                    : FindAudioDeviceByName(output_device, false);
+            SDL_AudioSpec spec{};
+            if (SDL_GetAudioDeviceFormat(device, &spec, nullptr) && spec.channels >= 6) {
+                device_channels = 6;
+            }
+        }
     }
 }
 
@@ -256,8 +265,10 @@ SDLSink::~SDLSink() = default;
 SinkStream* SDLSink::AcquireSinkStream(Core::System& system, u32 system_channels_,
                                        const std::string&, StreamType type) {
     system_channels = system_channels_;
+    const u32 stream_channels =
+        type != StreamType::In && system_channels == 6 ? device_channels : 2;
     SinkStreamPtr& stream = sink_streams.emplace_back(std::make_unique<SDLSinkStream>(
-        device_channels, system_channels, output_device, input_device, type, system));
+        stream_channels, system_channels, output_device, input_device, type, system));
     stream->SetDeviceVolume(device_volume);
     return stream.get();
 }

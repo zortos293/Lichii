@@ -140,9 +140,13 @@ Result IAudioController::GetForceMutePolicy(Out<ForceMutePolicy> out_mute_policy
 
 Result IAudioController::GetOutputModeSetting(Out<Set::AudioOutputMode> out_output_mode,
                                               Set::AudioOutputModeTarget target) {
-    LOG_WARNING(Audio, "(STUBBED) called, target={}", target);
-
     *out_output_mode = Set::AudioOutputMode::ch_7_1;
+    if (Settings::CurrentProgramIsSwitch2()) {
+        *out_output_mode = Settings::GetAudioOutputChannelCount() == 6
+                               ? Set::AudioOutputMode::ch_5_1
+                               : Set::AudioOutputMode::ch_2;
+    }
+    LOG_INFO(Audio, "called, target={}, output_mode={}", target, *out_output_mode);
     R_SUCCEED();
 }
 
