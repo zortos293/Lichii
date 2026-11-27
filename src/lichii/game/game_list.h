@@ -131,6 +131,7 @@ signals:
     void ExtractNupRequested(const std::string& game_path);
     void EditNupMetadataRequested(const std::string& game_path);
     void ConvertToNxRequested(const std::string& game_path);
+    void ExtractNxRequested(const std::string& game_path);
     void AddToNxRequested(const std::string& game_path);
     void RemoveFromNxRequested(const std::string& game_path);
     void EditNxMetadataRequested(const std::string& game_path);

@@ -1842,6 +1842,8 @@ void MainWindow::ConnectWidgetEvents() {
     });
     connect(game_list, &GameList::ConvertToNxRequested, this,
             [this](const std::string& path) { OnGameListNxTool(path, &NxTools::ConvertToNx); });
+    connect(game_list, &GameList::ExtractNxRequested, this,
+            [this](const std::string& path) { OnGameListNxTool(path, &NxTools::ExtractNx); });
     connect(game_list, &GameList::AddToNxRequested, this,
             [this](const std::string& path) { OnGameListNxTool(path, &NxTools::AddToNx); });
     connect(game_list, &GameList::RemoveFromNxRequested, this,
@@ -5264,7 +5266,7 @@ void MainWindow::OnGameListEditNxMetadata(const std::string& game_path) {
 void MainWindow::OnGameListNxTool(const std::string& game_path,
                                   void (NxTools::*tool)(const std::string&)) {
     // An archive edited in place must not be read by a running game.
-    if (emulation_running && tool != &NxTools::ConvertToNx &&
+    if (emulation_running && tool != &NxTools::ConvertToNx && tool != &NxTools::ExtractNx &&
         current_game_path == QString::fromStdString(game_path)) {
         QMessageBox::information(this, tr("NX Archive"),
                                  tr("Stop the game before changing its NX archive."));

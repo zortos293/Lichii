@@ -136,6 +136,7 @@ public:
                       QWidget* parent = nullptr);
 
     void SetProgress(const FileSys::Nup::PackProgress& progress);
+    void SetByteProgress(u64 done, u64 total, const QString& timing);
     void SetCancelling();
     // Closes the dialog without treating it as a cancel request.
     void Finish();
