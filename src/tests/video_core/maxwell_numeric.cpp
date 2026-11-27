@@ -12,6 +12,7 @@
 #include <vector>
 
 #include <catch2/catch_test_macros.hpp>
+#include <spirv/unified1/spirv.hpp11>
 
 #include "shader_recompiler/backend/spirv/emit_spirv.h"
 #ifdef HAS_OPENGL
@@ -557,4 +558,61 @@ TEST_CASE("Maxwell double byte conversions round before narrowing",
             }
         }
     }
+}
+
+TEST_CASE("IADD signed overflow includes the negative boundary",
+          "[shader][maxwell][numeric_backend]") {
+    Shader::ObjectPool<IR::Inst> pool;
+    IR::Block block{pool};
+    IR::IREmitter ir{block};
+    const IR::U32 a{ir.LocalInvocationIdX()};
+    const IR::U32 b{ir.LocalInvocationIdY()};
+    const IR::U32 sum{ir.IAdd(a, b)};
+    const IR::U1 overflow{ir.GetOverflowFromOp(sum)};
+    const IR::U32 result{ir.Select(overflow, ir.Imm32(1U), ir.Imm32(0U))};
+    block.AppendNewInst(Opcode::WriteStorage32, {ir.Imm32(0U), ir.Imm32(0U), result});
+
+    IR::Program program;
+    program.stage = Shader::Stage::Compute;
+    program.workgroup_size = {1, 1, 1};
+    program.blocks = {&block};
+    program.post_order_blocks = {&block};
+    program.syntax_list = {{{.block = &block}, IR::AbstractSyntaxNode::Type::Block},
+                           {{}, IR::AbstractSyntaxNode::Type::Return}};
+    NumericEnvironment env;
+    Shader::Optimization::CollectShaderInfoPass(env, program);
+    program.info.used_storage_buffer_types = IR::Type::U32;
+    program.info.storage_buffers_descriptors = {{0, 0, 1, true}};
+    Shader::Profile profile{};
+    profile.supported_spirv = 0x00010300;
+    const auto code{Shader::Backend::SPIRV::EmitSPIRV(profile, program)};
+
+    // The signed comparisons must share the wrapped INT_MAX - a threshold,
+    // and the negative branch must include equality.
+    std::array<u32, 3> positive{};
+    std::array<u32, 3> negative{};
+    bool selected = false;
+    for (size_t i = 5; i < code.size();) {
+        const u32 count{code[i] >> 16};
+        REQUIRE(count > 0);
+        REQUIRE(i + count <= code.size());
+        const auto op{static_cast<spv::Op>(code[i] & 0xffff)};
+        if (op == spv::Op::OpSGreaterThan) {
+            REQUIRE(count == 5);
+            positive = {code[i + 2], code[i + 3], code[i + 4]};
+        } else if (op == spv::Op::OpSLessThanEqual) {
+            REQUIRE(count == 5);
+            negative = {code[i + 2], code[i + 3], code[i + 4]};
+        } else if (op == spv::Op::OpSelect && count == 6 && positive[0] != 0 &&
+                   negative[0] != 0 && code[i + 4] == positive[0] &&
+                   code[i + 5] == negative[0]) {
+            selected = true;
+        }
+        i += count;
+    }
+    REQUIRE(positive[0] != 0);
+    REQUIRE(negative[0] != 0);
+    CHECK(positive[1] == negative[1]);
+    CHECK(positive[2] == negative[2]);
+    CHECK(selected);
 }
