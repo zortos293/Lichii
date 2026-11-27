@@ -80,31 +80,22 @@ void GameListModel::WorkerEvent() {
 }
 
 void GameListModel::AddDirEntry(GameListDir* entry_items) {
-    if (m_flat) {
-        delete entry_items;
-        return;
-    }
     invisibleRootItem()->appendRow(entry_items);
 }
 
 void GameListModel::AddEntry(const QList<QStandardItem*>& entry_items, GameListDir* parent) {
-    if (m_flat) {
-        invisibleRootItem()->appendRow(entry_items);
-    } else {
-        parent->appendRow(entry_items);
-    }
+    parent->appendRow(entry_items);
 }
 
 void GameListModel::DonePopulating(const QStringList& watch_list) {
-    emit ShowList(!IsEmpty());
+    const bool has_games = !IsEmpty();
+    emit ShowList(has_games ||
+                  UISettings::values.game_list_mode.GetValue() == Settings::GameListMode::GridView);
+    invisibleRootItem()->appendRow(new GameListAddDir());
+    invisibleRootItem()->insertRow(0, new GameListFavorites());
 
-    if (!m_flat) {
-        invisibleRootItem()->appendRow(new GameListAddDir());
-        invisibleRootItem()->insertRow(0, new GameListFavorites());
-
-        for (const auto id : std::as_const(UISettings::values.favorited_ids)) {
-            AddFavorite(id);
-        }
+    for (const auto id : std::as_const(UISettings::values.favorited_ids)) {
+        AddFavorite(id);
     }
 
     emit PopulatingCompleted(watch_list);
@@ -135,6 +126,16 @@ void GameListModel::SetFolderSize(const QString& game_path, u64 size_bytes) {
     for (int row = 0; row < rowCount(); ++row) {
         update_children(item(row));
     }
+}
+
+void GameListModel::sort(int column, Qt::SortOrder order) {
+    QStandardItemModel::sort(column, order);
+    // Qt sorts stably: sorting again on the favorite flag alone keeps the order just picked
+    // within favorites and within the rest. Folder rows never compare (they keep their order).
+    const int role = sortRole();
+    setSortRole(GameListItemPath::FavoriteRankRole);
+    QStandardItemModel::sort(COLUMN_NAME, Qt::AscendingOrder);
+    setSortRole(role);
 }
 
 bool GameListModel::IsEmpty() const {
@@ -261,8 +262,4 @@ void GameListModel::RetranslateUI() {
 
 QFileSystemWatcher* GameListModel::GetWatcher() const {
     return watcher;
-}
-
-void GameListModel::SetFlat(bool flat) {
-    m_flat = flat;
 }

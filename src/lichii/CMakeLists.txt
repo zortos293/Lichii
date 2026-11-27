@@ -197,6 +197,9 @@ add_executable(lichii
     hotkeys.h
     install_dialog.cpp
     install_dialog.h
+    classic_loading_screen.cpp
+    classic_loading_screen.h
+    classic_loading_screen.ui
     loading_screen.cpp
     loading_screen.h
     loading_screen.ui
@@ -280,6 +283,27 @@ add_executable(lichii
     game/carousel.h game/carousel.cpp
 )
 
+# Library styles (alternative game library layouts). The framework files come first; then one line
+# per style, sorted by style id. A new style adds its own line in sorted order and nothing else.
+target_sources(lichii PRIVATE
+    game/styles/library_style_filter.cpp game/styles/library_style_filter.h
+    game/styles/library_style_registry.h
+    game/styles/library_style_view.cpp game/styles/library_style_view.h
+    game/styles/style_helpers.cpp game/styles/style_helpers.h
+
+    # --- styles: begin (sorted by id, one line each) ---
+    game/styles/box_shelf_style.cpp game/styles/box_shelf_style.h
+    game/styles/canvas_style.cpp game/styles/canvas_style.h
+    game/styles/carousel_style.cpp game/styles/carousel_style.h
+    game/styles/cartridges_style.cpp game/styles/cartridges_style.h
+    game/styles/channel_grid_style.cpp game/styles/channel_grid_style.h
+    game/styles/dense_grid_style.cpp game/styles/dense_grid_style.h
+    game/styles/dual_pane_style.cpp game/styles/dual_pane_style.h
+    game/styles/home_row_style.cpp game/styles/home_row_style.h
+    game/styles/ris_style.cpp game/styles/ris_style.h
+    # --- styles: end ---
+)
+
 set_target_properties(lichii PROPERTIES OUTPUT_NAME "lichii")
 target_compile_definitions(lichii PRIVATE
     LICHII_USE_PENDING_RELEASE_NOTES=$<BOOL:${LICHII_USE_PENDING_RELEASE_NOTES}>)
@@ -320,6 +344,7 @@ endif()
 
 file(GLOB_RECURSE ICONS ${PROJECT_SOURCE_DIR}/dist/icons/*)
 file(GLOB_RECURSE THEMES ${PROJECT_SOURCE_DIR}/dist/qt_themes/*)
+file(GLOB_RECURSE FONTS ${PROJECT_SOURCE_DIR}/dist/fonts/*)
 
 if (ENABLE_UPDATE_CHECKER)
     target_compile_definitions(lichii PUBLIC ENABLE_UPDATE_CHECKER)
@@ -411,7 +436,8 @@ target_sources(lichii
     PRIVATE
         ${ICONS}
         ${LANGUAGES}
-        ${THEMES})
+        ${THEMES}
+        ${FONTS})
 
 # TODO(crueter): Move Assets.car/icon/icns handling to its own Module.
 if (APPLE)

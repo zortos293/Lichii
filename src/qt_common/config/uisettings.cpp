@@ -77,21 +77,37 @@ const Themes themes{{
     {"Midnight Blue", "qdarkstyle_midnight_blue"},
     {"Midnight Blue Colorful", "colorful_midnight_blue"},
     {"Lichii Dark", "lichii"},
+    {"Lichii Modern", "lichii_modern"},
+    {"RIS (PantACRO4life)", "ris"},
 }};
+
+bool IsLichiiTheme() {
+    const auto& theme = UISettings::values.theme;
+    return theme == std::string("lichii") || theme == std::string("lichii_modern") ||
+           IsRisTheme();
+}
+
+bool IsRisTheme() {
+    return UISettings::values.theme == std::string("ris");
+}
+
+const char* LichiiIconFolder() {
+    return IsRisTheme() ? "ris" : "lichii";
+}
 
 bool IsDarkTheme() {
     const auto& theme = UISettings::values.theme;
     return theme == std::string("qdarkstyle") || theme == std::string("qdarkstyle_midnight_blue") ||
            theme == std::string("colorful_dark") ||
-           theme == std::string("colorful_midnight_blue") || theme == std::string("lichii");
+           theme == std::string("colorful_midnight_blue") || IsLichiiTheme();
 }
 
 Values values = {};
 
 Setting<u32, true>& CurrentGameIconSize() {
-    return values.game_list_mode.GetValue() == Settings::GameListMode::TreeView
-               ? values.game_icon_size
-               : values.game_cover_size;
+    // One size for every view: the list, the grid, the carousel and the library styles. The
+    // list used its own (game_icon_size), so its icons didn't match after switching views.
+    return values.game_cover_size;
 }
 
 u32 CalculateWidth(u32 height, Settings::AspectRatio ratio) {

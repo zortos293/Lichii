@@ -8,6 +8,7 @@
 
 class GameCard;
 class GameListModel;
+class QAbstractProxyModel;
 class QResizeEvent;
 
 class GameCarousel : public QListView {
@@ -17,6 +18,8 @@ public:
     explicit GameCarousel(QWidget* parent = nullptr);
 
     void SetModel(GameListModel* model);
+    /// Sorts the games like the list does (its sort column and order).
+    void SetSort(int column, Qt::SortOrder order);
     /// Hides the games the filter doesn't match; returns how many are shown.
     int ApplyFilter(const QString& edit_filter_text, GameListModel* model);
     void UpdateIconSize();
@@ -25,4 +28,6 @@ public:
 
 private:
     GameCard* m_gameCard = nullptr;
+    /// The library model's games in one row, built from the loaded library (no scan).
+    QAbstractProxyModel* m_flatModel = nullptr;
 };

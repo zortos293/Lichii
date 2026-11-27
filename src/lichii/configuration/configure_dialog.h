@@ -57,6 +57,8 @@ public:
     ~ConfigureDialog() override;
 
     void ApplyConfiguration();
+    /// Opens on the Profiles tab (the library styles' profile button with a single profile).
+    void ShowProfiles();
 
     /// Drop the controller edits that were not applied; the Controls tab changes them live.
     void RestoreInputConfiguration();
@@ -78,6 +80,7 @@ private:
     void FitPageWidth();
 
     void HandleApplyButtonClicked();
+    void SetModernStyleEnabled(bool enabled);
 
     void SetConfiguration();
     void UpdateVisibleTabs();

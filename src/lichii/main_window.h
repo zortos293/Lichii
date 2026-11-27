@@ -35,6 +35,7 @@
 #include "qt_common/util/game.h"
 #include "lichii/compatibility_report.h"
 #include "lichii/hotkeys.h"
+#include "lichii/loading_screen.h"
 #include "lichii/user_data_migration.h"
 
 #ifdef __unix__
@@ -55,9 +56,9 @@ class EmuThread;
 class GameList;
 class GImageInfo;
 class GRenderWindow;
-class LoadingScreen;
 class OverlayDialog;
 class BugReportDialog;
+class ClassicLoadingScreen;
 class ControllerDialog;
 class QLabel;
 class MultiplayerState;
@@ -403,6 +404,8 @@ private slots:
     void OnMenuInstallToNAND();
     void OnMenuRecentFile();
     void OnConfigure();
+    /// Configure on the Profiles tab.
+    void OnConfigureProfiles();
     void OnConfigureTas();
     void OnDecreaseVolume();
     void OnIncreaseVolume();
@@ -451,13 +454,20 @@ private slots:
     void ResetWindowSize900();
     void ResetWindowSize1080();
 
-    void SetGameListMode(Settings::GameListMode mode);
+    void SetGameListMode(Settings::GameListMode mode, bool update_library_style = true);
     void SetGridView();
     void SetTreeView();
     void SetCarouselView();
 
     void CheckIconSize();
     void ToggleShowGameName();
+
+    /// Shows the library style `id` (lichii/game/styles), or the Modern grid for an empty id.
+    void SetLibraryLayout(const std::string& id);
+    void CycleLibraryStyle(int step);
+    void ToggleShowLibraryInfo();
+    void UpdateLibraryStyleActions();
+    void RetranslateLibraryStyleActions();
 
     void LaunchFirmwareApplet(u64 program_id, std::optional<Service::NFP::CabinetMode> mode);
     void OnCreateHomeMenuDesktopShortcut();
@@ -479,6 +489,10 @@ private slots:
     /// True while the emulation thread's teardown still makes progress (Common::ShutdownProgress
     /// moved since the last call), for at most MaxEmuThreadShutdownMs after it was asked to stop.
     bool EmulationShutdownProgressing();
+
+    /// Shows the first-run game library style chooser and records the choice (the fallback when
+    /// the chooser is dismissed).
+    void PromptGameLibraryStyle();
 
 #ifdef ENABLE_UPDATE_CHECKER
     // A manual check reports every outcome and ignores the skipped release and remind-later time.
@@ -579,6 +593,17 @@ private:
     GRenderWindow* render_window = nullptr;
     GameList* game_list = nullptr;
     LoadingScreen* loading_screen = nullptr;
+    /// The original loading screen and closing dialog, used by every theme but Lichii Modern.
+    ClassicLoadingScreen* classic_loading_screen = nullptr;
+    /// Whether the running game uses the modern loading screen, chosen when it boots.
+    bool modern_loading_screen = true;
+    /// Artwork captured before emulation starts, so shutdown never reads a loader being torn down.
+    LoadingScreen::Snapshot closing_snapshot;
+    /// Set when a direct launch skipped the first-run library style chooser; the choice is asked
+    /// once the interactive library session comes back.
+    bool deferred_library_style_prompt = false;
+    /// OnConfigure opens on the Profiles tab once.
+    bool configure_profiles_next = false;
     QTimer shutdown_timer;
     QTimer emu_terminate_timer;
     bool shutdown_game_in_progress{};
@@ -668,6 +693,13 @@ private:
     QString startup_icon_theme;
 
     QActionGroup* game_size_actions;
+
+    QList<QAction*> library_style_actions;
+    QAction* action_next_library_style = nullptr;
+    QAction* action_previous_library_style = nullptr;
+    QAction* action_show_library_info = nullptr;
+    QList<QAction*> game_info_actions;
+    QAction* action_scroll_long_names = nullptr;
 
     // Debugger panes
     ControllerDialog* controller_dialog = nullptr;

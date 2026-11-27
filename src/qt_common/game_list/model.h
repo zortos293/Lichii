@@ -50,6 +50,9 @@ public:
     void DonePopulating(const QStringList& watch_list);
     /// Shows the size of a loose dump's folder in every row of that game (favorites included).
     void SetFolderSize(const QString& game_path, u64 size_bytes);
+    /// Sorts by the column, then favorites first in every folder (a second, stable pass), so
+    /// every view showing the list (List, Modern grid, Carousel, the styles) has them in front.
+    void sort(int column, Qt::SortOrder order = Qt::AscendingOrder) override;
 
     void PopulateAsync(QVector<UISettings::GameDir>& game_dirs);
     void WorkerEvent();
@@ -67,8 +70,6 @@ public:
 
     QFileSystemWatcher* GetWatcher() const;
 
-    void SetFlat(bool flat);
-
 signals:
     void ShowList(bool show);
     void PopulatingCompleted(const QStringList& watch_list);
@@ -83,7 +84,6 @@ private:
     void Repopulate();
     void StopWorker();
 
-    bool m_flat = false;
     bool scan_enabled = true;
 
     std::shared_ptr<FileSys::VfsFilesystem> vfs;

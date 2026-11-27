@@ -1,0 +1,14 @@
+/* RIS additions, appended after the recolored Lichii Dark rules by tools/ui/make_ris_theme.py.
+   Signal red rules on the window edges, like the RIS site header and boot screens. */
+
+QMenuBar {
+    border-bottom: 2px solid #e01b31;
+}
+
+QStatusBar {
+    border-top: 1px solid #7a0d1c;
+}
+
+QWidget[libraryStyle="ris"] {
+    background-color: #0a0b0d;
+}

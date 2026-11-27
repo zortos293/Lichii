@@ -6,15 +6,21 @@
 
 #pragma once
 
+#include <algorithm>
+#include <cmath>
 #include <array>
 #include <map>
 #include <string>
 #include <string_view>
 #include <utility>
 
+#include <QByteArrayView>
+#include <QCache>
 #include <QCoreApplication>
 #include <QFileInfo>
 #include <QImage>
+#include <QLinearGradient>
+#include <QMutex>
 #include <QObject>
 #include <QPainter>
 #include <QPainterPath>
@@ -47,7 +53,7 @@ Q_DECLARE_METATYPE(GameListItemType);
  * @return QPixmap default icon
  */
 static bool IsLichiiTheme() {
-    return UISettings::values.theme == "lichii";
+    return UISettings::IsLichiiTheme();
 }
 
 static QPixmap GetDefaultIcon(u32 size) {
@@ -71,6 +77,99 @@ static QPixmap GetDefaultIcon(u32 size) {
                       QImage(QStringLiteral(":/lichii/icons/menu_gamepad@2x.png")));
     painter.end();
     return QPixmap::fromImage(icon);
+}
+
+inline bool IsFavoriteProgram(u64 program_id) {
+    return program_id != 0 && UISettings::values.favorited_ids.contains(program_id);
+}
+
+/// The favorite mark everywhere (list, menus, the Favorites row, every library style): a
+/// chubby pink heart sticker with a white border and a soft shadow outside it. Drawn once per
+/// size and kept. `size`: the pixmap's side in logical pixels. `icon`: upright and filling the
+/// square, for menus, the Favorites row and next to names; otherwise tilted like a sticker on
+/// a cover, with room for its shadow.
+inline QPixmap FavoriteHeart(int size, qreal dpr, bool icon = false, qreal tilt = -10.0) {
+    static QCache<QString, QPixmap> cache{48};
+    static QMutex mutex;
+    size = std::max(8, size);
+    const QString key = QStringLiteral("%1|%2|%3|%4").arg(size).arg(dpr).arg(icon).arg(tilt);
+    const QMutexLocker lock{&mutex};
+    if (const QPixmap* cached = cache.object(key)) {
+        return *cached;
+    }
+    const int px = static_cast<int>(std::ceil(size * dpr));
+    QImage image(px, px, QImage::Format_ARGB32_Premultiplied);
+    image.fill(Qt::transparent);
+    {
+        QPainter p(&image);
+        p.setRenderHint(QPainter::Antialiasing, true);
+        // The heart spans x -0.56..0.56, y -0.48..0.42; with its white edge about 1.4 wide.
+        p.translate(px / 2.0, px / 2.0 + (icon ? px * 0.02 : 0.0));
+        const qreal unit = icon ? px / 1.42 : px / 2.0;
+        p.scale(unit, unit);
+        if (!icon) {
+            p.rotate(tilt);
+        }
+        QPainterPath heart;
+        heart.moveTo(0.0, 0.42);
+        heart.cubicTo(-0.25, 0.28, -0.56, 0.08, -0.56, -0.16);
+        heart.cubicTo(-0.56, -0.36, -0.42, -0.48, -0.26, -0.48);
+        heart.cubicTo(-0.13, -0.48, -0.04, -0.40, 0.0, -0.30);
+        heart.cubicTo(0.04, -0.40, 0.13, -0.48, 0.26, -0.48);
+        heart.cubicTo(0.42, -0.48, 0.56, -0.36, 0.56, -0.16);
+        heart.cubicTo(0.56, 0.08, 0.25, 0.28, 0.0, 0.42);
+        heart.closeSubpath();
+        const qreal border = icon ? 0.2 : 0.26; // the white sticker edge (stroke width)
+        // Soft shadow outside the white edge, a little lower: stacked faint widenings.
+        const QPainterPath low = heart.translated(0.0, icon ? 0.05 : 0.13);
+        const int steps = icon ? 3 : 6;
+        const qreal strength = icon ? 0.35 : 0.55;
+        for (int i = steps; i >= 1; --i) {
+            QColor shade(0, 0, 0, static_cast<int>(255 * strength / steps));
+            p.setPen(QPen(shade, border + 0.05 * i, Qt::SolidLine, Qt::RoundCap, Qt::RoundJoin));
+            p.setBrush(shade);
+            p.drawPath(low);
+        }
+        p.setPen(QPen(Qt::white, border, Qt::SolidLine, Qt::RoundCap, Qt::RoundJoin));
+        p.setBrush(Qt::white);
+        p.drawPath(heart);
+        QLinearGradient pink(0.0, -0.5, 0.0, 0.5);
+        pink.setColorAt(0.0, QColor(0xff, 0x6f, 0xa8));
+        pink.setColorAt(1.0, QColor(0xe8, 0x2f, 0x72));
+        p.setPen(Qt::NoPen);
+        p.setBrush(pink);
+        p.drawPath(heart);
+    }
+    QPixmap pixmap = QPixmap::fromImage(image);
+    pixmap.setDevicePixelRatio(dpr);
+    cache.insert(key, new QPixmap(pixmap));
+    return pixmap;
+}
+
+/// The heart sticker centred on `center`, `size` wide (one size per few pixels, so a cover in
+/// motion reuses a handful of pixmaps). Upright: drawn in screen space, never through a
+/// perspective transform, which is slow for every cover on every frame.
+/// `tilt`: 0 where the caller turns the painter itself (with the stickers of a cartridge or case).
+inline void PaintFavoriteHeartAt(QPainter* painter, const QPointF& center, qreal size,
+                                 qreal tilt = -10.0) {
+    const int step = std::max(2, static_cast<int>(size / 12));
+    const int px = std::max(12, static_cast<int>(std::lround(size / step)) * step);
+    const qreal dpr = painter->device() != nullptr ? painter->device()->devicePixelRatioF() : 1.0;
+    painter->drawPixmap(QPointF(center.x() - px / 2.0, center.y() - px / 2.0),
+                        FavoriteHeart(px, dpr, false, tilt));
+}
+
+/// The size of the heart on art `side` pixels wide: the same share of the art at every size.
+inline qreal FavoriteHeartSize(qreal side) {
+    return std::max(12.0, side * 0.26);
+}
+
+/// The heart on a cover or tile: in its top left corner, sized with the art.
+inline void PaintFavoriteHeart(QPainter* painter, const QRectF& art) {
+    const qreal side = std::min(art.width(), art.height());
+    const qreal size = FavoriteHeartSize(side);
+    PaintFavoriteHeartAt(painter, QPointF(art.left() + size * 0.5, art.top() + size * 0.5),
+                         size);
 }
 
 static QPixmap RoundedIcon(const QPixmap& picture) {
@@ -132,12 +231,58 @@ public:
  */
 class GameListItemPath : public GameListItem {
 public:
+    /// 0 for a favorite, 1 otherwise: GameListModel::sort puts favorites first by it.
+    static constexpr int FavoriteRankRole = Qt::UserRole + 60;
     static constexpr int TitleRole = SortRole + 1;
     static constexpr int FullPathRole = SortRole + 2;
     static constexpr int ProgramIdRole = SortRole + 3;
     static constexpr int FileTypeRole = SortRole + 4;
     /// True when the picture comes from the game or its custom artwork, not the default art.
     static constexpr int HasIconRole = SortRole + 5;
+    static constexpr int CardIconRole = SortRole + 6;
+    /// Play time in seconds (qulonglong).
+    static constexpr int PlayTimeSecondsRole = SortRole + 7;
+    /// Readable play time without a label, or "Never Played".
+    static constexpr int PlayTimeTextRole = SortRole + 8;
+    /// Version of the applied update ("1.4.3"), empty when only the base game is present.
+    static constexpr int UpdateVersionRole = SortRole + 9;
+
+    /// Bounded, shared store for card-sized artwork: decode and scale each game's artwork once
+    /// and keep at most MaxCost bytes resident instead of decoding it into every item.
+    class CardArtCache {
+    public:
+        static QPixmap Lookup(const QString& key) {
+            const QMutexLocker lock{&Mutex()};
+            if (auto* cached = Cache().object(key)) {
+                return *cached;
+            }
+            return {};
+        }
+
+        static void Insert(const QString& key, const QPixmap& pixmap) {
+            if (pixmap.isNull()) {
+                return;
+            }
+            const QMutexLocker lock{&Mutex()};
+            Cache().insert(key, new QPixmap(pixmap),
+                           static_cast<int>(std::min<qint64>(
+                               qint64(pixmap.width()) * pixmap.height() * pixmap.depth() / 8,
+                               MaxCost)));
+        }
+
+    private:
+        static QCache<QString, QPixmap>& Cache() {
+            static QCache<QString, QPixmap> cache{MaxCost};
+            return cache;
+        }
+
+        static QMutex& Mutex() {
+            static QMutex mutex;
+            return mutex;
+        }
+
+        static constexpr int MaxCost = 32 * 1024 * 1024;
+    };
 
     GameListItemPath() = default;
     GameListItemPath(const QString& game_path, const std::vector<u8>& picture_data,
@@ -149,28 +294,51 @@ public:
         setData(qulonglong(program_id), ProgramIdRole);
         setData(game_type, FileTypeRole);
 
+        const QString play_time_text =
+            play_time > 0
+                ? QString::fromStdString(PlayTime::PlayTimeManager::GetReadablePlayTime(play_time))
+                : QObject::tr("Never Played");
         const auto readable_play_time =
-            play_time > 0 ? QObject::tr("Play Time: %1")
-                                .arg(QString::fromStdString(
-                                    PlayTime::PlayTimeManager::GetReadablePlayTime(play_time)))
-                          : QObject::tr("Never Played");
+            play_time > 0 ? QObject::tr("Play Time: %1").arg(play_time_text) : play_time_text;
 
-        const auto enabled_update = [patch_versions]() -> QString {
+        const QString update_version = [&patch_versions]() -> QString {
             const QStringList lines = patch_versions.split(QLatin1Char('\n'));
             const QRegularExpression regex{QStringLiteral(R"(^Update \(([0-9\.]+)\))")};
             for (const QString& line : std::as_const(lines)) {
                 const auto match = regex.match(line);
                 if (match.hasMatch() && match.hasCaptured(1))
-                    return QObject::tr("Version: %1").arg(match.captured(1));
+                    return match.captured(1);
             }
-            return QObject::tr("Version: 1.0.0");
+            return {};
         }();
+        const auto enabled_update =
+            update_version.isEmpty() ? QObject::tr("Version: 1.0.0")
+                                     : QObject::tr("Version: %1").arg(update_version);
+
+        setData(qulonglong(play_time), PlayTimeSecondsRole);
+        setData(play_time_text, PlayTimeTextRole);
+        setData(update_version, UpdateVersionRole);
 
         const auto tooltip = QStringLiteral("%1\n%2").arg(readable_play_time, enabled_update);
 
         setData(tooltip, Qt::ToolTipRole);
 
         SetPicture(this, picture_data);
+    }
+
+    /// The list icon at another size, from the card art the item already keeps: a size change
+    /// in the list no longer needs a scan of the library.
+    static void ResizePicture(QStandardItem* item, u32 size) {
+        if (size == 0) {
+            item->setData(QPixmap{}, Qt::DecorationRole);
+            return;
+        }
+        const QPixmap card = item->data(CardIconRole).value<QPixmap>();
+        const QPixmap picture =
+            item->data(HasIconRole).toBool() && !card.isNull()
+                ? card.scaled(size, size, Qt::IgnoreAspectRatio, Qt::SmoothTransformation)
+                : GetDefaultIcon(size);
+        item->setData(RoundedIcon(picture), Qt::DecorationRole);
     }
 
     /// Shows an image file as a game's picture, or the default art when it is not an image.
@@ -183,10 +351,34 @@ public:
         if (!has_icon) {
             picture = GetDefaultIcon(size);
         }
+        // Decode and scale the card artwork once, then share it through the bounded cache; the
+        // item itself stores a cheap copy-on-write reference.
+        const u64 program_id = item->data(ProgramIdRole).toULongLong();
+        const QString game_path = item->data(FullPathRole).toString();
+        const auto icon_hash = qHash(QByteArrayView{
+            reinterpret_cast<const char*>(picture_data.data()),
+            static_cast<qsizetype>(picture_data.size())});
+        const QString card_cache_key =
+            QStringLiteral("%1|%2|%3")
+                .arg(qulonglong(program_id))
+                .arg(game_path)
+                .arg(static_cast<qulonglong>(icon_hash));
+        QPixmap card_picture = has_icon ? CardArtCache::Lookup(card_cache_key) : QPixmap{};
+        if (has_icon && card_picture.isNull()) {
+            const u32 card_target = std::max<u32>(size, u32{384});
+            if (std::max(picture.width(), picture.height()) > static_cast<int>(card_target)) {
+                card_picture = picture.scaled(card_target, card_target, Qt::KeepAspectRatio,
+                                              Qt::SmoothTransformation);
+            } else {
+                card_picture = picture;
+            }
+            CardArtCache::Insert(card_cache_key, card_picture);
+        }
         picture = picture.scaled(size, size, Qt::IgnoreAspectRatio, Qt::SmoothTransformation);
 
         item->setData(RoundedIcon(picture), Qt::DecorationRole);
         item->setData(has_icon, HasIconRole);
+        item->setData(card_picture, CardIconRole);
     }
 
     int type() const override {
@@ -194,6 +386,9 @@ public:
     }
 
     QVariant data(int role) const override {
+        if (role == FavoriteRankRole) {
+            return IsFavoriteProgram(data(ProgramIdRole).toULongLong()) ? 0 : 1;
+        }
         if (role == Qt::DisplayRole || role == SortRole) {
             std::string filename;
             Common::SplitPath(data(FullPathRole).toString().toStdString(), nullptr, &filename,
@@ -438,7 +633,10 @@ public:
     explicit GameListFavorites() {
         setData(type(), TypeRole);
 
-        setData(ThemeIcon("star"), Qt::DecorationRole);
+        setData(FavoriteHeart(IsLichiiTheme() ? 16 : static_cast<int>(
+                                  UISettings::values.folder_icon_size.GetValue()),
+                              2.0, true),
+                Qt::DecorationRole);
         setData(QObject::tr("Favorites"), Qt::DisplayRole);
     }
 

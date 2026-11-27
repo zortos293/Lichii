@@ -48,6 +48,7 @@
 #include "common/settings.h"
 #include "common/settings_common.h"
 #include "qt_common/config/shared_translation.h"
+#include "qt_common/config/uisettings.h"
 #include "qt_common/qt_compat.h"
 
 namespace ConfigurationShared {
@@ -106,7 +107,7 @@ QPushButton* Widget::CreateRestoreGlobalButton(bool using_global, QWidget* paren
     restore_button_count++;
 
     QPushButton* restore_button =
-        new QPushButton(QIcon(QStringLiteral(":/lichii/icons/reset.png")), QString(), parent);
+        new QPushButton(QIcon(QStringLiteral(":/%1/icons/reset.png").arg(QLatin1String(UISettings::LichiiIconFolder()))), QString(), parent);
     restore_button->setObjectName(QStringLiteral("RestoreButton%1").arg(restore_button_count));
     restore_button->setProperty("restore", true);
     restore_button->setToolTip(
