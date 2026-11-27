@@ -60,7 +60,7 @@ inline constexpr u64 TextureDescriptorBytes = 32;
 /// caches write back what the host GPU wrote over the range, one call per mapped big page (64 or
 /// 128 KiB), so a pool this size costs at most 64 calls per miss. Ocarina of Time's pool is
 /// 1,058,176 bytes, just over the 1 MiB this was before.
-inline constexpr u64 MaxFlushedTexturePoolBytes = u64{4} << 20;
+inline constexpr u64 MaxFlushedTexturePoolBytes = u64{8} << 20;
 
 /// Bytes of a texture descriptor pool whose last index is `tic_limit`
 [[nodiscard]] constexpr u64 TexturePoolBytes(u32 tic_limit) noexcept {

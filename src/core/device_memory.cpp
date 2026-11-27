@@ -74,9 +74,12 @@ void DeviceMemory::TrimZeroPages(std::stop_token stop) {
     Common::SetCurrentThreadName("ZeroTrim");
     Common::SetCurrentThreadPriority(Common::ThreadPriority::Low);
     constexpr size_t Busy = size_t{64} << 20;
+    constexpr u64 EmergencyCommitFree = u64{2048} << 20;
     std::mutex mutex;
     std::condition_variable_any wake;
     std::chrono::seconds interval = 5s;
+    u64 last_zero_filled = 0;
+    u32 passes_done = 0;
     while (true) {
         {
             std::unique_lock lock{mutex};
@@ -120,7 +123,26 @@ void DeviceMemory::TrimZeroPages(std::stop_token stop) {
         const auto ms = std::chrono::duration_cast<std::chrono::milliseconds>(
                             std::chrono::steady_clock::now() - start)
                             .count();
-        if (trimmed < Busy) {
+        ++passes_done;
+        const u64 now_zero_filled = Common::HostMemory::ZeroFilledBytes();
+        const u64 new_zero_filled = now_zero_filled >= last_zero_filled
+                                        ? (now_zero_filled - last_zero_filled)
+                                        : now_zero_filled;
+        last_zero_filled = now_zero_filled;
+
+        bool low_commit_emergency = false;
+        if (passes_done > 2 && new_zero_filled < Busy && trimmed >= Busy) {
+            const Common::ProcessMemoryUsage usage = Common::GetProcessMemoryUsage();
+            if (usage.system_commit_limit > 0) {
+                const u64 commit_free = usage.system_commit_limit > usage.system_commit
+                                            ? (usage.system_commit_limit - usage.system_commit)
+                                            : 0;
+                low_commit_emergency = commit_free < EmergencyCommitFree;
+            }
+        }
+
+        if (trimmed < Busy ||
+            (passes_done > 2 && new_zero_filled < Busy && !low_commit_emergency)) {
             interval = (std::min)(interval * 2, std::chrono::seconds{300});
             continue;
         }
@@ -128,7 +150,7 @@ void DeviceMemory::TrimZeroPages(std::stop_token stop) {
         LOG_INFO(HW_Memory,
                  "Trimmed {} MiB of all-zero guest pages out of {} MiB resident in {} ms; the kernel "
                  "zero-filled {} MiB so far",
-                 trimmed >> 20, resident >> 20, ms, Common::HostMemory::ZeroFilledBytes() >> 20);
+                 trimmed >> 20, resident >> 20, ms, now_zero_filled >> 20);
     }
 }
 #endif

@@ -59,6 +59,7 @@ public:
     /// from a low-priority thread: data the host GPU has its own copy of, e.g. uploaded textures.
     /// Only while the host is short of RAM (Common::IsHostLowOnMemory).
     void HintCold(DAddr address, size_t size);
+    void TrimZeroPages() const;
 
     DAddr Allocate(size_t size);
     void AllocateFixed(DAddr start, size_t size);
@@ -257,7 +258,8 @@ private:
     const uintptr_t physical_base;
     const DeviceMemory* device_memory_ptr;
     DeviceInterface* device_inter;
-    std::unique_ptr<Common::ThreadWorker> cold_hint_worker;
+    mutable std::unique_ptr<Common::ThreadWorker> cold_hint_worker;
+    mutable std::atomic<bool> trim_queued{false};
 
     struct TrackedEntry {
         VAddr cpu_backing_address;

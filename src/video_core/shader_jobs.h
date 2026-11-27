@@ -176,6 +176,9 @@ public:
     /// the worker running them.
     void RunOrWait(const ShaderJobHandle& handle);
 
+    /// Adjusts active worker concurrency limits dynamically without tearing down pool threads.
+    void SetActiveWorkerLimits(size_t cpu_threads, size_t driver_threads);
+
     /// Cancels the queued jobs and joins the workers once their running stages end. A CPU stage
     /// that ends during shutdown gets no driver stage.
     void Shutdown();
@@ -203,6 +206,10 @@ private:
     mutable std::mutex mutex;
     std::condition_variable cpu_condition;
     std::condition_variable driver_condition;
+    size_t active_cpu_limit{1};
+    size_t active_driver_limit{1};
+    size_t active_cpu_running{0};
+    size_t active_driver_running{0};
     /// Entries go stale on promotion, cancellation or a stage start and are skipped when reached.
     Queue cpu_queue;
     Queue driver_queue;

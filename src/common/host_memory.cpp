@@ -67,6 +67,7 @@
 #include "common/free_region_manager.h"
 #include "common/host_memory.h"
 #include "common/logging.h"
+#include "common/settings.h"
 
 #if defined(__ANDROID__) && __ANDROID_API__ < 30
 #include <sys/syscall.h>
@@ -166,11 +167,13 @@ public:
         // ERROR_NO_SYSTEM_RESOURCES without growing a system-managed page file. The emulator then
         // runs the whole session without fastmem (Ocarina of Time: 20-25% fewer fps). A private
         // commit of the same size does grow the page file, so make one, release it and try again.
+        lazy_commit = Settings::values.lazy_dram_commit.GetValue();
+        const ULONG alloc_attr = lazy_commit ? SEC_RESERVE : SEC_COMMIT;
         for (int attempt = 1; attempt <= BackingAttempts && !backing_handle; ++attempt) {
-            backing_handle = pfn_CreateFileMapping2(INVALID_HANDLE_VALUE, nullptr, FILE_MAP_WRITE | FILE_MAP_READ, PAGE_READWRITE, SEC_COMMIT, backing_size, nullptr, nullptr, 0);
+            backing_handle = pfn_CreateFileMapping2(INVALID_HANDLE_VALUE, nullptr, FILE_MAP_WRITE | FILE_MAP_READ, PAGE_READWRITE, alloc_attr, backing_size, nullptr, nullptr, 0);
             if (backing_handle) {
-                if (attempt > 1) {
-                    LOG_INFO(HW_Memory, "Allocated {} MiB of backing memory on attempt {}", backing_size >> 20, attempt);
+                if (attempt > 1 || lazy_commit) {
+                    LOG_INFO(HW_Memory, "Allocated {} MiB of backing memory on attempt {} (lazy={})", backing_size >> 20, attempt, lazy_commit);
                 }
                 break;
             }
@@ -233,17 +236,31 @@ public:
         return ptr;
     }
 
+    [[nodiscard]] bool IsLazyCommit() const noexcept {
+        return lazy_commit;
+    }
+
     void Map(size_t virtual_offset, size_t host_offset, size_t length, MemoryPermission perms) {
         std::unique_lock lock{placeholder_mutex};
-        if (!IsNiechePlaceholder(virtual_offset, length)) {
+        const bool was_nieche = IsNiechePlaceholder(virtual_offset, length);
+        if (!was_nieche) {
             Split(virtual_offset, length);
         }
         ASSERT(placeholders.find({virtual_offset, virtual_offset + length}) == placeholders.end());
-        TrackPlaceholder(virtual_offset, host_offset, length);
 
         if (!MapView(virtual_offset, host_offset, length)) {
             LOG_CRITICAL(HW_Memory, "Failed to map placeholder, error {}", GetLastError());
+            if (!was_nieche) {
+                const auto it = placeholders.lower_bound({virtual_offset, virtual_offset + length});
+                const size_t left_bound = it == placeholders.begin() ? 0 : std::prev(it)->upper();
+                const size_t right_bound = it == placeholders.end() ? virtual_size : it->lower();
+                if (left_bound != virtual_offset || right_bound != virtual_offset + length) {
+                    Coalesce(left_bound, right_bound - left_bound);
+                }
+            }
+            return;
         }
+        TrackPlaceholder(virtual_offset, host_offset, length);
     }
 
     void Unmap(size_t virtual_offset, size_t length) {
@@ -485,9 +502,21 @@ private:
     }
 
     bool MapView(size_t virtual_offset, size_t host_offset, size_t length) {
-        return pfn_MapViewOfFile3(backing_handle, process, virtual_base + virtual_offset, host_offset,
-                                  length, MEM_REPLACE_PLACEHOLDER, PAGE_READWRITE, nullptr,
-                                  0) != nullptr;
+        void* const view = pfn_MapViewOfFile3(backing_handle, process, virtual_base + virtual_offset,
+                                              host_offset, length, MEM_REPLACE_PLACEHOLDER,
+                                              PAGE_READWRITE, nullptr, 0);
+        if (!view) {
+            return false;
+        }
+        if (lazy_commit && !VirtualAlloc(view, length, MEM_COMMIT, PAGE_READWRITE)) {
+            const DWORD err = GetLastError();
+            if (!pfn_UnmapViewOfFile2(process, view, MEM_PRESERVE_PLACEHOLDER)) {
+                LOG_CRITICAL(HW_Memory, "Failed to unmap placeholder after commit failure");
+            }
+            SetLastError(err);
+            return false;
+        }
+        return true;
     }
 
     void Split(size_t virtual_offset, size_t length) {
@@ -536,6 +565,7 @@ private:
 
     std::mutex placeholder_mutex;                                 ///< Mutex for placeholders
     std::shared_mutex protect_mutex;
+    bool lazy_commit{false};
     std::vector<ProtectionRun> kept_protections;
     boost::icl::separate_interval_set<size_t> placeholders;       ///< Mapped placeholders
     ::Common::unordered_map<size_t, size_t> placeholder_host_pointers; ///< Placeholder backing offset
@@ -1337,15 +1367,25 @@ std::pair<size_t, size_t> HostMemory::TrimZeroPages() const {
 #endif
 }
 
-void HostMemory::ClearBackingRegion(size_t physical_offset, size_t length, u32 fill_value) {
+bool HostMemory::ClearBackingRegion(size_t physical_offset, size_t length, u32 fill_value) {
     if (length == 0) {
-        return;
+        return true;
     }
+#ifdef _WIN32
+    if (impl && impl->IsLazyCommit() && backing_base) {
+        if (!VirtualAlloc(backing_base + physical_offset, length, MEM_COMMIT, PAGE_READWRITE)) {
+            LOG_CRITICAL(HW_Memory,
+                         "Failed to commit backing region at {:#x} (size {:#x}), error {}",
+                         physical_offset, length, GetLastError());
+            return false;
+        }
+    }
+#endif
     MarkUsed(physical_offset, length);
     if (fill_value != 0) {
         std::memset(backing_base + physical_offset, fill_value, length);
         MarkDirty(physical_offset, length);
-        return;
+        return true;
     }
     // Fresh backing memory is zero and the host gives it no RAM until it's touched: clear only
     // the granules that may hold data (title 1's heap made the host commit every page of it).
@@ -1379,6 +1419,7 @@ void HostMemory::ClearBackingRegion(size_t physical_offset, size_t length, u32 f
         }
         offset = clear_end;
     }
+    return true;
 }
 
 void HostMemory::MarkUsed(size_t physical_offset, size_t length) {

@@ -23,7 +23,7 @@ struct LogicalProcessor {
 };
 
 /// Physical cores of the fastest class needed before the GPU threads are pinned.
-constexpr std::size_t MinCoresForGpuThreadPinning = 6;
+constexpr std::size_t MinCoresForGpuThreadPinning = 8;
 
 /// Logical processor ids for each pinned role. All three are empty when the host has fewer than
 /// MinCoresForGpuThreadPinning performance cores.

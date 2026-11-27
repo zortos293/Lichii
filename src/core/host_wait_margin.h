@@ -59,6 +59,11 @@ public:
         return estimate_ns;
     }
 
+    /// Remaining hardware-wait budget in nanoseconds.
+    s64 Budget() const noexcept {
+        return budget_ns;
+    }
+
 private:
     std::array<s64, Samples> samples{};
     size_t next{};

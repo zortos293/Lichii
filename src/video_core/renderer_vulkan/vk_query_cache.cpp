@@ -3,8 +3,10 @@
 
 // SPDX-License-Identifier: GPL-3.0-or-later
 
+#include <array>
 #include <chrono>
 #include <cstddef>
+#include <cstring>
 #include <limits>
 #include <map>
 #include <memory>
@@ -238,18 +240,7 @@ public:
     }
 
     void ResetCounter() override {
-        if (has_started) {
-            PauseCounter();
-        }
-        AbandonCurrentQuery();
-        std::function<void()> func([this] {
-            amend_value = 0;
-            accumulation_value = 0;
-        });
-        rasterizer->SyncOperation(std::move(func));
-        accumulation_since_last_sync = false;
-        first_accumulation_checkpoint = (std::min)(first_accumulation_checkpoint, num_slots_used);
-        last_accumulation_checkpoint = (std::max)(last_accumulation_checkpoint, num_slots_used);
+        ResetCounterInternal();
     }
 
     // Called at each submission. The running query carries the count across it: a guest's
@@ -272,7 +263,7 @@ public:
                             "count (drop {})",
                             current_query->size_slots, bank_bound_resets);
             }
-            ResetCounter();
+            ResetCounterInternal();
         }
     }
 
@@ -644,6 +635,21 @@ private:
         Free(current_query_id);
         current_query = nullptr;
         current_query_id = 0;
+    }
+
+    void ResetCounterInternal() {
+        if (has_started) {
+            PauseCounter();
+        }
+        AbandonCurrentQuery();
+        std::function<void()> func([this] {
+            amend_value = 0;
+            accumulation_value = 0;
+        });
+        rasterizer->SyncOperation(std::move(func));
+        accumulation_since_last_sync = false;
+        first_accumulation_checkpoint = (std::min)(first_accumulation_checkpoint, num_slots_used);
+        last_accumulation_checkpoint = (std::max)(last_accumulation_checkpoint, num_slots_used);
     }
 
     void ReplicateCurrentQueryIfNeeded() {

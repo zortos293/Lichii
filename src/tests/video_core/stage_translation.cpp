@@ -470,8 +470,8 @@ TEST_CASE("Texture descriptor pools up to 4 MiB are flushed for translation on w
     CHECK(TexturePoolBytes(33067) == 1'058'176);
     CHECK(CanFlushTexturePool(33067));
 
-    // The cap is 4 MiB, it is inclusive, and the largest limit does not overflow
-    CHECK(MaxFlushedTexturePoolBytes == (u64{4} << 20));
+    // The cap is 8 MiB, it is inclusive, and the largest limit does not overflow
+    CHECK(MaxFlushedTexturePoolBytes == (u64{8} << 20));
     constexpr u32 last_index = static_cast<u32>(MaxFlushedTexturePoolBytes / 32 - 1);
     CHECK(TexturePoolBytes(last_index) == MaxFlushedTexturePoolBytes);
     CHECK(CanFlushTexturePool(last_index));

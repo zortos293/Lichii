@@ -91,23 +91,18 @@ TEST_CASE("Core pinning: 8 cores, 16 threads", "[common][core_pinning]") {
     CheckCoresAreDedicated(processors, plan);
 }
 
-TEST_CASE("Core pinning: 6 cores, 12 threads", "[common][core_pinning]") {
+TEST_CASE("Core pinning: 6 cores, 12 threads is skipped", "[common][core_pinning]") {
     const auto processors = Uniform(6, 2);
     const auto plan = Common::PlanGpuThreadPinning(processors);
     CHECK(plan.performance_cores == 6);
-    CHECK(plan.front == Ids(2, 2));
-    CHECK(plan.back == Ids(4, 2));
-    CHECK(plan.guest == Concat(Ids(0, 2), Ids(6, 6)));
-    CheckCoresAreDedicated(processors, plan);
+    CheckSkipped(plan);
 }
 
-TEST_CASE("Core pinning: 6 cores without SMT", "[common][core_pinning]") {
+TEST_CASE("Core pinning: 6 cores without SMT is skipped", "[common][core_pinning]") {
     const auto processors = Uniform(6, 1);
     const auto plan = Common::PlanGpuThreadPinning(processors);
-    CHECK(plan.front == Ids(1, 1));
-    CHECK(plan.back == Ids(2, 1));
-    CHECK(plan.guest == Concat(Ids(0, 1), Ids(3, 3)));
-    CheckCoresAreDedicated(processors, plan);
+    CHECK(plan.performance_cores == 6);
+    CheckSkipped(plan);
 }
 
 TEST_CASE("Core pinning: hybrid 8 P-cores with SMT and 16 E-cores", "[common][core_pinning]") {
@@ -126,12 +121,12 @@ TEST_CASE("Core pinning: E-cores enumerated first leave the P-cores to the pinne
           "[common][core_pinning]") {
     std::vector<LogicalProcessor> processors;
     AddCores(processors, 4, 1, 0);
-    AddCores(processors, 6, 2, 1);
+    AddCores(processors, 8, 2, 1);
     const auto plan = Common::PlanGpuThreadPinning(processors);
-    CHECK(plan.performance_cores == 6);
+    CHECK(plan.performance_cores == 8);
     CHECK(plan.front == Ids(6, 2));
     CHECK(plan.back == Ids(8, 2));
-    CHECK(plan.guest == Concat(Ids(4, 2), Ids(10, 6)));
+    CHECK(plan.guest == Concat(Ids(4, 2), Ids(10, 10)));
     CheckCoresAreDedicated(processors, plan);
 }
 

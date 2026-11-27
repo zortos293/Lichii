@@ -2070,6 +2070,7 @@ public:
         }
         // The interval belonged to this session's presents (PresentInterval).
         Tegra::g_nx2_guest_frame_interval_ns.store(0, std::memory_order_relaxed);
+        Tegra::FlushPeriodicTelemetry(std::chrono::steady_clock::now(), true);
     }
 
 private:
@@ -2237,6 +2238,7 @@ private:
             if (const u32 fence_id = ~w[22]; fence_id < 192 &&
                 !system.Host1x().GetSyncpointManager().IsReadyGuest(fence_id, w[24])) {
                 ++m_stats.ran_ahead;
+                Tegra::g_telemetry_frames_ahead.fetch_add(1, std::memory_order_relaxed);
             }
             if (m_stats.last_present != std::chrono::steady_clock::time_point{}) {
                 const long long frame = to_us(entered - m_stats.last_present);
@@ -2262,6 +2264,7 @@ private:
                                               : 0);
                 m_stats = {.last_present = entered};
             }
+            Tegra::FlushPeriodicTelemetry(std::chrono::steady_clock::now());
         }
         constexpr u64 AvailableSlots = 0x7fff;
         TipcReplyWords(ctx, {static_cast<u32>(AvailableSlots),
@@ -2674,10 +2677,13 @@ private:
             Tegra::g_nx2_guest_frame_interval_ns.store(0, std::memory_order_relaxed);
             return std::nullopt;
         }
-        if (timing != std::exchange(m_swap_word, timing)) {
-            LOG_INFO(Service,
-                     "nx2:vi2 present #{} swap interval {} at {} Hz, FPS limit {} (word 12 = {:#x})",
-                     m_presents, swap_interval, refresh_rate, fps_limit, timing);
+        if (const u32 prev_word = std::exchange(m_swap_word, timing); timing != prev_word) {
+            Tegra::g_telemetry_pace_switches.fetch_add(1, std::memory_order_relaxed);
+            if (prev_word == 0 && timing != 0) {
+                LOG_INFO(Service,
+                         "nx2:vi2 present #{} initial swap interval {} at {} Hz, FPS limit {} (word 12 = {:#x})",
+                         m_presents, swap_interval, refresh_rate, fps_limit, timing);
+            }
         }
         const auto vblank_interval =
             timer_paced ? std::chrono::nanoseconds{0}
@@ -3534,7 +3540,7 @@ private:
     };
 
     static constexpr u32 NoSyncpoint = ~0U;
-    static constexpr size_t MaxDecodedAhead = 2; // decoded frames held while no image is free
+    static constexpr size_t MaxDecodedAhead = 5; // decoded frames buffered ahead to absorb software decode jitter
     static constexpr u32 HostSyncpoints = 192;   // Tegra::Host1x::SyncpointManager
     static constexpr u32 MaxDroppedInARow = 30; // see DropOvertakenFrames
     // A client holding more output images than this queues frames and shows each at its own

@@ -210,6 +210,7 @@ struct Values {
 
     // Core
     SwitchableSetting<bool> use_multi_core{linkage, true, "use_multi_core", Category::Core};
+    SwitchableSetting<bool> lazy_dram_commit{linkage, false, "lazy_dram_commit", Category::Core};
     SwitchableSetting<MemoryLayout, true> memory_layout_mode{linkage,
                                                              MemoryLayout::Memory_4Gb,
                                                              "memory_layout_mode",
@@ -838,6 +839,12 @@ struct Values {
 
     SwitchableSetting<bool> gpu_unswizzle_enabled{linkage, false, "gpu_unswizzle_enabled",
                                                   Category::RendererHacks};
+
+    SwitchableSetting<bool> purge_stale_on_scene_change{linkage, true, "purge_stale_on_scene_change",
+                                                        Category::RendererHacks};
+
+    SwitchableSetting<bool> coalesce_pcie_readbacks{linkage, true, "coalesce_pcie_readbacks",
+                                                    Category::RendererHacks};
 
     SwitchableSetting<bool> pin_gpu_threads{linkage, true, "pin_gpu_threads",
                                             Category::RendererHacks};

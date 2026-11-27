@@ -185,6 +185,12 @@ namespace Vulkan {
         VkResult AllocateBuffer(const VkBufferCreateInfo &ci, MemoryUsage usage,
                                 VkDeviceSize min_alignment, vk::Buffer &buffer) const;
 
+        /// Device-local images in their own VMA pool; false when it doesn't apply or failed.
+        bool CreateImageInSeparatePool(const VkImageCreateInfo& ci,
+                                       const VmaAllocationCreateInfo& alloc_ci, VkImage& handle,
+                                       VmaAllocation& allocation,
+                                       VmaAllocationInfo& alloc_info) const;
+
         /// Device-local buffers in their own VMA pool; false when it doesn't apply or failed.
         bool CreateBufferInSeparatePool(const VkBufferCreateInfo& ci,
                                         const VmaAllocationCreateInfo& alloc_ci, VkBuffer& handle,

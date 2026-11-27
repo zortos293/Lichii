@@ -19,6 +19,7 @@
 
 #include "common/bit_util.h"
 #include "common/common_types.h"
+#include "common/logging.h"
 #include "common/thread.h"
 
 namespace Tegra {
@@ -30,6 +31,40 @@ inline std::atomic<bool> g_nx2_ampere{false};
 // The nx2:vi2 pacing interval reported to FrameGenPacer, in ns. Zero means to plan against the
 // measured interval alone, including when only the 240 fps fallback cap is active.
 inline std::atomic<u64> g_nx2_guest_frame_interval_ns{0};
+
+inline std::atomic<u64> g_telemetry_pace_switches{0};
+inline std::atomic<u64> g_telemetry_on_cpu_reads{0};
+inline std::atomic<u64> g_telemetry_frames_ahead{0};
+
+inline void FlushPeriodicTelemetry(std::chrono::steady_clock::time_point now, bool force = false) {
+    static std::atomic<u64> last_flush_ns{0};
+    const u64 now_ns = static_cast<u64>(
+        std::chrono::duration_cast<std::chrono::nanoseconds>(now.time_since_epoch()).count());
+    u64 prev_ns = last_flush_ns.load(std::memory_order_relaxed);
+    if (prev_ns == 0 && !force) {
+        last_flush_ns.compare_exchange_strong(prev_ns, now_ns, std::memory_order_relaxed);
+        return;
+    }
+    constexpr u64 TenSecondsNs = 10'000'000'000ULL;
+    if (!force && (now_ns < prev_ns || now_ns - prev_ns < TenSecondsNs)) {
+        return;
+    }
+    if (!last_flush_ns.compare_exchange_strong(prev_ns, now_ns, std::memory_order_relaxed) &&
+        !force) {
+        return;
+    }
+    if (force) {
+        last_flush_ns.store(0, std::memory_order_relaxed);
+    }
+    const u64 pace_switches = g_telemetry_pace_switches.exchange(0, std::memory_order_relaxed);
+    const u64 cpu_reads = g_telemetry_on_cpu_reads.exchange(0, std::memory_order_relaxed);
+    const u64 frames_ahead = g_telemetry_frames_ahead.exchange(0, std::memory_order_relaxed);
+    if (force && pace_switches == 0 && cpu_reads == 0 && frames_ahead == 0) {
+        return;
+    }
+    LOG_INFO(HW_GPU, "10s Telemetry | PaceVblankSwitches: {} | OnCPURead: {} | RanFrameAhead: {}",
+             pace_switches, cpu_reads, frames_ahead);
+}
 
 // GPU VA that nx2:gpu GetVaRange and GetUserPartition report to NVN. The in-process
 // allocator hands out addresses in [Nx2GpuVaStart, Nx2GpuVaEnd). NvRm's AllocAsEx range

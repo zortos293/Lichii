@@ -68,6 +68,9 @@ std::unique_ptr<TranslationMap> InitializeTranslations(QObject* parent) {
     INSERT(Settings, use_multi_core, tr("Multicore CPU Emulation"),
            tr("This option increases CPU emulation thread use from 1 to the maximum of 4.\n"
               "This is mainly a debug option and shouldn't be disabled."));
+    INSERT(Settings, lazy_dram_commit, tr("Lazy Guest DRAM Commit (Windows)"),
+           tr("Reserves guest DRAM via SEC_RESERVE and commits pages on demand via VirtualAlloc, "
+              "reducing initial Windows process commit on 16 GB hosts."));
     INSERT(Settings, memory_layout_mode, tr("Memory Layout"),
            tr("Increases the amount of emulated RAM.\nDoesn't affect performance/stability but may "
               "allow HD texture "
@@ -380,6 +383,12 @@ std::unique_ptr<TranslationMap> InitializeTranslations(QObject* parent) {
     INSERT(Settings, gpu_unswizzle_enabled, tr("GPU Unswizzle"),
            tr("Accelerates BCn 3D texture decoding using GPU compute.\n"
               "Disable if experiencing crashes or graphical glitches."));
+    INSERT(Settings, purge_stale_on_scene_change, tr("Purge Stale Textures on Scene Change"),
+           tr("Flushes delayed texture destruction rings and superseded textures on bulk unmaps, "
+              "preventing VRAM accumulation across consecutive tracks."));
+    INSERT(Settings, coalesce_pcie_readbacks, tr("Coalesce Contiguous PCIe Buffer Readbacks"),
+           tr("Merges contiguous readback slices within the same buffer into unified BufferCopy "
+              "requests to reduce DMA overhead."));
     INSERT(Settings, gpu_unswizzle_texture_size, tr("GPU Unswizzle Max Texture Size"),
            tr("Sets the maximum size (MiB) for GPU-based texture unswizzling.\n"
               "While the GPU is faster for medium and large textures, the CPU may be more "
@@ -396,7 +405,7 @@ std::unique_ptr<TranslationMap> InitializeTranslations(QObject* parent) {
     INSERT(Settings, pin_gpu_threads, tr("Pin GPU threads to their own cores"),
            tr("Pins the emulator's GPU threads to dedicated physical CPU cores and keeps the "
               "emulated CPU cores off them.\n"
-              "Can hurt performance on CPUs with few cores. Skipped on CPUs with fewer than 6 "
+              "Can hurt performance on CPUs with few cores. Skipped on CPUs with fewer than 8 "
               "physical performance cores.\n"
               "Windows and Linux only. Takes effect when a game starts."));
 

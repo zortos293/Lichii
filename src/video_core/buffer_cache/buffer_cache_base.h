@@ -1279,8 +1279,8 @@ private:
     /// several dispatches write it in between.
     static constexpr u16 MaxUnreadWrites = 256;
     /// Learned pages; the one read longest ago makes room. Ocarina of Time reads back ~220 pages
-    /// over a few seconds.
-    static constexpr size_t MaxReadBackPages = 512;
+    /// over a few seconds; Mario Kart World's 12-kart compute culling spans over 1,000 pages.
+    static constexpr size_t MaxReadBackPages = 2048;
     /// Early download bytes a frame, and early downloads not yet in guest memory: past them, reads
     /// flush on demand. These limits only decide which downloads are recorded early, never what a
     /// read finds: a read that no early download covers flushes.

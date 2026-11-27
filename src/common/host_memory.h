@@ -61,7 +61,7 @@ public:
 
     /// Clears guest memory being handed out. Memory still zero since it was created (or since its
     /// last full clear) is skipped: clearing it only made the host give every page real memory.
-    void ClearBackingRegion(size_t physical_offset, size_t length, u32 fill_value);
+    bool ClearBackingRegion(size_t physical_offset, size_t length, u32 fill_value);
 
     /// Memory written once and read again rarely: its pages leave the working set (backing and,
     /// when given, its view at virtual_offset), so the OS compresses or pages them out first when

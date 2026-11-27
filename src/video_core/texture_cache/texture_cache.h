@@ -172,11 +172,57 @@ void TextureCache<P>::RunGarbageCollector(bool out_of_memory, bool at_critical) 
     u64 ticks_to_destroy = 0;
     size_t num_iterations = 0;
     const auto Configure = [&](bool allow_aggressive) {
-        high_priority_mode =
-            out_of_memory || at_critical || total_used_memory >= expected_memory;
-        aggressive_mode = allow_aggressive &&
-                          (out_of_memory || at_critical || total_used_memory >= critical_memory);
-        mode_age = aggressive_mode ? 10ULL : high_priority_mode ? 25ULL : 50ULL;
+        const u64 total_gpu_vram = [&]() -> u64 {
+            if constexpr (requires { runtime.IsIntegrated(); }) {
+                if (runtime.IsIntegrated()) {
+                    if constexpr (requires { runtime.GetDeviceMemoryBudget(); }) {
+                        return runtime.GetDeviceMemoryBudget();
+                    }
+                }
+            }
+            if constexpr (requires { runtime.GetDeviceLocalHeapSize(); }) {
+                const u64 heap_size = runtime.GetDeviceLocalHeapSize();
+                if (heap_size > 0) {
+                    return heap_size;
+                }
+            }
+            if constexpr (requires { runtime.GetDeviceLocalMemory(); }) {
+                const u64 local_mem = runtime.GetDeviceLocalMemory();
+                if (local_mem > 0) {
+                    return local_mem;
+                }
+            }
+            if constexpr (requires { runtime.GetDeviceMemoryBudget(); }) {
+                return runtime.GetDeviceMemoryBudget();
+            }
+            return 0ULL;
+        }();
+
+        const double usage_pct = total_gpu_vram > 0
+            ? (static_cast<double>(total_used_memory) / static_cast<double>(total_gpu_vram))
+            : 0.0;
+
+        // Emergency trigger: usage above 85% of total GPU VRAM, out of memory, at_critical, or exceeding critical threshold
+        const bool emergency_mode = out_of_memory || at_critical || usage_pct >= 0.85 ||
+                                    (critical_memory > 0 && total_used_memory >= critical_memory);
+        // High priority: usage above 75% of total GPU VRAM or exceeding expected threshold
+        high_priority_mode = emergency_mode || usage_pct >= 0.75 ||
+                             (expected_memory > 0 && total_used_memory >= expected_memory);
+        aggressive_mode = allow_aggressive && emergency_mode;
+
+        if (emergency_mode) {
+            // Emergency: rapid eviction of cold images to avoid driver OOM
+            mode_age = 15ULL;
+            num_iterations = 128;
+        } else if (high_priority_mode) {
+            // Moderate pressure: steady eviction of stale assets, avoiding thrashing in turns
+            mode_age = 60ULL;
+            num_iterations = 32;
+        } else {
+            // Normal operation (<75%): relaxed retention, zero thrashing in track curves
+            mode_age = 90ULL;
+            num_iterations = 16;
+        }
         // EDEN_NX2_TC_MIN_AGE=<frames>: keep images used more recently while there is room
         // (thrash tests).
         static const u64 min_age = [] {
@@ -185,7 +231,6 @@ void TextureCache<P>::RunGarbageCollector(bool out_of_memory, bool at_critical) 
         }();
         ticks_to_destroy =
             EvictionAge(mode_age, min_age, total_used_memory, retention_limit, out_of_memory);
-        num_iterations = aggressive_mode ? 40 : (high_priority_mode ? 20 : 10);
     };
     // GPU-written images that overlap others without fitting them (BadOverlap) were dropped
     // without a download, their pages marked stale. The Duskbloods renders its characters'
@@ -516,6 +561,67 @@ void TextureCache<P>::RunGarbageCollector(bool out_of_memory, bool at_critical) 
             }
         }
     }
+}
+
+template <class P>
+void TextureCache<P>::PurgeStaleImagesOnSceneChange() {
+    if (!Settings::values.purge_stale_on_scene_change.GetValue() || is_purging) {
+        return;
+    }
+    constexpr u64 ScenePurgeCooldownTicks = 300;
+    if (last_scene_purge_tick != 0 && frame_tick - last_scene_purge_tick < ScenePurgeCooldownTicks) {
+        return;
+    }
+    struct PurgeGuard {
+        bool& flag;
+        ~PurgeGuard() {
+            flag = false;
+        }
+    } purge_guard{is_purging};
+    is_purging = true;
+    last_scene_purge_tick = frame_tick;
+
+    const StutterTrace::SiteScope site{StutterTrace::Site::TextureCollect};
+
+    if constexpr (requires { runtime.Finish(); }) {
+        runtime.Finish();
+    }
+    if constexpr (requires { runtime.CurrentTick(); }) {
+        while (!gpu_sentenced_images.empty() &&
+               runtime.IsFree(gpu_sentenced_images.front().tick)) {
+            gpu_sentenced_bytes -= gpu_sentenced_images.front().bytes;
+            gpu_sentenced_images.pop_front();
+        }
+    }
+
+    for (size_t i = 0; i < TICKS_TO_DESTROY; ++i) {
+        sentenced_images.Tick();
+        sentenced_framebuffers.Tick();
+        sentenced_image_view.Tick();
+        sentenced_image_bytes[i] = 0;
+    }
+
+    boost::container::small_vector<ImageId, 64> stale_candidates;
+    for (const auto [image_id, image] : slot_images) {
+        if (True(image->flags & ImageFlagBits::BadOverlap) &&
+            False(image->flags & ImageFlagBits::IsDecoding) &&
+            False(image->flags & ImageFlagBits::GpuModified)) {
+            stale_candidates.push_back(image_id);
+        }
+    }
+    for (const ImageId image_id : stale_candidates) {
+        if (slot_images.contains(image_id)) {
+            auto& image = slot_images[image_id];
+            if (True(image.flags & ImageFlagBits::Tracked)) {
+                UntrackImage(image, image_id);
+            }
+            UnregisterImage(image_id);
+            trace_delete_reason = "purge-stale-scene";
+            DeleteImage(image_id, true);
+        }
+    }
+
+    device_memory.TrimZeroPages();
 }
 
 template <class P>
@@ -1284,15 +1390,23 @@ void TextureCache<P>::ApplyThresholdOverrides(bool log) {
     // What the device budget allows (budget minus margins), before that cap.
     const u64 budget_critical = critical_memory;
     const u64 budget_expected = expected_memory;
-    u64 max_critical = MaxCriticalMemory;
-    if constexpr (requires { runtime.GetDeviceMemoryBudget(); }) {
-        max_critical = (std::max)(max_critical, runtime.GetDeviceMemoryBudget() / 8 * 5);
-    }
+    const u64 max_critical = [&]() {
+        if constexpr (requires { runtime.GetDeviceLocalHeapSize(); }) {
+            const u64 heap_size = runtime.GetDeviceLocalHeapSize();
+            if (heap_size > 0) {
+                return heap_size * 85 / 100;
+            }
+        }
+        if constexpr (requires { runtime.GetDeviceMemoryBudget(); }) {
+            return (std::max)(MaxCriticalMemory, runtime.GetDeviceMemoryBudget() / 8 * 5);
+        }
+        return MaxCriticalMemory;
+    }();
     critical_memory = (std::min)(critical_memory, max_critical);
-    expected_memory =
-        (std::min)(expected_memory, critical_memory - (std::min)(critical_memory, u64{768_MiB}));
-    minimum_memory =
-        (std::min)(minimum_memory, expected_memory - (std::min)(expected_memory, u64{1_GiB}));
+    const u64 spacing = (std::min)(critical_memory / 10, u64{768_MiB});
+    expected_memory = (std::min)(expected_memory, critical_memory - spacing);
+    const u64 min_spacing = (std::min)(expected_memory / 4, u64{1_GiB});
+    minimum_memory = (std::min)(minimum_memory, expected_memory - min_spacing);
     // EDEN_NX2_TC_EXPECTED_MIB / EDEN_NX2_TC_CRITICAL_MIB raise the collector's thresholds past
     // MaxCriticalMemory, but never past what the device budget allows: set outright, they kept
     // the cache above a shrinking budget (other programs' video memory, out-of-memory margins) and
@@ -1522,8 +1636,22 @@ void TextureCache<P>::TickFrame() {
             if (native_thresholds_applied && budget_check_frames++ % 30 == 0) {
                 const u64 budget = runtime.GetDeviceMemoryBudget();
                 retention_limit = 0;
-                if (budget > 2_GiB) {
-                    const u64 margin = (std::min)(budget / 8, 1_GiB);
+                if (budget > 1_GiB) {
+                    const u64 total_gpu_vram = [&]() {
+                        if constexpr (requires { runtime.IsIntegrated(); }) {
+                            if (runtime.IsIntegrated()) {
+                                return budget;
+                            }
+                        }
+                        if constexpr (requires { runtime.GetDeviceLocalHeapSize(); }) {
+                            const u64 heap_size = runtime.GetDeviceLocalHeapSize();
+                            if (heap_size > 0) {
+                                return heap_size;
+                            }
+                        }
+                        return budget;
+                    }();
+                    const u64 margin = (std::min)(total_gpu_vram / 10, 1_GiB);
                     if constexpr (requires { runtime.GetDeviceMemorySlack(); }) {
                         // The usage counted here leaves out the unused part of the allocator's
                         // blocks, which the driver counts and a full heap cannot hand to a new
@@ -1536,8 +1664,11 @@ void TextureCache<P>::TickFrame() {
                                            ? slack
                                            : slack_margin - (std::min)(slack_margin - slack, 16_MiB);
                     }
-                    const u64 reserved = margin + fit_margin + slack_margin;
-                    critical_memory = budget - (std::min)(reserved, budget / 2);
+                    const u64 reserved = fit_margin + slack_margin;
+                    critical_memory = (total_gpu_vram * 85 / 100) - (std::min)(reserved, total_gpu_vram / 8);
+                    if (budget != 0) {
+                        critical_memory = (std::min)(critical_memory, budget);
+                    }
                     // The device's budget is not all the room there is: see HostCriticalMemory.
                     // The usage is the driver's, which still counts images waiting to be freed.
                     const std::optional<u64> commit_room = Common::GetProcessCommitRoom();
@@ -1550,7 +1681,10 @@ void TextureCache<P>::TickFrame() {
                     const u64 room_margin =
                         (std::min)(fit_margin + slack_margin, retention_budget / 2);
                     retention_limit = (std::min)(retention_budget - room_margin, host_critical);
-                    expected_memory = critical_memory - (std::min)(margin, critical_memory / 2);
+                    expected_memory = total_gpu_vram * 75 / 100;
+                    if (expected_memory >= critical_memory) {
+                        expected_memory = critical_memory - (std::min)(margin, critical_memory / 2);
+                    }
                     ApplyThresholdOverrides(false);
                     u64 other_memory = 0;
                     if constexpr (requires { runtime.GetDeviceHeapMemoryBudget(); }) {
@@ -1568,7 +1702,13 @@ void TextureCache<P>::TickFrame() {
                             std::getenv("EDEN_NX2_TC_EXPECTED_MIB") != nullptr ||
                             std::getenv("EDEN_NX2_TC_CRITICAL_MIB") != nullptr;
                         const u64 heap_budget = runtime.GetDeviceHeapMemoryBudget();
-                        if (heap_budget > budget) {
+                        const bool is_integrated = [&]() {
+                            if constexpr (requires { runtime.IsIntegrated(); }) {
+                                return runtime.IsIntegrated();
+                            }
+                            return false;
+                        }();
+                        if (is_integrated && heap_budget > budget) {
                             u64 image_bytes = 0;
                             for (const auto [image_id, image] : slot_images) {
                                 image_bytes += ImageAllocationBytes(*image);
@@ -1579,7 +1719,7 @@ void TextureCache<P>::TickFrame() {
                             other_memory =
                                 total_used_memory - (std::min)(total_used_memory, image_bytes);
                         }
-                        if (heap_budget > budget && !overridden) {
+                        if (is_integrated && heap_budget > budget && !overridden) {
                             const u64 heap_critical =
                                 heap_budget - (std::min)(reserved, heap_budget / 2);
                             const u64 gap = critical_memory - expected_memory;
@@ -1619,8 +1759,7 @@ void TextureCache<P>::TickFrame() {
                                  slack_margin >> 20, other_memory >> 20, budget >> 20,
                                  retention_limit >> 20, retention_budget >> 20);
                         if (commit_room) {
-                            LOG_INFO(HW_GPU,
-                                     "Host memory: {} MiB of commit left for this process, {}",
+                            LOG_INFO(HW_GPU, "Host memory: {} MiB of commit left, {}",
                                      *commit_room >> 20,
                                      critical_memory == host_critical
                                          ? "which bounds the thresholds"
@@ -2260,14 +2399,36 @@ bool TextureCache<P>::RescaleRenderTargets() {
                 if (image_id != CORRUPT_ID) {
                     Image& image = slot_images[image_id];
                     ScaleUp(image);
+                    return True(image.flags & ImageFlagBits::Rescaled);
+                }
+                return true;
+            };
+            const auto scale_down = [this](ImageId image_id) {
+                if (image_id != CORRUPT_ID) {
+                    Image& image = slot_images[image_id];
+                    ScaleDown(image);
                 }
             };
             if (rescaled) {
+                bool all_scaled = true;
                 for (size_t index = 0; index < NUM_RT; ++index) {
-                    scale_up(tmp_color_images[index]);
+                    if (!scale_up(tmp_color_images[index])) {
+                        all_scaled = false;
+                    }
                 }
-                scale_up(tmp_depth_image);
-                scale_rating = 2;
+                if (!scale_up(tmp_depth_image)) {
+                    all_scaled = false;
+                }
+                if (all_scaled) {
+                    scale_rating = 2;
+                } else {
+                    for (size_t index = 0; index < NUM_RT; ++index) {
+                        scale_down(tmp_color_images[index]);
+                    }
+                    scale_down(tmp_depth_image);
+                    rescaled = false;
+                    scale_rating = 1;
+                }
             }
         } else {
             rescaled = false;
@@ -2809,6 +2970,9 @@ void TextureCache<P>::UnmapGPUMemory(size_t as_id, GPUVAddr gpu_addr, size_t siz
         }
         image.flags |= ImageFlagBits::Remapped;
     }
+    if (size >= 32_MiB || deleted_images.size() >= 8) {
+        PurgeStaleImagesOnSceneChange();
+    }
 }
 
 // A 2D-engine copy between two 3D surfaces names one depth slice by its address inside the
@@ -3133,9 +3297,19 @@ bool TextureCache<P>::TemporalUpscale(const Tegra::Engines::Fermi2D::Surface& ds
         };
         if (rescaled(src_id) || rescaled(motion_id) || rescaled(dst_id) ||
             (depth_id && rescaled(depth_id))) {
+            bool all_rescaled = true;
             for (const ImageId id : {src_id, motion_id, dst_id, depth_id}) {
                 if (id && !rescaled(id) && ImageCanRescale(slot_images[id])) {
-                    ScaleUp(slot_images[id]);
+                    if (!ScaleUp(slot_images[id])) {
+                        all_rescaled = false;
+                    }
+                }
+            }
+            if (!all_rescaled) {
+                for (const ImageId id : {src_id, motion_id, dst_id, depth_id}) {
+                    if (id && rescaled(id)) {
+                        ScaleDown(slot_images[id]);
+                    }
                 }
             }
         }
@@ -3719,10 +3893,12 @@ void TextureCache<P>::RefreshContents(Image& image, ImageId image_id) {
 
     // OpenGL has no deferred upload staging and uploads the whole volume at once.
     if constexpr (requires { runtime.CurrentTick(); }) {
+        constexpr size_t GpuUnswizzleMinBytes = 4096;
         if (Settings::values.gpu_unswizzle_enabled.GetValue() &&
             IsPixelFormatBCn(image.info.format) && image.info.type == ImageType::e3D &&
             image.info.resources.levels == 1 && image.info.resources.layers == 1 &&
-            MapSizeBytes(image) >= gpu_unswizzle_maxsize &&
+            MapSizeBytes(image) >= GpuUnswizzleMinBytes &&
+            MapSizeBytes(image) <= gpu_unswizzle_maxsize &&
             False(image.flags & ImageFlagBits::GpuModified)) {
             QueueAsyncUnswizzle(image, image_id);
             return;
@@ -4577,7 +4753,7 @@ void TextureCache<P>::TickAsyncUnswizzle() {
     Image& image = slot_images[task.image_id];
 
     if (!task.initialized) {
-        task.total_size = MapSizeBytes(image);
+        task.total_size = image.guest_size_bytes;
         task.staging_buffer = runtime.UploadStagingBuffer(task.total_size, true);
 
         const auto& info = image.info;
@@ -4820,7 +4996,15 @@ ImageId TextureCache<P>::JoinImages(const ImageInfo& info, GPUVAddr gpu_addr, DA
     if (can_rescale) {
         for (const auto& copy : join_copies_to_do) {
             Image& sibling = slot_images[copy.id];
-            ScaleUp(sibling);
+            if (!ScaleUp(sibling)) {
+                can_rescale = false;
+                break;
+            }
+        }
+        if (!can_rescale) {
+            for (const auto& copy : join_copies_to_do) {
+                ScaleDown(slot_images[copy.id]);
+            }
         }
     } else {
         for (const auto& copy : join_copies_to_do) {
@@ -5033,8 +5217,14 @@ ImageId TextureCache<P>::JoinImages(const ImageInfo& info, GPUVAddr gpu_addr, DA
     }
 
     if (can_rescale) {
-        ScaleUp(new_image);
-    } else {
+        if (!ScaleUp(new_image)) {
+            can_rescale = false;
+            for (const auto& copy : join_copies_to_do) {
+                ScaleDown(slot_images[copy.id]);
+            }
+        }
+    }
+    if (!can_rescale) {
         ScaleDown(new_image);
     }
 
@@ -6063,11 +6253,34 @@ void TextureCache<P>::SynchronizeAliases(ImageId image_id) {
         return;
     }
     const bool can_rescale = ImageCanRescale(image);
-    if (any_rescaled) {
-        if (can_rescale) {
-            ScaleUp(image);
+    const auto& resolution = Settings::values.resolution_info;
+    bool will_rescale = resolution.active && any_rescaled && can_rescale;
+    if (will_rescale) {
+        for (const AliasedImage* const aliased : aliased_images) {
+            Image& aliased_image = slot_images[aliased->id];
+            if (!ImageCanRescale(aliased_image)) {
+                will_rescale = false;
+                break;
+            }
+        }
+    }
+    if (will_rescale) {
+        if (!ScaleUp(image)) {
+            will_rescale = false;
         } else {
-            ScaleDown(image);
+            for (const AliasedImage* const aliased : aliased_images) {
+                Image& aliased_image = slot_images[aliased->id];
+                if (!ScaleUp(aliased_image)) {
+                    will_rescale = false;
+                    break;
+                }
+            }
+        }
+    }
+    if (!will_rescale) {
+        ScaleDown(image);
+        for (const AliasedImage* const aliased : aliased_images) {
+            ScaleDown(slot_images[aliased->id]);
         }
     }
     SetModificationTick(slot_images, image, most_recent_tick);
@@ -6081,19 +6294,7 @@ void TextureCache<P>::SynchronizeAliases(ImageId image_id) {
         const ImageBase& rhs_image = slot_images[rhs->id];
         return lhs_image.modification_tick < rhs_image.modification_tick;
     });
-    const auto& resolution = Settings::values.resolution_info;
     for (const AliasedImage* const aliased : aliased_images) {
-        if (!resolution.active || !any_rescaled) {
-            CopyImage(image_id, aliased->id, aliased->copies);
-            continue;
-        }
-        Image& aliased_image = slot_images[aliased->id];
-        if (!can_rescale) {
-            ScaleDown(aliased_image);
-            CopyImage(image_id, aliased->id, aliased->copies);
-            continue;
-        }
-        ScaleUp(aliased_image);
         CopyImage(image_id, aliased->id, aliased->copies);
     }
 }

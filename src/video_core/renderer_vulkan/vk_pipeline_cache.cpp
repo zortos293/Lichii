@@ -517,19 +517,78 @@ struct DeferredStages {
     std::array<std::vector<u32>, Maxwell::MaxShaderStage> reference_spirv;
 };
 
-size_t GetTotalPipelineWorkers() {
-    const size_t max_core_threads =
-        std::max<size_t>(static_cast<size_t>(std::thread::hardware_concurrency()), 2ULL) - 1ULL;
+struct PipelineWorkerCounts {
+    size_t cpu_workers;
+    size_t driver_workers;
+};
+
+PipelineWorkerCounts GetSmartPipelineWorkers(const Device* device = nullptr,
+                                             bool boot_turbo = false) {
+    const size_t total_threads =
+        std::max<size_t>(static_cast<size_t>(std::thread::hardware_concurrency()), 2ULL);
+
 #ifdef __ANDROID__
     const int configured = AndroidSettings::values.pipeline_worker_count.GetValue();
     const int clamped = std::clamp(configured, 2, 8);
     const size_t desired = static_cast<size_t>(clamped);
-    if (desired == 0) {
-        return 1ULL;
-    }
-    return std::min(max_core_threads, desired);
+    const size_t max_core_threads = total_threads - 1ULL;
+    const size_t cpu_w = desired == 0 ? 1ULL : std::min(max_core_threads, desired);
+    const size_t driver_w = std::min<size_t>(cpu_w, 2ULL);
+    return {cpu_w, driver_w};
 #else
-    return max_core_threads;
+    size_t cpu_w = 2;
+    size_t driver_w = 1;
+
+    if (boot_turbo) {
+        if (total_threads <= 4) {
+            cpu_w = 3;
+            driver_w = 1;
+        } else if (total_threads <= 6) {
+            // 6c/6t (e.g. i5-9400F) during initial boot load: guest CPU and audio are idle.
+            cpu_w = 5;
+            driver_w = 1;
+        } else if (total_threads <= 8) {
+            cpu_w = 6;
+            driver_w = 2;
+        } else if (total_threads <= 12) {
+            cpu_w = 10;
+            driver_w = 2;
+        } else {
+            cpu_w = std::min<size_t>(total_threads - 2ULL, 14ULL);
+            driver_w = total_threads >= 16 ? 3ULL : 2ULL;
+        }
+    } else if (total_threads <= 6) {
+        // 6c/6t (e.g. i5-9400F, i5-8400, Ryzen 3500) or 4c/4t:
+        // Reserve at least 3-4 cores for guest CPU, GPU thread, and audio to avoid stuttering.
+        cpu_w = 2;
+        driver_w = 1;
+    } else if (total_threads <= 8) {
+        // 8c/8t or 4c/8t:
+        cpu_w = 3;
+        driver_w = 1;
+    } else if (total_threads <= 12) {
+        // 6c/12t (e.g. Ryzen 5600, i5-10400, i5-12400):
+        cpu_w = 3;
+        driver_w = 2;
+    } else {
+        // 8c/16t or higher (Ryzen 7/9, i7/i9):
+        cpu_w = std::min<size_t>(total_threads / 2, 6ULL);
+        driver_w = std::min<size_t>(total_threads / 4, 3ULL);
+    }
+
+    if (device) {
+        // NVIDIA proprietary driver serializes driver compilation internally in vkCreateGraphicsPipelines.
+        // On <=8 thread CPUs, keep 1 driver worker to avoid lock contention.
+        if (device->GetDriverID() == VK_DRIVER_ID_NVIDIA_PROPRIETARY && total_threads <= 8) {
+            driver_w = 1;
+        }
+        if (device->HasBrokenParallelShaderCompiling()) {
+            driver_w = 1;
+        } else if (device->IsAmdLegacyGcn()) {
+            driver_w = std::min<size_t>(driver_w, 2ULL);
+        }
+    }
+    return {cpu_w, driver_w};
 #endif
 }
 
@@ -871,17 +930,14 @@ PipelineCache::PipelineCache(Tegra::MaxwellDeviceMemoryManager& device_memory_,
     dynamic_features.has_provoking_vertex_tf_preserve =
         device.SupportsTransformFeedbackProvokingVertexPreservation();
 
-    const size_t cpu_threads = GetTotalPipelineWorkers();
-    const size_t driver_threads =
-        device.HasBrokenParallelShaderCompiling()
-            ? 1
-            : std::min(cpu_threads, std::max<size_t>(std::thread::hardware_concurrency() / 2, 2));
+    const auto boot_workers = GetSmartPipelineWorkers(&device, true);
+    const auto gameplay_workers = GetSmartPipelineWorkers(&device, false);
     shader_jobs.emplace(VideoCommon::ShaderJobConfig{
-        .cpu_threads = cpu_threads,
-        .driver_threads = device.IsAmdLegacyGcn() ? std::min<size_t>(driver_threads, 2)
-                                                  : driver_threads,
+        .cpu_threads = std::max(boot_workers.cpu_workers, gameplay_workers.cpu_workers),
+        .driver_threads = std::max(boot_workers.driver_workers, gameplay_workers.driver_workers),
         .name = "VkShader",
     });
+    shader_jobs->SetActiveWorkerLimits(gameplay_workers.cpu_workers, gameplay_workers.driver_workers);
 }
 
 namespace {
@@ -1299,6 +1355,13 @@ void PipelineCache::LoadDiskResources(u64 title_id, std::stop_token stop_loading
         LOG_ERROR(Common_Filesystem, "Failed to create pipeline cache directories");
         return;
     }
+    const auto boot_workers = GetSmartPipelineWorkers(&device, true);
+    const auto gameplay_workers = GetSmartPipelineWorkers(&device, false);
+    shader_jobs->SetActiveWorkerLimits(boot_workers.cpu_workers, boot_workers.driver_workers);
+    SCOPE_EXIT {
+        shader_jobs->SetActiveWorkerLimits(gameplay_workers.cpu_workers,
+                                           gameplay_workers.driver_workers);
+    };
     namespace CacheV2 = VideoCommon::ShaderCacheV2;
     pipeline_cache_filename = base_dir / CacheV2::FileName;
     // Left by a boot load that never finished (a driver crash, abort or hang): this boot builds
@@ -2213,7 +2276,8 @@ void PipelineCache::PrecacheShaders(u64 title_id, std::stop_token stop_loading,
     }
 
     const auto begin = std::chrono::steady_clock::now();
-    const size_t num_threads = GetTotalPipelineWorkers();
+    const auto workers = GetSmartPipelineWorkers(&device, true);
+    const size_t num_threads = workers.cpu_workers + workers.driver_workers;
     std::vector<u8> built(jobs.size());
     std::atomic<size_t> done{};
     bool skipped = false;

@@ -8,6 +8,7 @@
 #include <limits>
 #include <memory>
 #include <mutex>
+#include <new>
 #include <source_location>
 #include <string_view>
 #include <thread>
@@ -315,6 +316,28 @@ void DeviceMemoryManager<Traits>::HintCold(DAddr address, size_t size) {
                                          : std::nullopt);
         }
     });
+}
+
+template <typename Traits>
+void DeviceMemoryManager<Traits>::TrimZeroPages() const {
+#ifdef _WIN32
+    if (device_memory_ptr) {
+        if (trim_queued.exchange(true)) {
+            return;
+        }
+        if (!cold_hint_worker) {
+            cold_hint_worker = std::make_unique<Common::ThreadWorker>(1, "DeviceMemory:ColdHint");
+        }
+        cold_hint_worker->QueueWork([this] {
+            Common::ScopeExit reset{[this] { trim_queued.store(false); }};
+            try {
+                device_memory_ptr->buffer.TrimZeroPages();
+            } catch (const std::bad_alloc&) {
+                LOG_WARNING(HW_Memory, "Skipping zero-page trim due to low host memory");
+            }
+        });
+    }
+#endif
 }
 
 template <typename Traits>

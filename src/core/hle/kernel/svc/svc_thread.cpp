@@ -182,14 +182,21 @@ void SleepThread(Core::System& system, s64 ns) {
             timeout = (std::numeric_limits<s64>::max)();
         }
 
+        if (ns < 10'000) {
+            std::this_thread::yield();
+        }
+
         // Sleep.
         // NOTE: Nintendo does not check the result of this sleep.
         static_cast<void>(GetCurrentThread(kernel).Sleep(kernel, timeout));
     } else if (yield_type == Svc::YieldType::WithoutCoreMigration) {
+        std::this_thread::yield();
         KScheduler::YieldWithoutCoreMigration(kernel);
     } else if (yield_type == Svc::YieldType::WithCoreMigration) {
+        std::this_thread::yield();
         KScheduler::YieldWithCoreMigration(kernel);
     } else if (yield_type == Svc::YieldType::ToAnyThread) {
+        std::this_thread::yield();
         KScheduler::YieldToAnyThread(kernel);
     } else {
         // Nintendo does nothing at all if an otherwise invalid value is passed.

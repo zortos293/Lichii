@@ -20,6 +20,7 @@
 #include <fmt/ranges.h>
 
 #include "common/range_sets.inc"
+#include "common/settings.h"
 #include "video_core/buffer_cache/buffer_cache_base.h"
 #include "video_core/buffer_cache/compute_write_grid.h"
 #include "video_core/buffer_cache/multi_range_refresh.h"
@@ -4346,12 +4347,24 @@ void BufferCache<P>::DownloadBuffersMemory(std::span<const BufferId> buffer_ids)
             buffer_addr, buffer.SizeBytes(), [&](u64 device_addr_out, u64 range_size) {
                 gpu_modified_ranges.ForEachInRange(device_addr_out, range_size,
                                                    [&](DAddr start, DAddr end) {
+                    const u64 new_offset = start - buffer_addr;
+                    const u64 new_size = end - start;
+                    if (Settings::values.coalesce_pcie_readbacks.GetValue() && !downloads.empty()) {
+                        auto& last = downloads.back();
+                        if (last.buffer_id == buffer_id &&
+                            last.copy.src_offset + last.copy.size == new_offset) {
+                            last.copy.size += new_size;
+                            total_size_bytes =
+                                last.copy.dst_offset + Common::AlignUp(last.copy.size, 64);
+                            return;
+                        }
+                    }
                     downloads.push_back({buffer_id, BufferCopy{
-                                                        .src_offset = start - buffer_addr,
+                                                        .src_offset = new_offset,
                                                         .dst_offset = total_size_bytes,
-                                                        .size = end - start,
+                                                        .size = new_size,
                                                     }});
-                    total_size_bytes += Common::AlignUp(end - start, 64);
+                    total_size_bytes += Common::AlignUp(new_size, 64);
                 });
                 ClearReplacedDownload(device_addr_out, range_size);
                 gpu_modified_ranges.Subtract(device_addr_out, range_size);
@@ -4399,14 +4412,22 @@ void BufferCache<P>::DownloadBufferMemory(Buffer& buffer, DAddr device_addr, u64
             const auto add_download = [&](DAddr start, DAddr end) {
                 const u64 new_offset = start - buffer_addr;
                 const u64 new_size = end - start;
+                constexpr u64 align = 64ULL;
+                constexpr u64 mask = ~(align - 1ULL);
+                if (Settings::values.coalesce_pcie_readbacks.GetValue() && !copies.empty()) {
+                    auto& last = copies.back();
+                    if (last.src_offset + last.size == new_offset) {
+                        last.size += new_size;
+                        largest_copy = (std::max)(largest_copy, last.size);
+                        total_size_bytes = last.dst_offset + ((last.size + align - 1) & mask);
+                        return;
+                    }
+                }
                 copies.push_back(BufferCopy{
                     .src_offset = new_offset,
                     .dst_offset = total_size_bytes,
                     .size = new_size,
                 });
-                // Align up to avoid cache conflicts
-                constexpr u64 align = 64ULL;
-                constexpr u64 mask = ~(align - 1ULL);
                 total_size_bytes += (new_size + align - 1) & mask;
                 largest_copy = (std::max)(largest_copy, new_size);
             };

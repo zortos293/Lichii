@@ -206,7 +206,9 @@ void CoreTiming::WaitForEvent(s64 next_time, std::optional<s64> one_shot_time) {
         return;
     }
     const s64 margin = t_host_wait_margin.Get(start);
-    const bool precise = one_shot_time && *one_shot_time - margin <= start;
+    const s64 short_wait_ns = next_time - start;
+    const bool precise = (one_shot_time && *one_shot_time - margin <= start) ||
+                         (short_wait_ns <= 50'000 && t_host_wait_margin.Budget() >= short_wait_ns);
     const s64 wake = one_shot_time ? (std::min)(next_time, *one_shot_time - margin) : next_time;
     const bool signalled = precise ? event.SpinFor(std::chrono::nanoseconds{next_time - start})
                                    : event.SleepFor(std::chrono::nanoseconds{wake - start});

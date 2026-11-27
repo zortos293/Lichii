@@ -1398,6 +1398,8 @@ void MacroEngine::Execute(Core::System& system, Engines::Maxwell3D& maxwell3d, u
         }
         // A method write of the macro (also what a remembered call replays).
         bool read_memory = false;
+        u64 last_clean_dma_page = ~u64{0};
+        std::array<u32, 0x1000> dma_words;
         const auto emit = [&](u32 address, u32 value) {
                 if (address >= 0xe00) return false;
                 if (split_writes != nullptr && !(*split_writes)[address]) {
@@ -1423,6 +1425,11 @@ void MacroEngine::Execute(Core::System& system, Engines::Maxwell3D& maxwell3d, u
                 // the load FIFO, which the macro then reads after a load barrier).
                 constexpr u32 MemAddressA = 0x154, MemAddressB = 0x155, DataRamAddress = 0x156;
                 constexpr u32 DmaRead = 0x157, DmaReadFifoed = 0x158;
+                if (address != MemAddressA && address != MemAddressB &&
+                    address != DataRamAddress && address != DmaRead &&
+                    address != DmaReadFifoed && address != 0x556) {
+                    last_clean_dma_page = ~u64{0};
+                }
                 if (address == DmaRead || address == DmaReadFifoed) {
                     read_memory = true;
                     const GPUVAddr source = (GPUVAddr{maxwell3d.GetRegisterValue(MemAddressA) & 0x1ffffff} << 32) |
@@ -1456,17 +1463,36 @@ void MacroEngine::Execute(Core::System& system, Engines::Maxwell3D& maxwell3d, u
                     const bool back_call =
                         split_writes != nullptr && VideoCommon::Nx2Profile::Enabled();
                     const u64 write_out_start = back_call ? VideoCore::AsyncReadback::Now() : 0;
-                    if (owns_caches) {
-                        VideoCommon::QueryDma::FlushPending(memory, maxwell3d.Rasterizer(), source,
-                                                            read_bytes);
-                    }
-                    const bool dirty =
-                        memory.IsMemoryDirty(source, read_bytes, VideoCommon::CacheType::BufferCache);
-                    if (dirty) {
-                        memory.FlushRegion(source, read_bytes, VideoCommon::CacheType::BufferCache);
-                        static u64 flushes{};
-                        if (++flushes % 2000 == 1) {
-                            LOG_INFO(HW_GPU, "Native MME DMA read flushed GPU-written memory ({} times)", flushes);
+                    const u64 first_page = source & ~u64{0xfff};
+                    const u64 last_page =
+                        (source + (read_bytes != 0 ? read_bytes - 1 : 0)) & ~u64{0xfff};
+                    const bool single_page = read_bytes != 0 && first_page == last_page;
+                    const bool already_clean = single_page && first_page == last_clean_dma_page;
+                    bool dirty = false;
+                    if (!already_clean) {
+                        if (owns_caches) {
+                            VideoCommon::QueryDma::FlushPending(memory, maxwell3d.Rasterizer(),
+                                                                source, read_bytes);
+                        }
+                        dirty = memory.IsMemoryDirty(source, read_bytes,
+                                                     VideoCommon::CacheType::BufferCache);
+                        if (dirty) {
+                            memory.FlushRegion(source, read_bytes,
+                                               VideoCommon::CacheType::BufferCache);
+                            static u64 flushes{};
+                            if (++flushes % 2000 == 1) {
+                                LOG_INFO(HW_GPU,
+                                         "Native MME DMA read flushed GPU-written memory ({} times)",
+                                         flushes);
+                            }
+                        }
+                        if (single_page &&
+                            (!owns_caches || !VideoCommon::QueryDma::HasPendingQueries(
+                                                 memory, maxwell3d.Rasterizer(), first_page,
+                                                 0x1000)) &&
+                            !memory.IsMemoryDirty(first_page, 0x1000,
+                                                  VideoCommon::CacheType::BufferCache)) {
+                            last_clean_dma_page = first_page;
                         }
                     }
                     if (back_call) {
@@ -1478,11 +1504,10 @@ void MacroEngine::Execute(Core::System& system, Engines::Maxwell3D& maxwell3d, u
                         ++dma_logs;
                         std::array<u32, 8> words{};
                         for (u32 i = 0; i < std::min<u32>(value, 8); ++i) words[i] = memory.Read<u32>(source + u64{i} * 4);
-                        LOG_INFO(HW_GPU, "Native MME DMA read{} start={:#x} source={:#x} count={} words={:08x}",
-                                 address == DmaReadFifoed ? " fifoed" : "", method, source, value, fmt::join(words, ","));
+                        LOG_DEBUG(HW_GPU, "Native MME DMA read{} start={:#x} source={:#x} count={} words={:08x}",
+                                  address == DmaReadFifoed ? " fifoed" : "", method, source, value, fmt::join(words, ","));
                     }
                     const u32 word_count = std::min<u32>(value, 0x1000);
-                    std::array<u32, 0x1000> dma_words;
                     memory.ReadWordsUnsafe(source, dma_words.data(), word_count);
                     for (u32 i = 0; i < word_count; ++i) {
                         const u32 word = dma_words[i];

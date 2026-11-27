@@ -362,12 +362,11 @@ struct GPU::Impl {
             return raster_area;
         }
         raster_area.preemtive = true;
-        // A guest CPU read of GPU-written memory (reactive flushing): count them, they decide
-        // whether buffer data must be copied back at every fence (EDEN_NX2_BUFFER_DOWNLOADS).
-        if (static std::atomic<u64> reads{}; (reads.fetch_add(1, std::memory_order_relaxed) & 63) == 0) {
-            LOG_INFO(HW_GPU, "CPU read of GPU-written memory [{:#x}, {:#x}) ({} so far)",
-                     raster_area.start_address, raster_area.end_address,
-                     reads.load(std::memory_order_relaxed));
+        // A guest CPU read of GPU-written memory (reactive flushing): counted and reported by the
+        // 10s telemetry instead of logging on every read.
+        const u64 reads = Tegra::g_telemetry_on_cpu_reads.fetch_add(1, std::memory_order_relaxed) + 1;
+        if ((reads & 63) == 0) {
+            Tegra::FlushPeriodicTelemetry(std::chrono::steady_clock::now());
         }
         namespace AsyncReadback = VideoCore::AsyncReadback;
         const u64 request = AsyncReadback::Now();
