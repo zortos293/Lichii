@@ -27,6 +27,12 @@ void EmitDeviceMemoryBarrier(EmitContext& ctx) {
     MemoryBarrier(ctx, spv::Scope::Device);
 }
 
+void EmitWarpSharedMemoryBarrier(EmitContext& ctx) {
+    ctx.OpMemoryBarrier(ctx.Const(static_cast<u32>(spv::Scope::Subgroup)),
+                        ctx.BarrierSemantics(spv::MemorySemanticsMask::AcquireRelease |
+                                             spv::MemorySemanticsMask::WorkgroupMemory));
+}
+
 void EmitBarrierVoteInit(EmitContext& ctx, u32 offset) {
     const Id workgroup{ctx.Const(static_cast<u32>(spv::Scope::Workgroup))};
     ctx.OpAtomicExchange(ctx.U32[1], ctx.BarrierVoteWord(ctx.Const(offset)), workgroup,

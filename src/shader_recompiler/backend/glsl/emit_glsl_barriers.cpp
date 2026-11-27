@@ -20,6 +20,10 @@ void EmitDeviceMemoryBarrier(EmitContext& ctx) {
     ctx.Add("memoryBarrier();");
 }
 
+void EmitWarpSharedMemoryBarrier(EmitContext& ctx) {
+    ctx.Add("memoryBarrierShared();");
+}
+
 void EmitBarrierVoteInit(EmitContext& ctx, u32 offset) {
     ctx.Add("atomicExchange(smem[{}],0u);barrier();", offset / 4);
 }

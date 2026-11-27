@@ -33,6 +33,7 @@ void EmitDemoteToHelperInvocation(EmitContext& ctx);
 void EmitBarrier(EmitContext& ctx);
 void EmitWorkgroupMemoryBarrier(EmitContext& ctx);
 void EmitDeviceMemoryBarrier(EmitContext& ctx);
+void EmitWarpSharedMemoryBarrier(EmitContext& ctx);
 void EmitBarrierVoteInit(EmitContext& ctx, u32 offset);
 void EmitBarrierVote(EmitContext& ctx, std::string_view cond, u32 offset, u32 size);
 void EmitVotedBarrier(EmitContext& ctx, u32 offset, u32 size);

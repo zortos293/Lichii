@@ -293,9 +293,11 @@ ComputePipeline::ComputePipeline(const Device& device_, Scheduler& scheduler, vk
         // compile SIMD32, which can spill a register-heavy kernel for minutes (Mario Kart World).
         // A shader whose divergent barrier lost its execution barrier relies on a whole warp
         // running in step: at a smaller subgroup size it reads stale shared memory, which shows as
-        // banding over the image in Mario Kart World on Intel's Windows driver.
+        // banding over the image in Mario Kart World on Intel's Windows driver. So does one that
+        // reads shared words other threads of its warp stored with no barrier between.
         const bool uses_warp_ops = info.demoted_conditional_barrier ||
-                                   info.uses_subgroup_vote || info.uses_subgroup_invocation_id ||
+                                   info.orders_warp_shared_memory || info.uses_subgroup_vote ||
+                                   info.uses_subgroup_invocation_id ||
                                    info.uses_subgroup_shuffles || info.uses_subgroup_mask ||
                                    info.uses_quad_shuffles || info.uses_fswzadd ||
                                    info.uses_cooperative_matrix;

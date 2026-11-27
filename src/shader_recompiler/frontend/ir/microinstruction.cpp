@@ -77,6 +77,7 @@ bool Inst::MayHaveSideEffects() const noexcept {
     case Opcode::Barrier:
     case Opcode::WorkgroupMemoryBarrier:
     case Opcode::DeviceMemoryBarrier:
+    case Opcode::WarpSharedMemoryBarrier:
     case Opcode::BarrierVoteInit:
     case Opcode::BarrierVote:
     case Opcode::VotedBarrier:

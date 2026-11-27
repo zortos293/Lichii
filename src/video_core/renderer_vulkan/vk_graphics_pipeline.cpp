@@ -2083,7 +2083,8 @@ void GraphicsPipeline::MakePipeline(VkRenderPass render_pass) {
         // Their binaries are stored under the graphics key, one key per program
         const auto make_compute = [&](VkShaderModule module, VkPipelineLayout layout,
                                       const Shader::Info* info, u64 program) {
-            const bool uses_warp_ops{info && (info->uses_subgroup_vote ||
+            const bool uses_warp_ops{info && (info->orders_warp_shared_memory ||
+                                              info->uses_subgroup_vote ||
                                               info->uses_subgroup_invocation_id ||
                                               info->uses_subgroup_shuffles ||
                                               info->uses_subgroup_mask ||
@@ -2525,7 +2526,8 @@ void GraphicsPipeline::MakePipeline(VkRenderPass render_pass) {
                 : StageFlag(info, MaxwellToVK::ShaderStage(Shader::StageFromIndex(stage)))};
         // Votes, ballots and shuffles span the guest's 32-thread warp. A driver free to pick a
         // narrower subgroup (Intel runs mesh shaders SIMD16) splits the warp and breaks them.
-        const bool uses_warp_ops = info.demoted_conditional_barrier || info.uses_subgroup_vote ||
+        const bool uses_warp_ops = info.demoted_conditional_barrier ||
+                                   info.orders_warp_shared_memory || info.uses_subgroup_vote ||
                                    info.uses_subgroup_invocation_id ||
                                    info.uses_subgroup_shuffles || info.uses_subgroup_mask;
         const bool force_warp_size = !emulated_vertex && uses_warp_ops && device.IsExtSubgroupSizeControlSupported() &&
