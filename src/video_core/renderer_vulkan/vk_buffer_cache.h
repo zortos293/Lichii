@@ -200,7 +200,7 @@ public:
 
     [[nodiscard]] StagingBufferRef DownloadStagingBuffer(size_t size, bool deferred = false);
 
-    bool CanReorderUpload(const Buffer& buffer, std::span<const VideoCommon::BufferCopy> copies);
+    bool CanReorderUpload(Buffer& buffer, std::span<const VideoCommon::BufferCopy> copies);
 
     void FreeDeferredStagingBuffer(StagingBufferRef& ref);
 
