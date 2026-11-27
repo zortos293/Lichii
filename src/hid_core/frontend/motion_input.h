@@ -45,6 +45,9 @@ public:
     /// Applies a modifier on top of the normal gyro threshold
     void SetUserGyroThreshold(f32 threshold);
 
+    /// Scales gyro samples as they add to the rotations (the gyro sensitivity)
+    void SetRotationScale(f32 scale);
+
     void EnableReset(bool reset);
     void ResetRotations();
     void ResetQuaternion();
@@ -100,6 +103,9 @@ private:
 
     // Multiplies gyro_threshold by this value
     f32 user_gyro_threshold = 0.0f;
+
+    // Multiplies each gyro sample added to rotations
+    f32 rotation_scale = 1.0f;
 
     // Number of invalid sequential data
     u32 reset_counter = 0;

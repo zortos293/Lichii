@@ -91,6 +91,8 @@ ConfigureMotionTouch::ConfigureMotionTouch(QWidget* parent,
 ConfigureMotionTouch::~ConfigureMotionTouch() = default;
 
 void ConfigureMotionTouch::SetConfiguration() {
+    ui->gyro_sensitivity->setValue(Settings::values.gyro_sensitivity.GetValue());
+
     const Common::ParamPackage touch_param(Settings::values.touch_device.GetValue());
 
     touch_from_button_maps = Settings::values.touch_from_button_maps;
@@ -296,6 +298,7 @@ void ConfigureMotionTouch::ApplyConfiguration() {
     touch_param.Set("max_x", max_x);
     touch_param.Set("max_y", max_y);
 
+    Settings::values.gyro_sensitivity = static_cast<u16>(ui->gyro_sensitivity->value());
     Settings::values.touch_device = touch_param.Serialize();
     Settings::values.touch_from_button_map_index = ui->touch_from_button_map->currentIndex();
     Settings::values.touch_from_button_maps = touch_from_button_maps;

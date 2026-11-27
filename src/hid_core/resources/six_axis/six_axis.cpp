@@ -112,7 +112,11 @@ void SixAxis::OnUpdate(const Core::Timing::CoreTiming& core_timing) {
                 state.attribute.is_connected.Assign(1);
                 state.delta_time = std::chrono::nanoseconds(5ms).count();
                 state.accel = hid_state.accel;
-                state.gyro = hid_state.gyro;
+                // Rotation is scaled as it accumulates (MotionInput). Orientation stays
+                // physical: the accelerometer anchors it to gravity.
+                const f32 gyro_scale =
+                    static_cast<f32>(Settings::values.gyro_sensitivity.GetValue()) / 100.0f;
+                state.gyro = hid_state.gyro * gyro_scale;
                 state.rotation = hid_state.rotation;
                 state.orientation = hid_state.orientation;
             };

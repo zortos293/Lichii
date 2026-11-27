@@ -91,6 +91,10 @@ void MotionInput::SetUserGyroThreshold(f32 threshold) {
     user_gyro_threshold = threshold / ThresholdStandard;
 }
 
+void MotionInput::SetRotationScale(f32 scale) {
+    rotation_scale = scale;
+}
+
 void MotionInput::EnableReset(bool reset) {
     reset_enabled = reset;
 }
@@ -116,7 +120,7 @@ void MotionInput::UpdateRotation(u64 elapsed_time) {
     if (sample_period > 0.1f) {
         return;
     }
-    rotations += gyro * sample_period;
+    rotations += gyro * (sample_period * rotation_scale);
 }
 
 void MotionInput::Calibrate() {

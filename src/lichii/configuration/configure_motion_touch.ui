@@ -10,6 +10,63 @@
   </property>
   <layout class="QVBoxLayout">
    <item>
+    <widget class="QGroupBox" name="motion_group_box">
+     <property name="title">
+      <string>Motion</string>
+     </property>
+     <layout class="QHBoxLayout">
+      <item>
+       <widget class="QLabel" name="gyro_sensitivity_label">
+        <property name="text">
+         <string>Gyro sensitivity:</string>
+        </property>
+        <property name="toolTip">
+         <string>Scales how fast the game sees the controller turn. Raise it for faster aiming, lower it for finer aiming.</string>
+        </property>
+       </widget>
+      </item>
+      <item>
+       <widget class="QSpinBox" name="gyro_sensitivity">
+        <property name="toolTip">
+         <string>Scales how fast the game sees the controller turn. Raise it for faster aiming, lower it for finer aiming.</string>
+        </property>
+        <property name="alignment">
+         <set>Qt::AlignCenter</set>
+        </property>
+        <property name="suffix">
+         <string>%</string>
+        </property>
+        <property name="minimum">
+         <number>10</number>
+        </property>
+        <property name="maximum">
+         <number>500</number>
+        </property>
+        <property name="singleStep">
+         <number>10</number>
+        </property>
+        <property name="value">
+         <number>100</number>
+        </property>
+       </widget>
+      </item>
+      <item>
+       <spacer>
+        <property name="orientation">
+         <enum>Qt::Horizontal</enum>
+        </property>
+        <property name="sizeHint" stdset="0">
+         <size>
+          <width>0</width>
+          <height>0</height>
+         </size>
+        </property>
+       </spacer>
+      </item>
+     </layout>
+    </widget>
+   </item>
+   <item>
     <widget class="QGroupBox" name="touch_group_box">
      <property name="title">
       <string>Touch</string>

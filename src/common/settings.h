@@ -977,6 +977,9 @@ struct Values {
                                               Category::Controls};
 
     SwitchableSetting<bool> motion_enabled{linkage, true, "motion_enabled", Category::Controls};
+    // Percent the gyroscope's angular velocity is scaled by before a game reads it
+    Setting<u16, true> gyro_sensitivity{linkage, 100, 10, 500, "gyro_sensitivity",
+                                        Category::Controls};
     Setting<std::string> udp_input_servers{linkage, "127.0.0.1:26760", "udp_input_servers",
                                            Category::Controls};
     Setting<bool> enable_udp_controller{linkage, false, "enable_udp_controller",
