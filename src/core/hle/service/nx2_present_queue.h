@@ -10,6 +10,7 @@
 #include <functional>
 #include <memory>
 #include <mutex>
+#include <new>
 #include <optional>
 #include <utility>
 
@@ -88,13 +89,25 @@ public:
 
     /// Queues a release at the CoreTiming time `deadline`, without blocking. Returns the fence
     /// value, or nothing when every slot is pending.
-    std::optional<u32> Queue(std::chrono::nanoseconds deadline) {
+    std::optional<u32> Queue(std::chrono::nanoseconds deadline,
+                             std::function<void()>* on_composited = nullptr) {
         std::scoped_lock lock{mutex};
         if (stopped || pending.size() == Capacity) {
             return std::nullopt;
         }
-        pending.push_back({deadline, ++next_value, false});
-        return next_value;
+        const u32 value = next_value + 1;
+        // Construct the callback before committing the entry. Neither a failed callback
+        // allocation nor a failed deque insertion may leave an unpublished release behind.
+        std::function<void()> callback;
+        if (on_composited) {
+            callback = OnComposited(value);
+        }
+        pending.push_back({deadline, value, false});
+        next_value = value;
+        if (on_composited) {
+            *on_composited = std::move(callback);
+        }
+        return value;
     }
 
     /// The renderer has composited the buffer released at `value`.
@@ -239,15 +252,25 @@ public:
                 return std::nullopt;
             }
             id = *allocated;
-            queue = std::make_shared<Nx2PresentReleaseQueue>(timing, syncpoints, id);
+            try {
+                queue = std::make_shared<Nx2PresentReleaseQueue>(timing, syncpoints, id);
+            } catch (const std::bad_alloc&) {
+                free(id);
+                return std::nullopt;
+            }
         }
         const auto deadline =
             timing.GetGlobalTimeNs() + (std::max)(std::chrono::nanoseconds{0}, wait);
-        const auto value = queue->Queue(deadline);
-        if (!value) {
+        try {
+            std::function<void()> on_composited;
+            const auto value = queue->Queue(deadline, &on_composited);
+            if (!value) {
+                return std::nullopt;
+            }
+            return Release{id, *value, std::move(on_composited)};
+        } catch (const std::bad_alloc&) {
             return std::nullopt;
         }
-        return Release{id, *value, queue->OnComposited(*value)};
     }
 
 private:
