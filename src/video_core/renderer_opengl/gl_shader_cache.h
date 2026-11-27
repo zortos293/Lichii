@@ -45,6 +45,24 @@ public:
     [[nodiscard]] ComputePipeline* CurrentComputePipeline();
 
 private:
+    // The serialized key keeps its existing format. The environment records the local layout.
+    struct ComputePipelineLookupKey {
+        ComputePipelineKey key;
+        u32 local_memory_size;
+        u32 local_memory_high_size;
+
+        bool operator==(const ComputePipelineLookupKey&) const noexcept = default;
+    };
+
+    struct ComputePipelineLookupHash {
+        size_t operator()(const ComputePipelineLookupKey& lookup) const noexcept {
+            size_t hash = lookup.key.Hash();
+            Common::HashCombine(hash, lookup.local_memory_size);
+            Common::HashCombine(hash, lookup.local_memory_high_size);
+            return hash;
+        }
+    };
+
     GraphicsPipeline* CurrentGraphicsPipelineSlowPath();
 
     [[nodiscard]] GraphicsPipeline* BuiltPipeline(GraphicsPipeline* pipeline) const noexcept;
@@ -81,7 +99,9 @@ private:
 
     ShaderContext::ShaderPools main_pools;
     ::Common::unordered_map<GraphicsPipelineKey, std::unique_ptr<GraphicsPipeline>> graphics_cache;
-    ::Common::unordered_map<ComputePipelineKey, std::unique_ptr<ComputePipeline>> compute_cache;
+    ::Common::unordered_map<ComputePipelineLookupKey, std::unique_ptr<ComputePipeline>,
+                            ComputePipelineLookupHash>
+        compute_cache;
 
     Shader::Profile profile;
     Shader::HostTranslateInfo host_info;

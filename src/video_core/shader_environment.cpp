@@ -102,6 +102,7 @@ constexpr u64 READ_PROPERTIES_KEY{MakeCbufKey(~0U, 0)};
 // texture at handle 0 (issue #846).
 constexpr u64 NULL_TEXTURE_2D_KEY{MakeCbufKey(~0U, 1)};
 constexpr u64 HEADER_BYTE_OFFSET_RULE_KEY{MakeCbufKey(~0U, 2)};
+constexpr u64 LOCAL_MEMORY_HIGH_SIZE_KEY{MakeCbufKey(~0U, 3)};
 
 // The most values of a kind an environment of a record holds. Translation reads a few hundred at
 // most; a damaged count can't make a load allocate more than a few MB for them.
@@ -344,9 +345,9 @@ size_t GenericEnvironment::ReadSizeBytes() const noexcept {
 }
 
 bool GenericEnvironment::CanBeSerialized() const noexcept {
-    // The read properties and the texture markers are three more constant buffer values.
+    // Read properties, the texture markers and the local layout are four more values.
     return !has_unbound_instructions &&
-           std::max({texture_types.size(), texture_pixel_formats.size(), cbuf_values.size() + 3,
+           std::max({texture_types.size(), texture_pixel_formats.size(), cbuf_values.size() + 4,
                      storage_pointer_types.size(), cbuf_replacements.size()}) <=
                MAX_RECORDED_VALUES;
 }
@@ -374,7 +375,7 @@ void GenericEnvironment::Serialize(std::ostream& file, u32 read_properties) cons
     const u64 code_size{static_cast<u64>(CachedSizeBytes())};
     const u64 num_texture_types{static_cast<u64>(texture_types.size())};
     const u64 num_texture_pixel_formats{static_cast<u64>(texture_pixel_formats.size())};
-    const u64 num_cbuf_values{static_cast<u64>(cbuf_values.size()) + 3};
+    const u64 num_cbuf_values{static_cast<u64>(cbuf_values.size()) + 4};
     const u64 num_storage_pointer_types{static_cast<u64>(storage_pointer_types.size())};
     const u64 num_cbuf_replacement_values{static_cast<u64>(cbuf_replacements.size())};
 
@@ -415,7 +416,11 @@ void GenericEnvironment::Serialize(std::ostream& file, u32 read_properties) cons
         .write(reinterpret_cast<const char*>(&marker_present), sizeof(marker_present))
         .write(reinterpret_cast<const char*>(&HEADER_BYTE_OFFSET_RULE_KEY),
                sizeof(HEADER_BYTE_OFFSET_RULE_KEY))
-        .write(reinterpret_cast<const char*>(&marker_present), sizeof(marker_present));
+        .write(reinterpret_cast<const char*>(&marker_present), sizeof(marker_present))
+        .write(reinterpret_cast<const char*>(&LOCAL_MEMORY_HIGH_SIZE_KEY),
+               sizeof(LOCAL_MEMORY_HIGH_SIZE_KEY))
+        .write(reinterpret_cast<const char*>(&local_memory_high_size),
+               sizeof(local_memory_high_size));
     for (const auto& [key, type] : storage_pointer_types) {
         file.write(reinterpret_cast<const char*>(&key), sizeof(key))
             .write(reinterpret_cast<const char*>(&type), sizeof(type));
@@ -1095,6 +1100,8 @@ ComputeEnvironment::ComputeEnvironment(Tegra::Engines::KeplerCompute& kepler_com
     shared_memory_size = qmd.shared_alloc;
     workgroup_size = {qmd.block_dim_x, qmd.block_dim_y, qmd.block_dim_z};
     if (kepler_compute->IsNativeMode()) {
+        // QMD v3 word 50 is the high local allocation, not the Maxwell call/return stack.
+        local_memory_high_size = qmd.local_crs_alloc;
         initial_offset = sizeof(sph);
         is_proprietary_driver = true;
         InitializeNativeCode(std::move(lowered_native_), 0, false, cache_v2);
@@ -1279,6 +1286,13 @@ void FileEnvironment::Deserialize(std::istream& file, std::streampos end) {
     }
     if (const auto it{cbuf_values.find(READ_PROPERTIES_KEY)}; it != cbuf_values.end()) {
         recorded_read_properties = it->second;
+        cbuf_values.erase(it);
+    }
+    if (const auto it{cbuf_values.find(LOCAL_MEMORY_HIGH_SIZE_KEY)}; it != cbuf_values.end()) {
+        if (it->second > local_memory_size || it->second >= (1U << 24)) {
+            throw std::ios_base::failure("Invalid high local memory allocation");
+        }
+        local_memory_high_size = it->second;
         cbuf_values.erase(it);
     }
     if (const auto it{cbuf_values.find(NULL_TEXTURE_2D_KEY)}; it != cbuf_values.end()) {
@@ -1466,6 +1480,15 @@ u32 FileEnvironment::ReadViewportTransformState() {
 
 u32 FileEnvironment::LocalMemorySize() const {
     return local_memory_size;
+}
+
+u32 FileEnvironment::LocalMemoryHighSize() {
+    if (!local_memory_high_size) {
+        // Older captures kept only low + high, which cannot identify either address range.
+        lacks_local_memory_layout = true;
+        throw Shader::LogicError("Uncached native local memory layout");
+    }
+    return *local_memory_high_size;
 }
 
 u32 FileEnvironment::SharedMemorySize() const {

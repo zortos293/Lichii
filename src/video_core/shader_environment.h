@@ -48,6 +48,8 @@ public:
 
     [[nodiscard]] u32 LocalMemorySize() const final;
 
+    [[nodiscard]] u32 LocalMemoryHighSize() override { return local_memory_high_size; }
+
     [[nodiscard]] u32 SharedMemorySize() const final;
 
     [[nodiscard]] std::array<u32, 3> WorkgroupSize() const final;
@@ -147,6 +149,7 @@ protected:
     ::Common::unordered_map<u64, Shader::ReplaceConstant> cbuf_replacements;
 
     u32 local_memory_size{};
+    u32 local_memory_high_size{};
     u32 texture_bound{};
     u32 shared_memory_size{};
     std::array<u32, 3> workgroup_size{};
@@ -289,6 +292,12 @@ public:
 
     [[nodiscard]] u32 LocalMemorySize() const override;
 
+    [[nodiscard]] u32 LocalMemoryHighSize() override;
+    /// The recorded high allocation, which records from before it was recorded lack.
+    [[nodiscard]] std::optional<u32> RecordedLocalMemoryHighSize() const noexcept {
+        return local_memory_high_size;
+    }
+
     [[nodiscard]] u32 SharedMemorySize() const override;
 
     [[nodiscard]] u32 TextureBoundBuffer() const override;
@@ -312,7 +321,7 @@ public:
     /// record made where they differ can lack it and hold all that translation reads there. A
     /// texture classification the load dropped as stale counts wherever the record was made.
     [[nodiscard]] bool LacksRecordedValue(u32 read_properties) const noexcept {
-        return lacks_dropped_value ||
+        return lacks_dropped_value || lacks_local_memory_layout ||
                (lacks_recorded_value &&
                 (!recorded_read_properties || *recorded_read_properties == read_properties));
     }
@@ -326,6 +335,7 @@ private:
     ::Common::unordered_map<u64, Shader::ReplaceConstant> cbuf_replacements;
     std::array<u32, 3> workgroup_size{};
     u32 local_memory_size{};
+    std::optional<u32> local_memory_high_size;
     u32 shared_memory_size{};
     u32 texture_bound{};
     u32 read_lowest{};
@@ -339,6 +349,7 @@ private:
     std::vector<u32> dropped_texture_handles;
     bool lacks_recorded_value{};
     bool lacks_dropped_value{};
+    bool lacks_local_memory_layout{};
 };
 
 /// Where a pipeline is in a cache file, from its environment count to the end of its key, and a

@@ -318,12 +318,14 @@ void ShaderCache::LoadDiskResources(u64 title_id, std::stop_token stop_loading,
         ComputePipelineKey key;
         file.read(reinterpret_cast<char*>(&key), sizeof(key));
         VideoCommon::CheckComputeRecord(env, key.shared_memory_size, key.workgroup_size);
-        queue_work([this, key, env_ = std::move(env), &state, &callback](Context* ctx) mutable {
+        const ComputePipelineLookupKey lookup{
+            key, env.LocalMemorySize(), env.RecordedLocalMemoryHighSize().value_or(0U)};
+        queue_work([this, lookup, env_ = std::move(env), &state, &callback](Context* ctx) mutable {
             ctx->pools.ReleaseContents();
-            auto pipeline{CreateComputePipeline(ctx->pools, key, env_, true)};
+            auto pipeline{CreateComputePipeline(ctx->pools, lookup.key, env_, true)};
             std::scoped_lock lock{state.mutex};
             if (pipeline) {
-                compute_cache.emplace(key, std::move(pipeline));
+                compute_cache.emplace(lookup, std::move(pipeline));
             }
             ++state.built;
             if (state.has_loaded) {
@@ -444,7 +446,10 @@ ComputePipeline* ShaderCache::CurrentComputePipeline() {
         .shared_memory_size = qmd.shared_alloc,
         .workgroup_size{qmd.block_dim_x, qmd.block_dim_y, qmd.block_dim_z},
     };
-    const auto [pair, is_new]{compute_cache.try_emplace(key)};
+    const ComputePipelineLookupKey lookup{
+        key, qmd.local_pos_alloc + qmd.local_crs_alloc,
+        kepler_compute->IsNativeMode() ? static_cast<u32>(qmd.local_crs_alloc.Value()) : 0U};
+    const auto [pair, is_new]{compute_cache.try_emplace(lookup)};
     auto& pipeline{pair->second};
     if (!is_new) {
         return pipeline.get();

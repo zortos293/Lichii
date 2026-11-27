@@ -131,6 +131,11 @@ public:
         return exits_to_dispatcher;
     }
 
+    /// Local instructions can depend on the layout even when translation drops every access.
+    [[nodiscard]] bool HasLocalMemoryAccesses() const noexcept {
+        return has_local_memory_accesses;
+    }
+
 private:
     void AnalyzeLabel(FunctionId function_id, Label& label);
 
@@ -161,6 +166,7 @@ private:
     boost::container::small_vector<Function, 1> functions;
     Location program_start;
     bool exits_to_dispatcher{};
+    bool has_local_memory_accesses{};
     Block* dispatch_block{};
 };
 

@@ -88,6 +88,7 @@ add_executable(tests
     video_core/ampere_branch_modifiers.cpp
     video_core/ampere_fast_fusion_logged.cpp
     video_core/fast_fusion_surface_store.cpp
+    video_core/native_local_memory.cpp
     video_core/fast_fusion_byte_store.cpp
     video_core/vk_byte_addressed_shadow.cpp
     video_core/global_memory_coherence.cpp

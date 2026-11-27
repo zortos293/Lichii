@@ -36,7 +36,20 @@ IR::U32 Offset(TranslatorVisitor& v, u64 insn) {
 }
 
 std::pair<IR::U32, IR::U32> WordOffset(TranslatorVisitor& v, u64 insn) {
-    const IR::U32 offset{Offset(v, insn)};
+    IR::U32 offset{Offset(v, insn)};
+    if (v.env.IsNativeProgram() && v.env.ShaderStage() == Stage::Compute) {
+        // Native QMDs allocate both ends of the 24-bit local address space. Rotate the high
+        // allocation before the low one so both fit in the host's contiguous private array.
+        if (const u32 high_size{v.env.LocalMemoryHighSize()}; high_size != 0) {
+            constexpr u32 local_address_mask = 0xffffff;
+            if (offset.IsImmediate()) {
+                offset = v.ir.Imm32((offset.U32() + high_size) & local_address_mask);
+            } else {
+                offset = v.ir.BitwiseAnd(v.ir.IAdd(offset, v.ir.Imm32(high_size)),
+                                         v.ir.Imm32(local_address_mask));
+            }
+        }
+    }
     if (offset.IsImmediate()) {
         return {v.ir.Imm32(offset.U32() / 4), offset};
     } else {

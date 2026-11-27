@@ -18,6 +18,7 @@
 #include <mutex>
 #include <optional>
 #include <string>
+#include <tuple>
 #include <type_traits>
 #include "common/container/unordered_map.h"
 #include <vector>
@@ -84,6 +85,40 @@ static_assert(std::has_unique_object_representations_v<ComputePipelineCacheKey>)
 static_assert(std::is_trivially_copyable_v<ComputePipelineCacheKey>);
 static_assert(std::is_trivially_constructible_v<ComputePipelineCacheKey>);
 
+/// The layout of a compute pipeline whose translation does not depend on local memory.
+inline constexpr u32 AnyLocalMemory = ~0U;
+
+/// A compute pipeline in memory: the recorded key and the local memory its translation addresses,
+/// the total and native compute's high allocation (see LocalMemoryHighSize), or AnyLocalMemory for
+/// both. Records hold only the key, so their layout stays as it is.
+struct ComputePipelineLookupKey {
+    ComputePipelineCacheKey key;
+    u32 local_memory_size;
+    u32 local_memory_high_size;
+
+    size_t Hash() const noexcept;
+
+    /// The driver binary slot for this translated key, keeping legacy slots for shared layouts.
+    [[nodiscard]] u64 DriverBinaryKey() const noexcept;
+
+    bool operator==(const ComputePipelineLookupKey& rhs) const noexcept;
+};
+static_assert(std::has_unique_object_representations_v<ComputePipelineLookupKey>);
+static_assert(std::is_trivially_copyable_v<ComputePipelineLookupKey>);
+
+[[nodiscard]] constexpr ComputePipelineLookupKey AnyLayoutKey(const ComputePipelineCacheKey& key) {
+    return {key, AnyLocalMemory, AnyLocalMemory};
+}
+
+[[nodiscard]] constexpr ComputePipelineLookupKey TranslatedComputeKey(
+    const ComputePipelineLookupKey& lookup, bool depends_on_local_memory_layout) {
+    return depends_on_local_memory_layout ? lookup : AnyLayoutKey(lookup.key);
+}
+
+/// The layout recorded with a pipeline. Older records can lack the native high allocation.
+[[nodiscard]] ComputePipelineLookupKey RecordLookupKey(const ComputePipelineCacheKey& key,
+                                                       const VideoCommon::FileEnvironment& env);
+
 } // namespace Vulkan
 
 namespace std {
@@ -95,9 +130,53 @@ struct hash<Vulkan::ComputePipelineCacheKey> {
     }
 };
 
+template <>
+struct hash<Vulkan::ComputePipelineLookupKey> {
+    size_t operator()(const Vulkan::ComputePipelineLookupKey& k) const noexcept {
+        return k.Hash();
+    }
+};
+
 } // namespace std
 
 namespace Vulkan {
+
+/// The pipeline translated for this layout, else one that serves every layout.
+template <typename Map>
+[[nodiscard]] auto FindComputePipeline(Map& cache, const ComputePipelineLookupKey& lookup) {
+    const auto it{cache.find(lookup)};
+    return it != cache.end() ? it : cache.find(AnyLayoutKey(lookup.key));
+}
+
+/// Whether a pipeline stored under `stored` serves a dispatch looking up `lookup`.
+[[nodiscard]] inline bool ServesLookup(const ComputePipelineLookupKey& stored,
+                                       const ComputePipelineLookupKey& lookup) {
+    return stored == lookup || stored == AnyLayoutKey(lookup.key);
+}
+
+/// Replaces the entry at `it` with its rebuild and returns where the rebuild is now. A rebuild
+/// that depends on a layout uses the layout it was translated for, which need not be the layout
+/// of the dispatch that finds it built. `retire` takes the pipelines replaced.
+template <typename Map, typename Retire>
+typename Map::iterator PublishComputeRebuild(Map& cache, typename Map::iterator it,
+                                             typename Map::mapped_type&& rebuilt, Retire&& retire) {
+    if (it->second.pipeline) {
+        retire(std::move(it->second.pipeline));
+    }
+    rebuilt.rebuilds = it->second.rebuilds + 1;
+    rebuilt.used = it->second.used;
+    if (rebuilt.depends_on_local_memory_layout && it->first == AnyLayoutKey(it->first.key)) {
+        const ComputePipelineLookupKey layout{rebuilt.dispatch_key};
+        cache.erase(it);
+        bool inserted{};
+        std::tie(it, inserted) = cache.try_emplace(layout);
+        if (!inserted && it->second.pipeline) {
+            retire(std::move(it->second.pipeline));
+        }
+    }
+    it->second = std::move(rebuilt);
+    return it;
+}
 
 class ComputePipeline;
 class DescriptorPool;
@@ -117,6 +196,9 @@ struct ComputePipelineCacheEntry {
     std::vector<std::pair<u32, u32>> null_pointer_slots;
     /// Constant buffer slots bound as storage buffer pointers (see MappedStoragePointerKeys)
     std::vector<u64> mapped_pointers;
+    bool depends_on_local_memory_layout{};
+    /// The layout of the dispatch it was translated for, when translated from the game
+    ComputePipelineLookupKey dispatch_key{};
     u32 rebuilds{};
     /// Whether a dispatch looked it up yet (kept only with EDEN_NX2_STUTTER_TRACE)
     bool used{};
@@ -227,6 +309,9 @@ private:
     void ReturnPools(std::shared_ptr<ShaderPools> pools);
 
     [[nodiscard]] bool StaleNullPointerSlot(const ComputePipelineCacheEntry& entry) const;
+    /// The lookup key of the current dispatch's pipeline.
+    [[nodiscard]] ComputePipelineLookupKey DispatchLookupKey(
+        const ComputePipelineCacheKey& key) const;
 
     /// Translates the current compute program, binding the pointers in keep_pointers whatever
     /// their slots hold now (see GenericEnvironment::KeepStoragePointers)
@@ -236,13 +321,14 @@ private:
 
     /// Builds the pipeline as CreateGraphicsPipeline does. With `emit_pools`, which `pools` must
     /// be, the SPIR-V is emitted by the CPU stage of the pipeline's job, which takes the pools and
-    /// the program.
+    /// the program. A shared-layout boot probe defers layout-dependent programs after flow analysis.
     ComputePipelineCacheEntry CreateComputePipeline(ShaderPools& pools,
-                                                     const ComputePipelineCacheKey& key,
+                                                     const ComputePipelineLookupKey& lookup,
                                                      Shader::Environment& env,
                                                      PipelineStatistics* statistics,
                                                      bool build_in_parallel,
-                                                     std::shared_ptr<ShaderPools> emit_pools = nullptr);
+                                                     std::shared_ptr<ShaderPools> emit_pools = nullptr,
+                                                     bool defer_local_memory = false);
 
     /// Where CreateGraphicsPipeline and CreateComputePipeline build; `cpu_bytes` estimates the
     /// IR a deferred emission holds
@@ -354,7 +440,7 @@ private:
     u64 rebuilt_from_kept{};  ///< Since the last eviction
     u64 translated_again{};   ///< Evicted pipelines translated again since the last eviction
 
-    ::Common::unordered_map<ComputePipelineCacheKey, ComputePipelineCacheEntry> compute_cache;
+    ::Common::unordered_map<ComputePipelineLookupKey, ComputePipelineCacheEntry> compute_cache;
     /// Replaced compute pipelines, destroyed once the GPU and their queued build are done with
     /// them (tick, pipeline)
     std::deque<std::pair<u64, std::unique_ptr<ComputePipeline>>> retired_compute_pipelines;

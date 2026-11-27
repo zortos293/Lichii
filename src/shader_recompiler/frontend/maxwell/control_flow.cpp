@@ -328,6 +328,10 @@ CFG::AnalysisState CFG::AnalyzeInst(Block* block, FunctionId function_id, Locati
         return AnalyzeEXIT(block, function_id, pc, inst);
     case Opcode::PRET:
         throw NotImplementedException("PRET flow analysis");
+    case Opcode::LDL:
+    case Opcode::STL:
+        has_local_memory_accesses = true;
+        break;
     case Opcode::CAL:
     case Opcode::JCAL: {
         const bool is_absolute{IsAbsoluteJump(opcode)};

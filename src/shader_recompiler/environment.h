@@ -117,6 +117,9 @@ public:
 
     [[nodiscard]] virtual u32 LocalMemorySize() const = 0;
 
+    /// Native compute local memory allocated at the top of its 24-bit address space.
+    [[nodiscard]] virtual u32 LocalMemoryHighSize() { return 0; }
+
     [[nodiscard]] virtual u32 SharedMemorySize() const = 0;
 
     [[nodiscard]] virtual std::array<u32, 3> WorkgroupSize() const = 0;

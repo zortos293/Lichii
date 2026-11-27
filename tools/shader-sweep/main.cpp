@@ -365,6 +365,9 @@ public:
     u32 LocalMemorySize() const override {
         return local_memory;
     }
+    u32 LocalMemoryHighSize() override {
+        return Lookup(cbuf_values, CbufKey(~0U, 3), "native local memory layout");
+    }
     u32 SharedMemorySize() const override {
         return shared_memory;
     }

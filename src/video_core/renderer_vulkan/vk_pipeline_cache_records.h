@@ -11,9 +11,13 @@
 #include <vector>
 
 #include "common/common_types.h"
+#include "common/unique_function.h"
 #include "video_core/shader_environment.h"
 
 namespace Vulkan {
+
+struct ComputePipelineCacheKey;
+struct ComputePipelineLookupKey;
 
 // <title>/vulkan_used.bin: the graphics pipelines recent sessions used, as key hash + sessions
 // since the last use.
@@ -27,6 +31,28 @@ struct CachedComputeTranslation {
     VideoCommon::FileEnvironment env;
     VideoCommon::PipelineRecord record;
 };
+
+[[nodiscard]] CachedComputeTranslation ReadCachedComputeTranslation(
+    std::span<const u8> payload, VideoCommon::PipelineRecord record,
+    const ComputePipelineCacheKey& key);
+
+enum class CachedComputeResult { Failed, ExactLayout, AnyLayout, Cancelled };
+enum class CachedComputeScope { AnyLayoutOnly, ExactLayoutOnly, EitherLayout };
+using TranslateCachedCompute =
+    Common::UniqueFunction<CachedComputeResult, const ComputePipelineLookupKey&,
+                           VideoCommon::FileEnvironment&, const CachedComputeScope&>;
+
+struct CachedComputeLoad {
+    size_t layouts{};
+    std::vector<VideoCommon::PipelineRecord> incomplete;
+    std::vector<VideoCommon::PipelineRecord> copies;
+};
+
+/// Tries the records of one compute key, in pointer preference order within each layout.
+/// An AnyLayoutOnly probe reports ExactLayout as soon as it sees layout-dependent instructions.
+[[nodiscard]] CachedComputeLoad RestoreCachedComputeLayouts(
+    const ComputePipelineCacheKey& key, std::vector<CachedComputeTranslation> candidates,
+    u32 read_properties, const TranslateCachedCompute& translate);
 
 /// Adds the translations of a key that no load chooses on a host with these `read_properties`, once
 /// `chosen` is the one that translated (the count when none did): those tried before it that lack a

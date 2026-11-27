@@ -6,9 +6,43 @@
 #include <numeric>
 
 #include "video_core/renderer_vulkan/vk_graphics_pipeline.h"
+#include "video_core/renderer_vulkan/vk_pipeline_cache.h"
 #include "video_core/renderer_vulkan/vk_pipeline_cache_records.h"
 
 namespace Vulkan {
+namespace {
+
+/// Prefer candidates that keep the first record's pointers, then those that add the most.
+void OrderComputeTranslations(std::vector<CachedComputeTranslation>& candidates) {
+    if (candidates.size() < 2) {
+        return;
+    }
+    std::vector<std::vector<u64>> keys;
+    keys.reserve(candidates.size());
+    for (const CachedComputeTranslation& candidate : candidates) {
+        keys.push_back(candidate.env.MappedStoragePointerKeys());
+    }
+    std::vector<size_t> order(candidates.size());
+    std::iota(order.begin(), order.end(), size_t{0});
+    const auto keeps_first = [&](size_t index) {
+        return std::ranges::includes(keys[index], keys.front());
+    };
+    std::ranges::stable_sort(order, [&](size_t lhs, size_t rhs) {
+        const bool lhs_keeps{keeps_first(lhs)};
+        if (lhs_keeps != keeps_first(rhs)) {
+            return lhs_keeps;
+        }
+        return lhs_keeps && keys[lhs].size() > keys[rhs].size();
+    });
+    std::vector<CachedComputeTranslation> ordered;
+    ordered.reserve(candidates.size());
+    for (const size_t index : order) {
+        ordered.push_back(std::move(candidates[index]));
+    }
+    candidates = std::move(ordered);
+}
+
+} // Anonymous namespace
 
 std::unordered_map<u64, u8> LoadUsedPipelines(const std::filesystem::path& path, u8 max_age) {
     std::unordered_map<u64, u8> used;
@@ -31,6 +65,88 @@ std::unordered_map<u64, u8> LoadUsedPipelines(const std::filesystem::path& path,
         }
     }
     return used;
+}
+
+CachedComputeTranslation ReadCachedComputeTranslation(std::span<const u8> payload,
+                                                      VideoCommon::PipelineRecord record,
+                                                      const ComputePipelineCacheKey& key) {
+    using VideoCommon::FileEnvironment;
+    CachedComputeTranslation candidate{.env = {}, .record = record};
+    Common::UniqueFunction<void, std::istream&, FileEnvironment> read_compute{
+        [&](std::istream& file, FileEnvironment env) {
+            ComputePipelineCacheKey read_key;
+            file.read(reinterpret_cast<char*>(&read_key), sizeof(read_key));
+            if (read_key != key) {
+                throw std::ios_base::failure("Compute pipeline record has another key");
+            }
+            VideoCommon::CheckComputeRecord(env, key.shared_memory_size, key.workgroup_size);
+            candidate.env = std::move(env);
+        }};
+    Common::UniqueFunction<void, std::istream&, std::vector<FileEnvironment>> read_graphics{
+        [](std::istream&, std::vector<FileEnvironment>) {
+            throw std::ios_base::failure("Graphics pipeline in a compute record");
+        }};
+    VideoCommon::ReadPipelinePayload(payload, read_compute, read_graphics);
+    return candidate;
+}
+
+CachedComputeLoad RestoreCachedComputeLayouts(
+    const ComputePipelineCacheKey& key, std::vector<CachedComputeTranslation> candidates,
+    u32 read_properties, const TranslateCachedCompute& translate) {
+    CachedComputeLoad load;
+    const auto try_layout = [&](std::vector<CachedComputeTranslation>& translations,
+                                CachedComputeScope scope) {
+        OrderComputeTranslations(translations);
+        size_t chosen = 0;
+        auto result = CachedComputeResult::Failed;
+        for (; chosen < translations.size(); ++chosen) {
+            auto& env = translations[chosen].env;
+            result = translate(RecordLookupKey(key, env), env, scope);
+            if (result != CachedComputeResult::Failed) {
+                break;
+            }
+        }
+        if (scope != CachedComputeScope::AnyLayoutOnly || result != CachedComputeResult::ExactLayout) {
+            ++load.layouts;
+            AddUnchosenComputeTranslations(translations, chosen, read_properties, load.incomplete,
+                                           load.copies);
+        }
+        return result;
+    };
+
+    if (candidates.empty()) {
+        return load;
+    }
+    const auto first_layout = RecordLookupKey(key, candidates.front().env);
+    if (std::ranges::all_of(candidates, [&](const auto& candidate) {
+            return RecordLookupKey(key, candidate.env) == first_layout;
+        })) {
+        try_layout(candidates, CachedComputeScope::EitherLayout);
+        return load;
+    }
+    // A shared pipeline keeps the original pointer preference across all its records.
+    if (try_layout(candidates, CachedComputeScope::AnyLayoutOnly) != CachedComputeResult::ExactLayout) {
+        return load;
+    }
+    std::ranges::sort(candidates, {}, [](const auto& candidate) { return candidate.record.begin; });
+
+    std::unordered_map<ComputePipelineLookupKey, size_t> group_indices;
+    std::vector<std::vector<CachedComputeTranslation>> groups;
+    for (auto& candidate : candidates) {
+        const auto layout = RecordLookupKey(key, candidate.env);
+        const auto [it, inserted] = group_indices.try_emplace(layout, groups.size());
+        if (inserted) {
+            groups.emplace_back();
+        }
+        groups[it->second].push_back(std::move(candidate));
+    }
+    for (auto& translations : groups) {
+        if (try_layout(translations, CachedComputeScope::ExactLayoutOnly) ==
+            CachedComputeResult::Cancelled) {
+            break;
+        }
+    }
+    return load;
 }
 
 void AddUnchosenComputeTranslations(std::span<const CachedComputeTranslation> candidates,
