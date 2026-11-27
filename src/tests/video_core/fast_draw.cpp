@@ -353,6 +353,40 @@ TEST_CASE("Fast draw takes the delta's ranges in use and clears it", "[fast_draw
     CHECK(out.num_device_writes == 0);
 }
 
+TEST_CASE("Fast draw tracks report writes without breaking unrelated draws", "[fast_draw]") {
+    DeltaFixture f;
+    f.Write(MAXWELL3D_REG_INDEX(tex_header.address_high), 0);
+    f.Write(MAXWELL3D_REG_INDEX(tex_header.address_low), 0x40000);
+    f.Write(MAXWELL3D_REG_INDEX(tex_header.limit), 7);
+
+    const auto report = [&](u32 address, bool short_query) {
+        f.Write(MAXWELL3D_REG_INDEX(report_semaphore.address_high), 0);
+        f.Write(MAXWELL3D_REG_INDEX(report_semaphore.address_low), address);
+        f.Write(MAXWELL3D_REG_INDEX(report_semaphore.payload), 1);
+        Maxwell3D::Regs::ReportSemaphore semaphore{};
+        semaphore.query.operation.Assign(Maxwell3D::Regs::ReportSemaphore::Operation::Release);
+        semaphore.query.short_query.Assign(short_query);
+        f.Write(MAXWELL3D_REG_INDEX(report_semaphore.query), semaphore.query.raw);
+    };
+
+    f.DrawArrays(0, 3);
+    const u64 serial = FastDraw::Serial();
+    FastDraw::g_delta = {};
+    report(0x30000, false);
+    report(0x31000, true);
+    CHECK(FastDraw::Serial() == serial);
+    REQUIRE(FastDraw::g_delta.num_writes == 2);
+    CHECK(FastDraw::g_delta.write_begin[0] == 0x30000);
+    CHECK(FastDraw::g_delta.write_end[0] == 0x30010);
+    CHECK(FastDraw::g_delta.write_begin[1] == 0x31000);
+    CHECK(FastDraw::g_delta.write_end[1] == 0x31004);
+    f.DrawArrays(3, 3);
+    CHECK(f.Reusable());
+
+    report(0x40020, false);
+    CHECK(FastDraw::Serial() != serial);
+}
+
 TEST_CASE("Fast draw breaks on state and texture headers", "[fast_draw]") {
     DeltaFixture f;
     f.Write(MAXWELL3D_REG_INDEX(tex_header.address_high), 0);

@@ -373,6 +373,11 @@ bool Maxwell3D::IsFastDrawParameter(u32 method) {
 }
 
 bool Maxwell3D::IsFastDrawQueryMethod(u32 method) {
+    constexpr u32 report_begin = MAXWELL3D_REG_INDEX(report_semaphore.address_high);
+    constexpr u32 report_end = MAXWELL3D_REG_INDEX(report_semaphore.query);
+    if (method >= report_begin && method <= report_end) {
+        return true;
+    }
     // Neither is in what a delta draw keeps: the draw manager asks ShouldExecute for every draw,
     // every draw resumes the counters and host conditional rendering (NotifySegment,
     // CounterEnable), and a resolve that leaves the render pass ends the delta chain there.
@@ -1042,7 +1047,14 @@ void Maxwell3D::ProcessQueryGet() {
         static_cast<VideoCommon::QueryType>(regs.report_semaphore.query.report.Value());
     const u32 payload = regs.report_semaphore.payload;
     const u32 subreport = regs.report_semaphore.query.sub_report;
-    switch (regs.report_semaphore.query.operation) {
+    const auto operation = regs.report_semaphore.query.operation.Value();
+    if (VideoCommon::Nx2FastDraw::Enabled() &&
+        (operation == Regs::ReportSemaphore::Operation::Release ||
+         operation == Regs::ReportSemaphore::Operation::ReportOnly)) {
+        const u64 bytes = regs.report_semaphore.query.short_query != 0 ? 4 : 16;
+        NoteFastDrawConstantData(sequence_address, sequence_address + bytes);
+    }
+    switch (operation) {
     case Regs::ReportSemaphore::Operation::Release:
         if (regs.report_semaphore.query.short_query != 0) {
             flags |= VideoCommon::QueryPropertiesFlags::IsAFence;
