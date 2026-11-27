@@ -568,7 +568,6 @@ bool DmaPusher::Step() {
                 const bool park_call =
                     !park_split_methods && dma_state.method_count != 0 &&
                     dma_state.method < MacroRegistersStart && header.addr != split_method_end &&
-                    header.size != dma_state.method_count &&
                     SplitResumesLater(command_list, dma_pushbuffer_subindex + 1);
                 if (park_call) {
                     static std::atomic<u32> reported{};

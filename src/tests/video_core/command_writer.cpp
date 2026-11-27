@@ -106,6 +106,49 @@ public:
 
 } // namespace
 
+TEST_CASE("GPFIFO parks an initial equal-size interleaved register call",
+          "[video_core][dma_pusher]") {
+    REQUIRE_FALSE(VideoCommon::GpuSplit::Get().Active());
+    ScopedSystemTestContext context;
+    Core::System system;
+    Core::DeviceMemory physical;
+    Tegra::MaxwellDeviceMemoryManager device_memory{physical};
+    Tegra::MemoryManager memory{system, device_memory, 32, 1ULL << 31};
+    Tegra::Control::ChannelState channel{0};
+    Tegra::DmaPusher pusher{system, memory, channel};
+    const bool ampere = Tegra::g_nx2_ampere.exchange(true);
+    SCOPE_EXIT { Tegra::g_nx2_ampere.store(ampere); };
+    SerialEngine engine;
+    engine.execution_mask.set();
+    pusher.BindSubchannel(&engine, 0, Tegra::Engines::EngineTypes::Fermi2D);
+
+    const auto write = [](u32 method, u32 count) {
+        return Tegra::BuildCommandHeader(static_cast<Tegra::BufferMethods>(method), count,
+                                         Tegra::SubmissionMode::Increasing);
+    };
+    const auto data = [](u32 value) { return Tegra::CommandHeader{.argument = value}; };
+    // The first write still needs two words. The unrelated two-word entry must run
+    // before the original write resumes at the next contiguous guest address.
+    Tegra::CommandList list{3};
+    list.submitted_words = {write(0x4c7, 2), write(0x5c7, 1), data(21), data(11), data(12)};
+    const std::array<GPUVAddr, 3> addresses{0x1004, 0x2000, 0x1008};
+    const std::array<u32, 4> offsets{0, 1, 3, 5};
+    for (size_t i = 0; i < addresses.size(); ++i) {
+        list.command_lists[i].addr.Assign(addresses[i]);
+        list.command_lists[i].size.Assign(offsets[i + 1] - offsets[i]);
+        list.submitted_offsets.push_back(offsets[i]);
+    }
+    pusher.Push(std::move(list));
+
+    for (size_t i = 0; i < addresses.size(); ++i) {
+        REQUIRE(Tegra::DmaPusherTestAccess::Step(pusher));
+    }
+    CHECK(engine.received == std::vector<std::pair<u32, u32>>{
+                                 {0x5c7, 21}, {0x4c7, 11}, {0x4c8, 12}});
+    CHECK(pusher.parked_methods.empty());
+    CHECK(pusher.dma_state.method_count == 0);
+}
+
 TEST_CASE("GPFIFO returns to a parked register write even when word counts match",
           "[video_core][dma_pusher]") {
     REQUIRE_FALSE(VideoCommon::GpuSplit::Get().Active());
