@@ -3276,6 +3276,21 @@ public:
         return 0;
     }
 
+    /// Whether count macro parameters from index on are adjacent words in guest memory, so the GPU
+    /// can read them as one indirect argument range
+    bool IsMacroRangeContiguous(size_t index, size_t count) const {
+        const GPUVAddr first = GetMacroAddress(index);
+        if (first == 0) {
+            return false;
+        }
+        for (size_t offset = 1; offset < count; ++offset) {
+            if (GetMacroAddress(index + offset) != first + offset * sizeof(u32)) {
+                return false;
+            }
+        }
+        return true;
+    }
+
     void RefreshParameters() {
         if (!current_macro_dirty) {
             return;

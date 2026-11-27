@@ -142,6 +142,10 @@ struct StorageInfo {
     StorageBufferSet unbounded_writes;
     /// A store or atomic stayed global without a buffer: it may land in any written buffer
     bool untracked_writes{};
+    /// Accesses through pointers loaded from a storage buffer stay global and are searched in
+    /// the pointer windows the host binds (HostTranslateInfo::support_pointer_windows)
+    bool pointer_windows{};
+    StorageBufferSet pointer_tables;
 };
 
 /// Returns true when the instruction is a global memory instruction
@@ -488,6 +492,30 @@ std::optional<StorageBufferAddr> Track(const IR::Value& value, const Bias* bias,
         return operand;
     };
     return BreadthFirstSearchPruned(value, pred, exhausted, stop_at_memory);
+}
+
+/// The storage buffer a global access's address was loaded from, when the address is a pointer read
+/// from memory rather than an offset into a storage buffer
+std::optional<StorageBufferAddr> TrackPointerTable(const IR::U32& low_addr, const Bias& nvn_bias,
+                                                   StorageInfo& info) {
+    const std::optional pointer_load{
+        IR::BreadthFirstSearch(low_addr, [](const IR::Inst* inst) -> std::optional<IR::Inst*> {
+            if (IsGlobalMemory(*inst) && !IsGlobalMemoryWrite(*inst)) {
+                return const_cast<IR::Inst*>(inst);
+            }
+            return std::nullopt;
+        })};
+    if (!pointer_load) {
+        return std::nullopt;
+    }
+    const std::optional<LowAddrInfo> table_addr{TrackLowAddress(*pointer_load)};
+    if (!table_addr) {
+        return std::nullopt;
+    }
+    if (const auto table{Track(table_addr->value, &nvn_bias, info.biased_exhausted)}) {
+        return table;
+    }
+    return Track(table_addr->value, nullptr, info.unbiased_exhausted);
 }
 
 /// Finds the one constant buffer word added directly into the low address, which is the base
@@ -1695,6 +1723,16 @@ bool CollectStorageBuffers(IR::Block& block, IR::Inst& inst, StorageInfo& info, 
         // If it fails, track without a bias
         storage_buffer = cached_track(nullptr, info.unbiased_tracks, info.unbiased_exhausted);
         if (!storage_buffer) {
+            // Nintendo Switch Sports resets its DrawIndexedIndirect arguments through pointers
+            // loaded from a table, a storage buffer: no bound buffer holds them, so the NVN
+            // fallbacks alone drop every reset. The host binds windows over what the table
+            // points to, and the access searches them.
+            if (info.pointer_windows) {
+                if (const auto table{TrackPointerTable(low_addr, nvn_bias, info)}) {
+                    info.pointer_tables.insert(*table);
+                    return false;
+                }
+            }
             // If that also fails, use NVN fallbacks
             LOG_WARNING(Shader, "Storage buffer failed to track, using global memory fallbacks");
             return false;
@@ -2321,6 +2359,9 @@ void GlobalMemoryToStorageBufferPass(Environment& env, IR::Program& program,
     info.bind_competing_loaded = host_info.support_int64;
     info.iterator_words = CollectIteratorWords(program);
     info.atomic_pointers = CollectAtomicPointers(program);
+    info.pointer_windows = host_info.support_pointer_windows && !env.IsNativeProgram() &&
+                           program.stage != Stage::Compute && program.stage != Stage::Task &&
+                           program.stage != Stage::Mesh;
     const auto collect = [&] {
         for (IR::Block* const block : program.post_order_blocks) {
             for (IR::Inst& inst : block->Instructions()) {
@@ -2341,6 +2382,7 @@ void GlobalMemoryToStorageBufferPass(Environment& env, IR::Program& program,
         paired.iterator_words = std::move(info.iterator_words);
         paired.atomic_pointers = std::move(info.atomic_pointers);
         paired.bind_competing_loaded = false;
+        paired.pointer_windows = info.pointer_windows;
         info = std::move(paired);
         collect();
     }
@@ -2350,6 +2392,7 @@ void GlobalMemoryToStorageBufferPass(Environment& env, IR::Program& program,
         with_tables.iterator_words = info.iterator_words;
         with_tables.atomic_pointers = info.atomic_pointers;
         with_tables.bind_competing_loaded = info.bind_competing_loaded;
+        with_tables.pointer_windows = info.pointer_windows;
         with_tables.tables_enabled = true;
         with_tables.table_budget = max_ssbos - info.set.size();
         with_tables.counted = info.set;
@@ -2366,6 +2409,16 @@ void GlobalMemoryToStorageBufferPass(Environment& env, IR::Program& program,
                                       info.set.size(), max_ssbos);
     }
     program.info.native_global_bounds |= info.native_runtime_bounds;
+    for (const StorageBufferAddr& table : info.pointer_tables) {
+        auto& tables{program.info.pointer_table_descriptors};
+        if (tables.size() == tables.capacity()) {
+            LOG_WARNING(Shader, "Too many pointer tables, ignoring c{}[{:#x}]", table.index,
+                        table.offset);
+            continue;
+        }
+        tables.push_back({.cbuf_index = table.index, .cbuf_offset = table.offset});
+        program.info.uses_pointer_windows = true;
+    }
     // Store extents, before the accesses are rebased (the analysis reads the guest addresses).
     // None while a store stays global: the backend routes it to the descriptor whose pointer is the
     // closest one at or below the address, which need not be one of the store's candidates.
@@ -2464,7 +2517,8 @@ std::vector<u32> JoinStorageInfo(Info& base, Info& source, size_t limit) {
         auto it{std::ranges::find_if(descriptors, [&desc](const auto& existing) {
             return desc.cbuf_index == existing.cbuf_index &&
                    desc.cbuf_offset == existing.cbuf_offset && desc.count == existing.count &&
-                   desc.indirect_offset == existing.indirect_offset;
+                   desc.indirect_offset == existing.indirect_offset &&
+                   desc.is_pointer_window == existing.is_pointer_window;
         })};
         if (it != descriptors.end()) {
             if (desc.is_written) {
@@ -2485,6 +2539,13 @@ std::vector<u32> JoinStorageInfo(Info& base, Info& source, size_t limit) {
         bindings.push_back(static_cast<u32>(descriptors.size()));
         descriptors.push_back(desc);
     }
+    for (const PointerTableDescriptor& table : source.pointer_table_descriptors) {
+        auto& tables{base.pointer_table_descriptors};
+        if (tables.size() < tables.capacity() && std::ranges::find(tables, table) == tables.end()) {
+            tables.push_back(table);
+        }
+    }
+    base.uses_pointer_windows |= source.uses_pointer_windows;
     return bindings;
 }
 

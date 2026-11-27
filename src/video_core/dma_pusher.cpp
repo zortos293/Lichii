@@ -531,16 +531,23 @@ bool DmaPusher::Step() {
             const bool kepler_payload = engine == Engines::EngineTypes::KeplerCompute && dma_state.method == ComputeInline && dma_state.non_incrementing;
             const bool macro_payload = engine == Engines::EngineTypes::Maxwell3D && dma_state.method >= MacroRegistersStart;
             if (kepler_payload || macro_payload) {
+                // Macro arguments continued in a separate entry are NVN indirect draw arguments, in
+                // memory the GPU may have just written. A buffer download clears its GPU-modified
+                // mark while the guest copy can still lag behind, so the HLE draw macros always read
+                // them on the GPU (Eden #4783, Amicuchu). Compute inline uploads keep the check.
                 const size_t words = std::min<size_t>(dma_state.method_count, header.size);
                 auto* const engine_state = subchannels[dma_state.subchannel];
                 if (auto& split = VideoCommon::GpuSplit::Get(); split.Active()) {
                     // The caches behind IsMemoryDirty belong to the split's back thread.
                     split.Defer([engine_state, memory = &memory_manager, address = GPUVAddr{dma_state.dma_get},
-                                 bytes = words * sizeof(u32)] {
-                        engine_state->current_dirty = memory->IsMemoryDirty(address, bytes);
+                                 bytes = words * sizeof(u32), macro_payload] {
+                        engine_state->current_dirty =
+                            macro_payload || memory->IsMemoryDirty(address, bytes);
                     }, VideoCommon::GpuSplit::FastDrawNeutral, VideoCommon::GpuSplit::Writes::Noted);
                 } else {
-                    engine_state->current_dirty = memory_manager.IsMemoryDirty(dma_state.dma_get, words * sizeof(u32));
+                    engine_state->current_dirty =
+                        macro_payload ||
+                        memory_manager.IsMemoryDirty(dma_state.dma_get, words * sizeof(u32));
                 }
             }
         }

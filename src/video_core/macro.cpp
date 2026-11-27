@@ -75,7 +75,10 @@ bool IsTopologySafe(Maxwell3D::Regs::PrimitiveTopology topology) {
 
 void HLE_DrawArraysIndirect::Execute(Core::System& system, Engines::Maxwell3D& maxwell3d, std::span<const u32> parameters, [[maybe_unused]] u32 method) {
     auto topology = static_cast<Maxwell3D::Regs::PrimitiveTopology>(parameters[0]);
-    if (!maxwell3d.AnyParametersDirty() || !IsTopologySafe(topology)) {
+    // The GPU reads the arguments as one range: arguments split over separate memory are taken
+    // as the macro received them
+    if (!maxwell3d.AnyParametersDirty() || !maxwell3d.IsMacroRangeContiguous(1, 4) ||
+        !IsTopologySafe(topology)) {
         Fallback(system, maxwell3d, parameters);
         return;
     }
@@ -134,7 +137,8 @@ void HLE_DrawArraysIndirect::Fallback(Core::System& system, Engines::Maxwell3D& 
 
 void HLE_DrawIndexedIndirect::Execute(Core::System& system, Engines::Maxwell3D& maxwell3d, std::span<const u32> parameters, [[maybe_unused]] u32 method) {
     auto topology = static_cast<Maxwell3D::Regs::PrimitiveTopology>(parameters[0]);
-    if (!maxwell3d.AnyParametersDirty() || !IsTopologySafe(topology)) {
+    if (!maxwell3d.AnyParametersDirty() || !maxwell3d.IsMacroRangeContiguous(1, 5) ||
+        !IsTopologySafe(topology)) {
         Fallback(system, maxwell3d, parameters);
         return;
     }

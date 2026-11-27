@@ -147,6 +147,28 @@ void AddNVNStorageBuffers(IR::Program& program, const HostTranslateInfo& host_in
     }
 }
 
+void AddPointerWindowStorageBuffers(IR::Program& program, const HostTranslateInfo& host_info) {
+    if (!program.info.uses_pointer_windows) {
+        return;
+    }
+    auto& descs{program.info.storage_buffers_descriptors};
+    if (descs.size() + NUM_POINTER_WINDOWS > Optimization::StorageBufferLimit(host_info)) {
+        LOG_WARNING(Shader, "No storage buffer bindings left for pointer windows");
+        program.info.uses_pointer_windows = false;
+        program.info.pointer_table_descriptors.clear();
+        return;
+    }
+    for (u32 window = 0; window < NUM_POINTER_WINDOWS; ++window) {
+        descs.push_back({
+            .cbuf_index = 0,
+            .cbuf_offset = window,
+            .count = 1,
+            .is_written = program.info.stores_global_memory,
+            .is_pointer_window = true,
+        });
+    }
+}
+
 using IR::IsLegacyAttribute; //rescoped to attribute.h to make it visible in load_store_attribute.cpp IPA
 
 std::map<IR::Attribute, IR::Attribute> GenerateLegacyToGenericMappings(
@@ -550,6 +572,7 @@ IR::Program TranslateProgram(ObjectPool<IR::Inst>& inst_pool, ObjectPool<IR::Blo
 
     CollectInterpolationInfo(env, program);
     AddNVNStorageBuffers(program, normalized_host_info);
+    AddPointerWindowStorageBuffers(program, normalized_host_info);
     Optimization::LimitSampledTextureArrays(program, normalized_host_info);
     return program;
 }

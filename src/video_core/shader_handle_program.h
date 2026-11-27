@@ -191,8 +191,8 @@ template <typename Descriptor>
     }
     const u32 offset = desc.cbuf_offset + (index << desc.size_shift);
     return std::ranges::any_of(info.storage_buffers_descriptors, [&](const auto& storage) {
-        return storage.cbuf_index == desc.cbuf_index && offset >= storage.cbuf_offset &&
-               offset - storage.cbuf_offset < sizeof(u64);
+        return !storage.is_pointer_window && storage.cbuf_index == desc.cbuf_index &&
+               offset >= storage.cbuf_offset && offset - storage.cbuf_offset < sizeof(u64);
     });
 }
 

@@ -180,8 +180,23 @@ struct StorageBufferDescriptor {
     u32 indirect_offset{~0U};
     /// How far the program's stores reach past the pointer (unbounded unless proven)
     StorageWriteExtent write_extent{};
+    /// A host-chosen window of the memory reached through pointers loaded from a pointer table
+    /// (PointerTableDescriptor); cbuf_offset is the window index.
+    bool is_pointer_window{};
 
     auto operator<=>(const StorageBufferDescriptor&) const = default;
+};
+
+/// Storage buffer windows bound for global memory reached through loaded pointers
+constexpr size_t NUM_POINTER_WINDOWS = 4;
+
+/// A storage buffer, described in a constant buffer, whose contents are pointers that global
+/// memory instructions dereference
+struct PointerTableDescriptor {
+    u32 cbuf_index;
+    u32 cbuf_offset;
+
+    auto operator<=>(const PointerTableDescriptor&) const = default;
 };
 
 struct TextureBufferDescriptor {
@@ -397,6 +412,10 @@ struct Info {
     std::array<u32, MAX_CBUFS> constant_buffer_used_sizes{};
     u32 nvn_buffer_base{};
     std::bitset<16> nvn_buffer_used{};
+
+    /// Pointer tables of global accesses that stay global, searched through pointer windows
+    boost::container::static_vector<PointerTableDescriptor, 4> pointer_table_descriptors;
+    bool uses_pointer_windows{};
 
     bool requires_layer_emulation{};
     IR::Attribute emulated_layer{};

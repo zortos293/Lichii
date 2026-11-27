@@ -23,6 +23,7 @@
 #include "video_core/buffer_cache/command_arena.h"
 #include "video_core/engines/maxwell_3d.h"
 #include "video_core/evicted_pointer_slots.h"
+#include "video_core/pointer_windows.h"
 #include "video_core/renderer_vulkan/fixed_pipeline_state.h"
 #include "video_core/renderer_vulkan/pipeline_build.h"
 #include "video_core/renderer_vulkan/pipeline_helper.h"
@@ -280,6 +281,10 @@ public:
         std::optional<f32> down_factor{};
         bool is_rescaling{};
         std::optional<bool> bind_pipeline{};
+        /// The pointer windows' push constant words, for pipelines that search them
+        std::optional<std::array<u32, Shader::Backend::SPIRV::NUM_POINTER_WINDOW_WORDS *
+                                          Shader::NUM_POINTER_WINDOWS>>
+            pointer_windows{};
     };
 
     void RecordPreparedBinding(const PreparedBinding& binding);
@@ -306,7 +311,7 @@ public:
     /// Whether the pipeline's draws can go unlent: built, no texture or image buffers. Task and
     /// mesh pipelines need EDEN_NX2_RENDER_UNLEND_MESH and native mesh shaders (the rasterizer).
     [[nodiscard]] bool CanUnlend() const noexcept {
-        return !unlend_texel_buffers && IsBuilt() && !Failed();
+        return !unlend_texel_buffers && !uses_pointer_windows && IsBuilt() && !Failed();
     }
     /// The back: the buffer bindings and the handle values, from the engine set by SetEngine.
     void ConfigureBack(bool is_indexed, BackHalf& half, GuestDescriptorQueue& capture);
@@ -478,6 +483,13 @@ private:
 
     void RecordBinding(const PreparedBinding& binding, const DescriptorUpdateEntry* descriptor_data);
 
+    /// Reads the pointer tables of the pipeline's stages and groups what they point to into the
+    /// pointer windows
+    void UpdatePointerWindows();
+
+    /// Binds a stage's storage buffers, the pointer windows among them
+    void BindStorageBuffers(size_t stage);
+
     void MakePipeline(VkRenderPass render_pass);
 
     void Validate();
@@ -498,6 +510,12 @@ private:
     std::array<bool, NUM_STAGES> stages_present{};
     bool unlend_texel_buffers{};
     bool unlend_images{};
+    bool uses_pointer_windows{};
+    VideoCommon::PointerWindows pointer_windows{};
+    std::array<u32, Shader::Backend::SPIRV::NUM_POINTER_WINDOW_WORDS * Shader::NUM_POINTER_WINDOWS>
+        pointer_window_words{};
+    std::vector<u64> pointer_table_scratch;
+    std::vector<GPUVAddr> pointer_scratch;
 
     std::vector<GraphicsPipelineCacheKey> transition_keys;
     std::vector<GraphicsPipeline*> transitions;

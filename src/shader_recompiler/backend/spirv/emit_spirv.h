@@ -20,17 +20,26 @@ constexpr u32 NUM_IMAGE_SCALING_WORDS = 2;
 constexpr u32 NUM_TEXTURE_AND_IMAGE_SCALING_WORDS =
     NUM_TEXTURE_SCALING_WORDS + NUM_IMAGE_SCALING_WORDS;
 
+/// Words per pointer window: base address low, base address high, size, padding
+constexpr u32 NUM_POINTER_WINDOW_WORDS = 4;
+
 struct RescalingLayout {
     alignas(16) std::array<u32, NUM_TEXTURE_SCALING_WORDS> rescaling_textures;
     alignas(16) std::array<u32, NUM_IMAGE_SCALING_WORDS> rescaling_images;
     u32 down_factor;
+    /// Storage buffer windows over global memory reached through loaded pointers
+    alignas(16) std::array<u32, NUM_POINTER_WINDOW_WORDS * NUM_POINTER_WINDOWS> pointer_windows;
 };
 struct RenderAreaLayout {
     std::array<f32, 4> render_area;
 };
 constexpr u32 RESCALING_LAYOUT_WORDS_OFFSET = offsetof(RescalingLayout, rescaling_textures);
 constexpr u32 RESCALING_LAYOUT_DOWN_FACTOR_OFFSET = offsetof(RescalingLayout, down_factor);
+constexpr u32 POINTER_WINDOWS_LAYOUT_OFFSET = offsetof(RescalingLayout, pointer_windows);
 constexpr u32 RENDERAREA_LAYOUT_OFFSET = offsetof(RenderAreaLayout, render_area);
+// The pipeline layouts' push constant range holds both layouts: within the 128 bytes every Vulkan
+// device supports
+static_assert(sizeof(RescalingLayout) + sizeof(RenderAreaLayout) <= 128);
 
 [[nodiscard]] std::vector<u32> EmitSPIRV(const Profile& profile, const RuntimeInfo& runtime_info, IR::Program& program, Bindings& bindings);
 [[nodiscard]] inline std::vector<u32> EmitSPIRV(const Profile& profile, IR::Program& program) {

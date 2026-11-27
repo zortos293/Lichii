@@ -57,6 +57,7 @@ Users report game bugs with Lichii logs (`eden_log.txt`, `eden_log.txt.old`). Ea
 | 0400FF500E34A001 | Xenoblade Chronicles: Definitive Edition - Nintendo Switch 2 Edition |
 | 0400E95004038001 | Xenoblade Chronicles 2 - Nintendo Switch 2 Edition |
 | 0400453019AA8001 | Xenoblade Chronicles X: Definitive Edition - Nintendo Switch 2 Edition |
+| 0100D2F00D5C0000 | Nintendo Switch Sports (Switch 1) |
 | 04003DC020784000 | Shine Post: Be Your Idol! |
 
 Add ids here when a report identifies a new game.

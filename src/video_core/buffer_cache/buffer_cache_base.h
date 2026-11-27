@@ -390,6 +390,12 @@ public:
     bool BindGraphicsStorageBuffer(size_t stage, size_t ssbo_index, u32 cbuf_index, u32 cbuf_offset,
                                    bool is_written, u32 indirect_offset = ~0U);
 
+    /// Binds a host-chosen range of GPU memory as a graphics storage buffer. Returns the bound
+    /// address (aligned down for the host) and size, or zeros when nothing was bound.
+    std::pair<GPUVAddr, u32> BindGraphicsStorageBufferRange(size_t stage, size_t ssbo_index,
+                                                            GPUVAddr gpu_addr, u32 size,
+                                                            bool is_written);
+
     void UnbindGraphicsTextureBuffers(size_t stage);
 
     void BindGraphicsTextureBuffer(size_t stage, size_t tbo_index, GPUVAddr gpu_addr, u32 size,

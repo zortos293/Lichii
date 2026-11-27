@@ -131,6 +131,7 @@ add_library(video_core STATIC
     memory_manager.cpp
     memory_manager.h
     page_filter.h
+    pointer_windows.h
     native_lowering.cpp
     native_lowering.h
     native_qmd.h

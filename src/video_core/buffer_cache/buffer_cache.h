@@ -2047,6 +2047,48 @@ bool BufferCache<P>::BindGraphicsStorageBuffer(size_t stage, size_t ssbo_index, 
 }
 
 template <class P>
+std::pair<GPUVAddr, u32> BufferCache<P>::BindGraphicsStorageBufferRange(size_t stage,
+                                                                        size_t ssbo_index,
+                                                                        GPUVAddr gpu_addr,
+                                                                        u32 size,
+                                                                        bool is_written) {
+    if (stage >= NUM_STAGES || ssbo_index >= NUM_STORAGE_BUFFERS) {
+        LOG_ERROR(HW_GPU, "Invalid graphics storage buffer binding: stage {}, index {}", stage,
+                  ssbo_index);
+        return {0, 0};
+    }
+    const bool already_enabled =
+        ((channel_state->enabled_storage_buffers[stage] >> ssbo_index) & 1U) != 0;
+    if constexpr (requires { runtime.ShouldLimitDynamicStorageBuffers(); }) {
+        if (runtime.ShouldLimitDynamicStorageBuffers() && !already_enabled) {
+            if (channel_state->total_graphics_storage_buffers >=
+                runtime.GetMaxDynamicStorageBuffers()) {
+                return {0, 0};
+            }
+            ++channel_state->total_graphics_storage_buffers;
+        }
+    }
+    channel_state->enabled_storage_buffers[stage] |= u64{1} << ssbo_index;
+    const u32 alignment = runtime.GetStorageBufferAlignment();
+    const GPUVAddr aligned_gpu_addr = Common::AlignDown(gpu_addr, alignment);
+    const u32 aligned_size = static_cast<u32>(gpu_addr - aligned_gpu_addr) + size;
+    const std::optional<DAddr> device_addr =
+        size != 0 ? gpu_memory->GpuToCpuAddress(aligned_gpu_addr) : std::nullopt;
+    if (!device_addr) {
+        channel_state->storage_buffers[stage][ssbo_index] = NULL_BINDING;
+        return {0, 0};
+    }
+    channel_state->written_storage_buffers[stage] |= u64{is_written ? 1U : 0U} << ssbo_index;
+    channel_state->storage_buffers[stage][ssbo_index] = Binding{
+        .device_addr = *device_addr,
+        .gpu_addr = aligned_gpu_addr,
+        .size = aligned_size,
+        .buffer_id = BufferId{},
+    };
+    return {aligned_gpu_addr, aligned_size};
+}
+
+template <class P>
 void BufferCache<P>::UnbindGraphicsTextureBuffers(size_t stage) {
     if (channel_state->enabled_texture_buffers[stage] == 0) {
         return;

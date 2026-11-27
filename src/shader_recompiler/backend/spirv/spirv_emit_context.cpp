@@ -504,9 +504,10 @@ EmitContext::EmitContext(const Profile& profile_, const RuntimeInfo& runtime_inf
     DefineImages(program.info, image_binding, bindings.image_scaling_index);
     DefineAttributeMemAccess(program.info);
     DefineWriteStorageCasLoopFunction(program.info);
+    // The global memory functions read the pointer windows from the rescaling push constants
+    DefineRescalingInput(program.info);
     DefineGlobalMemoryFunctions(program);
     DefineMeshEmulationOutput();
-    DefineRescalingInput(program.info);
     DefineRenderArea(program.info);
 }
 
@@ -1113,6 +1114,11 @@ void EmitContext::DefineGlobalMemoryFunctions(const IR::Program& program) {
     if (!info.uses_global_memory || !profile.support_int64) {
         return;
     }
+    // Whether the global memory functions search a storage buffer descriptor
+    const auto searched{[&info](const StorageBufferDescriptor& descriptor) {
+        return info.native_global_bounds || descriptor.is_pointer_window ||
+               UsesNvnStorageDescriptor(info, descriptor);
+    }};
     // The storage buffer descriptors the functions being defined route among, and those functions
     std::span<const u32> buffers;
     GlobalMemoryFunctions* functions{};
@@ -1202,13 +1208,27 @@ void EmitContext::DefineGlobalMemoryFunctions(const IR::Program& program) {
         } else {
             std::vector<Id> holds;
             for (const u32 index : buffers) {
-                if (!UsesNvnStorageDescriptor(info, info.storage_buffers_descriptors[index])) {
+                const auto& ssbo{info.storage_buffers_descriptors[index]};
+                Id ssbo_addr;
+                Id size;
+                if (ssbo.is_pointer_window) {
+                    // Base (aligned by the host) and size of the window, in the push constants
+                    const Id window{OpLoad(
+                        U32[NUM_POINTER_WINDOW_WORDS],
+                        OpAccessChain(TypePointer(spv::StorageClass::PushConstant,
+                                                  U32[NUM_POINTER_WINDOW_WORDS]),
+                                      rescaling_push_constants,
+                                      Const(pointer_windows_member_index),
+                                      Const(ssbo.cbuf_offset)))};
+                    ssbo_addr = OpBitcast(U64, OpVectorShuffle(U32[2], window, window, 0U, 1U));
+                    size = OpCompositeExtract(U32[1], window, 2U);
+                } else if (UsesNvnStorageDescriptor(info, ssbo)) {
+                    ssbo_addr = base_address(index);
+                    size = EmitGetCbufU32(*this, IR::Value{ssbo.cbuf_index},
+                                          IR::Value{ssbo.cbuf_offset + 8});
+                } else {
                     continue;
                 }
-                const auto& ssbo{info.storage_buffers_descriptors[index]};
-                const Id ssbo_addr{base_address(index)};
-                const Id size{EmitGetCbufU32(*this, IR::Value{ssbo.cbuf_index},
-                                             IR::Value{ssbo.cbuf_offset + 8})};
                 const Id ssbo_end{OpIAdd(U64, ssbo_addr, OpUConvert(U64, size))};
                 holds.push_back(OpLogicalAnd(U1, OpUGreaterThanEqual(U1, addr, ssbo_addr),
                                              OpULessThan(U1, addr, ssbo_end)));
@@ -1239,8 +1259,7 @@ void EmitContext::DefineGlobalMemoryFunctions(const IR::Program& program) {
         Route found_route;
         if (select && ValidId(search_function)) {
             for (const u32 index : buffers) {
-                if (info.native_global_bounds ||
-                    UsesNvnStorageDescriptor(info, info.storage_buffers_descriptors[index])) {
+                if (searched(info.storage_buffers_descriptors[index])) {
                     found_route.candidates.push_back(index);
                 }
             }
@@ -1524,10 +1543,7 @@ void EmitContext::DefineGlobalMemoryFunctions(const IR::Program& program) {
         OpFunctionEnd();
         return func_id;
     }};
-    const bool routes_atomics{
-        std::ranges::any_of(info.storage_buffers_descriptors, [&](const auto& descriptor) {
-            return info.native_global_bounds || UsesNvnStorageDescriptor(info, descriptor);
-        })};
+    const bool routes_atomics{std::ranges::any_of(info.storage_buffers_descriptors, searched)};
     std::vector<u32> every_buffer(info.storage_buffers_descriptors.size());
     std::iota(every_buffer.begin(), every_buffer.end(), 0U);
     for (size_t route = 0; route < global_memory_functions.size(); ++route) {
@@ -1584,18 +1600,18 @@ void EmitContext::DefineGlobalMemoryFunctions(const IR::Program& program) {
 }
 
 void EmitContext::DefineRescalingInput(const Info& info) {
-    if (!info.uses_rescaling_uniform) {
+    if (!info.uses_rescaling_uniform && !info.uses_pointer_windows) {
         return;
     }
     if (profile.unified_descriptor_binding) {
-        DefineRescalingInputPushConstant();
-    } else {
+        DefineRescalingInputPushConstant(info);
+    } else if (info.uses_rescaling_uniform) {
         DefineRescalingInputUniformConstant();
     }
 }
 
-void EmitContext::DefineRescalingInputPushConstant() {
-    boost::container::static_vector<Id, 3> members{};
+void EmitContext::DefineRescalingInputPushConstant(const Info& info) {
+    boost::container::static_vector<Id, 4> members{};
     u32 member_index{0};
 
     rescaling_textures_type = TypeArray(U32[1], Const(4u));
@@ -1611,6 +1627,14 @@ void EmitContext::DefineRescalingInputPushConstant() {
     if (stage != Stage::Compute) {
         members.push_back(F32[1]);
         rescaling_downfactor_member_index = member_index++;
+    }
+    if (info.uses_pointer_windows) {
+        const Id windows_type{TypeArray(U32[NUM_POINTER_WINDOW_WORDS],
+                                        Const(static_cast<u32>(NUM_POINTER_WINDOWS)))};
+        Decorate(windows_type, spv::Decoration::ArrayStride,
+                 NUM_POINTER_WINDOW_WORDS * static_cast<u32>(sizeof(u32)));
+        members.push_back(windows_type);
+        pointer_windows_member_index = member_index++;
     }
     const Id push_constant_struct{TypeStruct(std::span(members.data(), members.size()))};
     Decorate(push_constant_struct, spv::Decoration::Block);
@@ -1629,6 +1653,11 @@ void EmitContext::DefineRescalingInputPushConstant() {
                        spv::Decoration::Offset,
                        static_cast<u32>(offsetof(RescalingLayout, down_factor)));
         MemberName(push_constant_struct, rescaling_downfactor_member_index, "down_factor");
+    }
+    if (info.uses_pointer_windows) {
+        MemberDecorate(push_constant_struct, pointer_windows_member_index, spv::Decoration::Offset,
+                       POINTER_WINDOWS_LAYOUT_OFFSET);
+        MemberName(push_constant_struct, pointer_windows_member_index, "pointer_windows");
     }
     const Id pointer_type{TypePointer(spv::StorageClass::PushConstant, push_constant_struct)};
     rescaling_push_constants = AddGlobalVariable(pointer_type, spv::StorageClass::PushConstant);
