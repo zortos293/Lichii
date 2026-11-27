@@ -12,6 +12,7 @@ using Common::HostRam;
 using Common::HostRamFromUdev;
 using Common::InstalledRamFromUdev;
 using Common::IsBelowSwitch2RamMinimum;
+using Common::SetsMallocTunables;
 
 TEST_CASE("Switch 2 RAM minimum: installed RAM below 16 GiB", "[common]") {
     CHECK(IsBelowSwitch2RamMinimum(HostRam{8_GiB, true}));
@@ -90,4 +91,12 @@ TEST_CASE("Host RAM takes udev's total only when it covers managed memory", "[co
     const HostRam none = HostRamFromUdev("", 15_GiB);
     CHECK(none.bytes == 15_GiB);
     CHECK_FALSE(none.installed);
+}
+
+TEST_CASE("Malloc tunables are spotted in GLIBC_TUNABLES", "[common]") {
+    CHECK(SetsMallocTunables("glibc.malloc.arena_max=2"));
+    CHECK(SetsMallocTunables("glibc.rtld.optional_static_tls=4096:glibc.malloc.trim_threshold=0"));
+    CHECK_FALSE(SetsMallocTunables(""));
+    CHECK_FALSE(SetsMallocTunables("glibc.rtld.optional_static_tls=4096"));
+    CHECK_FALSE(SetsMallocTunables("glibc.pthread.rseq=0:glibc.mem.tagging=0"));
 }

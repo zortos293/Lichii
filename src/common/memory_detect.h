@@ -73,4 +73,24 @@ struct ProcessMemoryUsage {
 /// IsLowOnMemory for this host, read again at most once a second.
 [[nodiscard]] bool IsHostLowOnMemory();
 
+/// Whether a GLIBC_TUNABLES value sets any of glibc's malloc tunables.
+[[nodiscard]] bool SetsMallocTunables(std::string_view glibc_tunables);
+
+/// With glibc and up to 18 GiB of RAM, holds malloc to 4 arenas. glibc otherwise gives a thread
+/// that finds its arena busy a new one, up to 8 per core, and memory freed in an arena only serves
+/// the threads using it. Leaves malloc alone when MALLOC_ARENA_MAX or GLIBC_TUNABLES tunes it.
+/// Call before starting threads.
+void LimitHeapArenas();
+
+/// This process's private memory, resident and swapped out, before and after a trim, in bytes.
+struct HeapTrimResult {
+    u64 before{};
+    u64 after{};
+};
+
+/// Hands the free memory malloc holds back to the host (glibc's malloc_trim). By itself glibc only
+/// returns free memory at the top of an arena. It holds each arena's lock while it works, so call
+/// it from a thread that can wait. Zero on other hosts.
+HeapTrimResult TrimHeap();
+
 } // namespace Common

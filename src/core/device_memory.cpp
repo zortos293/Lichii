@@ -1,15 +1,18 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 
-#ifdef _WIN32
-#include <algorithm>
+#if defined(_WIN32) || defined(__linux__)
 #include <chrono>
 #include <condition_variable>
 #include <mutex>
-#include <new>
 
 #include "common/logging.h"
 #include "common/memory_detect.h"
 #include "common/thread.h"
+#endif
+
+#ifdef _WIN32
+#include <algorithm>
+#include <new>
 #endif
 
 #ifdef HAS_NCE
@@ -33,6 +36,9 @@ DeviceMemory::DeviceMemory()
              VirtualReserveSize} {
 #ifdef _WIN32
     zero_trim_thread = std::jthread{[this](std::stop_token stop) { TrimZeroPages(stop); }};
+#endif
+#if defined(__linux__) && defined(__GLIBC__)
+    heap_trim_thread = std::jthread{[this](std::stop_token stop) { TrimHeap(stop); }};
 #endif
 }
 
@@ -129,6 +135,40 @@ void DeviceMemory::TrimZeroPages(std::stop_token stop) {
                  "Trimmed {} MiB of all-zero guest pages out of {} MiB resident in {} ms; the kernel "
                  "zero-filled {} MiB so far",
                  trimmed >> 20, resident >> 20, ms, Common::HostMemory::ZeroFilledBytes() >> 20);
+    }
+}
+#endif
+
+#if defined(__linux__) && defined(__GLIBC__)
+// glibc keeps memory freed in the middle of an arena (pipeline and shader builds leave plenty)
+// until malloc_trim, and on a host short of RAM it gets swapped out instead, which with zram still
+// takes RAM. The thread keeps normal priority: a pass holds each arena's lock, and starving it
+// would stall the threads allocating from that arena.
+void DeviceMemory::TrimHeap(std::stop_token stop) {
+    using namespace std::chrono_literals;
+    Common::SetCurrentThreadName("HeapTrim");
+    std::mutex mutex;
+    std::condition_variable_any wake;
+    while (true) {
+        {
+            std::unique_lock lock{mutex};
+            wake.wait_for(lock, stop, 30s, [] { return false; });
+        }
+        if (stop.stop_requested()) {
+            return;
+        }
+        const auto start = std::chrono::steady_clock::now();
+        const Common::HeapTrimResult result = Common::TrimHeap();
+        const auto ms = std::chrono::duration_cast<std::chrono::milliseconds>(
+                            std::chrono::steady_clock::now() - start)
+                            .count();
+        const u64 trimmed = result.before > result.after ? result.before - result.after : 0;
+        if (trimmed >= (u64{32} << 20) || ms >= 20) {
+            LOG_INFO(HW_Memory,
+                     "Handed {} MiB of freed heap memory back to the host in {} ms; private memory "
+                     "is {} MiB",
+                     trimmed >> 20, ms, result.after >> 20);
+        }
     }
 }
 #endif

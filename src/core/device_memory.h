@@ -5,7 +5,7 @@
 
 #pragma once
 
-#ifdef _WIN32
+#if defined(_WIN32) || defined(__linux__)
 #include <thread>
 #endif
 
@@ -79,6 +79,13 @@ private:
     void TrimZeroPages(std::stop_token stop);
 
     std::jthread zero_trim_thread;
+#endif
+
+#if defined(__linux__) && defined(__GLIBC__)
+private:
+    void TrimHeap(std::stop_token stop);
+
+    std::jthread heap_trim_thread;
 #endif
 };
 

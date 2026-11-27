@@ -27,6 +27,10 @@
 #include <string_view>
 #endif
 
+#if defined(__linux__) && defined(__GLIBC__)
+#include <malloc.h>
+#endif
+
 #include <atomic>
 #include <chrono>
 #include <cstdio>
@@ -272,6 +276,60 @@ bool IsHostLowOnMemory() {
                   std::memory_order_relaxed);
     }
     return low.load(std::memory_order_relaxed);
+}
+
+bool SetsMallocTunables(std::string_view glibc_tunables) {
+    return glibc_tunables.starts_with("glibc.malloc.") ||
+           glibc_tunables.find(":glibc.malloc.") != std::string_view::npos;
+}
+
+void LimitHeapArenas() {
+#if defined(__linux__) && defined(__GLIBC__)
+    using namespace Common::Literals;
+    if (GetMemInfo().TotalPhysicalMemory > 18_GiB) {
+        return;
+    }
+    const char* const tunables = std::getenv("GLIBC_TUNABLES");
+    if (std::getenv("MALLOC_ARENA_MAX") != nullptr ||
+        (tunables != nullptr && SetsMallocTunables(tunables))) {
+        return;
+    }
+    mallopt(M_ARENA_MAX, 4);
+#endif
+}
+
+#if defined(__linux__) && defined(__GLIBC__)
+namespace {
+// stdio rather than a stream: this runs on the trim thread when RAM is short, and a stream's
+// buffer allocation throwing there would terminate the emulator. A failed read counts as 0.
+u64 PrivateMemory() {
+    std::FILE* const file = std::fopen("/proc/self/status", "r");
+    if (file == nullptr) {
+        return 0;
+    }
+    u64 kib = 0;
+    char line[128];
+    while (std::fgets(line, sizeof(line), file) != nullptr) {
+        unsigned long long value = 0;
+        if (std::sscanf(line, "RssAnon: %llu kB", &value) == 1 ||
+            std::sscanf(line, "VmSwap: %llu kB", &value) == 1) {
+            kib += value;
+        }
+    }
+    std::fclose(file);
+    return kib * 1024;
+}
+} // namespace
+#endif
+
+HeapTrimResult TrimHeap() {
+    HeapTrimResult result;
+#if defined(__linux__) && defined(__GLIBC__)
+    result.before = PrivateMemory();
+    malloc_trim(0);
+    result.after = PrivateMemory();
+#endif
+    return result;
 }
 
 } // namespace Common

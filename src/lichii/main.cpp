@@ -10,6 +10,7 @@
 
 #include "common/fs/fs_paths.h"
 #include "common/fs/path_util.h"
+#include "common/memory_detect.h"
 #include "nx2_switches.h"
 #include "startup_checks.h"
 
@@ -117,6 +118,7 @@ static void SetUpNvidiaShaderDiskCache() {
 #endif
 
 int main(int argc, char* argv[]) {
+    Common::LimitHeapArenas();
 #if defined(__unix__) && !defined(__APPLE__) && !defined(__ANDROID__)
     SetUpNvidiaShaderDiskCache();
 #endif
