@@ -41,6 +41,10 @@
 #include "video_core/vulkan_common/vulkan_memory_allocator.h"
 #include "video_core/vulkan_common/vulkan_wrapper.h"
 
+#ifdef LICHII_NVN_DIRECT
+struct nvn_direct_frame;
+#endif
+
 namespace Core {
 class System;
 }
@@ -97,6 +101,10 @@ public:
                               const Device& device_, MemoryAllocator& memory_allocator_,
                               StateTracker& state_tracker_, Scheduler& scheduler_);
     ~RasterizerVulkan() override;
+
+    [[nodiscard]] const PipelineCache& GetPipelineCache() const noexcept {
+        return pipeline_cache;
+    }
 
     void Draw(bool is_indexed, u32 instance_count) override;
 
@@ -202,8 +210,18 @@ public:
     std::optional<FramebufferTextureInfo> AccelerateDisplay(const Tegra::FramebufferConfig& config,
                                                             VAddr framebuffer_addr,
                                                             u32 pixel_stride);
+#ifdef LICHII_NVN_DIRECT
+    /// NVN2 direct mode: the replay's frame the composite in progress shows (RendererVulkan
+    /// takes it once per composite), nullptr outside one.
+    void SetDirectDisplayFrame(const nvn_direct_frame* frame) {
+        direct_display_frame = frame;
+    }
+#endif
 
 private:
+#ifdef LICHII_NVN_DIRECT
+    const nvn_direct_frame* direct_display_frame{};
+#endif
     static constexpr const u64 NEEDS_D24[] = {
         0x01006A800016E000ULL, // SSBU
         0x0100E95004038000ULL, // XC2

@@ -45,6 +45,9 @@ struct TextureDefinition {
     u32 count;
     bool is_multisample;
     bool is_integer;
+    /// Read from the pools: id is the texture pool's array of image_type, pointer_type points to
+    /// one of its elements (EmitContext::pool_samplers holds the samplers)
+    bool is_pool{};
 };
 
 struct TextureBufferDefinition {
@@ -66,6 +69,9 @@ struct ImageDefinition {
     Id pointer_type;
     u32 count;
     bool is_integer;
+    /// Read from the image pool: id is the pool's array of image_type, pointer_type points to one
+    /// of its elements
+    bool is_pool{};
 };
 
 struct UniformDefinitions {
@@ -299,6 +305,9 @@ public:
     std::vector<ImageBufferDefinition> image_buffers;
     std::vector<TextureDefinition> textures;
     std::vector<ImageDefinition> images;
+    /// The sampler pool's array and a pointer to one of its elements (pool textures only)
+    Id pool_samplers{};
+    Id pool_sampler_pointer{};
 
     Id workgroup_id{};
     Id local_invocation_id{};
@@ -346,6 +355,7 @@ public:
 
     Id render_area_push_constant{};
     u32 render_are_member_index{};
+    u32 render_area_offset{};
 
     Id local_memory{};
 
@@ -457,6 +467,9 @@ public:
     /// Mesh emulation (RuntimeInfo::mesh_as_compute): the output storage buffer and the
     /// pointer type to one of its words.
     Id mesh_output_buffer{};
+    Id loop_guard_buffer{}; ///< RuntimeInfo::loop_guard_binding's buffer
+    Id loop_guard_word_pointer{};
+    Id loop_guard_flag{}; ///< private u32: a loop's safety check ended a loop in this invocation
     Id mesh_output_u32{};
     // With a task program: its payload, offset and argument buffers (RuntimeInfo), and the mesh
     // workgroup's index within its task (what the mesh program reads at input address 0).
@@ -510,13 +523,15 @@ private:
     void DefineStorageBuffers(const Info& info, u32& binding);
     void DefineTextureBuffers(const Info& info, u32& binding);
     void DefineImageBuffers(const Info& info, u32& binding);
-    void DefineTextures(const Info& info, u32& binding, u32& scaling_index);
-    void DefineImages(const Info& info, u32& binding, u32& scaling_index);
+    void DefineTextures(const Info& info, u32& binding, u32& scaling_index,
+                        const Bindings& bindings);
+    void DefineImages(const Info& info, u32& binding, u32& scaling_index,
+                      const Bindings& bindings);
     void DefineAttributeMemAccess(const Info& info);
     void DefineWriteStorageCasLoopFunction(const Info& info);
     void DefineGlobalMemoryFunctions(const IR::Program& program);
     void DefineRescalingInput(const Info& info);
-    void DefineRescalingInputPushConstant();
+    void DefineRescalingInputPushConstant(const Info& info);
     void DefineRescalingInputUniformConstant();
     void DefineRenderArea(const Info& info);
 
@@ -524,6 +539,7 @@ private:
     void DefineOutputs(const IR::Program& program);
     void DefineMesh(const IR::Program& program);
     void DefineMeshEmulationOutput();
+    void DefineLoopGuard(const IR::Program& program);
 };
 
 } // namespace Shader::Backend::SPIRV

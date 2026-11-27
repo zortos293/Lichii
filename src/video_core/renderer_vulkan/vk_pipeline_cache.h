@@ -153,6 +153,14 @@ public:
         return dynamic_features;
     }
 
+    /// What this device's translations are made for (NVN2 direct mode translates with them too)
+    [[nodiscard]] const Shader::Profile& GetProfile() const noexcept {
+        return profile;
+    }
+    [[nodiscard]] const Shader::HostTranslateInfo& GetHostInfo() const noexcept {
+        return host_info;
+    }
+
     void TickFrame();
 
     [[nodiscard]] ComputePipeline* CurrentComputePipeline(u64& native_key);

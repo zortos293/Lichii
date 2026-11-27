@@ -8,13 +8,10 @@
 #include <chrono>
 #include <cstdio>
 #include <cstring>
-#include <thread>
-#include <vector>
-
-#ifdef __linux__
 #include <fstream>
 #include <string>
-#endif
+#include <thread>
+#include <vector>
 
 #include <catch2/catch_test_macros.hpp>
 
@@ -254,6 +251,97 @@ TEST_CASE("HostMemory: Partial middle unmap check bindings", "[common]") {
     REQUIRE(ptr[0x3fff] == 12);
 }
 
+/// The protection of the page at address: "rw", "r-" or "--".
+static std::string PageProtection([[maybe_unused]] const volatile u8* address) {
+#ifdef _WIN32
+    MEMORY_BASIC_INFORMATION info{};
+    REQUIRE(VirtualQuery(const_cast<const u8*>(address), &info, sizeof(info)) == sizeof(info));
+    switch (info.Protect) {
+    case PAGE_READWRITE:
+        return "rw";
+    case PAGE_READONLY:
+        return "r-";
+    case PAGE_NOACCESS:
+        return "--";
+    default:
+        return std::to_string(info.Protect);
+    }
+#elif defined(__linux__)
+    const auto page = reinterpret_cast<uintptr_t>(address);
+    std::ifstream maps{"/proc/self/maps"};
+    std::string line;
+    while (std::getline(maps, line)) {
+        unsigned long long begin{};
+        unsigned long long end{};
+        char perms[5]{};
+        if (std::sscanf(line.c_str(), "%llx-%llx %4s", &begin, &end, perms) == 3 &&
+            page >= begin && page < end) {
+            return std::string(perms, 2);
+        }
+    }
+    return "unmapped";
+#else
+    return {};
+#endif
+}
+
+TEST_CASE("HostMemory: Partial unmaps keep the protection of the rest of the view", "[common]") {
+    if (!MapsSingleGuestPages()) {
+        SKIP("Host pages larger than 4 KiB only map whole host pages");
+    }
+#if !defined(_WIN32) && !defined(__linux__)
+    SKIP("Page protection is read with VirtualQuery or from /proc/self/maps");
+#endif
+    constexpr size_t Page = 0x1000;
+    HostMemory mem(BACKING_SIZE, VIRTUAL_SIZE);
+    REQUIRE(mem.BackingBasePointer() != nullptr);
+    volatile u8* const base = mem.VirtualBasePointer();
+
+    // Four pages, the first and the last read-only, the middle two unmapped.
+    mem.Map(0x40000, 0x10000, 4 * Page, PERMS, HEAP);
+    base[0x40000] = 1;
+    base[0x43000] = 4;
+    mem.Protect(0x40000, Page, Common::MemoryPermission::Read);
+    mem.Protect(0x43000, Page, Common::MemoryPermission::Read);
+    mem.Unmap(0x41000, 2 * Page, HEAP);
+    REQUIRE(PageProtection(base + 0x40000) == "r-");
+    REQUIRE(PageProtection(base + 0x43000) == "r-");
+    REQUIRE(base[0x40000] == 1);
+    REQUIRE(base[0x43000] == 4);
+    // The kept pages can be made writable again.
+    REQUIRE(mem.Protect(0x40000, Page, PERMS));
+    REQUIRE(mem.Protect(0x43000, Page, PERMS));
+    REQUIRE(PageProtection(base + 0x40000) == "rw");
+    REQUIRE(PageProtection(base + 0x43000) == "rw");
+    base[0x43000] = 0x44;
+    REQUIRE(mem.BackingBasePointer()[0x13000] == 0x44);
+
+    // Mixed runs on both sides: read-only, read-write | unmapped | inaccessible, read-only.
+    mem.Map(0x80000, 0x20000, 6 * Page, PERMS, HEAP);
+    for (size_t page = 0; page < 6; ++page) {
+        base[0x80000 + page * Page] = static_cast<u8>(0x10 + page);
+    }
+    mem.Protect(0x80000, Page, Common::MemoryPermission::Read);
+    mem.Protect(0x84000, Page, Common::MemoryPermission{});
+    mem.Protect(0x85000, Page, Common::MemoryPermission::Read);
+    mem.Unmap(0x82000, 2 * Page, HEAP);
+    REQUIRE(PageProtection(base + 0x80000) == "r-");
+    REQUIRE(PageProtection(base + 0x81000) == "rw");
+    REQUIRE(PageProtection(base + 0x84000) == "--");
+    REQUIRE(PageProtection(base + 0x85000) == "r-");
+    REQUIRE(base[0x80000] == 0x10);
+    REQUIRE(base[0x81000] == 0x11);
+    REQUIRE(mem.BackingBasePointer()[0x24000] == 0x14);
+    REQUIRE(base[0x85000] == 0x15);
+    base[0x81000] = 0x21;
+    REQUIRE(mem.BackingBasePointer()[0x21000] == 0x21);
+    REQUIRE(mem.Protect(0x84000, 2 * Page, PERMS));
+    REQUIRE(PageProtection(base + 0x84000) == "rw");
+    REQUIRE(PageProtection(base + 0x85000) == "rw");
+    base[0x84000] = 0x24;
+    REQUIRE(mem.BackingBasePointer()[0x24000] == 0x24);
+}
+
 TEST_CASE("HostMemory: Partial sparse middle unmap and check bindings", "[common]") {
     if (!MapsSingleGuestPages()) {
         SKIP("Host pages larger than 4 KiB only map whole host pages");
@@ -347,6 +435,38 @@ TEST_CASE("HostMemory: Partial unmap preserves the protections of both kept piec
 #endif
 
 #ifdef _WIN32
+TEST_CASE("HostMemory: Partial unmaps keep the rest of the view readable", "[common]") {
+    if (!MapsSingleGuestPages()) {
+        SKIP("Host pages larger than 4 KiB only map whole host pages");
+    }
+    HostMemory mem(BACKING_SIZE, VIRTUAL_SIZE);
+    constexpr size_t Base = 0x400000;
+    constexpr size_t Size = 0x400000;
+    constexpr size_t Unmaps = 512;
+    mem.Map(Base, 0, Size, PERMS, HEAP);
+    volatile u8* const last = mem.VirtualBasePointer() + Base + Size - 0x1000;
+    *last = 0x5a;
+    std::atomic<bool> started{};
+    std::atomic<bool> done{};
+    u64 wrong = 0;
+    std::thread reader([&] {
+        started = true;
+        while (!done.load(std::memory_order_relaxed)) {
+            wrong += *last != 0x5a;
+        }
+    });
+    while (!started) {
+        std::this_thread::yield();
+    }
+    // Each unmap of the first page left takes the view down and maps back the rest of it.
+    for (size_t page = 0; page < Unmaps; ++page) {
+        mem.Unmap(Base + page * 0x1000, 0x1000, HEAP);
+    }
+    done = true;
+    reader.join();
+    REQUIRE(wrong == 0);
+}
+
 TEST_CASE("HostMemory: Trim zero pages keeps contents", "[common]") {
     constexpr size_t Page = 0x1000;
     HostMemory mem(BACKING_SIZE, VIRTUAL_SIZE);
@@ -498,3 +618,64 @@ TEST_CASE("HostMemory: Protect within a view, across views and over a gap", "[co
     REQUIRE(mem.BackingBasePointer()[0x200000] == 7);
 }
 #endif
+
+TEST_CASE("HostMemory: Backing view maps runs and zero pages of its own", "[common]") {
+    if (!MapsSingleGuestPages()) {
+        SKIP("Host pages larger than 4 KiB only map whole host pages");
+    }
+    HostMemory mem(BACKING_SIZE, VIRTUAL_SIZE);
+    if (mem.VirtualBasePointer() == nullptr) {
+        SKIP("no fastmem");
+    }
+    constexpr size_t Page = 0x1000;
+    u8* const backing = mem.BackingBasePointer();
+    // A hole, two runs out of order in the backing, a hole, the first run's page again, a hole.
+    const HostMemory::BackingRun runs[] = {
+        {.view_offset = 1 * Page, .host_offset = 0x50000, .length = 2 * Page},
+        {.view_offset = 3 * Page, .host_offset = 0x10000, .length = Page},
+        {.view_offset = 5 * Page, .host_offset = 0x50000, .length = Page},
+    };
+    u8* const view = mem.MapBackingView(7 * Page, runs);
+    REQUIRE(view != nullptr);
+
+    backing[0x50000] = 1;
+    backing[0x51000] = 2;
+    backing[0x10000] = 3;
+    REQUIRE(view[1 * Page] == 1);
+    REQUIRE(view[2 * Page] == 2);
+    REQUIRE(view[3 * Page] == 3);
+    REQUIRE(view[5 * Page] == 1);
+
+    view[5 * Page + 8] = 4;
+    REQUIRE(backing[0x50008] == 4);
+    REQUIRE(view[1 * Page + 8] == 4);
+
+    // The holes are zero, writable and shared with nothing.
+    for (size_t hole : {size_t{0}, 4 * Page, 6 * Page}) {
+        REQUIRE(view[hole] == 0);
+        view[hole] = 5;
+    }
+    REQUIRE(view[0] == 5);
+    REQUIRE(view[4 * Page] == 5);
+    REQUIRE(view[6 * Page] == 5);
+    REQUIRE(backing[0] == 0);
+
+    // The view stays when the fastmem view of the same pages goes.
+    mem.Map(0x100000, 0x50000, Page, PERMS, HEAP);
+    mem.Unmap(0x100000, Page, HEAP);
+    REQUIRE(view[1 * Page] == 1);
+
+    mem.UnmapBackingView(view, 7 * Page);
+    REQUIRE(backing[0x50000] == 1);
+
+    // Runs only, and holes only.
+    const HostMemory::BackingRun whole[] = {{.view_offset = 0, .host_offset = 0x10000, .length = Page}};
+    u8* const run_view = mem.MapBackingView(Page, whole);
+    REQUIRE(run_view != nullptr);
+    REQUIRE(run_view[0] == 3);
+    mem.UnmapBackingView(run_view, Page);
+    u8* const zero_view = mem.MapBackingView(2 * Page, {});
+    REQUIRE(zero_view != nullptr);
+    REQUIRE(zero_view[Page] == 0);
+    mem.UnmapBackingView(zero_view, 2 * Page);
+}

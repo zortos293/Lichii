@@ -47,6 +47,7 @@ add_executable(tests
     core/nx2_syncpoint_allocator.cpp
     core/nvdrv_syncpoint_complete.cpp
     core/nx2_fence_action.cpp
+    core/nvn_direct_choice.cpp
     core/nx2_frame_interval.cpp
     core/ldn_lan_protocol.cpp
     core/perf_stats.cpp
@@ -227,6 +228,7 @@ add_executable(tests
     video_core/spirv_builtin_capabilities.cpp
     video_core/spirv_frag_depth_d24.cpp
     video_core/spirv_min_max_denorms.cpp
+    video_core/spirv_float_atomic_add.cpp
     video_core/spirv_nan_safe_min_max.cpp
     video_core/spirv_scalar_constants.cpp
     video_core/spirv_emit_twice.cpp
@@ -372,6 +374,62 @@ target_compile_definitions(tests PRIVATE
     LICHII_TESTS_LOG_DIR="${CMAKE_CURRENT_BINARY_DIR}/test-log")
 
 add_test(NAME tests COMMAND tests)
+
+if (TARGET nvn_direct AND NOT WIN32)
+    set(NVN_DIRECT_DIR ../video_core/nvn_direct)
+    add_executable(nvn_tracking_tests
+        video_core/nvn_tracking.c
+        ${NVN_DIRECT_DIR}/nvn_tracking.c)
+    target_include_directories(nvn_tracking_tests PRIVATE
+        ${NVN_DIRECT_DIR}/bananative/gen
+        ${NVN_DIRECT_DIR}/bananative/dm/gfx/nvn
+        ${NVN_DIRECT_DIR}/bananative/dm/host)
+    set_target_properties(nvn_tracking_tests PROPERTIES C_STANDARD 17 C_EXTENSIONS ON)
+    target_compile_definitions(nvn_tracking_tests PRIVATE __ANDROID__ _GNU_SOURCE)
+    target_link_libraries(nvn_tracking_tests PRIVATE Threads::Threads Vulkan::Headers)
+    add_test(NAME nvn_tracking_tests COMMAND nvn_tracking_tests)
+
+    add_executable(nvn_present_tests
+        video_core/nvn_present.c
+        ${NVN_DIRECT_DIR}/nvn_present.c)
+    target_include_directories(nvn_present_tests PRIVATE
+        ${NVN_DIRECT_DIR}/bananative/shim
+        ${NVN_DIRECT_DIR}/bananative/gen
+        ${NVN_DIRECT_DIR}/bananative/dm/gfx/nvn/include
+        ${NVN_DIRECT_DIR}/bananative/dm/gfx/nvn
+        ${NVN_DIRECT_DIR}/bananative/dm/gfx/vk_android
+        ${NVN_DIRECT_DIR}/bananative/dm/host
+        ${NVN_DIRECT_DIR})
+    set_target_properties(nvn_present_tests PROPERTIES C_STANDARD 17 C_EXTENSIONS ON)
+    target_compile_definitions(nvn_present_tests PRIVATE __ANDROID__ _GNU_SOURCE)
+    # nvn_present.c and the replay functions the test stubs declare each other where they are
+    # used, as the nvn_direct library does (built with -w)
+    target_compile_options(nvn_present_tests PRIVATE -Wno-missing-declarations)
+    target_link_libraries(nvn_present_tests PRIVATE Threads::Threads Vulkan::Headers)
+    add_test(NAME nvn_present_tests COMMAND nvn_present_tests)
+
+    add_executable(nvn_hostseg_tests
+        video_core/nvn_hostseg.c
+        ${NVN_DIRECT_DIR}/bananative/dm/gfx/nvn/nvn_hostseg.c)
+    target_include_directories(nvn_hostseg_tests PRIVATE
+        ${NVN_DIRECT_DIR}/bananative/gen
+        ${NVN_DIRECT_DIR}/bananative/dm/gfx/nvn/include
+        ${NVN_DIRECT_DIR}/bananative/dm/gfx/nvn
+        ${NVN_DIRECT_DIR}/bananative/dm/host)
+    set_target_properties(nvn_hostseg_tests PROPERTIES C_STANDARD 17 C_EXTENSIONS ON)
+    target_compile_definitions(nvn_hostseg_tests PRIVATE __ANDROID__ _GNU_SOURCE)
+    target_link_libraries(nvn_hostseg_tests PRIVATE Threads::Threads)
+    add_test(NAME nvn_hostseg_tests COMMAND nvn_hostseg_tests)
+
+    add_executable(nvn_bind_tests
+        video_core/nvn_bind.c
+        ${NVN_DIRECT_DIR}/bananative/dm/gfx/vk_android/vka_bind.c)
+    target_include_directories(nvn_bind_tests PRIVATE
+        ${NVN_DIRECT_DIR}/bananative/dm/gfx/vk_android
+        ${NVN_DIRECT_DIR})
+    set_target_properties(nvn_bind_tests PROPERTIES C_STANDARD 17 C_EXTENSIONS ON)
+    add_test(NAME nvn_bind_tests COMMAND nvn_bind_tests)
+endif()
 
 if ((HAS_NCE AND LINUX) OR HAS_HYPERVISOR)
     enable_language(ASM)

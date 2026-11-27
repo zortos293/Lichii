@@ -727,6 +727,12 @@ struct Values {
     SwitchableSetting<bool> build_all_cached_shaders{linkage, false, "build_all_cached_shaders",
                                                      Category::RendererAdvanced};
 
+    // Runs the game's NVN calls in the NVN direct renderer (video_core/nvn_direct) instead of
+    // emulating its GPU. Read when a game boots (Core::NvnHook::Install), which falls back to
+    // the GPU emulation for a game the direct renderer cannot run.
+    SwitchableSetting<bool> nvn_direct_renderer{linkage, false, "nvn_direct_renderer",
+                                                Category::RendererAdvanced};
+
     SwitchableSetting<bool> enable_compute_pipelines{linkage, false, "enable_compute_pipelines",
                                                      Category::RendererAdvanced};
 

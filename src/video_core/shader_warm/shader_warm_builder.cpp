@@ -301,6 +301,8 @@ void Write(std::ofstream& out, const T& value) {
     out.write(reinterpret_cast<const char*>(&value), sizeof(T));
 }
 
+constexpr std::string_view NativeWarmFilename = "warm-compute-native.bin";
+
 void WriteHeader(std::ofstream& out) {
     out.write("yuzucach", 8);
     Write(out, WarmCacheVersion);
@@ -324,6 +326,30 @@ void WriteWarmCount(const fs::path& warm_file, u64 entries) {
 
 fs::path ComputeWarmPath(u64 title_id) {
     return TitleDir(title_id) / "warm-compute.bin";
+}
+
+fs::path NativeComputeWarmPath(u64 title_id) {
+    return TitleDir(title_id) / NativeWarmFilename;
+}
+
+std::optional<u32> ReadNativeWarmCount(std::istream& in) {
+    std::array<char, NativeWarmMagic.size()> magic{};
+    u32 count{};
+    u64 size{};
+    if (!in.read(magic.data(), magic.size())
+             .read(reinterpret_cast<char*>(&count), sizeof(count))
+             .read(reinterpret_cast<char*>(&size), sizeof(size)) ||
+        magic != NativeWarmMagic ||
+        size < NativeWarmHeaderSize + u64{count} * (2 * sizeof(u32) + NativeWarmMinControl + 16) ||
+        (count == 0 && size != NativeWarmHeaderSize)) {
+        return std::nullopt;
+    }
+    in.seekg(0, std::ios::end);
+    if (!in || static_cast<u64>(in.tellg()) != size) {
+        return std::nullopt;
+    }
+    in.seekg(NativeWarmHeaderSize);
+    return in ? std::optional{count} : std::nullopt;
 }
 
 fs::path WarmMarkerPath(const fs::path& warm_file) {
@@ -485,10 +511,15 @@ bool SetWarmRequested(const fs::path& warm_file, bool requested) {
     return static_cast<bool>(out);
 }
 
-bool WarmPending(u64 title_id) {
-    const auto file = ComputeWarmPath(title_id);
+bool WarmPending(u64 title_id, bool native) {
+    const auto file = native ? NativeComputeWarmPath(title_id) : ComputeWarmPath(title_id);
     std::error_code ec;
     return !fs::exists(file, ec) || !fs::exists(WarmMarkerPath(file), ec);
+}
+
+bool NativeWarmFilesStale(u64 title_id) {
+    std::ifstream in(NativeComputeWarmPath(title_id), std::ios::binary);
+    return !ReadNativeWarmCount(in).has_value();
 }
 
 void RequestWarmBeforeStart(bool before_start) {
@@ -513,10 +544,15 @@ bool DeleteWarmFiles(u64 title_id, std::string* error) {
     const auto warm = ComputeWarmPath(title_id);
     fs::path tmp = warm;
     tmp += ".tmp";
+    const auto native = NativeComputeWarmPath(title_id);
+    auto native_tmp = native;
+    native_tmp += ".tmp";
     bool ok = true;
     for (const auto& path :
          {warm, WarmMarkerPath(warm), WarmCountPath(warm), WarmProgressPath(warm),
-          WarmRequestPath(warm), tmp, TitleDir(title_id) / "precache-graphics.bin"}) {
+          WarmRequestPath(warm), tmp, native, WarmMarkerPath(native), WarmProgressPath(native),
+          native_tmp,
+          TitleDir(title_id) / "precache-graphics.bin"}) {
         std::error_code ec;
         fs::remove(path, ec);
         if (ec) {
@@ -588,11 +624,17 @@ Result BuildWarmFilesWith(Core::System& system, const fs::path& game_path, u64 t
     const fs::path compute_path = output_dir / "warm-compute.bin";
     fs::path compute_tmp = compute_path;
     compute_tmp += ".tmp";
+    const fs::path native_path = output_dir / NativeWarmFilename;
+    auto native_tmp = native_path;
+    native_tmp += ".tmp";
     std::ofstream compute_out;
+    std::ofstream native_out;
     const auto fail = [&](std::string error) {
         compute_out.close();
+        native_out.close();
         std::error_code ignored;
         fs::remove(compute_tmp, ignored);
+        fs::remove(native_tmp, ignored);
         result.ok = false;
         result.error = std::move(error);
         LOG_WARNING(Render_Vulkan, "Shader precache build for {:016x} failed: {}", title_id,
@@ -672,11 +714,26 @@ Result BuildWarmFilesWith(Core::System& system, const fs::path& game_path, u64 t
              archives.size(), packs.size(), dictionaries.Count());
 
     compute_out.open(compute_tmp, std::ios::binary | std::ios::trunc);
-    if (!compute_out) {
+#ifdef LICHII_NVN_DIRECT
+    constexpr bool build_native = true;
+#else
+    constexpr bool build_native = false;
+#endif
+    if (build_native) {
+        native_out.open(native_tmp, std::ios::binary | std::ios::trunc);
+    }
+    if (!compute_out || (build_native && !native_out)) {
         return fail("Cannot write to " + Common::FS::PathToUTF8String(output_dir));
     }
     WriteHeader(compute_out);
+    u32 native_count = 0;
+    if (build_native) {
+        native_out.write(NativeWarmMagic.data(), NativeWarmMagic.size());
+        Write(native_out, native_count);
+        Write(native_out, u64{0});
+    }
 
+    std::unordered_set<PairHash, PairHasher> native_identities;
     std::unordered_set<PairHash, PairHasher> compute_identities;
     std::unordered_set<std::string> compute_keys;
     size_t archive_errors = 0;
@@ -714,6 +771,18 @@ Result BuildWarmFilesWith(Core::System& system, const fs::path& game_path, u64 t
     const auto on_record = [&](const ShaderRecord& record) {
         if (record.stage != ProgramStage::Compute) {
             return;
+        }
+        const auto allocation = build_native ? NativeComputeAllocation(record) : std::span<const u8>{};
+        if (!allocation.empty()) {
+            const auto control = record.control.first(
+                std::min<size_t>(record.control.size(), NativeWarmMaxControl));
+            if (native_identities.insert(PairHash{Hash128(allocation), Hash128(control)}).second) {
+                Write(native_out, static_cast<u32>(allocation.size()));
+                Write(native_out, static_cast<u32>(control.size()));
+                native_out.write(reinterpret_cast<const char*>(allocation.data()), allocation.size());
+                native_out.write(reinterpret_cast<const char*>(control.data()), control.size());
+                ++native_count;
+            }
         }
         if (!compute_identities.insert(PairHash{Hash128(record.code), Hash128(record.control)})
                  .second) {
@@ -812,8 +881,16 @@ Result BuildWarmFilesWith(Core::System& system, const fs::path& game_path, u64 t
     converter.reset();
 
     report(StageWriting, 0, 1);
+    u64 native_size{};
+    if (build_native) {
+        native_size = static_cast<u64>(native_out.tellp());
+        native_out.seekp(NativeWarmMagic.size());
+        Write(native_out, native_count);
+        Write(native_out, native_size);
+        native_out.close();
+    }
     compute_out.close();
-    if (!compute_out) {
+    if (!compute_out || (build_native && !native_out)) {
         return fail("Writing the precache file failed");
     }
     // A new file: the count of the old one no longer applies, and its marker only when the
@@ -826,6 +903,15 @@ Result BuildWarmFilesWith(Core::System& system, const fs::path& game_path, u64 t
         return fail("Cannot replace " + Common::FS::PathToUTF8String(compute_path));
     }
     WriteWarmCount(compute_path, result.compute_programs);
+    if (build_native) {
+        DropStaleWarmMarker(native_path, native_tmp);
+        fs::rename(native_tmp, native_path, ec);
+        if (ec) {
+            return fail("Cannot replace " + Common::FS::PathToUTF8String(native_path));
+        }
+        LOG_INFO(Render_NvnDirect, "Shader precache build for {:016x}: {} native compute entries, {} bytes",
+                 title_id, native_count, native_size);
+    }
     report(StageWriting, 1, 1);
     result.ok = true;
     LOG_INFO(Render_Vulkan,

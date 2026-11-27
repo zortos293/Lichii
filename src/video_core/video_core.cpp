@@ -4,6 +4,7 @@
 // SPDX-FileCopyrightText: 2014 Citra Emulator Project
 // SPDX-License-Identifier: GPL-2.0-or-later
 
+#include <cstdlib>
 #include <memory>
 
 #include "common/logging.h"
@@ -12,6 +13,7 @@
 #include "core/frontend/emu_window.h"
 #include "core/frontend/graphics_context.h"
 #include "core/gpu_dirty_memory_manager.h"
+#include "core/nvn_hook.h"
 #include "video_core/host1x/gpu_device_memory_manager.h"
 #include "video_core/host1x/host1x.h"
 #include "video_core/nx2_async_readback.h"
@@ -61,6 +63,18 @@ namespace VideoCore {
 /// @brief Creates an emulated GPU instance using the given system context.
 void CreateGPU(std::optional<Tegra::GPU>& gpu, Core::Frontend::EmuWindow& emu_window, Core::System& system) {
     Settings::UpdateRescalingInfo();
+    // Lab: EDEN_NX2_RESOLUTION=<resolution_setup value> (3 = 1x, 2 = 3/4x, 1 = 1/2x, ...) in place
+    // of the configured one for this run only: the setting itself is left alone, so it is not
+    // written back into a shared config.
+    if (const char* setup = std::getenv("EDEN_NX2_RESOLUTION"); setup != nullptr && *setup != '\0') {
+        const int value = std::atoi(setup);
+        if (value >= static_cast<int>(Settings::ResolutionSetup::Res1_4X) &&
+            value <= static_cast<int>(Settings::ResolutionSetup::Res8X)) {
+            Settings::TranslateResolutionInfo(static_cast<Settings::ResolutionSetup>(value),
+                                              Settings::values.resolution_info);
+            LOG_INFO(Render, "EDEN_NX2_RESOLUTION: resolution scale of setup {}", value);
+        }
+    }
     VideoCommon::Nx2Profile::ReadSwitch();
     VideoCommon::StutterTrace::StartSession();
     Tegra::Nx2CmdPageDiag::ReadSwitch();
@@ -77,16 +91,25 @@ void CreateGPU(std::optional<Tegra::GPU>& gpu, Core::Frontend::EmuWindow& emu_wi
     const auto nvdec_value = Settings::values.nvdec_emulation.GetValue();
     const bool use_nvdec = nvdec_value != Settings::NvdecEmulation::Off;
     const bool use_async = Settings::values.use_asynchronous_gpu_emulation.GetValue();
-    gpu.emplace(system, use_async, use_nvdec);
-    auto context = emu_window.CreateSharedContext();
-    auto scope = context->Acquire();
-    try {
-        auto renderer = CreateRenderer(system, emu_window, *gpu, std::move(context));
-        gpu->BindRenderer(std::move(renderer));
-    } catch (const std::runtime_error& exception) {
-        scope.Cancel();
-        LOG_ERROR(HW_GPU, "Failed to initialize GPU: {}", exception.what());
-        gpu.reset();
+    for (;;) {
+        gpu.emplace(system, use_async, use_nvdec);
+        auto context = emu_window.CreateSharedContext();
+        auto scope = context->Acquire();
+        try {
+            auto renderer = CreateRenderer(system, emu_window, *gpu, std::move(context));
+            gpu->BindRenderer(std::move(renderer));
+            return;
+        } catch (const std::runtime_error& exception) {
+            scope.Cancel();
+            gpu.reset();
+            if (!Core::NvnHook::DirectMode()) {
+                LOG_ERROR(HW_GPU, "Failed to initialize GPU: {}", exception.what());
+                return;
+            }
+            LOG_WARNING(HW_GPU, "Direct NVN Vulkan setup failed; retrying with GPU emulation: {}",
+                        exception.what());
+            Core::NvnHook::DirectFailed();
+        }
     }
 }
 

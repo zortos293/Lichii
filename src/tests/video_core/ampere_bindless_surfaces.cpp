@@ -1,9 +1,19 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 
 #include <array>
+#include <optional>
+#include <span>
+#include <vector>
 #include <catch2/catch_test_macros.hpp>
 
+#include "shader_recompiler/backend/bindings.h"
+#include "shader_recompiler/backend/spirv/emit_spirv.h"
 #include "shader_recompiler/frontend/ampere/lower_to_maxwell.h"
+#include "shader_recompiler/frontend/maxwell/control_flow.h"
+#include "shader_recompiler/frontend/maxwell/translate_program.h"
+#include "shader_recompiler/host_translate_info.h"
+#include "shader_recompiler/profile.h"
+#include "shader_recompiler/runtime_info.h"
 
 namespace {
 using Shader::Ampere::Instruction;
@@ -127,5 +137,111 @@ TEST_CASE("Ampere bindless surfaces reject unsupported fields", "[video_core][am
     REQUIRE(LowerToMaxwell(std::array{uniform, Exit}));
     store_scratch.words[1] = (Store.words[1] & ~0xffU) | 214U;
     REQUIRE_FALSE(LowerToMaxwell(std::array{uniform, store_scratch, Exit}));
+}
+
+// A compute program of Maxwell words at 0x50, a scheduling word before every three
+class SurfaceEnvironment final : public Shader::Environment {
+public:
+    std::span<const u64> code;
+
+    SurfaceEnvironment() { stage = Shader::Stage::Compute; }
+
+    u64 ReadInstruction(u32 address) override {
+        for (u32 index = 0; index < code.size(); ++index) {
+            if (address == 0x50 + index * 8 + ((index + 1) / 3) * 8) {
+                return code[index];
+            }
+        }
+        FAIL("Read outside the surface fixture at " << address);
+        return 0;
+    }
+    u32 ReadCbufValue(u32, u32) override { return 0; }
+    Shader::TextureType ReadTextureType(u32) override { return Shader::TextureType::Color2D; }
+    Shader::TexturePixelFormat ReadTexturePixelFormat(u32) override {
+        return Shader::TexturePixelFormat::A8B8G8R8_UNORM;
+    }
+    bool IsTexturePixelFormatInteger(u32) override { return false; }
+    u32 ReadViewportTransformState() override { return 1; }
+    u32 TextureBoundBuffer() const override { return 2; }
+    u32 LocalMemorySize() const override { return 0; }
+    u32 SharedMemorySize() const override { return 0; }
+    std::array<u32, 3> WorkgroupSize() const override { return {32, 1, 1}; }
+    bool HasHLEMacroState() const override { return false; }
+    bool HasNativeInstructions() const override { return true; }
+    std::optional<Shader::ReplaceConstant> GetReplaceConstBuffer(u32, u32) override {
+        return std::nullopt;
+    }
+    void Dump(u64, u64) override {}
+};
+
+// Whether the SPIR-V decorates one variable with descriptor set `set` and binding `binding`
+bool DecoratesSetBinding(std::span<const u32> spirv, u32 set, u32 binding) {
+    std::vector<u32> in_set, at_binding;
+    for (size_t at = 5; at < spirv.size();) {
+        const u32 count{spirv[at] >> 16};
+        if (count == 0) {
+            break;
+        }
+        if ((spirv[at] & 0xffff) == 71 /* OpDecorate */ && count >= 4) {
+            if (spirv[at + 2] == 34 /* DescriptorSet */ && spirv[at + 3] == set) {
+                in_set.push_back(spirv[at + 1]);
+            }
+            if (spirv[at + 2] == 33 /* Binding */ && spirv[at + 3] == binding) {
+                at_binding.push_back(spirv[at + 1]);
+            }
+        }
+        at += count;
+    }
+    for (const u32 id : in_set) {
+        for (const u32 other : at_binding) {
+            if (id == other) {
+                return true;
+            }
+        }
+    }
+    return false;
+}
+
+// Duskbloods' compute shaders store through a handle no constant buffer word holds (the
+// register-handle SUST.P above): with pool textures (NVN direct mode) the image is read from the
+// image pool by the handle's texture ID, with no handle program to evaluate per dispatch.
+TEST_CASE("Ampere register-handle surface stores read the image pool", "[video_core][ampere]") {
+    const auto lowered = LowerToMaxwell(std::array{Store, Exit});
+    INFO(lowered.error);
+    REQUIRE(lowered);
+    // S2R R0, SR_TID.X: the handle (R0) comes from no constant buffer
+    std::vector<u64> code{0xf0c8000002170000ULL};
+    code.insert(code.end(), lowered.instructions.begin(), lowered.instructions.end());
+    SurfaceEnvironment env;
+    env.code = code;
+    Shader::ObjectPool<Shader::Maxwell::Flow::Block> flow_pool;
+    Shader::Maxwell::Flow::CFG cfg{env, flow_pool, Shader::Maxwell::Location{0x50}};
+    Shader::ObjectPool<Shader::IR::Inst> inst_pool;
+    Shader::ObjectPool<Shader::IR::Block> block_pool;
+    Shader::HostTranslateInfo host;
+    host.support_pool_textures = true;
+    host.ApplyDescriptorLimitPolicy();
+    auto program{Shader::Maxwell::TranslateProgram(inst_pool, block_pool, env, cfg, host)};
+    REQUIRE(program.info.image_descriptors.size() == 1);
+    const Shader::ImageDescriptor& image{program.info.image_descriptors.front()};
+    CHECK(image.is_pool);
+    CHECK(image.is_written);
+    CHECK_FALSE(image.is_integer); // formatted (.P): float
+    CHECK(image.handle_program == ~0U);
+    CHECK(program.info.handle_programs.empty());
+
+    Shader::Profile profile{};
+    profile.supported_spirv = 0x00010500;
+    profile.support_typeless_image_loads = true;
+    Shader::RuntimeInfo runtime_info{};
+    Shader::Backend::Bindings bindings{};
+    bindings.pool_set = 1;
+    bindings.pool_texture_binding = 0;
+    bindings.pool_sampler_binding = 1;
+    bindings.pool_image_binding = 2;
+    const auto spirv{Shader::Backend::SPIRV::EmitSPIRV(profile, runtime_info, program, bindings)};
+    REQUIRE(spirv.size() > 5);
+    CHECK(DecoratesSetBinding(spirv, 1, 2));
+    CHECK_FALSE(DecoratesSetBinding(spirv, 0, 0));
 }
 } // namespace

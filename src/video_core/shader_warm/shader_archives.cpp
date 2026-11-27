@@ -18,6 +18,7 @@
 #include <zstd_errors.h>
 
 #include "video_core/shader_warm/shader_archives.h"
+#include "video_core/shader_warm/warm_records.h"
 
 namespace VideoCommon::ShaderWarm {
 namespace {
@@ -85,11 +86,7 @@ bool IsEffectSet(std::string_view name) {
     return false;
 }
 
-struct Record {
-    ProgramStage stage;
-    Bytes code;
-    Bytes control;
-};
+using Record = ShaderRecord;
 
 // ---------------------------------------------------------------------------------------------
 // Decompressors
@@ -752,7 +749,7 @@ std::vector<Record> ParseBahs(Bytes data) {
             }
             records.push_back({info->stage, code, control});
         } else if (info->stage == ProgramStage::Compute) {
-            records.push_back({info->stage, code, control});
+            records.push_back({info->stage, code, control, Extent(data, code_offset, allocation)});
         } else {
             const auto item = GraphicsRecord(code, control);
             if (item.stage != info->stage) {
@@ -779,7 +776,7 @@ struct Walker {
     /// Passes every record to the caller's record callback.
     void Emit(const std::vector<Record>& records) const {
         for (const auto& record : records) {
-            on_record(ShaderRecord{record.stage, record.code, record.control});
+            on_record(record);
         }
     }
 
@@ -855,6 +852,23 @@ struct Walker {
 };
 
 } // Anonymous namespace
+
+std::span<const u8> NativeComputeAllocation(const ShaderRecord& record) {
+    const auto control = record.control;
+    if (record.stage != ProgramStage::Compute || control.size() < NativeWarmMinControl ||
+        !IsControlMagic(control) || control[0x56] != 5) {
+        return {};
+    }
+    const auto code = record.code_allocation.empty() ? record.code : record.code_allocation;
+    const u32 instructions = Le<u32>(control, 0x38);
+    const u32 constants = Le<u32>(control, 0x40);
+    const u32 allocation = Le<u32>(control, 0x44);
+    if (instructions == 0 || instructions % 16 != 0 || instructions > constants ||
+        constants > allocation || allocation > code.size() || allocation >= NativeWarmMaxCode) {
+        return {};
+    }
+    return code.first(allocation);
+}
 
 ZstdDictionaries::ZstdDictionaries() = default;
 

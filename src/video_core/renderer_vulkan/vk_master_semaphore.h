@@ -54,14 +54,17 @@ public:
     /// Waits for a tick to be hit on the GPU
     void Wait(u64 tick);
 
-    /// Submits the device graphics queue, updating the tick as necessary
+    /// Submits the device graphics queue, updating the tick as necessary. wait_timeline: a
+    /// timeline semaphore the submission also waits for at wait_value (with timeline semaphores
+    /// only: NVN direct, which needs them, is the one user).
     VkResult SubmitQueue(vk::CommandBuffer& cmdbuf, vk::CommandBuffer& upload_cmdbuf,
-                         VkSemaphore signal_semaphore, VkSemaphore wait_semaphore, u64 host_tick);
+                         VkSemaphore signal_semaphore, VkSemaphore wait_semaphore,
+                         VkSemaphore wait_timeline, u64 wait_value, u64 host_tick);
 
 private:
     VkResult SubmitQueueTimeline(vk::CommandBuffer& cmdbuf, vk::CommandBuffer& upload_cmdbuf,
                                  VkSemaphore signal_semaphore, VkSemaphore wait_semaphore,
-                                 u64 host_tick);
+                                 VkSemaphore wait_timeline, u64 wait_value, u64 host_tick);
     VkResult SubmitQueueFence(vk::CommandBuffer& cmdbuf, vk::CommandBuffer& upload_cmdbuf,
                               VkSemaphore signal_semaphore, VkSemaphore wait_semaphore,
                               u64 host_tick);

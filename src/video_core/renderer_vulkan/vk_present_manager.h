@@ -45,6 +45,7 @@ struct Frame {
     vk::Semaphore render_ready;
     vk::Fence present_done;
     bool storage_capable{};
+    bool replay_image{};
     /// Time the present thread leaves before presenting the next frame. Frame generation sets it
     /// on generated frames, so they share the screen time evenly with the real ones.
     std::chrono::nanoseconds present_spacing{};
@@ -188,6 +189,7 @@ private:
     };
     const bool present_wait;
     u64 last_present_id{}; ///< Ids are given only to presents the display paces (HostVsync)
+    bool accepted_replay_image{};
     std::atomic<u64> completed_present_id{}; ///< Newest present waited for, shown or not
     /// Newest present that reached the display, or whose swapchain is gone
     std::atomic<u64> shown_present_id{};

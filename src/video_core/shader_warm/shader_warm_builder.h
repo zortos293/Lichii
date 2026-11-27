@@ -6,6 +6,7 @@
 #include <cstddef>
 #include <filesystem>
 #include <functional>
+#include <iosfwd>
 #include <optional>
 #include <stop_token>
 #include <string>
@@ -24,6 +25,10 @@ namespace VideoCommon::ShaderWarm {
 /// (<shader dir>/<title id>/warm-compute.bin). It holds the compute programs found in the game
 /// files, in pipeline cache format with no recorded reads.
 std::filesystem::path ComputeWarmPath(u64 title_id);
+
+/// Raw NVN2 compute programs found by the same scan, for the NVN Direct renderer.
+std::filesystem::path NativeComputeWarmPath(u64 title_id);
+std::optional<u32> ReadNativeWarmCount(std::istream& in);
 
 /// "Already precached" marker of a precache file (same folder, extension .done), written by the
 /// emulator after the precache ran to the end. A matching marker skips the precache at boot.
@@ -112,7 +117,8 @@ bool SetWarmRequested(const std::filesystem::path& warm_file, bool requested);
 /// True when the title's precache has never finished: no precache file yet, or no marker next
 /// to it. A marker that no longer matches (new driver) is not seen here: the emulator checks that
 /// at boot.
-bool WarmPending(u64 title_id);
+bool WarmPending(u64 title_id, bool native = false);
+bool NativeWarmFilesStale(u64 title_id);
 
 /// Whether this boot precaches before the game starts: Always, Ask when the frontend asked and
 /// the user agreed (`asked`), or a game whose shaders the user asked to precompile

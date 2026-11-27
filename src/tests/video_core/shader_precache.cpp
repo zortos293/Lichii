@@ -8,6 +8,7 @@
 #include <fstream>
 #include <functional>
 #include <span>
+#include <sstream>
 #include <stop_token>
 #include <string>
 #include <unordered_set>
@@ -284,6 +285,70 @@ TEST_CASE("ShaderPrecache: a BNSH file gives each stage's code and control", "[v
     REQUIRE(control->shared_memory == 1024);
     REQUIRE(control->local_memory == 256);
     REQUIRE_FALSE(ShaderWarm::ReadComputeControl(std::span{controls[1]}.first(107)).has_value());
+}
+
+TEST_CASE("ShaderPrecache: native corpus validates its version and extent", "[video_core]") {
+    std::vector<u8> data(ShaderWarm::NativeWarmHeaderSize + 212);
+    std::memcpy(data.data(), ShaderWarm::NativeWarmMagic.data(), ShaderWarm::NativeWarmMagic.size());
+    const auto count_offset = ShaderWarm::NativeWarmMagic.size();
+    Put<u32>(data, count_offset, 1);
+    Put<u64>(data, count_offset + sizeof(u32), data.size());
+    const auto read = [&] {
+        std::istringstream input(std::string(reinterpret_cast<const char*>(data.data()), data.size()));
+        return ShaderWarm::ReadNativeWarmCount(input);
+    };
+    CHECK(read() == 1);
+    ++data[7];
+    CHECK_FALSE(read().has_value());
+    --data[7];
+    data.pop_back();
+    CHECK_FALSE(read().has_value());
+}
+
+TEST_CASE("ShaderPrecache: native BAHS compute keeps the inline constants", "[video_core]") {
+    constexpr size_t table = 0x170;
+    constexpr size_t descriptor = table + 24;
+    constexpr size_t control = descriptor + 16;
+    constexpr size_t control_size = 0xd0;
+    constexpr size_t pool = 0x280;
+    std::vector<u8> data(pool + 64);
+    std::memcpy(data.data(), "BAHS", 4);
+    Put<u32>(data, 4, 11);
+    Put<u32>(data, 8, static_cast<u32>(data.size()));
+    Put<u32>(data, 12, 5);
+    Put<u32>(data, 20, 0x20);
+    Put<u32>(data, 24, 64);
+    Put<u32>(data, 28, pool);
+    Put<u32>(data, table, control + control_size - table);
+    Put<u32>(data, table + 4, 1);
+    Put<u32>(data, table + 8, 32 + control_size);
+    Put<u32>(data, table + 12, 3);
+    Put<u32>(data, table + 20, 16 + control_size);
+    Put<u32>(data, descriptor + 8, control_size);
+    Put<s32>(data, descriptor + 12, control - descriptor);
+    Put<u32>(data, control, 0x98761234);
+    Put<u32>(data, control + 4, 0xc9);
+    Put<u32>(data, control + 0x38, 16);
+    Put<u32>(data, control + 0x40, 32);
+    Put<u32>(data, control + 0x44, 64);
+    data[control + 0x56] = 5;
+    data[pool + 63] = 0xab;
+
+    size_t records{};
+    ShaderWarm::WalkArchive(data, "Compute.bahs", nullptr, [&](const ShaderWarm::ShaderRecord& r) {
+        ++records;
+        REQUIRE(r.code.size() == 16);
+        const auto native = ShaderWarm::NativeComputeAllocation(r);
+        REQUIRE(native.size() == 64);
+        CHECK(native.back() == 0xab);
+        auto truncated = r;
+        truncated.code_allocation = native.first(63);
+        CHECK(ShaderWarm::NativeComputeAllocation(truncated).empty());
+        truncated = r;
+        truncated.control = r.control.first(ShaderWarm::NativeWarmMinControl - 1);
+        CHECK(ShaderWarm::NativeComputeAllocation(truncated).empty());
+    }, [](const std::string&) {});
+    CHECK(records == 1);
 }
 
 TEST_CASE("ShaderPrecache: a BNSH file whose layout does not check out is refused",

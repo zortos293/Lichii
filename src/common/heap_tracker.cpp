@@ -101,7 +101,7 @@ void HeapTracker::Unmap(size_t virtual_offset, size_t size, bool is_separate_hea
     m_buffer.Unmap(virtual_offset, size, false);
 }
 
-void HeapTracker::Protect(size_t virtual_offset, size_t size, MemoryPermission perm) {
+bool HeapTracker::Protect(size_t virtual_offset, size_t size, MemoryPermission perm) {
     // Ensure no rebuild occurs while reprotecting.
     std::shared_lock lk{m_rebuild_lock};
 
@@ -111,6 +111,8 @@ void HeapTracker::Protect(size_t virtual_offset, size_t size, MemoryPermission p
     // Declare tracking variables.
     const VAddr end = virtual_offset + size;
     VAddr cur = virtual_offset;
+    // Mappings that are not resident get their permission bits when they are mapped.
+    bool protected_all = true;
 
     while (cur < end) {
         VAddr next = cur;
@@ -148,13 +150,14 @@ void HeapTracker::Protect(size_t virtual_offset, size_t size, MemoryPermission p
         // Clamp to end.
         next = (std::min)(next, end);
         // Reprotect, if we need to.
-        if (should_protect) {
-            m_buffer.Protect(cur, next - cur, perm);
+        if (should_protect && !m_buffer.Protect(cur, next - cur, perm)) {
+            protected_all = false;
         }
 
         // Advance.
         cur = next;
     }
+    return protected_all;
 }
 
 bool HeapTracker::DeferredMapSeparateHeap(u8* fault_address) {

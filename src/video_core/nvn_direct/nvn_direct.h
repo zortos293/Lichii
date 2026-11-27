@@ -1,0 +1,414 @@
+// SPDX-FileCopyrightText: Copyright 2026 Eden Emulator Project
+// SPDX-License-Identifier: GPL-3.0-or-later
+
+// NVN direct renderer: with the nvn_direct_renderer setting (or
+// EDEN_NX2_NVN_DIRECT=1) a game's NVN calls run in Banana Native's NVN front end (bananative/dm/gfx/nvn/hle_nvn.c: objects and command
+// records in the game's own memory) and its NVN -> Vulkan replay (bananative/dm/gfx/vk_android),
+// not in the game's NVN driver and Lichii's Maxwell GPU path. This is the C interface between
+// them and Lichii; the replay's own headers stay out of C++.
+//
+// One game at a time: a boot starts the front end and the replay (nvn_direct_adopt_device,
+// nvn_direct_init), and the end of the boot takes them down again (nvn_direct_stop,
+// nvn_direct_park, nvn_direct_destroy, nvn_direct_reset), so the next game in the process starts
+// them as the first did.
+
+#pragma once
+
+#include <stddef.h>
+#include <stdint.h>
+
+#include <vulkan/vulkan_core.h>
+
+#ifdef __cplusplus
+extern "C" {
+#endif
+
+/// At most this many queues of the graphics family are handed to the replay (NVIDIA's family has
+/// 16): one per NVN queue the game keeps alive, plus the replay's own work.
+#define NVN_DIRECT_MAX_QUEUES 16
+
+/// One level of one layer of an ASTC texture on a device without ASTC: its
+/// block-linear ASTC blocks as the game stored them, decoded and re-compressed to BC on the GPU
+/// into image's level and layer (VK_IMAGE_LAYOUT_GENERAL, a BC1 or BC3 format).
+typedef struct nvn_direct_astc_level {
+    VkBuffer source;
+    VkDeviceSize source_offset; ///< where the level (of the layer) starts
+    VkDeviceSize source_size;   ///< the level's bytes from there
+    uint32_t width, height;     ///< the level's texels
+    uint32_t block_width, block_height; ///< the ASTC block's texels
+    uint32_t gobs_x;            ///< GOB columns of a row of the level, as laid out
+    uint32_t block_height_log2; ///< GOBs of a block's height at this level (log2)
+    int switch2_gobs;           ///< the Switch 2's order of 16-byte pieces in a GOB
+    VkImage image;
+    uint32_t level, layer;
+    int bc3; ///< BC3 (with alpha), else BC1
+} nvn_direct_astc_level;
+
+/// One NVN program stage for Lichii's shader recompiler: its code and control
+/// section, and the reads of the draw's state translation makes (constant buffer words, the
+/// texture formats of handles, guest memory).
+typedef struct nvn_direct_shader_source {
+    uint32_t nvn_stage;        ///< 0 vertex, 1 fragment, 2 geometry, 3 tess control, 4 tess evaluation, 5 compute, 6 task, 7 mesh
+    /// The control section: NVN2's (NVN_DIRECT_NVN2_CONTROL_SIZE bytes, version 0xc9 at +4) or the
+    /// first NVN_DIRECT_NVN1_CONTROL_SIZE bytes of NVN1's (Maxwell code)
+    const uint8_t* control;
+    const uint8_t* code;       ///< the code area in host memory
+    uint32_t code_size;        ///< bytes of the code area
+    uint64_t code_address;     ///< the code area's guest address
+    uint32_t first_binding;    ///< set 0 binding of the stage's first descriptor
+    uint8_t vertex_input_types[32]; ///< vertex: generic input types, 0 float, 1 signed, 2 unsigned
+    int convert_depth;         ///< pre-rasterization stages: z from -w..w to 0..w (the GL depth mode)
+    uint32_t per_primitive_inputs; ///< fragment after a mesh program: the generic inputs it writes per primitive
+    uint32_t input_topology;   ///< geometry: Shader::InputTopology of the draw's primitives
+    void* context;
+    uint32_t (*read_cbuf)(void* context, uint32_t bank, uint32_t offset);
+    /// 1 = the size bytes at guest address were read into out
+    int (*read_memory)(void* context, uint64_t address, void* out, size_t size);
+    /// The texture a handle names: its NVN target and VkFormat; 0 = no texture
+    int (*texture_info)(void* context, uint32_t handle, uint32_t* nvn_target, int32_t* vk_format);
+} nvn_direct_shader_source;
+
+#define NVN_DIRECT_NVN2_CONTROL_SIZE 0xd8
+#define NVN_DIRECT_NVN1_CONTROL_SIZE 0x760
+
+/// What a descriptor of a translated shader reads (Shader::Info's descriptor lists)
+enum {
+    NVN_DIRECT_DESC_CBUF,           ///< constant buffer cbuf_index
+    NVN_DIRECT_DESC_STORAGE,        ///< storage buffer at the address in c[cbuf_index][cbuf_offset] (or read through it: indirect_offset)
+    NVN_DIRECT_DESC_TEXTURE_BUFFER, ///< texel buffers and textures: the handle in c[cbuf_index][cbuf_offset]
+    NVN_DIRECT_DESC_IMAGE_BUFFER,
+    NVN_DIRECT_DESC_TEXTURE,
+    NVN_DIRECT_DESC_IMAGE,
+    NVN_DIRECT_DESC_LOOP_GUARD,     ///< storage buffer whose first word a loop's safety check sets when it ends a loop (at first_binding + NVN_DIRECT_LOOP_GUARD_SLOT)
+};
+#define NVN_DIRECT_LOOP_GUARD_SLOT 62
+/// The texture and sampler pools a texture with the pool flag is read from, by the texture and sampler
+/// IDs of the handle the shader computes: descriptor set 1, binding 0 (sampled images) and 1 (samplers)
+/// (dmsh_abi_vk.h DMSH_VK_SET_POOL, DMSH_VK_POOL_TEX_BINDING, DMSH_VK_POOL_SAMP_BINDING); an image with
+/// the pool flag, by the texture ID of its handle: binding 2 (storage images: the IDs registered as
+/// images, vka_tex.c bindless_init)
+#define NVN_DIRECT_POOL_SET 1
+#define NVN_DIRECT_POOL_TEXTURE_BINDING 0
+#define NVN_DIRECT_POOL_SAMPLER_BINDING 1
+#define NVN_DIRECT_POOL_IMAGE_BINDING 2
+/// Why the replay's bindings cannot fill a descriptor (nvn_direct_shader_desc::unsupported)
+enum {
+    NVN_DIRECT_UNSUPPORTED_NONE,
+    NVN_DIRECT_UNSUPPORTED_HANDLE_PROGRAM, ///< a texel buffer or image buffer handle computed per draw (Shader::Info::handle_programs; textures and images are read from the pools)
+    NVN_DIRECT_UNSUPPORTED_POINTER_WORD,   ///< a texture whose handle word is a pointer, never a handle: bound as nothing
+    NVN_DIRECT_UNSUPPORTED_ARRAY,          ///< an array of constant buffers, images or image buffers
+    NVN_DIRECT_UNSUPPORTED_BYTE_ADDRESSED, ///< an image addressed in bytes
+};
+typedef struct nvn_direct_shader_desc {
+    uint8_t kind;              ///< NVN_DIRECT_DESC_*
+    uint8_t vk_type;           ///< VkDescriptorType
+    uint16_t binding;
+    uint32_t count;            ///< descriptors of an array (element k: the handle at cbuf_offset + (k << size_shift))
+    uint32_t cbuf_index, cbuf_offset, shift_left;
+    uint32_t secondary_index, secondary_offset, secondary_shift_left; ///< a separate sampler word (has_secondary)
+    uint32_t size_shift;
+    uint8_t has_secondary;
+    uint8_t texture_type;      ///< Shader::TextureType
+    uint8_t is_depth, is_multisample, is_integer, is_written, is_atomic;
+    uint8_t unsupported;       ///< NVN_DIRECT_UNSUPPORTED_*
+    /// A storage buffer whose address is the 64-bit word at its pointer + this offset (a table of
+    /// pointers in memory, Shader::StorageBufferDescriptor::indirect_offset); ~0: the pointer itself
+    uint32_t indirect_offset;
+    /// A texture or image read from the pools by the handle the shader computes (NVN_DIRECT_POOL_SET):
+    /// its binding in the stage's range stays unused
+    uint8_t pool;
+} nvn_direct_shader_desc;
+
+/// A translated stage. Everything is allocated by the translator and given back with shader_free.
+typedef struct nvn_direct_shader {
+    uint32_t* spirv;
+    size_t spirv_words;
+    nvn_direct_shader_desc* descs;
+    uint32_t desc_count;
+    uint32_t local[3], shared; ///< compute, task and mesh: the workgroup; compute: shared memory bytes
+    uint32_t input_mask;       ///< vertex: generic inputs read
+    uint32_t output_mask;      ///< fragment: colour outputs written
+    uint32_t per_primitive_outputs; ///< mesh: generic outputs written per primitive
+    uint32_t ssbo_align;       ///< storage buffers are bound at their address rounded down to this
+    uint32_t uses_render_area; ///< graphics: reads the render area (NVN_DIRECT_RENDER_AREA_OFFSET)
+    char error[256];           ///< why it was not translated
+} nvn_direct_shader;
+
+/// Lichii's Vulkan device as the replay adopts it (vka_dev.c makes none of its own).
+typedef struct nvn_direct_device {
+    PFN_vkGetInstanceProcAddr get_instance_proc_addr;
+    VkInstance instance;
+    VkPhysicalDevice physical;
+    VkDevice device;
+    uint32_t queue_family;
+    /// The replay's queues: the NVN queues take all but the last one, the replay's own work
+    /// (uploads, sparse binds) the last, which is Lichii's graphics queue.
+    uint32_t queue_count;
+    VkQueue queues[NVN_DIRECT_MAX_QUEUES];
+    /// The device extensions Lichii enabled (the replay uses no other).
+    const char* const* extensions;
+    uint32_t extension_count;
+    /// Every queue submission of the replay holds this lock (Lichii: Scheduler::submit_mutex).
+    void (*queue_lock)(void* context);
+    void (*queue_unlock)(void* context);
+    void* queue_context;
+    /// Records the decode of an ASTC level (Lichii's astc_decoder.comp and bc_encoder.comp)
+    /// into cmdbuf, the replay's upload batch; 0 when nothing was recorded. NULL: no GPU
+    /// decode (ASTC textures then have no image unless the device samples ASTC).
+    int (*astc_to_bc)(void* context, VkCommandBuffer cmdbuf, const nvn_direct_astc_level* level);
+    /// Records what astc_to_bc left pending in cmdbuf (small levels it batches); the replay calls
+    /// it before it ends an upload batch. NULL: nothing is left pending.
+    void (*astc_flush)(void* context, VkCommandBuffer cmdbuf);
+    void* astc_context;
+    /// Whether ASTC blocks decode without alpha (Lichii's ASTC::IsOpaque): the image of such a
+    /// texture may be BC1 instead of BC3, half the memory. NULL: always BC3.
+    int (*astc_opaque)(const void* blocks, size_t size);
+    /// The process's device-local memory use and the budget it should stay within (Lichii's
+    /// Device::GetDeviceMemoryUsage / GetDeviceMemoryBudget, EDEN_NX2_VRAM_LIMIT_MIB included):
+    /// the replay lets go of images it can make again when the use nears the budget. NULL or a
+    /// budget of 0: no budget.
+    uint64_t (*memory_usage)(void* context);
+    uint64_t (*memory_budget)(void* context);
+    void* memory_context;
+    /// A pipeline the replay makes off the frame path (one its draws skip meanwhile, or one made
+    /// ahead from an earlier run's keys) starts and is done: Lichii's "building shaders" count
+    /// (VideoCore::ShaderNotify). NULL: not reported.
+    void (*pipeline_building)(void* context);
+    void (*pipeline_built)(void* context);
+    void* pipeline_context;
+    /// Lichii's asynchronous shader building: a draw whose pipeline is not made yet is skipped
+    /// until asynchronous threads have made it, instead of the frame waiting for its compile
+    /// (vka_pso.c async_threads).
+    int async_pipelines;
+    /// Precompile All Shaders: consider the full saved key list instead of the background cap.
+    int prewarm_all_pipelines;
+    /// Whether Lichii's device enabled pipelineCreationCacheControl (Vulkan 1.3 or
+    /// VK_EXT_pipeline_creation_cache_control): only then does the replay ask the pipeline cache
+    /// alone with VK_PIPELINE_CREATE_FAIL_ON_PIPELINE_COMPILE_REQUIRED_BIT (vka_pso.c cache_probe).
+    int pipeline_creation_cache_control;
+    /// Translates a program stage with Lichii's shader recompiler: 1 = done,
+    /// 0 = not (shader->error says why). NULL: no recompiler.
+    int (*shader_translate)(void* context, const nvn_direct_shader_source* source, nvn_direct_shader* shader);
+    void (*shader_free)(void* context, nvn_direct_shader* shader);
+    void* shader_context;
+    /// Lichii's resolution setting (Settings::ResolutionScalingInfo): render targets are made
+    /// scale_up / 2^scale_shift times their size. 1 and 0: no scale.
+    uint32_t scale_up, scale_shift;
+    /// Whether the replay labels its command buffers with the game's debug groups and markers
+    /// (VK_EXT_debug_utils), as Lichii labels its own: a debugging tool attached, or renderer debug.
+    int debug_labels;
+    /// Whether Lichii's GPU work up to tick (its scheduler's tick) is done, without waiting: the
+    /// composites that sampled a presented image (nvn_direct_present_composited). 1 done (a lost
+    /// device too), 0 not yet, -1 not known (the query failed): the replay retries, and stops as
+    /// after a GPU hang when it stays unknown for the hang time. NULL: done.
+    int (*tick_done)(void* context, uint64_t tick);
+    void* tick_context;
+} nvn_direct_device;
+
+/// The push constants of a translated stage that Lichii's RescalingPass changed
+/// (Shader::Backend::SPIRV::RescalingLayout): a bit per texture and per image descriptor that is
+/// scaled, then the pixel stage's down factor. A pipeline's stages are translated one by one, so
+/// each stage's descriptors take bits of their own: pixel and compute from bit 0, vertex and mesh
+/// from 64 (textures) / 32 (images), the other stages from 96 / 48.
+#define NVN_DIRECT_SCALE_PUSH_SIZE 32
+#define NVN_DIRECT_SCALE_IMAGES_OFFSET 16
+#define NVN_DIRECT_SCALE_DOWN_FACTOR_OFFSET 24
+/// The render area a stage reads in place of the console's blit parameters (Lichii's
+/// BlitConstantsPass, RenderAreaLayout: width, height and two unused words) follows them in the
+/// same push-constant range.
+#define NVN_DIRECT_RENDER_AREA_OFFSET NVN_DIRECT_SCALE_PUSH_SIZE
+#define NVN_DIRECT_RENDER_AREA_SIZE 16
+static inline uint32_t nvn_direct_scale_texture_bit(uint32_t nvn_stage) {
+    return nvn_stage == 1 || nvn_stage == 5 ? 0 : nvn_stage == 0 || nvn_stage == 7 ? 64 : 96;
+}
+static inline uint32_t nvn_direct_scale_texture_bits(uint32_t nvn_stage) { return nvn_stage == 1 || nvn_stage == 5 ? 64 : 32; }
+static inline uint32_t nvn_direct_scale_image_bit(uint32_t nvn_stage) {
+    return nvn_stage == 1 || nvn_stage == 5 ? 0 : nvn_stage == 0 || nvn_stage == 7 ? 32 : 48;
+}
+static inline uint32_t nvn_direct_scale_image_bits(uint32_t nvn_stage) { return nvn_stage == 1 || nvn_stage == 5 ? 32 : 16; }
+
+/// Hands Lichii's device to the replay and initialises it (vka_init); returns whether it is up.
+/// Called once a boot, after the device exists. When it fails the boot falls back to GPU emulation
+/// (Core::NvnHook::DirectFailed).
+int nvn_direct_adopt_device(const nvn_direct_device* device);
+
+/// After successful device adoption and before guest execution, try warming the driver cache
+/// from an NVN2 compute archive entry (the complete code allocation and its control section).
+/// Calls may run concurrently; the spans need only remain valid for the call. Join the workers
+/// before stopping the replay. A successful scratch build does not install a live shader or
+/// guarantee a cache hit with the game's dispatch state.
+int nvn_direct_precache_compute(const uint8_t* code, size_t code_size, const uint8_t* control,
+                                size_t control_size);
+
+/// Historical pipeline keys processed / scheduled, or 0 / 0 if none were scheduled.
+/// If all workers leave early, done equals total so callers don't wait for abandoned work.
+void nvn_direct_prewarm_progress(uint32_t* done, uint32_t* total);
+
+/// After joining the precache workers and before stopping the replay, synchronously write the
+/// driver cache. Returns 1 only if the cache file was successfully replaced.
+int nvn_direct_save_precache(void);
+
+/// Returns 1 if the driver cache was created with compatible cache data read from disk this boot.
+int nvn_direct_precache_cache_restored(void);
+
+/// Lichii's guest memory as the replay's memory pools need it.
+typedef struct nvn_direct_memory {
+    /// Maps the pages behind guest [address, address + size) (page aligned) once more, at a host
+    /// range of their own: read-write and never protected, so Vulkan imports them while the
+    /// guest's own view (the fastmem arena) may be write-tracked or partly unmapped. Pages the
+    /// guest has not mapped are zero pages of the view (their bytes in *unmapped). NULL on
+    /// failure. The view is given back with unmap_view.
+    void* (*map_view)(void* context, uint64_t address, uint64_t size, uint64_t* unmapped);
+    /// Takes down a view map_view made, of size bytes.
+    void (*unmap_view)(void* context, void* view, uint64_t size);
+    /// Arms (1) or disarms (0) Lichii's tracking of CPU writes to the pool pages [address,
+    /// address + size): a write to an armed page is reported (nvn_direct_cpu_written). 0 when
+    /// the range is outside the guest's address space or the protection of part of it could not
+    /// be changed; a disarming that failed leaves the range armed.
+    int (*track_pages)(void* context, uint64_t address, uint64_t size, int armed);
+    /// The backing memory of the guest page at address (never write-protected), NULL when the
+    /// guest has not mapped it.
+    void* (*backing)(void* context, uint64_t address);
+    /// The guest range [*address, *address + *size) of a Switch 2 native image handle (nx2:gsv's
+    /// images, as gsv 428 answers it); 0 when the handle names no image with bound memory.
+    int (*native_image)(void* context, uint64_t handle, uint64_t* address, uint64_t* size);
+    void* context;
+    /// The file behind the backing memory (Lichii's memfd), -1 when there is none, and the
+    /// backing view's base: the backing byte at p is the file's byte p - backing_base. Pools are
+    /// imported as udmabufs of it where the driver refuses host-pointer imports of it (amdgpu).
+    int backing_fd;
+    const uint8_t* backing_base;
+#if defined(_WIN32)
+    /// Windows, where there is no file to map: a virtual pool's host range (HostMemory's alias
+    /// regions), inaccessible until alias_map maps backing memory [backing_offset, backing_offset
+    /// + size) into it at address (0 on failure); alias_unmap makes pages inaccessible again and
+    /// alias_release gives the range back.
+    void* (*alias_reserve)(void* context, uint64_t size);
+    int (*alias_map)(void* context, void* address, uint64_t backing_offset, uint64_t size);
+    void (*alias_unmap)(void* context, void* address, uint64_t size);
+    void (*alias_release)(void* context, void* region);
+#endif
+} nvn_direct_memory;
+
+/// Takes the front end's slot table (the names of upstream's names.txt, in its order), the
+/// arena the game's addresses are offsets into (host = arena + address for every address below
+/// guest_size), the guest memory's views and the game's NVN: switch2 = NVN2 (else NVN1), sdk_major
+/// the NintendoSDK major its sdk was built with (-1 unknown, 0 a prerelease SDK 0.x; NVN1 reports
+/// other API versions to SDK 10 and older). Called once a boot, when the game's NVN is taken over.
+void nvn_direct_init(uint8_t* arena, uint64_t guest_size, const nvn_direct_memory* memory,
+                     int switch2, int sdk_major);
+
+/// Lichii saw a CPU write to tracked pool memory [address, address + size) (guest addresses):
+/// textures over it are uploaded again, and its pages are no longer tracked until uploaded.
+void nvn_direct_cpu_written(uint64_t address, uint64_t size);
+
+/// The guest unmaps [address, address + size): the pool memory imported over it is given back
+/// first (after the GPU is done with it), so no import keeps pages the guest reuses. Then the
+/// replay's readers of guest memory wait until nvn_direct_guest_unmap_done, which the caller
+/// calls once the pages are unmapped: a reader that found a page mapped reads it before.
+void nvn_direct_guest_unmap(uint64_t address, uint64_t size);
+void nvn_direct_guest_unmap_done(void);
+int nvn_direct_name_count(void);
+const char* nvn_direct_name(int slot);
+/// Whether the front end implements the slot's function (else the hook's stub answers 0).
+int nvn_direct_implemented(int slot);
+/// Whether the function takes or returns floats (v registers).
+int nvn_direct_float_args(int slot);
+
+#define NVN_DISPATCH_FLOAT_ARGS 1
+#define NVN_DISPATCH_FLOAT_RETURN 2
+
+/// Runs an implemented slot's function with the guest's x0-x7 and v0-v7 (low 64 bits) as its
+/// arguments, and the guest's stack at sp for the arguments past them; returns x0, and v0 through
+/// *v0 for a float result. lr: the guest's return address (the call site the front end records).
+uint64_t nvn_direct_call(int slot, const uint64_t x[8], const uint64_t v[8], uint64_t sp, uint64_t lr,
+                         uint64_t* v0);
+
+/// A guest function the game gave NVN that the calling thread's last NVN call would have called on
+/// the console (the command memory callback), with its x0-x3. A host call made from the JIT cannot
+/// run guest code, so the hook runs it on the same guest thread once the call returns, before the
+/// call's caller goes on.
+typedef struct nvn_direct_guest_call {
+    uint64_t function;
+    uint64_t x[4];
+} nvn_direct_guest_call;
+
+/// 1 and *call when the calling thread's last NVN call owes the game one (it is owed no longer),
+/// else 0.
+int nvn_direct_guest_call_take(nvn_direct_guest_call* call);
+
+/// A presented image as Lichii's presenter shows it. The image stays in
+/// VK_IMAGE_LAYOUT_GENERAL; it is drawn on the replay's queues and finished at fence.
+typedef struct nvn_direct_frame {
+    uint64_t id;
+    VkImage image;
+    VkImageView view; ///< 2D, level 0, layer 0, sampled only, in format
+    VkFormat format;
+    uint32_t width, height;           ///< the texture's size (the crop's units)
+    uint32_t scaled_width, scaled_height; ///< the image's (the render scale's)
+    int32_t crop[4]; ///< x, y, width, height the game shows (nvnWindowSetCrop); width 0: all of it
+    uint32_t interval; ///< the window's present interval (vblanks per frame)
+    uint64_t fence;
+    /// The timeline semaphore and value the replay queue that drew the image signals on the GPU at
+    /// fence (reached once nvn_direct_present_frame gives the frame), for the composite's
+    /// submission to wait on. VK_NULL_HANDLE only without a fence (nothing drew it).
+    VkSemaphore semaphore;
+    uint64_t semaphore_value;
+} nvn_direct_frame;
+
+/// Lichii's framebuffer address of a direct-mode frame: id | NVN_DIRECT_FRAME_TAG (no device
+/// address has that bit).
+#define NVN_DIRECT_FRAME_TAG (1ull << 62)
+
+/// The image of the present the calling thread just made (nvnQueuePresentTexture): waits until
+/// the replay reached it and keeps a reference to it for Lichii. 0: nothing to show (the null
+/// backend, or a texture the replay never drew or uploaded).
+int nvn_direct_present_take(nvn_direct_frame* frame);
+
+/// On Lichii's GPU thread, once per composite: the frame taken with id (the newest one held if it
+/// was let go already), once the GPU finished drawing it (waits, bounded). 0: no usable frame (none
+/// taken, its fence not reached in time, or the replay stopped). From the present until then, and
+/// from a frame given here until nvn_direct_present_composited, the game's acquires of its image
+/// wait.
+int nvn_direct_present_frame(uint64_t id, nvn_direct_frame* frame);
+
+/// On Lichii's GPU thread, after nvn_direct_present_frame gave frame id: the composite that
+/// sampled its image was submitted with tick (nvn_direct_device.tick_done). The game's next
+/// acquire of that image waits until the tick is done.
+void nvn_direct_present_composited(uint64_t id, uint64_t tick);
+
+/// Whether an implemented slot's call would wait for the replay's GPU now:
+/// nvnSyncWait on a fenced sync the GPU has not reached, nvnQueueFinish on a queue whose last
+/// submission it has not, a window acquire whose image Lichii's composite still reads. Lichii
+/// then sleeps the guest thread in the guest kernel until it would not, so the core runs the
+/// game's other threads meanwhile.
+int nvn_direct_call_blocks(int slot, const uint64_t x[8]);
+
+/// The emulator shuts down, before the guest's cores are suspended: nothing
+/// more is replayed or submitted, every fence reads as done, and the game's threads waiting on the
+/// host inside an NVN call (a fence, the replay worker's queue, a present) return. Until
+/// nvn_direct_reset.
+void nvn_direct_stop(void);
+
+/// Before Lichii's device goes away (after nvn_direct_stop, which it implies): saves the pipeline
+/// cache a last time and waits (bounded) until every thread of the replay and the front end has
+/// left; the process exits when one does not.
+void nvn_direct_park(void);
+
+/// After nvn_direct_park, once the device is idle and before it is destroyed: the replay's Vulkan
+/// objects, its imports and views of guest memory and the front end's mappings of it are
+/// destroyed, and a line says whether any object was left.
+void nvn_direct_destroy(void);
+
+/// The boot is over (its game and device are gone): every static variable of the front end and
+/// the replay returns to its initial value, for the next boot (nvn_reset.c). 0 when it could not
+/// (a build whose compiler keeps no sections for them, or a thread that did not leave): the next
+/// boot must not use the direct renderer.
+int nvn_direct_reset(void);
+
+/// nvnDeviceGetInteger's answer for item, as the game's own driver gave it.
+void nvn_direct_set_device_integer(unsigned item, int value);
+
+#ifdef __cplusplus
+}
+#endif

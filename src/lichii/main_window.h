@@ -184,7 +184,7 @@ class MainWindow : public QMainWindow {
 public:
     void filterBarSetChecked(bool state);
     void UpdateUITheme();
-    explicit MainWindow(bool has_broken_vulkan);
+    explicit MainWindow(bool has_broken_vulkan, bool relaunch_global_settings);
     ~MainWindow() override;
 
     bool DropAction(QDropEvent* event);
@@ -498,6 +498,11 @@ private slots:
     void SyncNextendoProfile(bool force);
 
 private:
+    /// Starts a fresh Lichii that waits for this one to exit, then boots `filename` with the same
+    /// user dir, profile and environment: the NVN direct renderer of an earlier game in this
+    /// process could not be reset (Core::NvnHook::DirectNeedsFreshProcess). Returns whether it
+    /// started.
+    bool RelaunchForGame(const QString& filename, StartGameType type);
     void OnGameListNxTool(const std::string& game_path, void (NxTools::*tool)(const std::string&));
     void OnGameListEditNxMetadata(const std::string& game_path);
     void RemovePlayTimeData(u64 program_id);
@@ -696,6 +701,7 @@ private:
 
     // Last game booted, used for multi-process apps
     QString last_filename_booted;
+    StartGameType current_game_start_type{StartGameType::Normal};
 
     // Applets
     QtAmiiboSettingsDialog* cabinet_applet = nullptr;

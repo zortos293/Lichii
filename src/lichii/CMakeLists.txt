@@ -276,6 +276,7 @@ add_executable(lichii
 
     render/performance_overlay.h render/performance_overlay.cpp
     updater/update_dialog.h updater/update_dialog.cpp updater/update_dialog.ui
+    util/relaunch_wait.h
     game/common.h
     game/carousel.h game/carousel.cpp
 )

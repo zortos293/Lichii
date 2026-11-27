@@ -38,6 +38,7 @@
 #include "core/hle/kernel/k_process.h"
 #include "core/hle/kernel/nx2_thread_stats.h"
 #include "core/memory.h"
+#include "core/nvn_hook.h"
 #include "video_core/gpu.h"
 #include "video_core/gpu_trace/recorder.h"
 #include "video_core/host1x/gpu_device_memory_manager.h"
@@ -585,11 +586,12 @@ struct Memory::Impl {
         }
     }
 
-    void RasterizerMarkRegionCached(u64 vaddr, u64 size, bool cached) {
+    bool RasterizerMarkRegionCached(u64 vaddr, u64 size, bool cached) {
         if (vaddr == 0 || !AddressSpaceContains(*current_page_table, vaddr, size)) {
-            return;
+            return false;
         }
 
+        bool protected_all = true;
 #ifdef HAS_NATIVE_PAGE_PROTECTION
         std::unique_lock lock{nce_page_mutex, std::defer_lock};
         if (nce_pages) {
@@ -617,19 +619,27 @@ struct Memory::Impl {
                 const char* value = std::getenv("EDEN_NX2_NO_REACTIVE");
                 return value != nullptr && value[0] == '1';
             }();
+            // NVN2 direct mode tracks pool pages for CPU writes only: the replay reads them in
+            // place and its GPU writes land in the same pages, so nothing is flushed on a read.
             const bool reactive_flushing =
                 Settings::ReactiveFlushing() &&
-                !(nx2_no_reactive && Settings::CurrentProgramIsSwitch2());
+                !(nx2_no_reactive && Settings::CurrentProgramIsSwitch2()) &&
+                !Core::NvnHook::DirectMode();
             if (!reactive_flushing || !cached) {
                 perm |= Common::MemoryPermission::Read;
             }
             if (!cached) {
                 perm |= Common::MemoryPermission::Write;
             }
-            host_buffer->Protect(vaddr, size, perm);
+            protected_all = host_buffer->Protect(vaddr, size, perm);
             if (cached && perm != Common::MemoryPermission{}) {
                 ProtectArmedPages(vaddr, size);
             }
+        }
+        // Pages an uncaching could not unprotect stay cached: a write to them still faults, and
+        // the rasterizer path reports it.
+        if (!cached && !protected_all) {
+            return false;
         }
 
         // Iterate over a contiguous CPU address space, which corresponds to the specified GPU
@@ -688,6 +698,7 @@ struct Memory::Impl {
                 }
             }
         }
+        return protected_all;
     }
 
     /// Read traps replace reactive flushing's blanket read protection of every cached page: only
@@ -1027,6 +1038,10 @@ struct Memory::Impl {
     }
 
     void HandleRasterizerDownload(VAddr v_address, size_t size) {
+        if (Core::NvnHook::DirectMode()) {
+            // NVN2 direct mode: cached pages are the replay's write-tracked pools, read in place.
+            return;
+        }
         if (!Kernel::Nx2ThreadStats::g_enabled) {
             DownloadFromRasterizer(v_address, size);
             return;
@@ -1084,6 +1099,12 @@ struct Memory::Impl {
     /// Callers store the bytes after this and call EndRasterizerWrite once they landed.
     void HandleRasterizerWrite(VAddr v_address, size_t size) {
         VideoCommon::Nx2FastDraw::BeginMemoryChange();
+        if (Core::NvnHook::DirectMode()) {
+            // NVN2 direct mode: the replay's write-tracked pools, by guest address (they have no
+            // device address).
+            Core::NvnHook::OnDirectCpuWrite(v_address & 0xffffffffffffULL, size);
+            return;
+        }
         if (!Kernel::Nx2ThreadStats::g_enabled) {
             WriteToRasterizer(v_address, size);
             return;
@@ -1348,7 +1369,13 @@ void Memory::MapMemoryRegion(Common::PageTable& page_table, Common::ProcessAddre
 
 void Memory::UnmapRegion(Common::PageTable& page_table, Common::ProcessAddress base, u64 size,
                          bool separate_heap) {
+    // NVN2 direct mode: pool memory the replay imported here is given back before the pages go,
+    // and the replay reads no guest memory until they are gone.
+    const bool direct = Core::NvnHook::OnGuestUnmap(page_table, GetInteger(base), size);
     impl->UnmapRegion(page_table, base, size, separate_heap);
+    if (direct) {
+        Core::NvnHook::OnGuestUnmapDone();
+    }
 }
 
 void Memory::ProtectRegion(Common::PageTable& page_table, Common::ProcessAddress vaddr, u64 size,
@@ -1508,8 +1535,8 @@ Result Memory::FlushDataCache(Common::ProcessAddress dest_addr, const std::size_
     return impl->FlushDataCache(dest_addr, size);
 }
 
-void Memory::RasterizerMarkRegionCached(Common::ProcessAddress vaddr, u64 size, bool cached) {
-    impl->RasterizerMarkRegionCached(GetInteger(vaddr), size, cached);
+bool Memory::RasterizerMarkRegionCached(Common::ProcessAddress vaddr, u64 size, bool cached) {
+    return impl->RasterizerMarkRegionCached(GetInteger(vaddr), size, cached);
 }
 
 void Memory::RasterizerArmReadTraps(Common::ProcessAddress vaddr, u64 size) {

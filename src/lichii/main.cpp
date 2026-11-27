@@ -3,6 +3,8 @@
 
 #include <QApplication>
 #include <QMessageBox>
+#include <chrono>
+#include <cstdio>
 #include <cstdlib>
 #include <exception>
 #include <filesystem>
@@ -10,8 +12,10 @@
 
 #include "common/fs/fs_paths.h"
 #include "common/fs/path_util.h"
+#include "core/nvn_hook.h"
 #include "nx2_switches.h"
 #include "startup_checks.h"
+#include "util/relaunch_wait.h"
 
 #if LICHII_ROOM
 #include <cstring>
@@ -117,6 +121,29 @@ static void SetUpNvidiaShaderDiskCache() {
 #endif
 
 int main(int argc, char* argv[]) {
+    bool relaunch_global_settings = false;
+    if (const char* pid = std::getenv("LICHII_RELAUNCH_WAIT_PID")) {
+        const bool exited = Lichii::WaitForRelaunchingProcess(pid, std::chrono::seconds{60});
+        relaunch_global_settings = qgetenv("LICHII_RELAUNCH_GLOBAL_SETTINGS") == "1";
+        qunsetenv("LICHII_RELAUNCH_GLOBAL_SETTINGS");
+#ifdef _WIN32
+        _putenv_s("LICHII_RELAUNCH_WAIT_PID", "");
+#else
+        unsetenv("LICHII_RELAUNCH_WAIT_PID");
+#endif
+        if (!exited) {
+            std::fputs("Lichii did not confirm the previous process exited; relaunch canceled.\n",
+                       stderr);
+#ifdef _WIN32
+            MessageBoxW(nullptr,
+                        L"Lichii could not confirm the previous process exited. Close it before "
+                        L"starting Lichii again.",
+                        L"Lichii", MB_OK | MB_ICONWARNING);
+#endif
+            return EXIT_FAILURE;
+        }
+        Core::NvnHook::MarkRelaunched();
+    }
 #if defined(__unix__) && !defined(__APPLE__) && !defined(__ANDROID__)
     SetUpNvidiaShaderDiskCache();
 #endif
@@ -252,7 +279,7 @@ int main(int argc, char* argv[]) {
     setlocale(LC_ALL, "C");
 
     try {
-        MainWindow main_window{has_broken_vulkan};
+        MainWindow main_window{has_broken_vulkan, relaunch_global_settings};
         main_window.show();
         app.connect(&app, &QGuiApplication::applicationStateChanged, &main_window,
                     &MainWindow::OnAppFocusStateChanged);

@@ -579,6 +579,8 @@ Id EmitImageQueryDimensions(EmitContext& ctx, IR::Inst* inst, const IR::Value& i
 Id EmitImageQueryLod(EmitContext& ctx, IR::Inst* inst, const IR::Value& index, Id coords);
 Id EmitImageGradient(EmitContext& ctx, IR::Inst* inst, const IR::Value& index, Id coords,
                      Id derivatives, const IR::Value& offset, Id lod_clamp);
+/// The element of a pool image (ImageDefinition::is_pool) at the texture ID of the handle
+Id PoolImagePointer(EmitContext& ctx, u32 descriptor_index, const IR::Value& handle);
 Id EmitImageRead(EmitContext& ctx, IR::Inst* inst, const IR::Value& index, Id coords);
 void EmitImageWrite(EmitContext& ctx, IR::Inst* inst, const IR::Value& index, Id coords, Id color);
 Id EmitIsTextureScaled(EmitContext& ctx, const IR::Value& index);

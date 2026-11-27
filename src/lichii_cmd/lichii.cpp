@@ -23,6 +23,7 @@
 #include <string>
 #include "common/settings_enums.h"
 #include "core/launch_params.h"
+#include "core/nvn_hook.h"
 #ifdef __EMSCRIPTEN__
 #include <emscripten.h>
 #endif
@@ -959,6 +960,9 @@ extern "C" void SDL_AppQuit(void *appstate, SDL_AppResult result) {
     // --version): the kernel is uninitialised then, and Pause()/ShutdownMainProcess() would
     // dereference it.
     if (state->system.IsPoweredOn()) {
+        // Pause waits for the cores to leave the game's threads: in NVN2 direct mode one may be
+        // waiting on the host inside an NVN call until the replay stops.
+        Core::NvnHook::StopDirect();
         void(state->system.Pause());
         state->system.ShutdownMainProcess();
     }

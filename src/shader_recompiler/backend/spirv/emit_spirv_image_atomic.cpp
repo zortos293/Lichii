@@ -24,12 +24,15 @@ std::pair<Id, Id> AtomicArgs(EmitContext& ctx) {
 
 Id ImageAtomicU32(EmitContext& ctx, IR::Inst* inst, const IR::Value& index, Id coords, Id value,
                   Id (Sirit::Module::*atomic_func)(Id, Id, Id, Id, Id)) {
-    if (!index.IsImmediate() || index.U32() != 0) {
+    const auto info{inst->Flags<IR::TextureInstInfo>()};
+    const bool pool{info.type != TextureType::Buffer &&
+                    ctx.images.at(info.descriptor_index).is_pool};
+    if (!pool && (!index.IsImmediate() || index.U32() != 0)) {
         // TODO: handle layers
         throw NotImplementedException("Image indexing");
     }
-    const auto info{inst->Flags<IR::TextureInstInfo>()};
-    const Id image{Image(ctx, info)};
+    // (a pool image's index operand is its handle)
+    const Id image{pool ? PoolImagePointer(ctx, info.descriptor_index, index) : Image(ctx, info)};
     const Id pointer{ctx.OpImageTexelPointer(ctx.image_u32, image, coords, ctx.Const(0U))};
     const auto [scope, semantics]{AtomicArgs(ctx)};
     return (ctx.*atomic_func)(ctx.U32[1], pointer, scope, semantics, value);

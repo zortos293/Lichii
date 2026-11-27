@@ -29,6 +29,15 @@ constexpr u32 WarmBuilderVersion = 4;
 
 using ComputeKey = std::array<u8, 24>;
 
+// Native precache: magic, u32 record count, u64 file size, then (u32 code size,
+// u32 control size, code allocation, control section) per record.
+inline constexpr std::array<char, 8> NativeWarmMagic{'N', 'V', 'N', 'W', 'A', 'R', 'M', '1'};
+inline constexpr u32 NativeWarmVersion = 1;
+inline constexpr u32 NativeWarmMaxCode = 16U << 20;
+inline constexpr u32 NativeWarmMinControl = 0xbc;
+inline constexpr u32 NativeWarmMaxControl = 0xd8;
+inline constexpr size_t NativeWarmHeaderSize = NativeWarmMagic.size() + sizeof(u32) + sizeof(u64);
+
 /// A program lowered and laid out as LowerNativeCode (video_core/shader_environment.cpp) does,
 /// with the same functions (video_core/native_lowering.h).
 struct LoweredCode {

@@ -8,6 +8,7 @@
 #include <atomic>
 #include <memory>
 #include <optional>
+#include <span>
 #include <utility>
 #include "common/common_funcs.h"
 #include "common/common_types.h"
@@ -49,7 +50,9 @@ public:
 
     void Unmap(size_t virtual_offset, size_t length, bool separate_heap);
 
-    void Protect(size_t virtual_offset, size_t length, MemoryPermission perms);
+    /// false (logged) when the host refused to protect part of the range, which may then keep its
+    /// previous protection.
+    bool Protect(size_t virtual_offset, size_t length, MemoryPermission perms);
 
 #ifdef HAS_NCE
     [[nodiscard]] bool EnableDirectMappedAddress();
@@ -93,6 +96,46 @@ public:
     [[nodiscard]] const u8* BackingBasePointer() const noexcept {
         return backing_base;
     }
+
+    /// The file behind the backing memory, -1 when there is none (Linux: the memfd; the backing
+    /// byte at p is its offset p - BackingBasePointer()).
+    [[nodiscard]] int BackingFd() const noexcept;
+
+    /// Backing memory [host_offset, host_offset + length) at view_offset in a backing view.
+    struct BackingRun {
+        size_t view_offset;
+        size_t host_offset;
+        size_t length;
+    };
+
+    /// Maps backing memory once more, at a host range of its own of `length` bytes: each run
+    /// read-write at its view offset, the rest zero pages of the view's own (read-write, shared
+    /// with nothing). Map, Unmap and Protect never touch it. Runs are page aligned, in view order
+    /// and do not overlap. nullptr (logged) without fastmem, when there are runs and private
+    /// memory is behind them (it cannot be mapped twice), or when a mapping fails. Given back with
+    /// UnmapBackingView.
+    [[nodiscard]] u8* MapBackingView(size_t length, std::span<const BackingRun> runs);
+
+    /// Takes down a view MapBackingView made, with its zero pages.
+    void UnmapBackingView(u8* view, size_t length);
+
+#ifdef _WIN32
+    /// Windows: a host range of its own of `length` bytes for MapAlias, inaccessible until
+    /// mapped (Linux maps the memfd into a range with mmap instead). nullptr (logged) without
+    /// fastmem or on failure. Given back with ReleaseAliasRegion.
+    [[nodiscard]] u8* ReserveAliasRegion(size_t length);
+
+    /// Windows: backing memory [host_offset, host_offset + length) mapped read-write at address,
+    /// in a region ReserveAliasRegion made, in place of what was mapped there. Page aligned.
+    /// false (logged) on failure: the range is then inaccessible.
+    bool MapAlias(u8* address, size_t host_offset, size_t length);
+
+    /// Windows: [address, address + length) of an alias region inaccessible again.
+    void UnmapAlias(u8* address, size_t length);
+
+    /// Windows: takes down a region ReserveAliasRegion made, with everything mapped in it.
+    void ReleaseAliasRegion(u8* region);
+#endif
 
     [[nodiscard]] size_t BackingSize() const noexcept {
         return backing_size;

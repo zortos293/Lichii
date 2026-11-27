@@ -15,6 +15,7 @@
 #include "common/windows/timer_resolution.h"
 #endif
 #include "core/frontend/emu_window.h"
+#include "core/nvn_hook.h"
 #include "video_core/host_vsync.h"
 #include "video_core/nx2_profile.h"
 #ifdef HAS_LSFG
@@ -274,6 +275,7 @@ Frame* PresentManager::GetRenderFrame() {
                            std::memory_order_relaxed);
     frame->present_done.Reset();
     frame->color_space = VK_COLOR_SPACE_SRGB_NONLINEAR_KHR;
+    frame->replay_image = false;
     frame->present_spacing = {};
     frame->game_frame_presents = 1;
 #ifdef EGLANTINE_STREAMLINE
@@ -817,6 +819,10 @@ void PresentManager::CopyToSwapchainImpl(Frame* frame) {
         .id = host_vsync && swapchain.WaitsForDisplay() ? ++last_present_id : 0,
     };
     record.accepted = swapchain.Present(render_semaphore, record.id);
+    if (record.accepted && frame->replay_image && !accepted_replay_image) {
+        accepted_replay_image = true;
+        Core::NvnHook::TraceStartup("first replay image accepted by host swapchain");
+    }
 #ifdef EGLANTINE_STREAMLINE
     if (frame->frame_gen) {
         Streamline::FrameGenAfterPresent(frame->frame_gen_frame.index);

@@ -7,6 +7,7 @@
 #include <QDialog>
 #include "common/net/net.h"
 
+class QProcessEnvironment;
 class QRadioButton;
 namespace Ui {
 class UpdateDialog;
@@ -24,6 +25,10 @@ public:
 
     // Start `target` again once this process has exited, then close `window`.
     static void Restart(QWidget* window, const QString& target);
+
+    // This process's environment without what a running AppImage's mount put in it, for a
+    // Lichii this process starts.
+    static QProcessEnvironment RestartEnvironment();
 
 #ifdef _WIN32
     // Start the installer helper on the files under `staging`, then close `window`.

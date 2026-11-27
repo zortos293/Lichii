@@ -17,6 +17,7 @@
 #include "core/core_timing.h"
 #include "core/hardware_properties.h"
 #include "core/hle/kernel/k_process.h"
+#include "core/nvn_hook.h"
 #include "core/hle/kernel/nx2_thread_stats.h"
 #include "dynarmic/interface/A64/config.h"
 #include "video_core/nx2_stutter_trace.h"
@@ -150,6 +151,14 @@ bool DynarmicCallbacks64::MemoryWriteExclusive128(u64 vaddr, Dynarmic::A64::Vect
 }
 
 void DynarmicCallbacks64::InstructionCacheOperationRaised(Dynarmic::A64::InstructionCacheOperation op, u64 value) {
+    if (op == Dynarmic::A64::InstructionCacheOperation::BlockEntryHook) {
+        if (Core::NvnHook::OnBlockEntry(value, *m_parent.m_jit, m_memory, m_process)) {
+            // An NVN call that may block: it runs from the kernel, as an SVC.
+            m_parent.m_svc = Core::NvnHook::HaltedCallSvc;
+            m_parent.m_jit->HaltExecution(SupervisorCall);
+        }
+        return;
+    }
     last_code_addr = u64(-1); //invalidate cached page
     switch (op) {
     case Dynarmic::A64::InstructionCacheOperation::InvalidateByVAToPoU: {
@@ -383,6 +392,7 @@ void ArmDynarmic64::MakeJit(Common::PageTable* page_table, std::size_t address_s
 
     // Multi-process state
     config.processor_id = std::uint8_t(m_core_index);
+    config.block_entry_hook = Core::NvnHook::BlockEntryHookFunction();
     config.global_monitor = &m_exclusive_monitor.monitor;
 
     // System registers

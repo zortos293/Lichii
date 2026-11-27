@@ -189,11 +189,11 @@ void MasterSemaphore::Wait(u64 tick) {
 
 VkResult MasterSemaphore::SubmitQueue(vk::CommandBuffer& cmdbuf, vk::CommandBuffer& upload_cmdbuf,
                                       VkSemaphore signal_semaphore, VkSemaphore wait_semaphore,
-                                      u64 host_tick) {
+                                      VkSemaphore wait_timeline, u64 wait_value, u64 host_tick) {
     const VideoCommon::Nx2Profile::Scope scope{VideoCommon::Nx2Profile::Zone::QueueSubmit};
     const VkResult result =
         semaphore ? SubmitQueueTimeline(cmdbuf, upload_cmdbuf, signal_semaphore, wait_semaphore,
-                                        host_tick)
+                                        wait_timeline, wait_value, host_tick)
                   : SubmitQueueFence(cmdbuf, upload_cmdbuf, signal_semaphore, wait_semaphore,
                                      host_tick);
     if (result == VK_SUCCESS && watchdog.count() != 0) {
@@ -215,8 +215,23 @@ static constexpr VkPipelineStageFlags wait_stage_mask = VK_PIPELINE_STAGE_VERTEX
 VkResult MasterSemaphore::SubmitQueueTimeline(vk::CommandBuffer& cmdbuf,
                                               vk::CommandBuffer& upload_cmdbuf,
                                               VkSemaphore signal_semaphore,
-                                              VkSemaphore wait_semaphore, u64 host_tick) {
+                                              VkSemaphore wait_semaphore, VkSemaphore wait_timeline,
+                                              u64 wait_value, u64 host_tick) {
     const VkSemaphore timeline_semaphore = *semaphore;
+    // The binary wait_semaphore (value ignored), then wait_timeline at wait_value
+    std::array<VkSemaphore, 2> wait_semaphores{};
+    std::array<u64, 2> wait_values{};
+    std::array<VkPipelineStageFlags, 2> wait_masks{};
+    u32 num_wait_semaphores = 0;
+    if (wait_semaphore) {
+        wait_semaphores[num_wait_semaphores] = wait_semaphore;
+        wait_masks[num_wait_semaphores++] = wait_stage_mask;
+    }
+    if (wait_timeline) {
+        wait_semaphores[num_wait_semaphores] = wait_timeline;
+        wait_values[num_wait_semaphores] = wait_value;
+        wait_masks[num_wait_semaphores++] = VK_PIPELINE_STAGE_ALL_COMMANDS_BIT;
+    }
 
     if (device.HasSynchronization2()) {
         const std::array<VkCommandBufferSubmitInfo, 2> cmdbuffer_infos{{
@@ -258,22 +273,24 @@ VkResult MasterSemaphore::SubmitQueueTimeline(vk::CommandBuffer& cmdbuf,
             num_signal_semaphores = 2;
         }
 
-        const u32 num_wait_semaphores = wait_semaphore ? 1 : 0;
-        const VkSemaphoreSubmitInfo wait_info{
-            .sType = VK_STRUCTURE_TYPE_SEMAPHORE_SUBMIT_INFO,
-            .pNext = nullptr,
-            .semaphore = wait_semaphore,
-            .value = 0,
-            .stageMask = static_cast<VkPipelineStageFlags2>(wait_stage_mask),
-            .deviceIndex = 0,
-        };
+        std::array<VkSemaphoreSubmitInfo, 2> wait_infos{};
+        for (u32 i = 0; i < num_wait_semaphores; ++i) {
+            wait_infos[i] = VkSemaphoreSubmitInfo{
+                .sType = VK_STRUCTURE_TYPE_SEMAPHORE_SUBMIT_INFO,
+                .pNext = nullptr,
+                .semaphore = wait_semaphores[i],
+                .value = wait_values[i],
+                .stageMask = static_cast<VkPipelineStageFlags2>(wait_masks[i]),
+                .deviceIndex = 0,
+            };
+        }
 
         const VkSubmitInfo2 submit_info2{
             .sType = VK_STRUCTURE_TYPE_SUBMIT_INFO_2,
             .pNext = nullptr,
             .flags = 0,
             .waitSemaphoreInfoCount = num_wait_semaphores,
-            .pWaitSemaphoreInfos = num_wait_semaphores ? &wait_info : nullptr,
+            .pWaitSemaphoreInfos = num_wait_semaphores ? wait_infos.data() : nullptr,
             .commandBufferInfoCount = static_cast<u32>(cmdbuffer_infos.size()),
             .pCommandBufferInfos = cmdbuffer_infos.data(),
             .signalSemaphoreInfoCount = num_signal_semaphores,
@@ -288,20 +305,18 @@ VkResult MasterSemaphore::SubmitQueueTimeline(vk::CommandBuffer& cmdbuf,
 
     const std::array cmdbuffers{*upload_cmdbuf, *cmdbuf};
 
-    const u32 num_wait_semaphores = wait_semaphore ? 1 : 0;
     // Pointers must be null when the count is zero (best-practices)
     const VkSemaphore* p_wait_sems =
-        (num_wait_semaphores > 0) ? &wait_semaphore : nullptr;
+        (num_wait_semaphores > 0) ? wait_semaphores.data() : nullptr;
     const VkPipelineStageFlags* p_wait_masks =
-        (num_wait_semaphores > 0) ? &wait_stage_mask : nullptr;
+        (num_wait_semaphores > 0) ? wait_masks.data() : nullptr;
     const VkSemaphore* p_signal_sems =
         (num_signal_semaphores > 0) ? signal_semaphores.data() : nullptr;
-    const u64 wait_zero = 0; // dummy for binary wait
     const VkTimelineSemaphoreSubmitInfo timeline_si{
         .sType = VK_STRUCTURE_TYPE_TIMELINE_SEMAPHORE_SUBMIT_INFO,
         .pNext = nullptr,
         .waitSemaphoreValueCount = num_wait_semaphores,
-        .pWaitSemaphoreValues    = num_wait_semaphores ? &wait_zero : nullptr,
+        .pWaitSemaphoreValues    = num_wait_semaphores ? wait_values.data() : nullptr,
         .signalSemaphoreValueCount = num_signal_semaphores,
         .pSignalSemaphoreValues = signal_values.data(),
     };

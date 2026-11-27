@@ -16,6 +16,7 @@
 
 #include "common/common_types.h"
 #include "common/div_ceil.h"
+#include "common/settings.h"
 #include "shader_recompiler/backend/nvn_storage_descriptor.h"
 #include "shader_recompiler/backend/spirv/emit_spirv.h"
 #include "shader_recompiler/backend/spirv/emit_spirv_instructions.h"
@@ -480,7 +481,8 @@ EmitContext::EmitContext(const Profile& profile_, const RuntimeInfo& runtime_inf
       requires_coherent_image_memory{program.info.requires_coherent_image_memory},
       vulkan_memory_model{vulkan_memory_model_}, stage{program.stage},
       texture_rescaling_index{bindings.texture_scaling_index},
-      image_rescaling_index{bindings.image_scaling_index} {
+      image_rescaling_index{bindings.image_scaling_index},
+      render_area_offset{bindings.render_area_offset} {
     const bool is_unified{profile.unified_descriptor_binding};
     u32& uniform_binding{is_unified ? bindings.unified : bindings.uniform_buffer};
     u32& storage_binding{is_unified ? bindings.unified : bindings.storage_buffer};
@@ -500,12 +502,13 @@ EmitContext::EmitContext(const Profile& profile_, const RuntimeInfo& runtime_inf
     DefineStorageBuffers(program.info, storage_binding);
     DefineTextureBuffers(program.info, texture_binding);
     DefineImageBuffers(program.info, image_binding);
-    DefineTextures(program.info, texture_binding, bindings.texture_scaling_index);
-    DefineImages(program.info, image_binding, bindings.image_scaling_index);
+    DefineTextures(program.info, texture_binding, bindings.texture_scaling_index, bindings);
+    DefineImages(program.info, image_binding, bindings.image_scaling_index, bindings);
     DefineAttributeMemAccess(program.info);
     DefineWriteStorageCasLoopFunction(program.info);
     DefineGlobalMemoryFunctions(program);
     DefineMeshEmulationOutput();
+    DefineLoopGuard(program);
     DefineRescalingInput(program.info);
     DefineRenderArea(program.info);
 }
@@ -1588,14 +1591,14 @@ void EmitContext::DefineRescalingInput(const Info& info) {
         return;
     }
     if (profile.unified_descriptor_binding) {
-        DefineRescalingInputPushConstant();
+        DefineRescalingInputPushConstant(info);
     } else {
         DefineRescalingInputUniformConstant();
     }
 }
 
-void EmitContext::DefineRescalingInputPushConstant() {
-    boost::container::static_vector<Id, 3> members{};
+void EmitContext::DefineRescalingInputPushConstant(const Info& info) {
+    boost::container::static_vector<Id, 4> members{};
     u32 member_index{0};
 
     rescaling_textures_type = TypeArray(U32[1], Const(4u));
@@ -1611,6 +1614,11 @@ void EmitContext::DefineRescalingInputPushConstant() {
     if (stage != Stage::Compute) {
         members.push_back(F32[1]);
         rescaling_downfactor_member_index = member_index++;
+    }
+    const bool with_render_area{info.uses_render_area && render_area_offset != 0};
+    if (with_render_area) {
+        members.push_back(F32[4]);
+        render_are_member_index = member_index++;
     }
     const Id push_constant_struct{TypeStruct(std::span(members.data(), members.size()))};
     Decorate(push_constant_struct, spv::Decoration::Block);
@@ -1630,9 +1638,17 @@ void EmitContext::DefineRescalingInputPushConstant() {
                        static_cast<u32>(offsetof(RescalingLayout, down_factor)));
         MemberName(push_constant_struct, rescaling_downfactor_member_index, "down_factor");
     }
+    if (with_render_area) {
+        MemberDecorate(push_constant_struct, render_are_member_index, spv::Decoration::Offset,
+                       render_area_offset);
+        MemberName(push_constant_struct, render_are_member_index, "render_area");
+    }
     const Id pointer_type{TypePointer(spv::StorageClass::PushConstant, push_constant_struct)};
     rescaling_push_constants = AddGlobalVariable(pointer_type, spv::StorageClass::PushConstant);
     Name(rescaling_push_constants, "rescaling_push_constants");
+    if (with_render_area) {
+        render_area_push_constant = rescaling_push_constants;
+    }
 
     if (profile.supported_spirv >= 0x00010400) {
         interfaces.push_back(rescaling_push_constants);
@@ -1651,8 +1667,8 @@ void EmitContext::DefineRescalingInputUniformConstant() {
 }
 
 void EmitContext::DefineRenderArea(const Info& info) {
-    if (!info.uses_render_area) {
-        return;
+    if (!info.uses_render_area || Sirit::ValidId(render_area_push_constant)) {
+        return;   // (or a member of the rescaling block: DefineRescalingInputPushConstant)
     }
 
     if (profile.unified_descriptor_binding) {
@@ -1666,7 +1682,8 @@ void EmitContext::DefineRenderArea(const Info& info) {
         Decorate(push_constant_struct, spv::Decoration::Block);
         Name(push_constant_struct, "RenderAreaInfo");
 
-        MemberDecorate(push_constant_struct, render_are_member_index, spv::Decoration::Offset, 0);
+        MemberDecorate(push_constant_struct, render_are_member_index, spv::Decoration::Offset,
+                       render_area_offset);
         MemberName(push_constant_struct, render_are_member_index, "render_area");
 
         const Id pointer_type{TypePointer(spv::StorageClass::PushConstant, push_constant_struct)};
@@ -1800,6 +1817,10 @@ void EmitContext::DefineStorageBuffers(const Info& info, u32& binding) {
     IR::Type used_types{profile.support_descriptor_aliasing ? info.used_storage_buffer_types
                                                             : IR::Type::U32};
     used_types |= IR::Type::U32;
+    if (profile.support_descriptor_aliasing && profile.support_float32_atomic_add &&
+        info.uses_atomic_f32_add) {
+        used_types |= IR::Type::F32;
+    }
     if (profile.support_int8 && profile.support_storage_buffer_8bit &&
         True(used_types & IR::Type::U8)) {
         DefineSsbos(*this, storage_types.U8, &StorageDefinitions::U8, info, binding, U8,
@@ -1939,11 +1960,57 @@ void EmitContext::DefineImageBuffers(const Info& info, u32& binding) {
     }
 }
 
-void EmitContext::DefineTextures(const Info& info, u32& binding, u32& scaling_index) {
+void EmitContext::DefineTextures(const Info& info, u32& binding, u32& scaling_index,
+                                 const Bindings& bindings) {
     textures.reserve(info.texture_descriptors.size());
     for (const TextureDescriptor& desc : info.texture_descriptors) {
         const Id image_type{ImageType(*this, desc)};
         const Id sampled_type{TypeSampledImage(image_type)};
+        if (desc.is_pool) {
+            // The texture pool as an array of images of the type this descriptor samples (each
+            // pool texture's type aliases the same binding), and the sampler pool. The binding
+            // and rescaling bit the descriptor would take stay unused, so the others keep theirs.
+            if (profile.supported_spirv < 0x00010500) {
+                AddExtension("SPV_EXT_descriptor_indexing");
+            }
+            AddCapability(spv::Capability::RuntimeDescriptorArray);
+            const Id pointer_type{TypePointer(spv::StorageClass::UniformConstant, image_type)};
+            const Id id{AddGlobalVariable(
+                TypePointer(spv::StorageClass::UniformConstant, TypeRuntimeArray(image_type)),
+                spv::StorageClass::UniformConstant)};
+            Decorate(id, spv::Decoration::Binding, bindings.pool_texture_binding);
+            Decorate(id, spv::Decoration::DescriptorSet, bindings.pool_set);
+            Name(id, NameOf(stage, desc, "pool_tex"));
+            if (!pool_samplers.value) {
+                const Id sampler_type{TypeSampler()};
+                pool_sampler_pointer = TypePointer(spv::StorageClass::UniformConstant, sampler_type);
+                pool_samplers = AddGlobalVariable(
+                    TypePointer(spv::StorageClass::UniformConstant, TypeRuntimeArray(sampler_type)),
+                    spv::StorageClass::UniformConstant);
+                Decorate(pool_samplers, spv::Decoration::Binding, bindings.pool_sampler_binding);
+                Decorate(pool_samplers, spv::Decoration::DescriptorSet, bindings.pool_set);
+                Name(pool_samplers, "pool_samp");
+                if (profile.supported_spirv >= 0x00010400) {
+                    interfaces.push_back(pool_samplers);
+                }
+            }
+            textures.push_back({
+                .id = id,
+                .sampled_type = sampled_type,
+                .pointer_type = pointer_type,
+                .image_type = image_type,
+                .count = 1,
+                .is_multisample = desc.is_multisample,
+                .is_integer = desc.is_integer,
+                .is_pool = true,
+            });
+            if (profile.supported_spirv >= 0x00010400) {
+                interfaces.push_back(id);
+            }
+            ++binding;
+            ++scaling_index;
+            continue;
+        }
         const Id pointer_type{TypePointer(spv::StorageClass::UniformConstant, sampled_type)};
         const Id desc_type{DescType(*this, sampled_type, pointer_type, desc.count)};
         const Id id{AddGlobalVariable(desc_type, spv::StorageClass::UniformConstant)};
@@ -1970,12 +2037,45 @@ void EmitContext::DefineTextures(const Info& info, u32& binding, u32& scaling_in
     }
 }
 
-void EmitContext::DefineImages(const Info& info, u32& binding, u32& scaling_index) {
+void EmitContext::DefineImages(const Info& info, u32& binding, u32& scaling_index,
+                               const Bindings& bindings) {
     images.reserve(info.image_descriptors.size());
     for (const ImageDescriptor& desc : info.image_descriptors) {
         const Id sampled_type{desc.is_integer ? U32[1] : F32[1]};
         const Id image_type{ImageType(*this, desc, sampled_type)};
         const Id pointer_type{TypePointer(spv::StorageClass::UniformConstant, image_type)};
+        if (desc.is_pool) {
+            // The image pool as an array of images of this descriptor's type (each pool image's
+            // type aliases the same binding). The binding and rescaling bit the descriptor would
+            // take stay unused, so the others keep theirs.
+            if (profile.supported_spirv < 0x00010500) {
+                AddExtension("SPV_EXT_descriptor_indexing");
+            }
+            AddCapability(spv::Capability::RuntimeDescriptorArray);
+            const Id id{AddGlobalVariable(
+                TypePointer(spv::StorageClass::UniformConstant, TypeRuntimeArray(image_type)),
+                spv::StorageClass::UniformConstant)};
+            Decorate(id, spv::Decoration::Binding, bindings.pool_image_binding);
+            Decorate(id, spv::Decoration::DescriptorSet, bindings.pool_set);
+            Name(id, NameOf(stage, desc, "pool_img"));
+            if (info.requires_coherent_image_memory) {
+                Decorate(id, spv::Decoration::Coherent);
+            }
+            images.push_back({
+                .id = id,
+                .image_type = image_type,
+                .pointer_type = pointer_type,
+                .count = 1,
+                .is_integer = desc.is_integer,
+                .is_pool = true,
+            });
+            if (profile.supported_spirv >= 0x00010400) {
+                interfaces.push_back(id);
+            }
+            ++binding;
+            ++scaling_index;
+            continue;
+        }
         const Id id{AddGlobalVariable(pointer_type, spv::StorageClass::UniformConstant)};
         Decorate(id, spv::Decoration::Binding, binding);
         Decorate(id, spv::Decoration::DescriptorSet, 0U);
@@ -2358,6 +2458,41 @@ void EmitContext::DefineMesh(const IR::Program& program) {
     }
     for (const u32 line : mesh_info.primitive_lines) {
         mesh_primitive_targets.push_back(target(line, true));
+    }
+}
+
+void EmitContext::DefineLoopGuard(const IR::Program& program) {
+    if (runtime_info.loop_guard_binding == ~0U || Settings::values.disable_shader_loop_safety_checks ||
+        std::ranges::none_of(program.syntax_list, [](const IR::AbstractSyntaxNode& node) {
+            return node.type == IR::AbstractSyntaxNode::Type::Repeat;
+        })) {
+        return;
+    }
+    // (Sirit shares identical types: the u32 storage buffer type of the program's own storage
+    // buffers is decorated already, as in DefineMeshEmulationOutput)
+    AddExtension("SPV_KHR_storage_buffer_storage_class");
+    Id struct_pointer{storage_types.U32.array};
+    if (!Sirit::ValidId(struct_pointer)) {
+        const Id array_type{TypeRuntimeArray(U32[1])};
+        Decorate(array_type, spv::Decoration::ArrayStride, 4U);
+        const Id struct_type{TypeStruct(array_type)};
+        Decorate(struct_type, spv::Decoration::Block);
+        MemberDecorate(struct_type, 0, spv::Decoration::Offset, 0U);
+        struct_pointer = TypePointer(spv::StorageClass::StorageBuffer, struct_type);
+    }
+    const Id buffer{AddGlobalVariable(struct_pointer, spv::StorageClass::StorageBuffer)};
+    Decorate(buffer, spv::Decoration::Binding, runtime_info.loop_guard_binding);
+    Decorate(buffer, spv::Decoration::DescriptorSet, 0U);
+    Name(buffer, "loop_guard");
+    if (profile.supported_spirv >= 0x00010400) {
+        interfaces.push_back(buffer);
+    }
+    loop_guard_buffer = buffer;
+    loop_guard_word_pointer = TypePointer(spv::StorageClass::StorageBuffer, U32[1]);
+    loop_guard_flag = AddGlobalVariable(TypePointer(spv::StorageClass::Private, U32[1]),
+                                        spv::StorageClass::Private, u32_zero_value);
+    if (profile.supported_spirv >= 0x00010400) {
+        interfaces.push_back(loop_guard_flag);
     }
 }
 

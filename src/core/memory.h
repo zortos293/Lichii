@@ -491,8 +491,11 @@ public:
      * @param size   The size of the address range in bytes.
      * @param cached Whether or not any pages within the address range should be
      *               marked as cached or uncached.
+     * @returns false when the range is outside the address space (nothing changes) or the host
+     *          refused to change the protection of part of it (fastmem); an uncaching then
+     *          leaves the range cached.
      */
-    void RasterizerMarkRegionCached(Common::ProcessAddress vaddr, u64 size, bool cached);
+    bool RasterizerMarkRegionCached(Common::ProcessAddress vaddr, u64 size, bool cached);
 
     /**
      * Makes the next guest read of each rasterizer cached page in the range take the slow path

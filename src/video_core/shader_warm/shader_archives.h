@@ -46,7 +46,13 @@ struct ShaderRecord {
     ProgramStage stage{};
     std::span<const u8> code;
     std::span<const u8> control;
+    /// Full code allocation when it differs from the instruction span in code.
+    std::span<const u8> code_allocation{};
 };
+
+/// The complete NVN2 compute allocation, including any inline constants. Empty if the
+/// archive does not carry enough data to reconstruct the native program.
+std::span<const u8> NativeComputeAllocation(const ShaderRecord& record);
 
 /// The game's Zstandard dictionaries (Pack/ZsDic.pack.zs), by dictionary ID.
 class ZstdDictionaries {

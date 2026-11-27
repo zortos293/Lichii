@@ -360,6 +360,7 @@ struct DeviceDispatch : InstanceDispatch {
     PFN_vkMapMemory vkMapMemory{};
     PFN_vkQueueBindSparse vkQueueBindSparse{};
     PFN_vkQueueSubmit vkQueueSubmit{};
+    PFN_vkQueueWaitIdle vkQueueWaitIdle{};
     PFN_vkQueueSubmit2 vkQueueSubmit2{};
     PFN_vkResetFences vkResetFences{};
     PFN_vkResetQueryPool vkResetQueryPool{};
@@ -894,6 +895,10 @@ public:
 
     VkResult Present(const VkPresentInfoKHR& present_info) const noexcept {
         return dld->vkQueuePresentKHR(queue, &present_info);
+    }
+
+    VkResult WaitIdle() const noexcept {
+        return dld->vkQueueWaitIdle(queue);
     }
 
 private:

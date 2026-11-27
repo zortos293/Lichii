@@ -247,3 +247,17 @@ TEST_CASE("nx2:gpu 214 again on the same start does not make the GPU back wait f
     back.emplace([&] { Tegra::Nx2BackSparseWrite(Start, sizeof(data), &data); });
     REQUIRE(space.WaitBacked(Start, 2, std::chrono::seconds{2}));
 }
+
+TEST_CASE("nx2:gsv native image handles name their image's guest range", "[core][nx2]") {
+    Service::Nx2NativeObjects objects;
+    objects.memories[1] = {.size = 0x120000, .address = 0x2200ac1000};
+    objects.memories[2] = {.size = 0x120000};
+    objects.images[1] = {.memory = 1, .size = 0x60000, .count = 3};
+    objects.images[4] = {.memory = 2, .size = 0x60000, .count = 3};
+
+    REQUIRE(objects.ImageRange(1) == std::pair<u64, u64>{0x2200ac1000, 0x60000});
+    REQUIRE(objects.ImageRange(3) == std::pair<u64, u64>{0x2200b81000, 0x60000});
+    REQUIRE_FALSE(objects.ImageRange(0));
+    REQUIRE_FALSE(objects.ImageRange(4));
+    REQUIRE_FALSE(objects.ImageRange(7));
+}

@@ -7,6 +7,7 @@
 
 #include <memory>
 #include <string>
+#include <thread>
 #include <variant>
 
 #include "common/dynamic_library.h"
@@ -16,6 +17,8 @@
 #include "video_core/renderer_vulkan/present/frame_gen.h"
 #endif
 #include "video_core/renderer_vulkan/vk_blit_screen.h"
+#include "video_core/renderer_vulkan/vk_nvn_direct_astc.h"
+#include "video_core/renderer_vulkan/vk_nvn_direct_shaders.h"
 #include "video_core/renderer_vulkan/vk_present_manager.h"
 #include "video_core/renderer_vulkan/vk_rasterizer.h"
 #include "video_core/renderer_vulkan/vk_scheduler.h"
@@ -38,6 +41,10 @@ class GPU;
 }
 
 namespace Vulkan {
+
+#ifdef LICHII_NVN_DIRECT
+struct NvnDirectMemory;
+#endif
 
 Device CreateDevice(const vk::Instance& instance, const vk::InstanceDispatch& dld,
                     VkSurfaceKHR surface);
@@ -148,6 +155,12 @@ private:
     FrameGen frame_gen;
 #endif
     std::optional<TurboMode> turbo_mode;
+#ifdef LICHII_NVN_DIRECT
+    std::optional<NvnDirectAstc> nvn_direct_astc; ///< The replay's ASTC decode (NVN2 direct mode).
+    std::optional<NvnDirectShaders> nvn_direct_shaders; ///< The replay's shader recompiler.
+    std::unique_ptr<NvnDirectMemory> nvn_direct_memory; ///< The replay's memory figures.
+    std::jthread vram_trace;
+#endif
 
     Frame applet_frame;
 

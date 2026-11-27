@@ -55,7 +55,8 @@ public:
     void Map(size_t virtual_offset, size_t host_offset, size_t length, MemoryPermission perm,
              bool is_separate_heap);
     void Unmap(size_t virtual_offset, size_t size, bool is_separate_heap);
-    void Protect(size_t virtual_offset, size_t length, MemoryPermission perm);
+    /// false when the host refused to protect part of the resident mappings (HostMemory::Protect).
+    bool Protect(size_t virtual_offset, size_t length, MemoryPermission perm);
     u8* VirtualBasePointer() {
         return m_buffer.VirtualBasePointer();
     }

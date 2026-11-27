@@ -51,6 +51,8 @@ VK_DEFINE_HANDLE(VmaPool)
 
 #define FOR_EACH_VK_FEATURE_1_3(FEATURE)                                                           \
     FEATURE(EXT, ImageRobustness, IMAGE_ROBUSTNESS, robust_image_access)                           \
+    FEATURE(EXT, PipelineCreationCacheControl, PIPELINE_CREATION_CACHE_CONTROL,                    \
+            pipeline_creation_cache_control)                                                       \
     FEATURE(EXT, ShaderDemoteToHelperInvocation, SHADER_DEMOTE_TO_HELPER_INVOCATION,               \
             shader_demote_to_helper_invocation)                                                    \
     FEATURE(EXT, SubgroupSizeControl, SUBGROUP_SIZE_CONTROL, subgroup_size_control)                \
@@ -339,6 +341,27 @@ public:
     /// Returns main graphics queue family index.
     u32 GetGraphicsFamily() const {
         return graphics_family;
+    }
+
+    /// NVN2 direct mode: the device enables what the replay needs.
+    bool IsNvnDirect() const {
+        return nvn_direct;
+    }
+
+    /// NVN2 direct mode: the graphics family's queues made for the replay (index 0 is
+    /// GetGraphicsQueue's).
+    std::span<const VkQueue> GetNvnDirectQueues() const {
+        return {nvn_direct_queues.data(), nvn_direct_queue_count};
+    }
+
+    /// NVN2 direct mode: shaderBufferFloat32AtomicAdd is enabled for the replay's shaders.
+    bool IsNvnDirectFloat32AtomicAddEnabled() const {
+        return nvn_direct_float32_atomic_add;
+    }
+
+    /// Returns the extensions the device was created with.
+    const std::set<std::string, std::less<>>& GetLoadedExtensions() const {
+        return loaded_extensions;
     }
 
     /// Returns main present queue family index.
@@ -1115,6 +1138,12 @@ FN_MAX_LIMIT_LIST
         return extensions.synchronization2;
     }
 
+    /// Returns true if pipelineCreationCacheControl is enabled (Vulkan 1.3 or
+    /// VK_EXT_pipeline_creation_cache_control).
+    bool IsPipelineCreationCacheControlSupported() const {
+        return extensions.pipeline_creation_cache_control;
+    }
+
     /// Returns the minimum supported version of SPIR-V.
     u32 SupportedSpirvVersion() const {
         if (instance_version >= VK_API_VERSION_1_3) {
@@ -1427,6 +1456,11 @@ private:
     vk::PhysicalDevice physical; ///< Physical device.
     vk::Device logical;          ///< Logical device.
     vk::Queue graphics_queue;    ///< Main graphics queue.
+    static constexpr u32 NvnDirectMaxQueues = 16; ///< NVN_DIRECT_MAX_QUEUES (nvn_direct.h)
+    bool nvn_direct{};                                        ///< NVN2 direct mode
+    std::array<VkQueue, NvnDirectMaxQueues> nvn_direct_queues{}; ///< NVN2 direct mode
+    u32 nvn_direct_queue_count{};                             ///< NVN2 direct mode
+    bool nvn_direct_float32_atomic_add{};                     ///< NVN2 direct mode
     vk::Queue present_queue;     ///< Main present queue.
     vk::PipelineCache static_pipeline_cache;
     bool owns_static_pipeline_cache{};

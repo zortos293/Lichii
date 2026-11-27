@@ -98,7 +98,7 @@ UpdateDialog::~UpdateDialog() {
     delete ui;
 }
 
-void UpdateDialog::Restart(QWidget* window, const QString& target) {
+QProcessEnvironment UpdateDialog::RestartEnvironment() {
     auto environment = QProcessEnvironment::systemEnvironment();
     const auto app_dir = environment.value(QStringLiteral("APPDIR"));
     if (!app_dir.isEmpty()) {
@@ -119,6 +119,11 @@ void UpdateDialog::Restart(QWidget* window, const QString& target) {
     for (const auto& key : {"APPDIR", "APPIMAGE", "ARGV0", "OWD"}) {
         environment.remove(QString::fromLatin1(key));
     }
+    return environment;
+}
+
+void UpdateDialog::Restart(QWidget* window, const QString& target) {
+    const auto environment = RestartEnvironment();
 
     // Wait for this process to exit, so the new one reads the settings this one writes on close.
     QProcess process;
