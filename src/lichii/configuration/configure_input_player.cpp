@@ -179,6 +179,12 @@ void SetAnalogParam(const Common::ParamPackage& input_param, Common::ParamPackag
 } // namespace
 
 QString ConfigureInputPlayer::ButtonToText(const Common::ParamPackage& param) {
+    if (param.Has("alt")) {
+        Common::ParamPackage first = param;
+        first.Erase("alt");
+        return QStringLiteral("%1 / %2").arg(
+            ButtonToText(first), ButtonToText(Common::ParamPackage{param.Get("alt", "")}));
+    }
     if (!param.Has("engine")) {
         return QObject::tr("[not set]");
     }
@@ -374,7 +380,13 @@ ConfigureInputPlayer::ConfigureInputPlayer(QWidget* parent, std::size_t player_i
             HandleClick(
                 button, button_id,
                 [=, this](const Common::ParamPackage& params) {
-                    emulated_controller->SetButtonParam(button_id, params);
+                    // Rebinding the button keeps its second binding.
+                    const auto old_param = emulated_controller->GetButtonParam(button_id);
+                    Common::ParamPackage new_param = params;
+                    if (old_param.Has("alt")) {
+                        new_param.Set("alt", old_param.Get("alt", ""));
+                    }
+                    emulated_controller->SetButtonParam(button_id, new_param);
                 },
                 InputCommon::Polling::InputType::Button);
         });
@@ -388,6 +400,25 @@ ConfigureInputPlayer::ConfigureInputPlayer(QWidget* parent, std::size_t player_i
                         emulated_controller->SetButtonParam(button_id, {});
                         button_map[button_id]->setText(tr("[not set]"));
                     });
+                    if (param.Has("engine")) {
+                        context_menu.addAction(tr("Set second binding"), [&] {
+                            HandleClick(
+                                button_map[button_id], button_id,
+                                [=, this](const Common::ParamPackage& params) {
+                                    auto new_param = emulated_controller->GetButtonParam(button_id);
+                                    new_param.Set("alt", params.Serialize());
+                                    emulated_controller->SetButtonParam(button_id, new_param);
+                                },
+                                InputCommon::Polling::InputType::Button);
+                        });
+                    }
+                    if (param.Has("alt")) {
+                        context_menu.addAction(tr("Clear second binding"), [&] {
+                            param.Erase("alt");
+                            button_map[button_id]->setText(ButtonToText(param));
+                            emulated_controller->SetButtonParam(button_id, param);
+                        });
+                    }
                     if (param.Has("code") || param.Has("button") || param.Has("hat")) {
                         context_menu.addAction(tr("Invert button"), [&] {
                             const bool invert_value = !param.Get("inverted", false);
