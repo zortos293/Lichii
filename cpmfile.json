@@ -273,7 +273,9 @@
             "0001-use-parent-libusb.patch",
             "0002-switch2-sensor-counter-wrap.patch",
             "0003-switch2-sensor-enabled.patch",
-            "0004-no-static-export-without-install.patch"
+            "0004-no-static-export-without-install.patch",
+            "0005-switch2-macos-os-hid-interface.patch",
+            "0006-switch2-pro-report-format-retry.patch"
         ],
         "repo": "libsdl-org/SDL",
         "version": "release-3.4.20"

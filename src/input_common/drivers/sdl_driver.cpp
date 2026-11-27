@@ -1071,8 +1071,10 @@ SDLDriver::SDLDriver(std::string input_engine_) : InputEngine(std::move(input_en
         SDL_SetHintWithPriority(SDL_HINT_JOYSTICK_RAWINPUT_CORRELATE_XINPUT, "0", SDL_HINT_OVERRIDE);
         SDL_SetHintWithPriority(SDL_HINT_JOYSTICK_WGI, "0", SDL_HINT_OVERRIDE);
     }
-    // SDL is built with libusb on Windows for Switch 2 controllers. Leave the GameCube adapter to
-    // the GC adapter driver, which claims it through libusb itself.
+#endif
+#if defined(_WIN32) || defined(__APPLE__)
+    // SDL is built with libusb for Switch 2 controllers on these platforms. Leave the GameCube
+    // adapter to the GC adapter driver, which claims it through libusb itself.
     SDL_SetHint(SDL_HINT_HIDAPI_LIBUSB_GAMECUBE, "0");
 #endif
 

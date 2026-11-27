@@ -29,7 +29,7 @@ These options control dependencies.
 - `LICHII_TZDB_PATH` (string) Path to a pre-downloaded timezone database (useful for nixOS and Gentoo)
 - `LICHII_USE_BUNDLED_MOLTENVK` (ON, macOS only) Download bundled MoltenVK lib
 - `LICHII_USE_BUNDLED_OPENSSL` (ON for MSVC, Android, Solaris, and OpenBSD) Download bundled OpenSSL build
-- `LICHII_USE_BUNDLED_SDL3` (ON for MSVC) Download a prebuilt SDL3
+- `LICHII_USE_BUNDLED_SDL3` (ON for MSVC) Download a prebuilt SDL3 (on macOS SDL3 is always built from source, for libusb)
 
 ### Miscellaneous
 

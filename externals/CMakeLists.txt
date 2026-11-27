@@ -157,9 +157,14 @@ if (ENABLE_LIBUSB)
     add_subdirectory(libusb)
 endif()
 
-# The prebuilt Windows SDL3 has no libusb, which SDL's Switch 2 controller driver needs
-if (MSVC AND ENABLE_LIBUSB AND LICHII_USE_BUNDLED_SDL3)
+# SDL's Switch 2 controller driver needs libusb, which the prebuilt Windows SDL3 and Homebrew's
+# SDL3 (used on macOS) are built without
+if (ENABLE_LIBUSB AND ((MSVC AND LICHII_USE_BUNDLED_SDL3) OR APPLE))
     message(STATUS "Building SDL3 with libusb for Switch 2 controllers")
+    # With a system libusb, libusb::usb is local to externals/libusb. Find it again here: SDL links that target.
+    if (NOT TARGET libusb::usb)
+        find_package(libusb MODULE)
+    endif()
     AddJsonPackage(NAME sdl3 FORCE_BUNDLED_PACKAGE ON OPTIONS
         "SDL_SHARED OFF"
         "SDL_STATIC ON"

@@ -1,0 +1,40 @@
+--- a/src/joystick/hidapi/SDL_hidapi_switch2.c
++++ b/src/joystick/hidapi/SDL_hidapi_switch2.c
+@@ -113,6 +113,9 @@
+     Uint16 rumble_lo_freq;
+     Uint32 rumble_error;
+     bool rumble_updated;
++
++    Uint64 report_format_request_ns;
++    int report_format_requests;
+ 
+     Switch2_StickCalibration left_stick;
+     Switch2_StickCalibration right_stick;
+@@ -1198,6 +1201,27 @@
+ 
+     if (size < 64) {
+         // We don't know how to handle this report
++        return;
++    }
++
++    if (device->product_id == USB_PRODUCT_NINTENDO_SWITCH2_PRO && data[0] != 0x05) {
++        /* A pad that has just been plugged in can ignore the report format set during init and keep
++         * sending its default format (report 0x09), which HandleSwitchProState can't parse. Ask again,
++         * up to 20 times, until it switches. */
++        if (ctx->interface_claimed && ctx->report_format_requests < 20 &&
++            timestamp - ctx->report_format_request_ns >= SDL_MS_TO_NS(250)) {
++            static const Uint8 set_report_format[] = {
++                0x03, 0x91, 0x00, 0x0a, 0x00, 0x04, 0x00, 0x00, 0x05, 0x00, 0x00, 0x00
++            };
++            Uint8 reply[0x40];
++            int transferred;
++            ctx->report_format_request_ns = timestamp;
++            ++ctx->report_format_requests;
++            // Short timeouts: this runs on the joystick update path
++            if (ctx->libusb->bulk_transfer(ctx->device_handle, ctx->out_endpoint, (Uint8 *)set_report_format, sizeof(set_report_format), &transferred, 20) == 0) {
++                ctx->libusb->bulk_transfer(ctx->device_handle, ctx->in_endpoint, reply, sizeof(reply), &transferred, 20);
++            }
++        }
+         return;
+     }
+ 
