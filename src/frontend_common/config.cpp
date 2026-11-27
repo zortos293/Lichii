@@ -65,7 +65,7 @@ void Config::Initialize(const std::string& config_name) {
         Reload();
         break;
     case ConfigType::InputProfile:
-        config_loc = FS::PathToUTF8String(fs_config_loc / "input" / config_file);
+        config_loc = FS::PathToUTF8String(fs_config_loc / "input" / FS::ToU8String(config_file));
         void(FS::CreateParentDir(config_loc));
         SetUpIni();
         break;
