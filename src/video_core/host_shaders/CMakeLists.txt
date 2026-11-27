@@ -8,15 +8,21 @@ set(FIDELITYFX_FILES
     ${FIDELITYFX_INCLUDE_DIR}/ffx_fsr1.h
 )
 
+set(ASTC_DECODE_INCLUDE ${CMAKE_CURRENT_SOURCE_DIR}/astc_decode.glsl)
+set(BCN_ENCODE_INCLUDE ${CMAKE_CURRENT_SOURCE_DIR}/bcn_encode.glsl)
+
 set(GLSL_INCLUDES
     fidelityfx_fsr.frag
     ${FIDELITYFX_FILES}
+    ${ASTC_DECODE_INCLUDE}
+    ${BCN_ENCODE_INCLUDE}
 )
 
 set(SHADER_FILES
     ${CMAKE_CURRENT_SOURCE_DIR}/vulkan_vertex_repack.comp
     ${CMAKE_CURRENT_SOURCE_DIR}/astc_decoder.comp
     ${CMAKE_CURRENT_SOURCE_DIR}/bc_encoder.comp
+    ${CMAKE_CURRENT_SOURCE_DIR}/astc_bc.comp
     ${CMAKE_CURRENT_SOURCE_DIR}/blit_color_float.frag
     ${CMAKE_CURRENT_SOURCE_DIR}/blit_color_srgb_to_linear.frag
     ${CMAKE_CURRENT_SOURCE_DIR}/block_linear_unswizzle_2d.comp
@@ -158,18 +164,24 @@ endif()
 foreach(SOURCE_FILE IN ITEMS ${SHADER_FILES})
     get_filename_component(FILENAME ${SOURCE_FILE} NAME)
     string(REPLACE "." "_" SHADER_NAME ${FILENAME})
+    unset(SOURCE_INCLUDE)
+    if (FILENAME STREQUAL "astc_decoder.comp")
+        set(SOURCE_INCLUDE ${ASTC_DECODE_INCLUDE})
+    endif()
     # Skip generating source headers on Vulkan exclusive files
-    if (NOT ${FILENAME} MATCHES "vulkan.*")
+    if (NOT FILENAME MATCHES "^vulkan" AND NOT FILENAME STREQUAL "astc_bc.comp" AND
+        NOT FILENAME STREQUAL "bc_encoder.comp")
         set(SOURCE_HEADER_FILE ${SHADER_DIR}/${SHADER_NAME}.h)
         add_custom_command(
             OUTPUT
                 ${SOURCE_HEADER_FILE}
             COMMAND
-                ${CMAKE_COMMAND} -P ${HEADER_GENERATOR} ${SOURCE_FILE} ${SOURCE_HEADER_FILE} ${INPUT_FILE}
+                ${CMAKE_COMMAND} -P ${HEADER_GENERATOR} ${SOURCE_FILE} ${SOURCE_HEADER_FILE} ${INPUT_FILE} ${SOURCE_INCLUDE}
             MAIN_DEPENDENCY
                 ${SOURCE_FILE}
             DEPENDS
                 ${INPUT_FILE}
+                ${SOURCE_INCLUDE}
                 # HEADER_GENERATOR should be included here but msbuild seems to assume it's always modified
         )
         set(SHADER_HEADERS ${SHADER_HEADERS} ${SOURCE_HEADER_FILE})
@@ -182,6 +194,12 @@ foreach(SOURCE_FILE IN ITEMS ${SHADER_FILES})
         elseif (FILENAME STREQUAL "convert_abgr8_to_x8d24.frag" OR
             FILENAME STREQUAL "convert_x8d24_to_abgr8.frag")
             list(APPEND SPIRV_DEPENDENCIES ${CMAKE_CURRENT_SOURCE_DIR}/x8d24_conversion.glsl)
+        elseif (FILENAME STREQUAL "astc_decoder.comp")
+            list(APPEND SPIRV_DEPENDENCIES ${ASTC_DECODE_INCLUDE})
+        elseif (FILENAME STREQUAL "bc_encoder.comp")
+            list(APPEND SPIRV_DEPENDENCIES ${BCN_ENCODE_INCLUDE})
+        elseif (FILENAME STREQUAL "astc_bc.comp")
+            list(APPEND SPIRV_DEPENDENCIES ${ASTC_DECODE_INCLUDE} ${BCN_ENCODE_INCLUDE})
         endif()
         string(TOUPPER ${SHADER_NAME}_SPV SPIRV_VARIABLE_NAME)
         set(SPIRV_HEADER_FILE ${SHADER_DIR}/${SHADER_NAME}_spv.h)

@@ -329,11 +329,12 @@ public:
 
     std::optional<ASTCDecoderPass> astc_decoder_pass;
     std::optional<BcEncoderPass> bc_encoder_pass;
+    std::optional<AstcBcPass> astc_bc_pass;
 
-    /// ASTC decoded on the GPU and re-compressed to BC1/BC3 there (accelerate_astc=Gpu with
-    /// astc_recompression=Bc1/Bc3): decode into a temporary RGBA8 image, encode, copy.
+    /// ASTC decoded and re-compressed to BC1/BC3 on the GPU.
     void TranscodeAstcToBcn(Image& image, const StagingBufferRef& map,
                             std::span<const VideoCommon::SwizzleParameters> swizzles);
+    void NoteAstcTranscode(bool fused, u64 output_bytes, u64 rgba8_bytes, bool chunked);
 
     /// Temporary decode images, reusable once the GPU is past `tick`.
     struct PendingTranscode {
@@ -345,10 +346,22 @@ public:
         u32 levels;
         u32 layers;
         u32 unused_frames;
+
+        u64 DecodeBytes() const;
     };
     std::deque<PendingTranscode> pending_transcodes;
     /// Decode images the GPU is done with, for the next texture of the same shape.
     std::vector<PendingTranscode> free_transcodes;
+    struct AstcTranscodeMeter {
+        std::chrono::steady_clock::time_point window_start{};
+        u64 fused{};
+        u64 two_pass{};
+        u64 chunked{};
+        u64 rgba8_bytes{};
+        u64 bc_bytes{};
+        u64 peak_in_flight{};
+        u64 peak_resident{};
+    } astc_transcode_meter;
 
     std::optional<BlockLinearUnswizzle3DPass> bl3d_unswizzle_pass;
     const Settings::ResolutionScalingInfo& resolution;

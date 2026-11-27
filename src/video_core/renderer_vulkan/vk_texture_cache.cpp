@@ -991,11 +991,11 @@ void CopyBufferToImage(vk::CommandBuffer cmdbuf, VkBuffer src_buffer, VkImage im
                        VkImageAspectFlags aspect_mask, bool is_initialized,
                        std::span<const VkBufferImageCopy> copies) {
     static constexpr VkAccessFlags WRITE_ACCESS_FLAGS =
-                                           VK_ACCESS_SHADER_WRITE_BIT | VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT |
-                                           VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT;
-    static constexpr VkAccessFlags READ_ACCESS_FLAGS = VK_ACCESS_SHADER_READ_BIT |
-                                                       VK_ACCESS_COLOR_ATTACHMENT_READ_BIT |
-                                                       VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_READ_BIT;
+        VK_ACCESS_SHADER_WRITE_BIT | VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT |
+        VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT | VK_ACCESS_TRANSFER_WRITE_BIT;
+    static constexpr VkAccessFlags READ_ACCESS_FLAGS =
+        VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_COLOR_ATTACHMENT_READ_BIT |
+        VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_READ_BIT | VK_ACCESS_TRANSFER_READ_BIT;
 
     //  Compute exact mip/layer range being written to
     RangedBarrierRange range;
@@ -1030,18 +1030,11 @@ void CopyBufferToImage(vk::CommandBuffer cmdbuf, VkBuffer src_buffer, VkImage im
             .subresourceRange = subresource_range,
     };
 
-    cmdbuf.PipelineBarrier(VK_PIPELINE_STAGE_LATE_FRAGMENT_TESTS_BIT |
-                           VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT |
-                           VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT, 0,
-                           read_barrier);
+    cmdbuf.PipelineBarrier(vk::PIPELINE_STAGE_GRAPHICS_COMPUTE_TRANSFER,
+                           VK_PIPELINE_STAGE_TRANSFER_BIT, 0, read_barrier);
     cmdbuf.CopyBufferToImage(src_buffer, image, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, copies);
-    // TODO: Move this to another API
-    cmdbuf.PipelineBarrier(
-            VK_PIPELINE_STAGE_TRANSFER_BIT,
-            VK_PIPELINE_STAGE_LATE_FRAGMENT_TESTS_BIT |
-            VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT |
-            VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT,
-            0, nullptr, nullptr, write_barrier);
+    cmdbuf.PipelineBarrier(VK_PIPELINE_STAGE_TRANSFER_BIT,
+                           vk::PIPELINE_STAGE_GRAPHICS_COMPUTE_TRANSFER, 0, write_barrier);
 }
 
 [[nodiscard]] VkImageBlit MakeImageBlit(const Region2D& dst_region, const Region2D& src_region,
@@ -1350,6 +1343,11 @@ TextureCacheRuntime::TextureCacheRuntime(const Device& device_, Scheduler& sched
         if (Settings::GetAstcRecompression() != Settings::AstcRecompression::Uncompressed) {
             bc_encoder_pass.emplace(device, scheduler, descriptor_pool,
                                     compute_pass_descriptor_queue);
+            const char* fused = std::getenv("EDEN_NX2_ASTC_FUSED");
+            if (fused != nullptr && std::string_view{fused} == "1") {
+                astc_bc_pass.emplace(device, scheduler, descriptor_pool,
+                                     compute_pass_descriptor_queue);
+            }
         }
     }
     if (!device.IsKhrImageFormatListSupported()) {
@@ -3199,20 +3197,13 @@ void TextureCacheRuntime::TickFrame() {
         pending_byte_addressed_shadows.pop_front();
     }
     static constexpr u32 MAX_UNUSED_SCRATCH_FRAMES = 60;
-    const auto decode_bytes = [](const PendingTranscode& t) {
-        u64 bytes{};
-        for (u32 level = 0; level < t.levels; ++level) {
-            bytes += u64{(std::max)(t.width >> level, 1U)} * (std::max)(t.height >> level, 1U) * 4;
-        }
-        return bytes * t.layers;
-    };
     u64 free_bytes{};
     for (const PendingTranscode& t : free_transcodes) {
-        free_bytes += decode_bytes(t);
+        free_bytes += t.DecodeBytes();
     }
     while (!pending_transcodes.empty() && scheduler.IsFree(pending_transcodes.front().tick)) {
         PendingTranscode& done = pending_transcodes.front();
-        const u64 bytes = decode_bytes(done);
+        const u64 bytes = done.DecodeBytes();
         if (free_bytes + bytes <= MaxFreeTranscodeBytes) {
             done.unused_frames = 0;
             free_bytes += bytes;
@@ -5540,6 +5531,63 @@ void TextureCacheRuntime::AccelerateImageUploadLayers(
     astc_decoder_pass->AssembleLayers(image, map, swizzles, layers);
 }
 
+u64 TextureCacheRuntime::PendingTranscode::DecodeBytes() const {
+    u64 bytes{};
+    for (u32 level = 0; level < levels; ++level) {
+        bytes += u64{(std::max)(width >> level, 1U)} * (std::max)(height >> level, 1U) * 4;
+    }
+    return bytes * layers;
+}
+
+void TextureCacheRuntime::NoteAstcTranscode(bool fused, u64 output_bytes, u64 rgba8_bytes,
+                                           bool chunked) {
+    static const bool enabled = [] {
+        const char* value = std::getenv("EDEN_NX2_TRANSCODE_LOG");
+        return value != nullptr && std::string_view{value} == "1";
+    }();
+    if (!enabled) {
+        return;
+    }
+    auto& meter = astc_transcode_meter;
+    const auto now = std::chrono::steady_clock::now();
+    if (meter.fused == 0 && meter.two_pass == 0) {
+        meter.window_start = now;
+    }
+    ++(fused ? meter.fused : meter.two_pass);
+    meter.chunked += chunked ? 1U : 0U;
+    meter.rgba8_bytes += rgba8_bytes;
+    meter.bc_bytes += output_bytes;
+    u64 in_flight{};
+    u64 resident{};
+    for (const auto& pending : pending_transcodes) {
+        const u64 bytes = pending.DecodeBytes();
+        resident += bytes;
+        if (!scheduler.IsFree(pending.tick)) {
+            in_flight += bytes;
+        }
+    }
+    for (const auto& free : free_transcodes) {
+        resident += free.DecodeBytes();
+    }
+    meter.peak_in_flight = (std::max)(meter.peak_in_flight, in_flight);
+    meter.peak_resident = (std::max)(meter.peak_resident, resident);
+    const auto elapsed = now - meter.window_start;
+    if (elapsed >= std::chrono::seconds{5}) {
+        constexpr double mib = 1.0 / (1024 * 1024);
+        LOG_INFO(Render_Vulkan,
+                 "ASTC BC transcode: {} fused, {} two-pass in {} ms ({} chunked); "
+                 "RGBA8 payload {:.1f} MiB, BC output {:.1f} MiB; peak decode images "
+                 "{:.1f} MiB in flight, {:.1f} MiB resident",
+                 meter.fused, meter.two_pass,
+                 std::chrono::duration_cast<std::chrono::milliseconds>(elapsed).count(),
+                 meter.chunked, static_cast<double>(meter.rgba8_bytes) * mib,
+                 static_cast<double>(meter.bc_bytes) * mib,
+                 static_cast<double>(meter.peak_in_flight) * mib,
+                 static_cast<double>(meter.peak_resident) * mib);
+        meter = {};
+    }
+}
+
 void TextureCacheRuntime::TranscodeAstcToBcn(
     Image& image, const StagingBufferRef& map,
     std::span<const VideoCommon::SwizzleParameters> swizzles) {
@@ -5548,6 +5596,60 @@ void TextureCacheRuntime::TranscodeAstcToBcn(
     const u32 height = info.size.height;
     const u32 levels = static_cast<u32>(HostMipCount(info));
     const u32 layers = static_cast<u32>(info.resources.layers);
+    const bool bc3 = !IsOpaqueBc1Astc(device, info) &&
+                     Settings::GetAstcRecompression() != Settings::AstcRecompression::Bc1;
+    const u64 block_bytes = bc3 ? 16 : 8;
+    boost::container::small_vector<VideoCommon::BufferImageCopy, 16> copies;
+    u64 total = 0;
+    for (u32 level = 0; level < levels; ++level) {
+        const u32 level_width = (std::max)(width >> level, 1U);
+        const u32 level_height = (std::max)(height >> level, 1U);
+        const u32 blocks_x = Common::DivCeil(level_width, 4U);
+        const u32 blocks_y = Common::DivCeil(level_height, 4U);
+        const u64 size = u64{blocks_x} * blocks_y * block_bytes * layers;
+        copies.push_back({
+            .buffer_offset = total,
+            .buffer_size = size,
+            .buffer_row_length = blocks_x * 4,
+            .buffer_image_height = blocks_y * 4,
+            .image_subresource{
+                .base_level = static_cast<s32>(level),
+                .base_layer = 0,
+                .num_layers = static_cast<s32>(layers),
+            },
+            .image_offset{0, 0, 0},
+            .image_extent{level_width, level_height, 1},
+        });
+        total += size;
+    }
+    const auto copy_output = [&](StagingBufferRef& output) {
+        scheduler.Record([](vk::CommandBuffer cmdbuf) {
+            const VkMemoryBarrier barrier{
+                .sType = VK_STRUCTURE_TYPE_MEMORY_BARRIER,
+                .pNext = nullptr,
+                .srcAccessMask = VK_ACCESS_SHADER_WRITE_BIT,
+                .dstAccessMask = VK_ACCESS_TRANSFER_READ_BIT,
+            };
+            cmdbuf.PipelineBarrier(VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+                                   VK_PIPELINE_STAGE_TRANSFER_BIT, 0, barrier);
+        });
+        image.UploadMemory(output, copies);
+        staging_buffer_pool.FreeDeferred(output);
+    };
+
+    constexpr u32 max_reciprocal_extent = 32768;
+    const auto max_storage = device.GetMaxStorageBufferRange();
+    if (astc_bc_pass && image.guest_size_bytes <= max_storage && total <= max_storage &&
+        width <= max_reciprocal_extent && height <= max_reciprocal_extent &&
+        layers <= device.GetMaxComputeWorkGroupCount()[2]) {
+        auto output = staging_buffer_pool.Request(total, MemoryUsage::DeviceLocal, true);
+        astc_bc_pass->Transcode(info, image.guest_size_bytes, map, output, total, swizzles, copies,
+                               bc3);
+        copy_output(output);
+        NoteAstcTranscode(true, total, 0, false);
+        return;
+    }
+
     // The BC encoder declares layout(rgba8). Identical byte layout is not enough:
     // its storage image view must have the matching R8G8B8A8_UNORM format.
     constexpr VkFormat DecodeFormat = VK_FORMAT_R8G8B8A8_UNORM;
@@ -5668,60 +5770,25 @@ void TextureCacheRuntime::TranscodeAstcToBcn(
         }
     }
 
-    // Encode every level into one buffer, then copy it into the image.
-    const bool bc3 = !IsOpaqueBc1Astc(device, info) &&
-                     Settings::GetAstcRecompression() != Settings::AstcRecompression::Bc1;
-    const u64 block_bytes = bc3 ? 16 : 8;
-    boost::container::small_vector<VideoCommon::BufferImageCopy, 16> copies;
-    boost::container::small_vector<u64, 16> layer_bytes; // one encoded layer of each level
-    boost::container::small_vector<u64, 16> level_offsets;
-    u64 total = 0;
-    for (u32 level = 0; level < levels; ++level) {
-        const u32 level_width = (std::max)(width >> level, 1U);
-        const u32 level_height = (std::max)(height >> level, 1U);
-        const u32 blocks_x = Common::DivCeil(level_width, 4U);
-        const u32 blocks_y = Common::DivCeil(level_height, 4U);
-        layer_bytes.push_back(u64{blocks_x} * blocks_y * block_bytes);
-        const u64 size = layer_bytes.back() * layers;
-        level_offsets.push_back(total);
-        copies.push_back({
-            .buffer_offset = total,
-            .buffer_size = size,
-            .buffer_row_length = blocks_x * 4,
-            .buffer_image_height = blocks_y * 4,
-            .image_subresource{
-                .base_level = static_cast<s32>(level),
-                .base_layer = 0,
-                .num_layers = static_cast<s32>(layers),
-            },
-            .image_offset{0, 0, 0},
-            .image_extent{level_width, level_height, 1},
-        });
-        total += size;
-    }
     // Deferred, and stamped once the copy below is recorded. The decode submits (wait), so a
     // buffer stamped now carried the tick before that submit while the encode and the copy ran
     // in the next one: the pool could hand it to the next transcode, or free it, once the GPU
     // was past the decode, and two textures' blocks met in one buffer.
     auto output = staging_buffer_pool.Request(total, MemoryUsage::DeviceLocal, true);
 
+    boost::container::small_vector<u64, 16> level_offsets;
+    boost::container::small_vector<u64, 16> layer_bytes;
+    for (const auto& copy : copies) {
+        level_offsets.push_back(copy.buffer_offset);
+        layer_bytes.push_back(copy.buffer_size / layers);
+    }
     TranscodeAstcBatches(*astc_decoder_pass, *bc_encoder_pass, info, image.guest_size_bytes, map,
                          swizzles, *pending.image, pending.views, batch, bc3, output.buffer,
                          output.offset, total, level_offsets, layer_bytes);
-    scheduler.Record([](vk::CommandBuffer cmdbuf) {
-        const VkMemoryBarrier barrier{
-            .sType = VK_STRUCTURE_TYPE_MEMORY_BARRIER,
-            .pNext = nullptr,
-            .srcAccessMask = VK_ACCESS_SHADER_WRITE_BIT,
-            .dstAccessMask = VK_ACCESS_TRANSFER_READ_BIT,
-        };
-        cmdbuf.PipelineBarrier(VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT,
-                               0, barrier);
-    });
-    image.UploadMemory(output.buffer, output.offset, copies);
-    staging_buffer_pool.FreeDeferred(output);
+    copy_output(output);
     pending.tick = scheduler.CurrentTick();
     pending_transcodes.push_back(std::move(pending));
+    NoteAstcTranscode(false, total, decode_layer_bytes * layers, batch < layers);
 }
 
 void TextureCacheRuntime::TransitionImageLayout(Image& image) {

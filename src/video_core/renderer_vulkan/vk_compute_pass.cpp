@@ -18,6 +18,7 @@
 #include "common/logging.h"
 #include "common/div_ceil.h"
 #include "common/vector_math.h"
+#include "video_core/host_shaders/astc_bc_comp_spv.h"
 #include "video_core/host_shaders/astc_decoder_comp_spv.h"
 #include "video_core/host_shaders/bc_encoder_comp_spv.h"
 #include "video_core/host_shaders/queries_prefix_scan_sum_comp_spv.h"
@@ -237,6 +238,27 @@ struct BcEncoderPushConstants {
     u32 out_offset; // in 8-byte units
 };
 
+struct AstcBcPushConstants {
+    u32 width;
+    u32 height;
+    u32 blocks_x;
+    u32 blocks_y;
+    u32 block_w;
+    u32 block_h;
+    u32 recip_w;
+    u32 recip_h;
+    u32 infill_ds;
+    u32 infill_dt;
+    u32 layer_stride;
+    u32 block_size;
+    u32 x_shift;
+    u32 block_height;
+    u32 block_height_mask;
+    u32 native_tiling;
+    u32 out_offset;
+};
+static_assert(sizeof(AstcBcPushConstants) == 17 * sizeof(u32));
+
 struct QueriesPrefixScanPushConstants {
     u32 min_accumulation_base;
     u32 max_accumulation_base;
@@ -254,7 +276,7 @@ ComputePass::ComputePass(const Device& device_, Scheduler& scheduler, Descriptor
                          vk::Span<VkDescriptorUpdateTemplateEntry> templates,
                          const DescriptorBankInfo& bank_info,
                          vk::Span<VkPushConstantRange> push_constants, std::span<const u32> code,
-                         std::optional<u32> optional_subgroup_size)
+                         std::optional<u32> optional_subgroup_size, bool defer_pipeline)
     : device{device_} {
     descriptor_set_layout = device.GetLogical().CreateDescriptorSetLayout({
         .sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO,
@@ -298,13 +320,20 @@ ComputePass::ComputePass(const Device& device_, Scheduler& scheduler, Descriptor
         .pCode = code.data(),
     });
     device.SaveShader(code);
+    if (!defer_pipeline) {
+        pipeline = CreatePipeline(nullptr, optional_subgroup_size);
+    }
+}
+
+vk::Pipeline ComputePass::CreatePipeline(const VkSpecializationInfo* specialization,
+                                         std::optional<u32> subgroup_size) {
     const VkPipelineShaderStageRequiredSubgroupSizeCreateInfoEXT subgroup_size_ci{
         .sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_REQUIRED_SUBGROUP_SIZE_CREATE_INFO_EXT,
         .pNext = nullptr,
-        .requiredSubgroupSize = optional_subgroup_size ? *optional_subgroup_size : 32U,
+        .requiredSubgroupSize = subgroup_size.value_or(32U),
     };
-    bool use_setup_size = device.IsExtSubgroupSizeControlSupported() && optional_subgroup_size;
-    pipeline = device.GetLogical().CreateComputePipeline(VkComputePipelineCreateInfo{
+    const bool use_setup_size = device.IsExtSubgroupSizeControlSupported() && subgroup_size;
+    return device.GetLogical().CreateComputePipeline(VkComputePipelineCreateInfo{
         .sType = VK_STRUCTURE_TYPE_COMPUTE_PIPELINE_CREATE_INFO,
         .pNext = nullptr,
         .flags = 0,
@@ -315,7 +344,7 @@ ComputePass::ComputePass(const Device& device_, Scheduler& scheduler, Descriptor
             .stage = VK_SHADER_STAGE_COMPUTE_BIT,
             .module = *module,
             .pName = "main",
-            .pSpecializationInfo = nullptr,
+            .pSpecializationInfo = specialization,
         },
         .layout = *layout,
         .basePipelineHandle = {},
@@ -878,6 +907,77 @@ void BcEncoderPass::Encode(VkImageView source, u32 width, u32 height, u32 layers
         cmdbuf.Dispatch(Common::DivCeil(uniforms.blocks_x, 8U), Common::DivCeil(uniforms.blocks_y, 8U),
                         layers);
     });
+}
+
+AstcBcPass::AstcBcPass(const Device& device_, Scheduler& scheduler_,
+                      DescriptorPool& descriptor_pool_,
+                      ComputePassDescriptorQueue& descriptor_queue_)
+    : ComputePass(device_, scheduler_, descriptor_pool_, INPUT_OUTPUT_DESCRIPTOR_SET_BINDINGS,
+                  INPUT_OUTPUT_DESCRIPTOR_UPDATE_TEMPLATE, INPUT_OUTPUT_BANK_INFO,
+                  COMPUTE_PUSH_CONSTANT_RANGE<sizeof(AstcBcPushConstants)>, ASTC_BC_COMP_SPV,
+                  std::nullopt, true),
+      scheduler{scheduler_}, descriptor_queue{descriptor_queue_} {}
+
+void AstcBcPass::Transcode(const VideoCommon::ImageInfo& info, size_t input_size,
+                          const StagingBufferRef& input, const StagingBufferRef& output,
+                          size_t output_size,
+                          std::span<const VideoCommon::SwizzleParameters> swizzles,
+                          std::span<const VideoCommon::BufferImageCopy> copies, bool bc3) {
+    const u32 kind = bc3 ? 1U : 0U;
+    if (!pipelines[kind]) {
+        constexpr VkSpecializationMapEntry entry{0, 0, sizeof(kind)};
+        const VkSpecializationInfo specialization{1, &entry, sizeof(kind), &kind};
+        pipelines[kind] = CreatePipeline(&specialization);
+    }
+    const VkPipeline vk_pipeline = *pipelines[kind];
+    const u32 block_w = VideoCore::Surface::DefaultBlockWidth(info.format);
+    const u32 block_h = VideoCore::Surface::DefaultBlockHeight(info.format);
+    const u32 layers = static_cast<u32>(info.resources.layers);
+    const bool whole_blocks = ((block_w | block_h) & 3U) == 0;
+    scheduler.RequestOutsideRenderPassOperationContext();
+    for (const auto& swizzle : swizzles) {
+        const auto level = static_cast<size_t>(swizzle.level);
+        if (level >= copies.size()) {
+            continue;
+        }
+        const auto& copy = copies[level];
+        const auto params = VideoCommon::Accelerated::MakeBlockLinearSwizzle2DParams(swizzle, info);
+        const AstcBcPushConstants uniforms{
+            .width = copy.image_extent.width,
+            .height = copy.image_extent.height,
+            .blocks_x = Common::DivCeil(copy.image_extent.width, block_w),
+            .blocks_y = Common::DivCeil(copy.image_extent.height, block_h),
+            .block_w = block_w,
+            .block_h = block_h,
+            .recip_w = Common::DivCeil(1U << 18, block_w),
+            .recip_h = Common::DivCeil(1U << 18, block_h),
+            .infill_ds = (1024U + block_w / 2U) / (block_w - 1U),
+            .infill_dt = (1024U + block_h / 2U) / (block_h - 1U),
+            .layer_stride = info.layer_stride,
+            .block_size = params.block_size,
+            .x_shift = params.x_shift,
+            .block_height = params.block_height,
+            .block_height_mask = params.block_height_mask,
+            .native_tiling = params.native_tiling,
+            .out_offset = static_cast<u32>(copy.buffer_offset / 8),
+        };
+        const u32 columns = whole_blocks ? uniforms.blocks_x : copy.buffer_row_length / 4;
+        const u32 rows = whole_blocks ? uniforms.blocks_y : copy.buffer_image_height / 4;
+        descriptor_queue.Acquire(scheduler, 2);
+        descriptor_queue.AddBuffer(input.buffer, input.offset + swizzle.buffer_offset,
+                                   input_size - swizzle.buffer_offset);
+        descriptor_queue.AddBuffer(output.buffer, output.offset, output_size);
+        const void* const descriptor_data = descriptor_queue.UpdateData();
+        scheduler.Record([this, vk_pipeline, uniforms, columns, rows, layers,
+                          descriptor_data](vk::CommandBuffer cmdbuf) {
+            const VkDescriptorSet set = descriptor_allocator.Commit();
+            device.GetLogical().UpdateDescriptorSet(set, *descriptor_template, descriptor_data);
+            cmdbuf.BindPipeline(VK_PIPELINE_BIND_POINT_COMPUTE, vk_pipeline);
+            cmdbuf.BindDescriptorSets(VK_PIPELINE_BIND_POINT_COMPUTE, *layout, 0, set, {});
+            cmdbuf.PushConstants(*layout, VK_SHADER_STAGE_COMPUTE_BIT, uniforms);
+            cmdbuf.Dispatch(Common::DivCeil(columns, 64U), rows, layers);
+        });
+    }
 }
 
 void TranscodeAstcBatches(ASTCDecoderPass& decoder, BcEncoderPass& encoder,

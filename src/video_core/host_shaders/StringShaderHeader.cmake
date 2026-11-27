@@ -9,6 +9,11 @@ string(REPLACE "." "_" CONTENTS_NAME ${CONTENTS_NAME})
 string(TOUPPER ${CONTENTS_NAME} CONTENTS_NAME)
 
 FILE(READ ${SOURCE_FILE} line_contents)
+if (DEFINED CMAKE_ARGV6)
+    get_filename_component(INCLUDE_NAME ${CMAKE_ARGV6} NAME)
+    file(READ ${CMAKE_ARGV6} INCLUDE_CONTENTS)
+    string(REPLACE "#include \"${INCLUDE_NAME}\"" "${INCLUDE_CONTENTS}" line_contents "${line_contents}")
+endif()
 
 # CMake separates list elements with semicolons, but semicolons
 # are used extensively in the shader code.

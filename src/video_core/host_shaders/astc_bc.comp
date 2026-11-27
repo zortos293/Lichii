@@ -1,0 +1,128 @@
+// SPDX-FileCopyrightText: Copyright 2026 Eglantine Emulator Project
+// SPDX-License-Identifier: GPL-3.0-or-later
+
+#version 450
+#extension GL_GOOGLE_include_directive : require
+
+layout (local_size_x = 64, local_size_y = 1, local_size_z = 1) in;
+layout (constant_id = 0) const uint BC3 = 0u;
+
+layout (push_constant) uniform PushConstants {
+    uint width;
+    uint height;
+    uint blocks_x;
+    uint blocks_y;
+    uint block_w;
+    uint block_h;
+    uint recip_w;
+    uint recip_h;
+    uint infill_ds;
+    uint infill_dt;
+    uint layer_stride;
+    uint block_size;
+    uint x_shift;
+    uint block_height;
+    uint block_height_mask;
+    uint native_tiling;
+    uint out_offset; // in 8-byte units
+};
+
+layout (binding = 0, std430) readonly restrict buffer InputBlocks {
+    uvec4 astc_data[];
+};
+
+layout (binding = 1, std430) writeonly restrict buffer OutputBlocks {
+    uvec2 out_blocks[];
+};
+
+#define block_dims uvec2(block_w, block_h)
+
+#include "astc_decode.glsl"
+
+uint px[16];
+bool any_transparent;
+
+vec4 Texel(int i) {
+    const uint p = px[i];
+    precise vec4 normalized =
+        vec4(uvec4(p & 255u, (p >> 8u) & 255u, (p >> 16u) & 255u, p >> 24u)) * (1.0 / 255.0);
+    return normalized;
+}
+
+#include "bcn_encode.glsl"
+
+void SetTexel(uint k, uvec2 pos) {
+    px[k] = packUnorm4x8(GetTexel(pos.x, pos.y));
+    any_transparent = any_transparent || (px[k] >> 24u) < 128u;
+}
+
+void Store(uvec2 bc_size, uvec2 bc_block, uint z) {
+    const uint at = (z * bc_size.y + bc_block.y) * bc_size.x + bc_block.x;
+    if (BC3 != 0u) {
+        out_blocks[out_offset + at * 2u] = EncodeAlpha();
+        out_blocks[out_offset + at * 2u + 1u] = EncodeColor(false);
+    } else {
+        out_blocks[out_offset + at] = EncodeColor(any_transparent);
+    }
+}
+
+void LoadCrossingBlock(uvec2 bc_block, uint z) {
+    const uvec2 first = bc_block * 4u;
+    const uvec2 last = min(first + 3u, uvec2(width, height) - 1u);
+    const uvec2 recip = uvec2(recip_w, recip_h);
+    const uvec2 astc_first = (first * recip) >> 18u;
+    const uvec2 astc_last = (last * recip) >> 18u;
+    any_transparent = false;
+    for (uint ay = astc_first.y; ay <= astc_last.y; ay++) {
+        for (uint ax = astc_first.x; ax <= astc_last.x; ax++) {
+            const uvec2 block = uvec2(ax, ay);
+            DecodeBlock(ReadAstcBlock(uvec3(block, z)), infill_ds, infill_dt);
+            const uvec2 origin = block * block_dims;
+            for (uint k = 0u; k < 16u; k++) {
+                const uvec2 pos = min(first + uvec2(k & 3u, k >> 2u), last) - origin;
+                if (all(lessThan(pos, block_dims))) {
+                    SetTexel(k, pos);
+                }
+            }
+        }
+    }
+}
+
+void PerAstcBlock(uvec2 bc_size, uvec2 block, uint z) {
+    if (any(greaterThanEqual(block, uvec2(blocks_x, blocks_y)))) {
+        return;
+    }
+    DecodeBlock(ReadAstcBlock(uvec3(block, z)), infill_ds, infill_dt);
+    const uvec2 subblocks = block_dims >> 2u;
+    const uvec2 origin = block * block_dims;
+    for (uint sy = 0u; sy < subblocks.y; sy++) {
+        for (uint sx = 0u; sx < subblocks.x; sx++) {
+            const uvec2 bc_block = block * subblocks + uvec2(sx, sy);
+            if (any(greaterThanEqual(bc_block, bc_size))) {
+                continue;
+            }
+            const uvec2 first = bc_block * 4u;
+            const uvec2 last = min(first + 3u, uvec2(width, height) - 1u);
+            any_transparent = false;
+            for (uint k = 0u; k < 16u; k++) {
+                const uvec2 pos = min(first + uvec2(k & 3u, k >> 2u), last) - origin;
+                SetTexel(k, pos);
+            }
+            Store(bc_size, bc_block, z);
+        }
+    }
+}
+
+void main() {
+    const uvec2 bc_size = (uvec2(width, height) + 3u) >> 2u;
+    const uvec3 id = gl_GlobalInvocationID;
+    if (((block_w | block_h) & 3u) == 0u) {
+        PerAstcBlock(bc_size, id.xy, id.z);
+        return;
+    }
+    if (any(greaterThanEqual(id.xy, bc_size))) {
+        return;
+    }
+    LoadCrossingBlock(id.xy, id.z);
+    Store(bc_size, id.xy, id.z);
+}

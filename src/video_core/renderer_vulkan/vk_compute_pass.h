@@ -5,6 +5,7 @@
 
 #pragma once
 
+#include <array>
 #include <functional>
 #include <optional>
 #include <span>
@@ -40,10 +41,14 @@ public:
                          vk::Span<VkDescriptorUpdateTemplateEntry> templates,
                          const DescriptorBankInfo& bank_info,
                          vk::Span<VkPushConstantRange> push_constants, std::span<const u32> code,
-                         std::optional<u32> optional_subgroup_size = std::nullopt);
+                         std::optional<u32> optional_subgroup_size = std::nullopt,
+                         bool defer_pipeline = false);
     ~ComputePass();
 
 protected:
+    vk::Pipeline CreatePipeline(const VkSpecializationInfo* specialization,
+                                std::optional<u32> subgroup_size = std::nullopt);
+
     const Device& device;
     vk::DescriptorUpdateTemplate descriptor_template;
     vk::PipelineLayout layout;
@@ -193,6 +198,22 @@ public:
 private:
     Scheduler& scheduler;
     ComputePassDescriptorQueue& compute_pass_descriptor_queue;
+};
+
+class AstcBcPass final : public ComputePass {
+public:
+    explicit AstcBcPass(const Device& device, Scheduler& scheduler, DescriptorPool& descriptor_pool,
+                        ComputePassDescriptorQueue& descriptor_queue);
+
+    void Transcode(const VideoCommon::ImageInfo& info, size_t input_size,
+                   const StagingBufferRef& input, const StagingBufferRef& output,
+                   size_t output_size, std::span<const VideoCommon::SwizzleParameters> swizzles,
+                   std::span<const VideoCommon::BufferImageCopy> copies, bool bc3);
+
+private:
+    Scheduler& scheduler;
+    ComputePassDescriptorQueue& descriptor_queue;
+    std::array<vk::Pipeline, 2> pipelines;
 };
 
 /// Decodes the ASTC array `info` in `map` into `decode` (RGBA8 with `batch` layers, one storage
