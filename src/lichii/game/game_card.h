@@ -3,7 +3,12 @@
 
 #pragma once
 
+#include <QPixmap>
+#include <QSet>
+#include <QString>
 #include <QStyledItemDelegate>
+
+QPixmap GameListFallbackIcon(int size);
 
 /**
  * A stylized "card"-like delegate for the game grid view.
@@ -23,7 +28,8 @@ public:
                  const QWidget* widget, const QRect& cellRect) const;
 
     QSize sizeHint(const QStyleOptionViewItem& option, const QModelIndex& index) const override;
-    void setSize(const QSize& newSize, const QSize& contentSize, const int padding, const int columns);
+    void setSize(const QSize& newSize, const QSize& contentSize, const int padding, const int columns,
+                 const int folder_label_extra_height = 0);
 
 private:
     static constexpr int cardMargin = 8;
@@ -32,4 +38,7 @@ private:
     QSize m_contentSize;
     int m_padding;
     int m_columns;
+    int m_folder_label_extra_height{};
+    mutable QSet<QString> pending_card_art;
+
 };

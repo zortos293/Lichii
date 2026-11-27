@@ -3,12 +3,21 @@
 
 #pragma once
 
+#include <algorithm>
+
 #include <QStandardItem>
 #include <QStringList>
 
 #include "qt_common/game_list/game_list_p.h"
 
 namespace Lichii {
+
+/// Display size used by the icon-based library views: without a title label the user icon size is
+/// used as-is, otherwise keep a minimum size that stays legible next to the title.
+inline u32 CardIconDisplaySize(bool show_game_name) {
+    const u32 icon_size = UISettings::values.game_cover_size.GetValue();
+    return (show_game_name && icon_size > 0) ? std::max<u32>(icon_size, u32{128}) : icon_size;
+}
 
 inline bool ContainsAllWords(const QString& haystack, const QString& userinput) {
     const QStringList userinput_split = userinput.split(QLatin1Char{' '}, Qt::SkipEmptyParts);
@@ -27,14 +36,16 @@ inline bool FilterMatches(const QString& filter, const QStandardItem* item) {
     };
 
     const auto norm_filter = sluggify(filter);
+    const QString display_name = sluggify(item->data(Qt::DisplayRole).toString());
     const auto program_id = item->data(GameListItemPath::ProgramIdRole).toULongLong();
     const QString file_path = sluggify(item->data(GameListItemPath::FullPathRole).toString());
     const QString file_title = sluggify(item->data(GameListItemPath::TitleRole).toString());
     const QString file_program_id = QStringLiteral("%1").arg(program_id, 16, 16, QLatin1Char{'0'});
     const QString file_name = sluggify(file_path.mid(file_path.lastIndexOf(QLatin1Char{'/'}) + 1) + QLatin1Char{' '} + file_title);
-    return (ContainsAllWords(file_name, norm_filter)
-        || ContainsAllWords(file_title, norm_filter))
-        || (file_program_id.size() == 16 && file_program_id.contains(norm_filter));
+    return ContainsAllWords(display_name, norm_filter) ||
+           ContainsAllWords(file_name, norm_filter) ||
+           ContainsAllWords(file_title, norm_filter) ||
+           (file_program_id.size() == 16 && file_program_id.contains(norm_filter));
 }
 
 } // namespace Lichii

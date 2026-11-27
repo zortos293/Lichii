@@ -657,9 +657,23 @@ KeyManager::KeyManager() {
     ReloadKeys();
 }
 
+std::unique_ptr<KeyManager> KeyManager::CreateForDirectory(const std::filesystem::path& keys_dir) {
+    auto manager = std::unique_ptr<KeyManager>(new KeyManager());
+    manager->ReloadKeys(keys_dir);
+    return manager;
+}
+
 void KeyManager::ReloadKeys() {
+    LoadKeysFrom(Common::FS::GetEdenPath(Common::FS::EdenPath::KeysDir));
+}
+
+void KeyManager::ReloadKeys(const std::filesystem::path& keys_dir) {
+    ClearKeys();
+    LoadKeysFrom(keys_dir);
+}
+
+void KeyManager::LoadKeysFrom(const std::filesystem::path& keys_dir) {
     // Initialize keys
-    const auto keys_dir = Common::FS::GetEdenPath(Common::FS::EdenPath::KeysDir);
     if (!Common::FS::CreateDir(keys_dir))
         LOG_ERROR(Core, "Failed to create the keys directory.");
     if (Settings::values.use_dev_keys.GetValue()) {
@@ -679,7 +693,7 @@ void KeyManager::ReloadKeys() {
     DeriveMissingMasterKeys();
 }
 
-void KeyManager::ResetKeys() {
+void KeyManager::ClearKeys() {
     s128_keys.clear();
     s256_keys.clear();
     common_tickets.clear();
@@ -689,6 +703,10 @@ void KeyManager::ResetKeys() {
     keyblobs = {};
     eticket_extended_kek = {};
     eticket_rsa_keypair = {};
+}
+
+void KeyManager::ResetKeys() {
+    ClearKeys();
     ReloadKeys();
 }
 

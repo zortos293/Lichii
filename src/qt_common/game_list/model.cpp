@@ -80,15 +80,23 @@ void GameListModel::WorkerEvent() {
 }
 
 void GameListModel::AddDirEntry(GameListDir* entry_items) {
-    if (m_flat) {
-        delete entry_items;
-        return;
-    }
+    // Flat views keep directory objects alive while worker events add their games, and expose
+    // installed SD/NAND locations as navigable cards too.
     invisibleRootItem()->appendRow(entry_items);
 }
 
 void GameListModel::AddEntry(const QList<QStandardItem*>& entry_items, GameListDir* parent) {
     if (m_flat) {
+        // Games sit at the top level in the flat list, so the folder card cannot read its game
+        // count from child rows; keep the counter the card displays up to date instead.
+        if (parent) {
+            parent->setData(parent->data(GameListDir::GameCountRole).toInt() + 1,
+                            GameListDir::GameCountRole);
+            const QVariant dir_index = parent->data(GameListDir::GameDirRole);
+            if (dir_index.isValid() && !entry_items.isEmpty()) {
+                entry_items[0]->setData(dir_index, GameListItemPath::OwnerDirRole);
+            }
+        }
         invisibleRootItem()->appendRow(entry_items);
     } else {
         parent->appendRow(entry_items);
@@ -96,9 +104,27 @@ void GameListModel::AddEntry(const QList<QStandardItem*>& entry_items, GameListD
 }
 
 void GameListModel::DonePopulating(const QStringList& watch_list) {
-    emit ShowList(!IsEmpty());
-
-    if (!m_flat) {
+    if (m_flat) {
+        for (int row = rowCount() - 1; row >= 0; --row) {
+            const QStandardItem* item = invisibleRootItem()->child(row);
+            if (item == nullptr) {
+                continue;
+            }
+            const auto type = static_cast<GameListItemType>(item->type());
+            const bool installed_directory = type == GameListItemType::SdmcDir ||
+                                             type == GameListItemType::UserNandDir ||
+                                             type == GameListItemType::SysNandDir;
+            if (installed_directory && item->data(GameListDir::GameCountRole).toInt() == 0) {
+                invisibleRootItem()->removeRow(row);
+            }
+        }
+        // The grid keeps its empty-library card: it is the add-a-folder entry point, so hiding
+        // the whole list would leave a blank window.
+        invisibleRootItem()->appendRow(new GameListAddDir());
+        emit ShowList(true);
+    } else {
+        const bool has_games = !IsEmpty();
+        emit ShowList(has_games);
         invisibleRootItem()->appendRow(new GameListAddDir());
         invisibleRootItem()->insertRow(0, new GameListFavorites());
 
@@ -142,15 +168,32 @@ bool GameListModel::IsEmpty() const {
         const QStandardItem* child = invisibleRootItem()->child(i);
         const auto type = static_cast<GameListItemType>(child->type());
 
-        if (!child->hasChildren() &&
-            (type == GameListItemType::SdmcDir || type == GameListItemType::UserNandDir ||
-             type == GameListItemType::SysNandDir)) {
+        const bool installed_directory = type == GameListItemType::SdmcDir ||
+                                         type == GameListItemType::UserNandDir ||
+                                         type == GameListItemType::SysNandDir;
+        if (installed_directory && !child->hasChildren()) {
+            if (m_flat) {
+                if (child->data(GameListDir::GameCountRole).toInt() > 0) {
+                    return false;
+                }
+                continue;
+            }
             invisibleRootItem()->removeRow(child->row());
-            i--;
+            --i;
+            continue;
+        }
+
+        if (type == GameListItemType::Favorites || type == GameListItemType::AddDir) {
+            continue;
+        }
+
+        if (type == GameListItemType::Game || type == GameListItemType::CustomDir ||
+            child->hasChildren()) {
+            return false;
         }
     }
 
-    return !invisibleRootItem()->hasChildren();
+    return true;
 }
 
 void GameListModel::ToggleFavorite(u64 program_id) {
