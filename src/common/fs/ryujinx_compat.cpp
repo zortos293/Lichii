@@ -16,6 +16,16 @@
 
 namespace Common::FS {
 namespace fs = std::filesystem;
+
+namespace {
+// Test-only: runs after a published path is reclaimed into recovery, before old-save restore.
+void (*after_published_reclaim)() = nullptr;
+} // namespace
+
+void SetRyujinxAfterPublishedReclaimHook(void (*hook)()) {
+    after_published_reclaim = hook;
+}
+
 namespace {
 
 u64 ReadLe(std::string_view data) {
@@ -60,10 +70,14 @@ public:
             return;
         }
         std::error_code ec;
-        if (staged_link) {
-            fs::remove(stage, ec);
-        } else {
-            fs::remove_all(stage, ec);
+        // Only disposable staging is cleaned here. Recovery copies and collected backups live under
+        // work/ and must survive so the caller can report them.
+        if (!stage.empty()) {
+            if (staged_link) {
+                fs::remove(stage, ec);
+            } else {
+                fs::remove_all(stage, ec);
+            }
         }
         fs::remove(work, ec);
     }
@@ -76,8 +90,16 @@ public:
         auto candidate = destination.parent_path() / name;
         auto new_stage = candidate / "new";
         auto new_backup = candidate / "backup";
-        fs::create_directories(destination.parent_path());
-        if (!fs::create_directory(candidate)) {
+        std::error_code ec;
+        fs::create_directories(destination.parent_path(), ec);
+        if (ec) {
+            throw std::runtime_error("Could not create the save parent directory");
+        }
+        if (!fs::create_directory(candidate, ec)) {
+            if (ec) {
+                throw std::runtime_error("Could not create the save staging folder: " +
+                                         ec.message());
+            }
             throw std::runtime_error("Save staging folder already exists");
         }
         stage = std::move(new_stage);
@@ -87,40 +109,69 @@ public:
 
     void CopyFrom(const fs::path& source) {
         Prepare();
-        fs::create_directory(stage);
-        for (const auto& entry : fs::recursive_directory_iterator(source)) {
+        std::error_code ec;
+        fs::create_directory(stage, ec);
+        if (ec) {
+            throw std::runtime_error("Could not create the staged save directory: " +
+                                     ec.message());
+        }
+        for (fs::recursive_directory_iterator it(source, ec), end; !ec && it != end; it.increment(ec)) {
+            const auto& entry = *it;
             const auto target = stage / entry.path().lexically_relative(source);
-            const auto type = entry.symlink_status().type();
+            const auto type = entry.symlink_status(ec).type();
+            if (ec) {
+                throw std::runtime_error("Could not inspect a save entry");
+            }
             if (IsSymlink(entry.path())) {
                 throw std::runtime_error("Save data contains a link");
             }
             if (type == fs::file_type::directory) {
-                fs::create_directory(target);
+                fs::create_directory(target, ec);
+                if (ec) {
+                    throw std::runtime_error("Could not create a staged save subdirectory");
+                }
             } else if (type == fs::file_type::regular) {
-                fs::copy_file(entry.path(), target);
+                fs::copy_file(entry.path(), target, ec);
+                if (ec) {
+                    throw std::runtime_error("Could not copy a save file into the stage");
+                }
             } else {
                 throw std::runtime_error("Save data contains a special file");
             }
+        }
+        if (ec) {
+            throw std::runtime_error("Could not read the source save directory");
         }
     }
 
     void LinkTo(const fs::path& source, RyujinxLinkCreator create_link) {
         Prepare();
         staged_link = true;
-        if (!create_link(source, stage) || !IsSymlink(stage) || !fs::equivalent(source, stage)) {
+        std::error_code ec;
+        if (!create_link(source, stage) || !IsSymlink(stage) || !fs::equivalent(source, stage, ec) ||
+            ec) {
             throw std::runtime_error("Could not create the temporary save link");
         }
     }
 
+    // Prefer error_code filesystem APIs and same-TU std::runtime_error. Under -fno-rtti,
+    // catch (const std::exception&) does not match libc++ std::filesystem::filesystem_error.
     void Publish() {
+        std::error_code ec;
         if (had_destination) {
-            fs::rename(destination, backup);
+            fs::rename(destination, backup, ec);
+            if (ec) {
+                throw std::runtime_error("Could not move the existing save aside: " + ec.message());
+            }
             has_backup = true;
         }
         if (Exists(destination)) {
             throw std::runtime_error("The destination changed during save linking");
         }
-        fs::rename(stage, destination);
+        fs::rename(stage, destination, ec);
+        if (ec) {
+            throw std::runtime_error("Could not publish the staged save: " + ec.message());
+        }
         published = true;
     }
 
@@ -128,17 +179,31 @@ public:
         std::error_code ec;
         if (published) {
             fs::rename(destination, stage, ec);
-        }
-        if (ec) {
-            throw fs::filesystem_error("Could not roll back the new save", destination, ec);
+            if (ec) {
+                throw std::runtime_error("Could not roll back the new save: " + ec.message());
+            }
+            published = false;
+            // Rename already placed the live save at stage. Claim it as recovery immediately —
+            // before any further FS probe (Exists/symlink_status can throw) or old-save restore —
+            // so reclaimed content is never left as disposable staging if a later step fails.
+            recovery = std::move(stage);
+            stage.clear();
+            has_recovery = true;
+            if (after_published_reclaim) {
+                after_published_reclaim();
+            }
         }
         if (has_backup) {
-            if (Exists(destination)) {
+            // Fail closed: symlink_status returns file_type::none on error and not_found only when
+            // the path is absent. Treating any probe_ec as vacant would rename over unknown content.
+            std::error_code probe_ec;
+            const auto status = fs::symlink_status(destination, probe_ec);
+            if (status.type() != fs::file_type::not_found) {
                 throw std::runtime_error("Could not restore the old save: destination is occupied");
             }
             fs::rename(backup, destination, ec);
             if (ec) {
-                throw fs::filesystem_error("Could not restore the old save", destination, ec);
+                throw std::runtime_error("Could not restore the old save: " + ec.message());
             }
             has_backup = false;
         }
@@ -155,6 +220,10 @@ public:
         if (has_backup) {
             result.backups.push_back(std::move(backup));
         }
+        if (has_recovery) {
+            result.backups.push_back(std::move(recovery));
+            has_recovery = false;
+        }
     }
 
 private:
@@ -162,8 +231,10 @@ private:
     fs::path work;
     fs::path stage;
     fs::path backup;
+    fs::path recovery;
     bool had_destination{};
     bool has_backup{};
+    bool has_recovery{};
     bool staged_link{};
     bool published{};
 };
@@ -305,6 +376,22 @@ RyujinxSaveResult UpdateRyujinxSave(const fs::path& lichii, const fs::path& ryuj
                 } catch (const std::exception& rollback_error) {
                     result.error += "\n";
                     result.error += rollback_error.what();
+                } catch (...) {
+                    result.error += "\nUnknown rollback exception";
+                }
+            }
+        }
+    } catch (...) {
+        result.error = "Unknown exception";
+        for (auto* replacement : {&lichii_swap, &ryujinx_swap}) {
+            if (*replacement) {
+                try {
+                    (*replacement)->RollBack();
+                } catch (const std::exception& rollback_error) {
+                    result.error += "\n";
+                    result.error += rollback_error.what();
+                } catch (...) {
+                    result.error += "\nUnknown rollback exception";
                 }
             }
         }

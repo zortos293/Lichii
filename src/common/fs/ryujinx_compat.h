@@ -41,4 +41,8 @@ RyujinxSaveResult UpdateRyujinxSave(const std::filesystem::path& lichii,
                                     RyujinxSaveOperation operation,
                                     RyujinxLinkCreator create_link = CreateSymlink);
 
+// Test-only hook: invoked after a published save is moved to recovery, before restoring the
+// previous save. Used to inject restore failures without probing the reclaimed path.
+void SetRyujinxAfterPublishedReclaimHook(void (*hook)());
+
 } // namespace Common::FS
