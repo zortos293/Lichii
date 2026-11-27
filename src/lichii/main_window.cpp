@@ -364,6 +364,8 @@ __declspec(dllexport) int AmdPowerXpressRequestHighPerformance = 1;
 
 constexpr int default_mouse_hide_timeout = 2500;
 constexpr int default_input_update_timeout = 1;
+// Without a running game the input drivers only serve menus and hotplug.
+constexpr int idle_input_update_timeout = 16;
 constexpr int EmuThreadStopTimeoutMs = 10'000;
 // A teardown that keeps making progress (Common::ShutdownProgress) is waited for this long at
 // most before Lichii gives up on it and exits.
@@ -668,7 +670,7 @@ MainWindow::MainWindow(bool has_broken_vulkan)
     connect(&mouse_hide_timer, &QTimer::timeout, this, &MainWindow::HideMouseCursor);
     connect(ui->menubar, &QMenuBar::hovered, this, &MainWindow::ShowMouseCursor);
 
-    update_input_timer.setInterval(default_input_update_timeout);
+    update_input_timer.setInterval(idle_input_update_timeout);
     connect(&update_input_timer, &QTimer::timeout, this, &MainWindow::UpdateInputDrivers);
     update_input_timer.start();
 
@@ -2783,6 +2785,7 @@ void MainWindow::BootGame(const QString& filename, Service::AM::FrontendAppletPa
     loading_screen->show();
 
     emulation_running = true;
+    update_input_timer.setInterval(default_input_update_timeout);
     if (ui->action_Fullscreen->isChecked()) {
         ShowFullscreen();
     } else if (!UISettings::values.preserve_window_size &&
@@ -3014,6 +3017,7 @@ void MainWindow::OnEmulationStopped() {
     }
 
     emulation_running = false;
+    update_input_timer.setInterval(idle_input_update_timeout);
     nextendo_version_check.reset();
 
     nextendo_social_timer.stop();
