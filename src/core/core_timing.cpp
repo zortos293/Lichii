@@ -7,6 +7,7 @@
 #include <array>
 #include <cstdlib>
 #include <mutex>
+#include <new>
 #include <optional>
 #include <string>
 #include <tuple>
@@ -313,11 +314,33 @@ void CoreTiming::UnscheduleEvent(const std::shared_ptr<EventType>& event_type,
         std::scoped_lock lk{basic_lock};
 
         std::vector<heap_t::handle_type> to_remove;
-        for (auto itr = event_queue.begin(); itr != event_queue.end(); itr++) {
-            const Event& e = *itr;
-            if (e.type.lock().get() == event_type.get()) {
-                to_remove.push_back(itr->handle);
+        try {
+            for (auto itr = event_queue.begin(); itr != event_queue.end(); ++itr) {
+                if (itr->type.lock().get() == event_type.get()) {
+                    to_remove.push_back(itr->handle);
+                }
             }
+        } catch (const std::bad_alloc&) {
+            // Cancellation is also used by destructors. If scratch allocation fails,
+            // discard the partial list and cancel in bounded batches without allocating.
+            // Erasure can change heap iteration order, so restart after every batch.
+            to_remove.clear();
+            std::array<heap_t::handle_type, 32> batch;
+            size_t count;
+            do {
+                count = 0;
+                for (auto itr = event_queue.begin(); itr != event_queue.end(); ++itr) {
+                    if (itr->type.lock().get() == event_type.get()) {
+                        batch[count++] = itr->handle;
+                        if (count == batch.size()) {
+                            break;
+                        }
+                    }
+                }
+                for (size_t i = 0; i < count; ++i) {
+                    event_queue.erase(batch[i]);
+                }
+            } while (count == batch.size());
         }
 
         for (auto& h : to_remove) {

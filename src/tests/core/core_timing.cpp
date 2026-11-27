@@ -170,3 +170,31 @@ TEST_CASE("CoreTiming[BasicOrderNoPausing]", "[core]") {
     printf("HostTimer No Pausing Timer Time: %.3f %.6f\n", timer_time / 1000.f,
            timer_time / 1000000.f);
 }
+
+TEST_CASE("CoreTiming unschedules all matching events and preserves unrelated callbacks",
+          "[core][core_timing]") {
+    using namespace std::chrono_literals;
+    Core::Timing::CoreTiming timing;
+    const auto canceled = Core::Timing::CreateEvent(
+        "canceled", [](s64, std::chrono::nanoseconds) -> std::optional<std::chrono::nanoseconds> {
+            FAIL("A canceled event must not run");
+            return std::nullopt;
+        });
+    int calls = 0;
+    const auto live = Core::Timing::CreateEvent(
+        "live", [&](s64, std::chrono::nanoseconds) -> std::optional<std::chrono::nanoseconds> {
+            ++calls;
+            return std::nullopt;
+        });
+    for (int i = 0; i < 70; ++i) {
+        timing.ScheduleEvent(0ns, canceled);
+        if (i % 23 == 0) {
+            timing.ScheduleEvent(0ns, live);
+        }
+    }
+
+    timing.UnscheduleEvent(canceled);
+    CHECK(canceled->sequence_number == 1);
+    CHECK_FALSE(timing.Advance().has_value());
+    CHECK(calls == 4);
+}
