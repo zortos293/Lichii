@@ -68,6 +68,11 @@ struct Patch {
 // Frontends only need to list what is unchecked.
 [[nodiscard]] std::vector<std::string> StoredDisabledAddons(u64 title_id,
                                                             std::vector<std::string> unchecked);
+
+// Whether a title's disabled_addons turn off its update of this version ("Update@<version>")
+// or all of its updates ("Update").
+[[nodiscard]] bool IsUpdateDisabled(const std::vector<std::string>& disabled, u32 version);
+
 // An enabled cheat that writes code or state of an applied built-in patch. Ranges are main module
 // offsets, end exclusive.
 struct BuiltinCheatOverlap {

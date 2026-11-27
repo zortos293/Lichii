@@ -127,7 +127,7 @@ std::optional<std::string> OpenGame(Core::System& system, const fs::path& game_p
         if (const auto base = game.nup->FindBasePackage()) {
             packages.push_back(*base);
         }
-        if (const auto update = game.nup->FindBestUpdatePackage()) {
+        if (const auto update = game.nup->FindEnabledUpdatePackage()) {
             packages.push_back(*update);
         }
         std::sort(packages.begin(), packages.end());

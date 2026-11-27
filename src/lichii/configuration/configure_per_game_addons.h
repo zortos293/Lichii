@@ -64,6 +64,7 @@ protected:
 
 private:
     static constexpr int LOADED_CHECK_STATE = PATCH_LOCATION + 1;
+    static constexpr int NUP_UPDATE = LOADED_CHECK_STATE + 1;
 
     static QString AddonKey(const QStandardItem& item);
     void changeEvent(QEvent* event) override;

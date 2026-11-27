@@ -915,6 +915,12 @@ std::vector<std::string> StoredDisabledAddons(u64 title_id, std::vector<std::str
     return unchecked;
 }
 
+bool IsUpdateDisabled(const std::vector<std::string>& disabled, u32 version) {
+    const std::string disabled_key = fmt::format("Update@{}", version);
+    return std::find(disabled.cbegin(), disabled.cend(), disabled_key) != disabled.cend() ||
+           std::find(disabled.cbegin(), disabled.cend(), "Update") != disabled.cend();
+}
+
 namespace {
 
 enum class TitleVersionFormat : u8 {
@@ -989,12 +995,6 @@ void AppendCommaIfNotEmpty(std::string& to, std::string_view with) {
 
 bool IsDirValidAndNonEmpty(const VirtualDir& dir) {
     return dir != nullptr && (!dir->GetFiles().empty() || !dir->GetSubdirectories().empty());
-}
-
-bool IsVersionedExternalUpdateDisabled(const std::vector<std::string>& disabled, u32 version) {
-    const std::string disabled_key = fmt::format("Update@{}", version);
-    return std::find(disabled.cbegin(), disabled.cend(), disabled_key) != disabled.cend() ||
-           std::find(disabled.cbegin(), disabled.cend(), "Update") != disabled.cend();
 }
 
 std::string GetUpdateVersionStringFromSlot(const ContentProvider* provider, u64 update_tid) {
@@ -1167,7 +1167,7 @@ VirtualDir PatchManager::PatchExeFS(VirtualDir exefs, bool apply_update) const {
             if (!update_versions.empty()) {
                 checked_external = true;
                 for (const auto& update_entry : update_versions) {
-                    if (!IsVersionedExternalUpdateDisabled(disabled, update_entry.version)) {
+                    if (!IsUpdateDisabled(disabled, update_entry.version)) {
                         update_disabled = false;
                         enabled_version = update_entry.version;
                         break;
@@ -1186,7 +1186,7 @@ VirtualDir PatchManager::PatchExeFS(VirtualDir exefs, bool apply_update) const {
                 if (!manual_update_versions.empty()) {
                     checked_manual = true;
                     for (const auto& update_entry : manual_update_versions) {
-                        if (!IsVersionedExternalUpdateDisabled(disabled, update_entry.version)) {
+                        if (!IsUpdateDisabled(disabled, update_entry.version)) {
                             update_disabled = false;
                             enabled_version = update_entry.version;
                             break;
@@ -1856,7 +1856,7 @@ VirtualFile PatchManager::PatchRomFS(const NCA* base_nca, VirtualFile base_romfs
             if (!update_versions.empty()) {
                 checked_external = true;
                 for (const auto& update_entry : update_versions) {
-                    if (!IsVersionedExternalUpdateDisabled(disabled, update_entry.version)) {
+                    if (!IsUpdateDisabled(disabled, update_entry.version)) {
                         update_disabled = false;
                         enabled_version = update_entry.version;
                         update_raw = external_provider->GetEntryForVersion(update_tid, type, update_entry.version);
@@ -1875,7 +1875,7 @@ VirtualFile PatchManager::PatchRomFS(const NCA* base_nca, VirtualFile base_romfs
                 if (!manual_update_versions.empty()) {
                     checked_manual = true;
                     for (const auto& update_entry : manual_update_versions) {
-                        if (!IsVersionedExternalUpdateDisabled(disabled, update_entry.version)) {
+                        if (!IsUpdateDisabled(disabled, update_entry.version)) {
                             update_disabled = false;
                             enabled_version = update_entry.version;
                             update_raw = manual_provider->GetEntryForVersion(update_tid, type, update_entry.version);
@@ -1978,8 +1978,7 @@ std::vector<Patch> PatchManager::GetPatches(VirtualFile update_raw) const {
                     version_str = FormatTitleVersion(update_entry.version);
                 }
 
-                const auto update_disabled =
-                    IsVersionedExternalUpdateDisabled(disabled, update_entry.version);
+                const auto update_disabled = IsUpdateDisabled(disabled, update_entry.version);
 
                 Patch update_patch = {.enabled = !update_disabled,
                                       .name = "Update",
@@ -2005,8 +2004,7 @@ std::vector<Patch> PatchManager::GetPatches(VirtualFile update_raw) const {
                     version_str = FormatTitleVersion(update_entry.version);
                 }
 
-                const auto update_disabled =
-                    IsVersionedExternalUpdateDisabled(disabled, update_entry.version);
+                const auto update_disabled = IsUpdateDisabled(disabled, update_entry.version);
 
 
                 Patch update_patch = {.enabled = !update_disabled,

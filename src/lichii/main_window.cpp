@@ -3465,7 +3465,7 @@ void MainWindow::OnGameListDumpRomFS(u64 program_id, const std::string& game_pat
         }
     } else if (loader->GetFileType() == Loader::FileType::NUP) {
         // A NUP is never installed either: its loader gives the RomFS with the newest update
-        // already merged over the base.
+        // left on in Add-Ons already merged over the base.
         title_id = program_id;
         if (loader->ReadRomFS(romfs) != Loader::ResultStatus::Success || romfs == nullptr) {
             failed();

@@ -109,8 +109,8 @@ bool NpdmIsSwitch2(const FileSys::VirtualFile& npdm) {
            metadata.IsSwitch2();
 }
 
-// The platform of a NUP, as the emulator decides it at boot: the NPDM of the newest update
-// with an ExeFS, else of the base.
+// The platform of a NUP with all its updates, as the emulator decides it at boot: the NPDM
+// of the newest update with an ExeFS, else of the base.
 bool NupIsSwitch2(const FileSys::VirtualFile& file) {
     if (!FileSys::NupContainer::IsNupFile(file)) {
         return false;

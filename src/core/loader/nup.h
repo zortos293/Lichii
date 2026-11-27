@@ -6,6 +6,7 @@
 #include <memory>
 #include <optional>
 #include <string>
+#include <vector>
 
 #include "core/file_sys/nup_container.h"
 #include "core/loader/loader.h"
@@ -19,8 +20,8 @@ class NupContainer;
 namespace Loader {
 
 /// Loads a NUP (NX Package) container: loose ExeFS/RomFS trees for a base
-/// program plus its updates in one file. The newest update package is layered
-/// over the base; add-on content packages are served as installed add-ons.
+/// program plus its updates in one file. The newest update package left on in Add-Ons is
+/// layered over the base; add-on content packages are served as installed add-ons.
 class AppLoader_NUP final : public AppLoader {
 public:
     explicit AppLoader_NUP(FileSys::VirtualFile file_);
@@ -58,7 +59,14 @@ public:
     ResultStatus ReadNSOModules(Modules& modules) override;
     ResultStatus ReadMainBuildId(Core::System& system, std::array<u8, 0x20>& build_id) override;
 
-    std::optional<std::string> ReadContainerUpdateVersion() const;
+    struct ContainerUpdate {
+        u32 version;
+        std::string display_version;
+    };
+    /// Every update in the container, newest first, whether or not Add-Ons switch it off.
+    std::vector<ContainerUpdate> ReadContainerUpdates() const;
+    /// The title whose Add-Ons settings switch the container's updates off, if they can be.
+    std::optional<u64> ReadContainerUpdateSettingsId() const;
 
 private:
     std::unique_ptr<FileSys::NupContainer> nup;

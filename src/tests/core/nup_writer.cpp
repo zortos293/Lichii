@@ -627,6 +627,116 @@ Loader::ResultStatus StatusAfterPatch(std::string nup, Patch&& patch) {
 
 } // namespace
 
+TEST_CASE("NUP boots the newest update Add-Ons leave on, else the base", "[nup][boot-inputs]") {
+    TempDir tmp;
+    const auto root = tmp.path / "dump";
+    Put(root / "base/exefs/main", "base main");
+    Put(root / "base/exefs/main.npdm", EditionNpdm(TitleId, true));
+    Put(root / "base/romfs/title.bin", "base title");
+    for (const std::string version : {"65536", "131072"}) {
+        Put(root / "updates" / version / "exefs/main", version + " main");
+        Put(root / "updates" / version / "exefs/main.npdm", EditionNpdm(TitleId, true));
+        Put(root / "updates" / version / "romfs/title.bin", version + " title");
+    }
+    const auto archive = tmp.path / "game.nup";
+    REQUIRE(FileSys::Nup::PackDump(root, archive) == FileSys::Nup::PackResult::Success);
+
+    const auto previous_disabled = Settings::values.disabled_addons;
+    SCOPE_EXIT { Settings::values.disabled_addons = previous_disabled; };
+    Settings::values.disabled_addons.erase(TitleId);
+    std::string booted = "131072";
+    SECTION("no add-on setting") {}
+    SECTION("the newest update is off") {
+        Settings::values.disabled_addons[TitleId] = {"Update@131072"};
+        booted = "65536";
+    }
+    SECTION("both updates are off") {
+        Settings::values.disabled_addons[TitleId] = {"Update@131072", "Update@65536"};
+        booted = "base";
+    }
+    SECTION("all updates are off") {
+        Settings::values.disabled_addons[TitleId] = {"Update"};
+        booted = "base";
+    }
+
+    const auto vfs = std::make_shared<FileSys::RealVfsFilesystem>();
+    const auto file = vfs->OpenFile(archive.string(), FileSys::OpenMode::Read);
+    NupContainer nup{file};
+    REQUIRE(nup.GetStatus() == Loader::ResultStatus::Success);
+    CHECK(nup.UpdateSettingsTitleId() == TitleId);
+    const auto selected = nup.SelectProgram();
+    REQUIRE(selected);
+    CHECK(PackedTree(selected->exefs).at("main") == booted + " main");
+
+    Loader::AppLoader_NUP loader{file};
+    FileSys::VirtualFile image;
+    REQUIRE(loader.ReadRomFS(image) == Loader::ResultStatus::Success);
+    const auto extracted = FileSys::ExtractRomFS(image);
+    REQUIRE(extracted);
+    CHECK(PackedTree(extracted).at("title.bin") == booted + " title");
+    std::string display_version;
+    (void)loader.ReadDisplayVersion(display_version);
+    if (booted == "base") {
+        CHECK(display_version != "2.0.0");
+        CHECK(display_version != "1.0.0");
+    } else {
+        CHECK(display_version == (booted == "131072" ? "2.0.0" : "1.0.0"));
+    }
+    const auto updates = loader.ReadContainerUpdates();
+    REQUIRE(updates.size() == 2);
+    CHECK(updates[0].version == 131072);
+    CHECK(updates[1].version == 65536);
+    CHECK(loader.ReadContainerUpdateSettingsId() == TitleId);
+}
+
+TEST_CASE("NUP add-on settings of the base do not switch off another program's update",
+          "[nup][boot-inputs]") {
+    constexpr u64 LegacyId = 0x0100ABCD00010000ULL;
+    TempDir tmp;
+    const auto root = tmp.path / "dump";
+    Put(root / "base/exefs/main", "base main");
+    Put(root / "base/exefs/main.npdm", EditionNpdm(LegacyId, false));
+    Put(root / "base/romfs/title.bin", "base title");
+    Put(root / "updates/65536/exefs/main", "update main");
+    Put(root / "updates/65536/exefs/main.npdm", EditionNpdm(TitleId + 1, true));
+    Put(root / "updates/65536/romfs/title.bin", "update title");
+    const auto archive = tmp.path / "game.nup";
+    REQUIRE(FileSys::Nup::PackDump(root, archive) == FileSys::Nup::PackResult::Success);
+
+    const auto previous_disabled = Settings::values.disabled_addons;
+    SCOPE_EXIT { Settings::values.disabled_addons = previous_disabled; };
+    Settings::values.disabled_addons[LegacyId] = {"Update"};
+
+    FileSys::RealVfsFilesystem real;
+    NupContainer nup{real.OpenFile(archive.string(), FileSys::OpenMode::Read)};
+    REQUIRE(nup.GetStatus() == Loader::ResultStatus::Success);
+    CHECK_FALSE(nup.UpdateSettingsTitleId());
+    CHECK(nup.FindEnabledUpdatePackage() == nup.FindBestUpdatePackage());
+}
+
+TEST_CASE("NUP add-on settings do not switch off a standalone update", "[nup][boot-inputs]") {
+    TempDir tmp;
+    const auto root = tmp.path / "dump";
+    Put(root / "updates/65536/exefs/main", "update main");
+    Put(root / "updates/65536/exefs/main.npdm", EditionNpdm(TitleId, true));
+    Put(root / "updates/65536/romfs/title.bin", "update title");
+    const auto archive = tmp.path / "game.nup";
+    REQUIRE(FileSys::Nup::PackDump(root, archive) == FileSys::Nup::PackResult::Success);
+
+    const auto previous_disabled = Settings::values.disabled_addons;
+    SCOPE_EXIT { Settings::values.disabled_addons = previous_disabled; };
+    Settings::values.disabled_addons[TitleId] = {"Update"};
+
+    FileSys::RealVfsFilesystem real;
+    NupContainer nup{real.OpenFile(archive.string(), FileSys::OpenMode::Read)};
+    REQUIRE(nup.GetStatus() == Loader::ResultStatus::Success);
+    CHECK_FALSE(nup.UpdateSettingsTitleId());
+    CHECK(nup.FindEnabledUpdatePackage() == nup.FindBestUpdatePackage());
+    const auto selected = nup.SelectProgram();
+    REQUIRE(selected);
+    CHECK(PackedTree(selected->exefs).at("main") == "update main");
+}
+
 TEST_CASE("NUP packs base, updates and add-ons and reads back through NupContainer", "[nup]") {
     TempDir t;
     const auto root = t.path / "Game";
@@ -827,7 +937,9 @@ TEST_CASE("NUP marks updates standalone when the dump has no base", "[nup]") {
     REQUIRE(Read(nup.GetRomFSDir(0)->GetFile("file")) == "rom");
 
     const Loader::AppLoader_NUP loader{real.OpenFile(archive.string(), FileSys::OpenMode::Read)};
-    CHECK(loader.ReadContainerUpdateVersion() == "1.0.0");
+    const auto updates = loader.ReadContainerUpdates();
+    REQUIRE_FALSE(updates.empty());
+    CHECK(updates.front().display_version == "1.0.0");
 }
 
 TEST_CASE("NUP packs a bare exefs/romfs dump as one base", "[nup]") {
@@ -852,7 +964,7 @@ TEST_CASE("NUP packs a bare exefs/romfs dump as one base", "[nup]") {
     REQUIRE(std::ranges::count(files, std::string{"notes.txt"}, &RawFile::name) == 1);
 
     const Loader::AppLoader_NUP loader{real.OpenFile(archive.string(), FileSys::OpenMode::Read)};
-    CHECK_FALSE(loader.ReadContainerUpdateVersion());
+    CHECK(loader.ReadContainerUpdates().empty());
 }
 
 TEST_CASE("NUP low storage resumes and deletes the packed sources", "[nup]") {
@@ -1579,7 +1691,9 @@ TEST_CASE("NUP loader selects base metadata field by field with an empty base Ex
         REQUIRE(entry.GetDeveloperName() == expected_publisher);
     }
     REQUIRE(control.GetVersionString() == "1.2.3");
-    CHECK(loader.ReadContainerUpdateVersion() == "1.2.3");
+    const auto updates = loader.ReadContainerUpdates();
+    REQUIRE_FALSE(updates.empty());
+    CHECK(updates.front().display_version == "1.2.3");
     REQUIRE(control.raw.save_data_owner_id == TitleId);
     u64 program_id{};
     REQUIRE(loader.ReadProgramId(program_id) == Loader::ResultStatus::Success);
@@ -1841,7 +1955,9 @@ TEST_CASE("A native update boots over a base packed without an executable", "[nu
     u64 program_id{};
     REQUIRE(loader.ReadProgramId(program_id) == Loader::ResultStatus::Success);
     CHECK(program_id == TitleId);
-    CHECK(loader.ReadContainerUpdateVersion() == "2.0.1");
+    const auto updates = loader.ReadContainerUpdates();
+    REQUIRE_FALSE(updates.empty());
+    CHECK(updates.front().display_version == "2.0.1");
 
     Core::System system{Service::Account::ProfileStorage::Scratch};
     system.SetFilesystem(std::make_shared<FileSys::RealVfsFilesystem>());

@@ -32,6 +32,7 @@
 #include "core/file_sys/submission_package.h"
 #include "core/loader/loader.h"
 #include "core/loader/nca.h"
+#include "core/loader/nup.h"
 #include "core/loader/nx.h"
 
 #include "qt_common/config/uisettings.h"
@@ -298,8 +299,32 @@ QList<QStandardItem*> MakeGameListEntry(const std::string& path, const std::stri
         });
 
     std::string version;
+    // A NUP lists its bundled updates, marked [D] when Add-Ons switch them off.
+    const auto* const nup = file_type == Loader::FileType::NUP
+                                ? static_cast<const Loader::AppLoader_NUP*>(&loader)
+                                : nullptr;
+    const auto nup_updates =
+        nup ? nup->ReadContainerUpdates() : std::vector<Loader::AppLoader_NUP::ContainerUpdate>{};
+    if (!nup_updates.empty()) {
+        const auto settings_id = nup->ReadContainerUpdateSettingsId();
+        const auto disabled = settings_id ? Settings::values.disabled_addons.find(*settings_id)
+                                          : Settings::values.disabled_addons.end();
+        for (const auto& update : nup_updates) {
+            const bool off = disabled != Settings::values.disabled_addons.end() &&
+                             FileSys::IsUpdateDisabled(disabled->second, update.version);
+            if (!patch_versions.isEmpty()) {
+                patch_versions += QLatin1Char('\n');
+            }
+            patch_versions += QStringLiteral("%1Update (%2)")
+                                  .arg(off ? QStringLiteral("[D] ") : QString{})
+                                  .arg(QString::fromStdString(update.display_version));
+            if (!settings_id) {
+                break;
+            }
+        }
+    }
     // An NX tree snapshot, like a NUP, is already the updated game: no patch manager update.
-    if ((file_type == Loader::FileType::NUP ||
+    if (((nup && nup_updates.empty()) ||
          (file_type == Loader::FileType::NX && !loader.IsRomFSUpdatable())) &&
         loader.ReadDisplayVersion(version) == Loader::ResultStatus::Success && !version.empty()) {
         if (!patch_versions.isEmpty()) {

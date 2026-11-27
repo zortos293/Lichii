@@ -108,7 +108,8 @@ void ConfigurePerGameAddons::OnItemChanged(QStandardItem* item) {
 
 QString ConfigurePerGameAddons::AddonKey(const QStandardItem& item) {
     const auto version = item.data(NUMERIC_VERSION);
-    if (version.isValid() && item.text() == QStringLiteral("Update")) {
+    if (version.isValid() &&
+        (item.text() == QStringLiteral("Update") || item.data(NUP_UPDATE).toBool())) {
         return QStringLiteral("Update@%1").arg(version.toUInt());
     }
     return item.text();
@@ -352,10 +353,24 @@ void ConfigurePerGameAddons::LoadConfiguration() {
 
     if (loader->GetFileType() == Loader::FileType::NUP) {
         const auto& nup = static_cast<const Loader::AppLoader_NUP&>(*loader);
-        if (const auto version = nup.ReadContainerUpdateVersion()) {
+        const bool can_disable = nup.ReadContainerUpdateSettingsId() == title_id;
+        for (const auto& update : nup.ReadContainerUpdates()) {
             auto* const name = new QStandardItem(tr("Update (NUP)"));
-            name->setToolTip(tr("This update is part of the NUP and cannot be disabled here."));
-            item_model->appendRow({name, new QStandardItem(QString::fromStdString(*version))});
+            auto* const version = new QStandardItem(QString::fromStdString(update.display_version));
+            if (!can_disable) {
+                name->setToolTip(tr("This update is part of the NUP and cannot be disabled here."));
+                item_model->appendRow({name, version});
+                break;
+            }
+            name->setCheckable(true);
+            name->setData(static_cast<quint32>(update.version), NUMERIC_VERSION);
+            name->setData(true, NUP_UPDATE);
+            const auto check_state =
+                FileSys::IsUpdateDisabled(disabled, update.version) ? Qt::Unchecked : Qt::Checked;
+            name->setCheckState(check_state);
+            name->setData(static_cast<int>(check_state), LOADED_CHECK_STATE);
+            list_items.push_back(QList<QStandardItem*>{name, version});
+            item_model->appendRow(list_items.back());
         }
     }
 

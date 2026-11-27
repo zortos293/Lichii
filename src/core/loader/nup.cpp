@@ -118,7 +118,7 @@ AppLoader_NUP::AppLoader_NUP(FileSys::VirtualFile file_)
     }
 
     const auto base_index = nup->FindBasePackage();
-    const auto update_index = nup->FindBestUpdatePackage();
+    const auto update_index = nup->FindEnabledUpdatePackage();
     const auto selected = nup->SelectProgram();
     if (!selected) {
         LOG_ERROR(Loader, "NUP container has no package with a usable ExeFS");
@@ -226,6 +226,14 @@ AppLoader::LoadResult AppLoader_NUP::Load(Kernel::KProcess& process, Core::Syste
     if (!has_program || secondary_loader == nullptr) {
         return {ResultStatus::ErrorNUPNoBasePackage, {}};
     }
+    if (const auto best = nup->FindBestUpdatePackage(),
+        update = nup->FindEnabledUpdatePackage();
+        best != update) {
+        LOG_INFO(Loader, "NUP update v{} is switched off in Add-Ons; booting {}",
+                 nup->GetPackages()[*best].version,
+                 update ? fmt::format("update v{}", nup->GetPackages()[*update].version)
+                        : std::string{"the base"});
+    }
 
     const auto result = secondary_loader->Load(process, system);
     if (result.first != ResultStatus::Success) {
@@ -275,7 +283,7 @@ ResultStatus AppLoader_NUP::VerifyIntegrity(
 ResultStatus AppLoader_NUP::ReadRomFS(FileSys::VirtualFile& out_file) {
     const auto base_index = nup->FindBasePackage();
     const auto base_romfs = base_index ? nup->GetRomFSDir(*base_index) : FileSys::VirtualDir{};
-    const auto update_index = nup->FindBestUpdatePackage();
+    const auto update_index = nup->FindEnabledUpdatePackage();
     const auto update_romfs =
         update_index ? nup->GetRomFSDir(*update_index) : FileSys::VirtualDir{};
     // A standalone update carries the complete merged tree; a base+update pair
@@ -394,11 +402,24 @@ ResultStatus AppLoader_NUP::ReadMainBuildId(Core::System& system,
     return secondary_loader->ReadMainBuildId(system, build_id);
 }
 
-std::optional<std::string> AppLoader_NUP::ReadContainerUpdateVersion() const {
-    if (!has_program || !nup->FindBestUpdatePackage()) {
-        return std::nullopt;
+std::vector<AppLoader_NUP::ContainerUpdate> AppLoader_NUP::ReadContainerUpdates() const {
+    std::vector<ContainerUpdate> updates;
+    if (!has_program) {
+        return updates;
     }
-    return display_version;
+    for (const auto& package : nup->GetPackages()) {
+        if (package.kind == NupContainer::PackageKind::Update) {
+            updates.push_back({package.version, package.display_version.empty()
+                                                    ? DecodeVersion(package.version)
+                                                    : package.display_version});
+        }
+    }
+    std::ranges::sort(updates, std::ranges::greater{}, &ContainerUpdate::version);
+    return updates;
+}
+
+std::optional<u64> AppLoader_NUP::ReadContainerUpdateSettingsId() const {
+    return has_program ? nup->UpdateSettingsTitleId() : std::nullopt;
 }
 
 } // namespace Loader

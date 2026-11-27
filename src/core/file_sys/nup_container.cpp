@@ -37,9 +37,11 @@
 #include "common/fs/file.h"
 #include "common/fs/path_util.h"
 #include "common/logging.h"
+#include "common/settings.h"
 #include "common/swap.h"
 #include "core/file_sys/common_funcs.h"
 #include "core/file_sys/content_archive.h"
+#include "core/file_sys/patch_manager.h"
 #include "core/file_sys/program_metadata.h"
 #include "core/file_sys/control_metadata.h"
 #include "core/file_sys/vfs/vfs_offset.h"
@@ -980,12 +982,60 @@ std::optional<std::size_t> NupContainer::FindBestUpdatePackage() const {
     return best;
 }
 
+std::optional<u64> NupContainer::UpdateSettingsTitleId() {
+    const auto base = FindBasePackage();
+    if (!base) {
+        return std::nullopt;
+    }
+    const auto exefs = GetExeFSDir(*base);
+    if (!exefs || !IsDirectoryExeFS(exefs)) {
+        return std::nullopt;
+    }
+    // An update that is another program (a Switch 2 Edition over a Switch 1 base) is not the
+    // base's update; its settings belong to that program.
+    if (const auto update = FindBestUpdatePackage()) {
+        const auto update_exefs = GetExeFSDir(*update);
+        ProgramMetadata base_metadata;
+        ProgramMetadata update_metadata;
+        if (update_exefs &&
+            base_metadata.Load(exefs->GetFile("main.npdm")) == Loader::ResultStatus::Success &&
+            update_metadata.Load(update_exefs->GetFile("main.npdm")) ==
+                Loader::ResultStatus::Success &&
+            base_metadata.GetTitleID() != update_metadata.GetTitleID()) {
+            return std::nullopt;
+        }
+    }
+    return packages[*base].title_id;
+}
+
+std::optional<std::size_t> NupContainer::FindEnabledUpdatePackage() {
+    const auto title_id = UpdateSettingsTitleId();
+    if (!title_id) {
+        return FindBestUpdatePackage();
+    }
+    const auto it = Settings::values.disabled_addons.find(*title_id);
+    if (it == Settings::values.disabled_addons.end()) {
+        return FindBestUpdatePackage();
+    }
+    std::optional<std::size_t> best;
+    for (std::size_t i = 0; i < packages.size(); ++i) {
+        if (packages[i].kind != PackageKind::Update ||
+            IsUpdateDisabled(it->second, packages[i].version)) {
+            continue;
+        }
+        if (!best || packages[i].version > packages[*best].version) {
+            best = i;
+        }
+    }
+    return best;
+}
+
 std::optional<NupContainer::ProgramSelection> NupContainer::SelectProgram() {
     if (status != Loader::ResultStatus::Success) {
         return std::nullopt;
     }
     const auto base = FindBasePackage();
-    const auto update = FindBestUpdatePackage();
+    const auto update = FindEnabledUpdatePackage();
     auto base_exefs = base ? GetExeFSDir(*base) : nullptr;
     auto update_exefs = update ? GetExeFSDir(*update) : nullptr;
     const auto select_base = [&]() -> std::optional<ProgramSelection> {

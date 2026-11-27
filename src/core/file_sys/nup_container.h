@@ -106,6 +106,12 @@ public:
     std::optional<std::size_t> FindBasePackage() const;
     /// Highest version among Update packages, if any.
     std::optional<std::size_t> FindBestUpdatePackage() const;
+    /// The title whose Add-Ons settings switch the updates off: the base's, when the base can
+    /// boot on its own and its updates are the same program.
+    std::optional<u64> UpdateSettingsTitleId();
+    /// The update to boot: the newest one those settings leave on, as for .nx archives. A
+    /// container without a bootable base always boots its best update.
+    std::optional<std::size_t> FindEnabledUpdatePackage();
     std::optional<ProgramSelection> SelectProgram();
     /// Highest version of the selected Switch 2 program's marked upgrade pack, if any.
     std::optional<std::size_t> FindUpgradePack(u64 program_id);
