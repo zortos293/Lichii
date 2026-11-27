@@ -1389,6 +1389,22 @@ StagingBufferRef TextureCacheRuntime::DownloadStagingBuffer(size_t size, bool de
     return staging_buffer_pool.Request(size, MemoryUsage::Download, deferred);
 }
 
+std::optional<StagingBufferRef> TextureCacheRuntime::TryGetCollectorDownloadBuffer(size_t size) {
+    if (!collector_download_buffer) {
+        try {
+            collector_download_buffer = DownloadStagingBuffer(size, true);
+        } catch (const vk::Exception& error) {
+            if (error.GetResult() != VK_ERROR_OUT_OF_HOST_MEMORY &&
+                error.GetResult() != VK_ERROR_OUT_OF_DEVICE_MEMORY) {
+                throw;
+            }
+            return std::nullopt;
+        }
+    }
+    ASSERT(collector_download_buffer->mapped_span.size() >= size);
+    return collector_download_buffer;
+}
+
 void TextureCacheRuntime::FreeDeferredStagingBuffer(StagingBufferRef& ref) {
     staging_buffer_pool.FreeDeferred(ref);
 }

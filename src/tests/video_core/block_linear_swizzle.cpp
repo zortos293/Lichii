@@ -1,6 +1,7 @@
 // SPDX-FileCopyrightText: Copyright 2026 Eden Emulator Project
 // SPDX-License-Identifier: GPL-3.0-or-later
 
+#include <algorithm>
 #include <chrono>
 #include <cstdio>
 #include <random>
@@ -10,6 +11,7 @@
 
 #include "common/alignment.h"
 #include "common/div_ceil.h"
+#include "video_core/texture_cache/writeback_chunks.h"
 #include "video_core/textures/decoders.h"
 
 namespace {
@@ -163,6 +165,61 @@ void CheckSubrect(const Layout& layout, const Subrect& rect, bool native) {
 }
 
 } // Anonymous namespace
+
+TEST_CASE("Writing back separate GOB columns preserves the whole guest image", "[writeback_chunks]") {
+    namespace Chunks = VideoCommon::WritebackChunks;
+    for (u32 bpp : {1U, 2U, 4U, 8U, 16U}) {
+        for (u32 block_height = 0; block_height <= 6; ++block_height) {
+            const u32 row_bytes = 5 * GOB_SIZE_X;
+            const u32 band_rows = GOB_SIZE_Y << block_height;
+            const u64 column_bytes = u64{GOB_SIZE} << block_height;
+            const Chunks::Layout layout{row_bytes / bpp, band_rows + 3, bpp, block_height};
+            const auto linear = RandomBytes(size_t{row_bytes} * layout.height, bpp + block_height);
+            // Give the untouched bytes in the three-row tail band distinct values.
+            const auto original = RandomBytes(10 * column_bytes, 31 + block_height);
+            for (bool native : {false, true}) {
+                auto expected = original;
+                SwizzleTexture(expected, linear, bpp, layout.width, layout.height, 1, block_height,
+                               0, 0, native);
+                for (u64 budget : {column_bytes, 2 * column_bytes + 19, 8 * column_bytes}) {
+                    CAPTURE(bpp, block_height, native, budget);
+                    auto actual = original;
+                    u64 cursor{};
+                    while (cursor < actual.size()) {
+                        const auto chunk = Chunks::Next(layout, cursor, budget);
+                        REQUIRE(chunk);
+                        REQUIRE(chunk->guest_offset == cursor);
+                        REQUIRE(chunk->guest_size > 0);
+                        REQUIRE(chunk->guest_size <= (std::min)(budget, actual.size() - cursor));
+                        REQUIRE(chunk->x + chunk->width <= layout.width);
+                        REQUIRE(chunk->y + chunk->height <= layout.height);
+                        const size_t pitch = size_t{chunk->width} * bpp;
+                        std::vector<u8> compact(pitch * chunk->height);
+                        for (u32 y = 0; y < chunk->height; ++y) {
+                            const size_t offset = size_t{chunk->y + y} * row_bytes + chunk->x * bpp;
+                            std::copy_n(linear.data() + offset, pitch, compact.data() + y * pitch);
+                        }
+                        const auto guest = std::span{actual}.subspan(cursor, chunk->guest_size);
+                        REQUIRE(Chunks::Swizzle(guest, compact, layout, *chunk, native));
+                        cursor += chunk->guest_size;
+                    }
+                    CHECK_FALSE(Chunks::Next(layout, cursor, budget));
+                    CHECK(actual == expected);
+                }
+            }
+        }
+    }
+}
+
+TEST_CASE("A partial GOB column cannot be scheduled for writeback", "[writeback_chunks]") {
+    namespace Chunks = VideoCommon::WritebackChunks;
+    const Chunks::Layout layout{64, 32, 4, 2};
+    const u64 column_bytes = u64{GOB_SIZE} << layout.block_height;
+    CHECK_FALSE(Chunks::Next(layout, 0, column_bytes - 1));
+    CHECK_FALSE(Chunks::Next(layout, 1, column_bytes));
+    CHECK_FALSE(Chunks::Next({65, 32, 4, 2}, 0, column_bytes));
+    CHECK_FALSE(Chunks::Next({64, 32, 3, 2}, 0, column_bytes));
+}
 
 TEST_CASE("Block linear subrect swizzle matches the GOB layout", "[block_linear_swizzle]") {
     // Origins and extents that start and end inside 16-byte units and GOBs.

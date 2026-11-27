@@ -223,7 +223,10 @@ std::optional<StagingBufferRef> StagingBufferPool::TryGetReservedBuffer(size_t s
     }
     // The last entry takes its place, so the next lookup starts there.
     cache_level.iterate_index = position;
-    cache_level.deferred.emplace(it->index, std::move(*it));
+    // Finish all node/bucket allocation before moving the idle buffer's ownership.
+    const auto [node, inserted] = cache_level.deferred.try_emplace(it->index);
+    ASSERT(inserted);
+    node->second = std::move(*it);
     if (it != entries.end() - 1) {
         *it = std::move(entries.back());
     }
