@@ -928,12 +928,17 @@ void DmaPusher::ResolveSplitMethod(GPUVAddr entry_address, bool park) {
                                              &ParkedMethod::resume_address);
     const bool can_park =
         park || (continued != parked_methods.end() && dma_state.method < MacroRegistersStart);
+    // A matching parked method must not be removed while another method still owns
+    // the arguments. If that active method is parked here, the resume is safe.
+    const bool park_current =
+        can_park && dma_state.method_count != 0 && entry_address != split_method_end;
     std::optional<ParkedMethod> resume;
-    if (continued != parked_methods.end()) {
+    if (continued != parked_methods.end() &&
+        (dma_state.method_count == 0 || park_current)) {
         resume = *continued;
         parked_methods.erase(continued);
     }
-    if (can_park && dma_state.method_count != 0 && entry_address != split_method_end) {
+    if (park_current) {
         if (parked_methods.size() == MaxParkedMethods) {
             static std::atomic<u32> reported{};
             if (reported.fetch_add(1) < 8) {

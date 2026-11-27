@@ -37,6 +37,35 @@ struct DmaPusherTestAccess {
     static bool Step(DmaPusher& pusher) {
         return pusher.Step();
     }
+
+    static void CheckParkedResumeWhileMacroBusy(DmaPusher& pusher) {
+        // The register write was parked for a later entry at 0x1008.
+        pusher.parked_methods.push_back({
+            .method = 0x4c7,
+            .subchannel = 0,
+            .method_count = 2,
+            .non_incrementing = false,
+            .increment_once = false,
+            .resume_address = 0x1008,
+        });
+        // A macro currently owns the parser's remaining words. A matching address
+        // cannot restore the parked register method until the macro finishes.
+        pusher.dma_state.method = 0xe00;
+        pusher.dma_state.method_count = 2;
+        pusher.split_method_end = 0x3000;
+        pusher.ResolveSplitMethod(0x1008, false);
+        CHECK(pusher.dma_state.method == 0xe00);
+        CHECK(pusher.dma_state.method_count == 2);
+        REQUIRE(pusher.parked_methods.size() == 1);
+        CHECK(pusher.parked_methods.front().resume_address == 0x1008);
+
+        // A later entry can revisit the address after the macro has finished.
+        pusher.dma_state.method_count = 0;
+        pusher.ResolveSplitMethod(0x1008, false);
+        CHECK(pusher.dma_state.method == 0x4c7);
+        CHECK(pusher.dma_state.method_count == 2);
+        CHECK(pusher.parked_methods.empty());
+    }
 };
 
 } // namespace Tegra
@@ -105,6 +134,18 @@ public:
 };
 
 } // namespace
+
+TEST_CASE("GPFIFO retains a parked register write while a macro owns pending words",
+          "[video_core][dma_pusher]") {
+    ScopedSystemTestContext context;
+    Core::System system;
+    Core::DeviceMemory physical;
+    Tegra::MaxwellDeviceMemoryManager device_memory{physical};
+    Tegra::MemoryManager memory{system, device_memory, 32, 1ULL << 31};
+    Tegra::Control::ChannelState channel{0};
+    Tegra::DmaPusher pusher{system, memory, channel};
+    Tegra::DmaPusherTestAccess::CheckParkedResumeWhileMacroBusy(pusher);
+}
 
 TEST_CASE("GPFIFO returns to a parked register write even when word counts match",
           "[video_core][dma_pusher]") {
