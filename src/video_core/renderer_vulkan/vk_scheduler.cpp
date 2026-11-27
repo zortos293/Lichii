@@ -175,7 +175,7 @@ Scheduler::Scheduler(const Device& device_, StateTracker& state_tracker_)
                  trace_timestamp_bits, trace_timestamp_period);
     }
 
-    AcquireNewChunk();
+    chunk = AcquireNewChunk();
     AllocateWorkerCommandBuffer();
     worker_thread = std::jthread([this](std::stop_token token) { WorkerThread(token); });
 }
@@ -383,18 +383,20 @@ void Scheduler::DispatchWork() {
         FlushUploads();
     }
     if (chunk && !chunk->Empty()) {
+        // Keep the recorded chunk owned if allocating its replacement fails.
+        auto next_chunk = AcquireNewChunk();
         // Waking the worker is a system call (~2% of the GPU thread at one dispatch per 8
         // draws): skip it while the worker is still busy, it pops the queue before waiting.
         bool wake;
         {
             std::scoped_lock ql{queue_mutex};
             work_queue.push(std::move(chunk));
+            chunk = std::move(next_chunk);
             wake = worker_waiting;
         }
         if (wake) {
             event_cv.notify_all();
         }
-        AcquireNewChunk();
     }
 }
 
@@ -1396,17 +1398,15 @@ void Scheduler::EndRenderPass()
     }
 
 
-void Scheduler::AcquireNewChunk() {
+std::unique_ptr<Scheduler::CommandChunk> Scheduler::AcquireNewChunk() {
     std::scoped_lock rl{reserve_mutex};
 
     if (chunk_reserve.empty()) {
-        // If we don't have anything reserved, we need to make a new chunk.
-        chunk = std::make_unique<CommandChunk>();
-    } else {
-        // Otherwise, we can just take from the reserve.
-        chunk = std::move(chunk_reserve.back());
-        chunk_reserve.pop_back();
+        return std::make_unique<CommandChunk>();
     }
+    auto next_chunk = std::move(chunk_reserve.back());
+    chunk_reserve.pop_back();
+    return next_chunk;
 }
 
 } // namespace Vulkan
