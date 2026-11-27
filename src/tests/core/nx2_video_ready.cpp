@@ -2,6 +2,7 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 
 #include <optional>
+#include <thread>
 
 #include <catch2/catch_test_macros.hpp>
 
@@ -62,8 +63,16 @@ TEST_CASE("Video readiness follows input capacity and decoder running state", "[
 
         // A single consumed input must wake the producer even if it holds all output images.
         inputs.Pop();
-        ready.room.store(inputs.HasRoom());
-        ready.Signal(kernel);
+        const bool notify_ready = ready.UpdateRoom(inputs.HasRoom());
+        REQUIRE(notify_ready);
+        // No timing callback runs: the decoder's host thread supplies the capacity edge.
+        std::thread worker{[&] {
+            system.RegisterHostThread();
+            if (notify_ready) {
+                ready.Signal(kernel);
+            }
+        }};
+        worker.join();
         CHECK(event->GetReadableEvent().IsSignaled(kernel));
         REQUIRE(inputs.Submit(refused));
         event->Clear(kernel);
@@ -71,7 +80,32 @@ TEST_CASE("Video readiness follows input capacity and decoder running state", "[
         ready.Signal(kernel);
         CHECK_FALSE(event->GetReadableEvent().IsSignaled(kernel));
 
+        // A delayed edge must recheck current state after leaving the queue lock.
+        inputs.Pop();
+        REQUIRE(ready.UpdateRoom(inputs.HasRoom()));
+        REQUIRE(inputs.Submit({{0xCD}, 99, false}));
+        ready.room.store(inputs.HasRoom());
+        ready.Signal(kernel);
+        CHECK_FALSE(event->GetReadableEvent().IsSignaled(kernel));
+
+        inputs.Pop();
+        REQUIRE(ready.UpdateRoom(inputs.HasRoom()));
         ready.SetRunning(kernel, false);
+        ready.Signal(kernel);
+        CHECK_FALSE(event->GetReadableEvent().IsSignaled(kernel));
+
+        ready.SetRunning(kernel, true);
+        ready.Signal(kernel);
+        CHECK(event->GetReadableEvent().IsSignaled(kernel));
+        event->Clear(kernel);
+        inputs.Pop();
+        CHECK_FALSE(ready.UpdateRoom(inputs.HasRoom()));
+        CHECK_FALSE(event->GetReadableEvent().IsSignaled(kernel));
+        // Auto-clear can consume an edge; the existing periodic notification remains necessary.
+        ready.Signal(kernel);
+        CHECK(event->GetReadableEvent().IsSignaled(kernel));
+        event->Clear(kernel);
+        ready.room.store(false); // An EOS submission closes readiness even with available space.
         ready.Signal(kernel);
         CHECK_FALSE(event->GetReadableEvent().IsSignaled(kernel));
         ready.event = nullptr;
