@@ -21,7 +21,7 @@ TEST_CASE("Native desktop submissions use an exact default budget", "[video_core
     u32 counter{};
     std::vector<u32> dispatches;
     std::vector<u32> submissions;
-    for (u32 work = 1; work <= 384; ++work) {
+    for (u32 work = 1; work <= 512; ++work) {
         const auto action = Advance(counter, true, false);
         if (action == Action::Dispatch) {
             dispatches.push_back(work);
@@ -30,9 +30,10 @@ TEST_CASE("Native desktop submissions use an exact default budget", "[video_core
             REQUIRE(counter == 0);
         }
     }
-    REQUIRE(DefaultNativeBudget == 128);
-    REQUIRE(submissions == std::vector<u32>{128, 256, 384});
-    REQUIRE(dispatches == std::vector<u32>{32, 64, 96, 160, 192, 224, 288, 320, 352});
+    REQUIRE(DefaultNativeBudget == 256);
+    REQUIRE(submissions == std::vector<u32>{256, 512});
+    REQUIRE(dispatches == std::vector<u32>{32,  64,  96,  128, 160, 192, 224,
+                                           288, 320, 352, 384, 416, 448, 480});
 }
 
 TEST_CASE("Native submission overrides do not round to a dispatch boundary",

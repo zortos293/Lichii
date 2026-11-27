@@ -10,7 +10,7 @@
 
 namespace Vulkan::SubmissionPolicy {
 
-inline constexpr u32 DefaultNativeBudget = 128;
+inline constexpr u32 DefaultNativeBudget = 256;
 
 enum class Action {
     None,
