@@ -29,6 +29,7 @@
 #include <QtConcurrent/QtConcurrentRun>
 #include <qlayoutitem.h>
 
+#include "common/settings.h"
 #include "common/common_types.h"
 #include "common/fs/fs_util.h"
 #include "common/logging.h"
@@ -437,6 +438,27 @@ QString GameList::GameTitle(u64 program_id) const {
     return title;
 }
 
+std::vector<std::pair<u64, QString>> GameList::GameTitles() const {
+    std::vector<std::pair<u64, QString>> titles;
+    const std::function<void(const QStandardItem*)> visit = [&](const QStandardItem* parent) {
+        for (int row = 0; row < parent->rowCount(); ++row) {
+            const QStandardItem* item = parent->child(row);
+            const u64 program_id = item->data(GameListItemPath::ProgramIdRole).toULongLong();
+            if (item->data(GameListItem::TypeRole).value<GameListItemType>() ==
+                    GameListItemType::Game &&
+                program_id != 0 &&
+                std::ranges::none_of(titles, [program_id](const auto& title) {
+                    return title.first == program_id;
+                })) {
+                titles.emplace_back(program_id, item->data(GameListItemPath::TitleRole).toString());
+            }
+            visit(item);
+        }
+    };
+    visit(item_model->invisibleRootItem());
+    return titles;
+}
+
 void GameList::QueueArtworkLookups() {
     if (UISettings::values.steamgriddb_api_key.GetValue().empty()) {
         return;
@@ -799,6 +821,7 @@ void GameList::AddGamePopup(QMenu& context_menu, u64 program_id, const std::stri
         context_menu.addAction(tr("Start Game without Custom Configuration"));
     context_menu.addSeparator();
     QAction* open_save_location = context_menu.addAction(tr("Open Save Data Location"));
+    QAction* sync_save = context_menu.addAction(tr("Sync Save with Google Drive"));
     QAction* open_mod_location = context_menu.addAction(tr("Open Mod Data Location"));
     QAction* open_transferable_shader_cache =
         context_menu.addAction(tr("Open Transferable Pipeline Cache"));
@@ -890,11 +913,12 @@ void GameList::AddGamePopup(QMenu& context_menu, u64 program_id, const std::stri
                 [this, program_id] { emit ReportCompatibilityRequested(program_id); });
     }
 
-    const std::array<std::pair<QAction*, const char*>, 21> icons{{
+    const std::array<std::pair<QAction*, const char*>, 22> icons{{
         {favorite, "star"},
         {start_game, "play"},
         {start_game_global, "play"},
         {open_save_location, "folder"},
+        {sync_save, "cloud"},
         {open_mod_location, "puzzle"},
         {open_transferable_shader_cache, "layers"},
         {prepare_shaders, "cpu"},
@@ -923,6 +947,7 @@ void GameList::AddGamePopup(QMenu& context_menu, u64 program_id, const std::stri
     favorite->setCheckable(true);
     favorite->setChecked(UISettings::values.favorited_ids.contains(program_id));
     open_save_location->setVisible(program_id != 0);
+    sync_save->setVisible(program_id != 0 && Settings::values.cloud_sync_enabled.GetValue());
     open_mod_location->setVisible(program_id != 0);
     open_transferable_shader_cache->setVisible(program_id != 0);
     prepare_shaders->setVisible(program_id != 0);
@@ -938,6 +963,8 @@ void GameList::AddGamePopup(QMenu& context_menu, u64 program_id, const std::stri
     connect(open_save_location, &QAction::triggered, this, [this, program_id, path]() {
         emit OpenFolderRequested(program_id, GameListOpenTarget::SaveData, path);
     });
+    connect(sync_save, &QAction::triggered, this,
+            [this, program_id] { emit SyncSaveRequested(program_id, GameTitle(program_id)); });
     connect(start_game, &QAction::triggered, this,
             [this, path]() { emit BootGame(QString::fromStdString(path), StartGameType::Normal); });
     connect(start_game_global, &QAction::triggered, this,

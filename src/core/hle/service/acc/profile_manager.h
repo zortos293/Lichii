@@ -109,12 +109,16 @@ public:
 
     bool RemoveUser(Common::UUID uuid);
     bool RemoveProfileAtIndex(std::size_t index);
+    /// Undoes CreateNewUser for a profile profiles.dat never took: removes it from memory only,
+    /// as RemoveUser would put it back when profiles.dat can't be written.
+    void RemoveUnsavedUser(Common::UUID uuid);
 
     bool SetProfileBase(Common::UUID uuid, const ProfileBase& profile_new);
     bool SetProfileBaseAndData(Common::UUID uuid, const ProfileBase& profile_new,
                                const UserData& data_new);
 
-    void WriteUserSaveFile();
+    /// False when profiles.dat couldn't be written; the changes stay to be written next time.
+    bool WriteUserSaveFile();
 
     void ResetUserSaveFile();
     /// Whether the last load read the users from profiles.dat, rather than making the default one.

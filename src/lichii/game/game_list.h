@@ -6,6 +6,8 @@
 
 #pragma once
 
+#include <utility>
+#include <vector>
 #include <QLabel>
 #include <QLineEdit>
 #include <QHash>
@@ -103,6 +105,8 @@ public slots:
     void RefreshGameDirectory();
     /// Shows a new name for every library entry of the program, without a rescan.
     void SetGameTitle(u64 program_id, const QString& title);
+    /// Every game in the library, by program id, with its name.
+    std::vector<std::pair<u64, QString>> GameTitles() const;
     /// The user saved or removed the program's custom artwork: a lookup still running for it
     /// does not replace that choice.
     void OnCustomArtworkChanged(u64 program_id);
@@ -117,6 +121,7 @@ signals:
     void OpenFolderRequested(u64 program_id, GameListOpenTarget target,
                              const std::string& game_path);
     void OpenTransferableShaderCacheRequested(u64 program_id);
+    void SyncSaveRequested(u64 program_id, const QString& title);
     void PrepareShaderWarmRequested(u64 program_id, const std::string& game_path);
     void DeleteShaderWarmRequested(u64 program_id);
     void PrecompileShadersRequested(u64 program_id, const std::string& game_path, bool on);

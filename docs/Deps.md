@@ -57,7 +57,7 @@ All other dependencies will be downloaded and built by [CPM](https://github.com/
 * [lz4](http://www.lz4.org)
 * [nlohmann\_json](https://github.com/nlohmann/json) 3.8+
 * [OpenSSL](https://www.openssl.org/source/) 3+
-* [ZLIB](https://www.zlib.net/) 1.2+
+* [ZLIB](https://www.zlib.net/) 1.2+, with its contrib/minizip (`minizip` in pkg-config) when the system zlib is used
 * [zstd](https://facebook.github.io/zstd/) 1.5+
 * [enet](http://enet.bespin.org/) 1.3+
 * [Opus](https://opus-codec.org/) 1.3+
@@ -153,7 +153,7 @@ Required USE flags:
 <summary>Arch Linux</summary>
 
 ```sh
-sudo pacman -Syu --needed base-devel boost catch2 cmake enet ffmpeg fmt git glslang libzip lz4 ninja nlohmann-json openssl opus qt6-base qt6-multimedia qt6-charts sdl3 zlib zstd zip unzip vulkan-headers vulkan-utility-libraries libusb spirv-tools spirv-headers
+sudo pacman -Syu --needed base-devel boost catch2 cmake enet ffmpeg fmt git glslang libzip lz4 ninja nlohmann-json openssl opus qt6-base qt6-multimedia qt6-charts sdl3 zlib minizip zstd zip unzip vulkan-headers vulkan-utility-libraries libusb spirv-tools spirv-headers
 ```
 
 * Building with QT Web Engine requires `qt6-webengine` as well.
@@ -166,7 +166,7 @@ sudo pacman -Syu --needed base-devel boost catch2 cmake enet ffmpeg fmt git glsl
 <summary>Ubuntu, Debian, Mint Linux</summary>
 
 ```sh
-sudo apt-get install autoconf cmake g++ gcc git glslang-tools libglu1-mesa-dev libhidapi-dev libpulse-dev libtool libudev-dev libxcb-icccm4 libxcb-image0 libxcb-keysyms1 libxcb-render-util0 libxcb-xinerama0 libxcb-xkb1 libxext-dev libxkbcommon-x11-0 mesa-common-dev nasm ninja-build qt6-base-private-dev catch2 libfmt-dev liblz4-dev nlohmann-json3-dev libzstd-dev libssl-dev libavfilter-dev libavcodec-dev libswscale-dev pkg-config zlib1g-dev libva-dev libvdpau-dev qt6-tools-dev qt6-charts-dev libvulkan-dev spirv-tools spirv-headers libusb-1.0-0-dev libxbyak-dev libboost-dev libboost-fiber-dev libboost-context-dev libsdl3-dev libopus-dev libasound2t64 vulkan-utility-libraries-dev
+sudo apt-get install autoconf cmake g++ gcc git glslang-tools libglu1-mesa-dev libhidapi-dev libpulse-dev libtool libudev-dev libxcb-icccm4 libxcb-image0 libxcb-keysyms1 libxcb-render-util0 libxcb-xinerama0 libxcb-xkb1 libxext-dev libxkbcommon-x11-0 mesa-common-dev nasm ninja-build qt6-base-private-dev catch2 libfmt-dev liblz4-dev nlohmann-json3-dev libzstd-dev libssl-dev libavfilter-dev libavcodec-dev libswscale-dev pkg-config zlib1g-dev libminizip-dev libva-dev libvdpau-dev qt6-tools-dev qt6-charts-dev libvulkan-dev spirv-tools spirv-headers libusb-1.0-0-dev libxbyak-dev libboost-dev libboost-fiber-dev libboost-context-dev libsdl3-dev libopus-dev libasound2t64 vulkan-utility-libraries-dev
 ```
 
 * Ubuntu 26.04, Linux Mint 22.3, or Debian 13 or later is required.
@@ -180,7 +180,7 @@ sudo apt-get install autoconf cmake g++ gcc git glslang-tools libglu1-mesa-dev l
 Fedora:
 
 ```sh
-sudo dnf install autoconf cmake fmt-devel gcc{,-c++} glslang hidapi-devel json-devel libtool libusb1-devel libzstd-devel lz4-devel nasm ninja-build openssl-devel pulseaudio-libs-devel qt6-linguist qt6-qtbase{-private,}-devel qt6-qtwebengine-devel qt6-qtmultimedia-devel qt6-charts-devel speexdsp-devel wayland-devel zlib-devel ffmpeg-devel libXext-devel boost jq
+sudo dnf install autoconf cmake fmt-devel gcc{,-c++} glslang hidapi-devel json-devel libtool libusb1-devel libzstd-devel lz4-devel nasm ninja-build openssl-devel pulseaudio-libs-devel qt6-linguist qt6-qtbase{-private,}-devel qt6-qtwebengine-devel qt6-qtmultimedia-devel qt6-charts-devel speexdsp-devel wayland-devel zlib-devel minizip-ng-compat-devel ffmpeg-devel libXext-devel boost jq
 ```
 
 AlmaLinux (use `LICHII_USE_CPM=ON`):
@@ -190,11 +190,13 @@ AlmaLinux (use `LICHII_USE_CPM=ON`):
 sudo dnf install epel-release dnf-utils
 # (run rpmfusion installation afterwards)
 # vvv - This will work for most systems
-sudo dnf install autoconf cmake libtool libudev cmake gcc gcc-c++ qt6-qtbase-devel zlib-devel openssl-devel boost SDL3 ffmpeg-devel libdrm glslang jq patch
+sudo dnf install autoconf cmake libtool libudev cmake gcc gcc-c++ qt6-qtbase-devel zlib-devel minizip-devel openssl-devel boost SDL3 ffmpeg-devel libdrm glslang jq patch
 # Qt6 private GUI must be taken from CRB repos
 sudo dnf config-manager --enable crb
 sudo dnf install qt6-qtbase-private-devel
 ```
+
+Fedora's `minizip-ng-compat-devel` and EPEL's `minizip-devel` are minizip-ng with its minizip compatibility headers (`<minizip/zip.h>`, pkg-config `minizip`); Lichii has not been built against them yet.
 
 For systems like OpenEuler or derivates, don't forget to also install: `SDL3-devel pkg-config fmt-dev nlohmann-json-dev`.
 
@@ -242,7 +244,7 @@ If you're going for a pure build (i.e no downloaded deps), use `-DLICHII_USE_CPM
 Install dependencies from **[Homebrew](https://brew.sh/)**
 
 ```sh
-brew install autoconf automake boost ffmpeg fmt glslang hidapi libtool libusb lz4 ninja nlohmann-json openssl pkg-config qt@6 sdl3 speexdsp zlib zstd cmake Catch2 molten-vk vulkan-loader spirv-tools vulkan-utility-libraries
+brew install autoconf automake boost ffmpeg fmt glslang hidapi libtool libusb lz4 ninja nlohmann-json openssl pkg-config qt@6 sdl3 speexdsp zlib minizip zstd cmake Catch2 molten-vk vulkan-loader spirv-tools vulkan-utility-libraries
 ```
 
 If you are compiling on Intel Mac, or are using a Rosetta Homebrew installation, you must replace all references of `/opt/homebrew` with `/usr/local`.

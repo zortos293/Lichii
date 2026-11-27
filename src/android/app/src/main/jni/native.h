@@ -4,6 +4,7 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 
 #include <optional>
+#include <stop_token>
 
 #include <android/native_window_jni.h>
 #include "common/android/applets/software_keyboard.h"
@@ -43,8 +44,11 @@ public:
     void PauseEmulation();
     void UnPauseEmulation();
     void HaltEmulation();
+    // Stopped by HaltEmulation from InitializeEmulation on, also before RunEmulation.
+    std::stop_token HaltToken() const;
     void RunEmulation();
-    void ShutdownEmulation();
+    // True when it hands over to the next program, which boots right away.
+    bool ShutdownEmulation();
     void RequestDiskShaderCacheReload(u64 program_id);
 
     const Core::PerfStatsResults& PerfStats();
@@ -83,6 +87,7 @@ private:
     Core::SystemResultStatus m_load_result{Core::SystemResultStatus::ErrorNotInitialized};
     std::atomic<bool> m_is_running = false;
     std::atomic<bool> m_is_paused = false;
+    std::stop_source m_halt_stop;
     Common::Android::SoftwareKeyboard::AndroidKeyboard* m_software_keyboard{};
     std::unique_ptr<FileSys::ManualContentProvider> m_manual_provider;
     int m_applet_id{1};

@@ -20,6 +20,12 @@
         android:label="NewUserDialogFragment" />
 
     <fragment
+        android:id="@+id/cloudSyncFragment"
+        android:name="io.github.zortos293.lichii.fragments.CloudSyncFragment"
+        android:label="@string/cloud_sync"
+        tools:layout="@layout/fragment_cloud_sync" />
+
+    <fragment
         android:id="@+id/driverManagerFragment"
         android:name="io.github.zortos293.lichii.fragments.DriverManagerFragment"
         android:label="DriverManagerFragment">

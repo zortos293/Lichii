@@ -88,6 +88,23 @@ TEST_CASE("A profile reset says whether it read profiles.dat", "[core][acc]") {
     CHECK(manager.UserSaveFileRead());
 }
 
+TEST_CASE("A profile deletion profiles.dat can't take keeps the profile", "[core][acc]") {
+    NandFixture fixture;
+    Settings::values.current_user = 0;
+    ProfileManager manager;
+    const auto second = Common::UUID::MakeRandom();
+    REQUIRE(manager.CreateNewUser(second, "Second").IsSuccess());
+    REQUIRE(manager.WriteUserSaveFile());
+    // profiles.dat can't be replaced while a folder takes its place.
+    const auto profiles_dat = fixture.nand / "system/save/8000000000000010/su/avators/profiles.dat";
+    std::filesystem::remove(profiles_dat);
+    std::filesystem::create_directory(profiles_dat);
+
+    CHECK_FALSE(manager.RemoveUser(second));
+    CHECK(manager.GetUserCount() == 2);
+    CHECK(manager.UserExists(second));
+}
+
 // FindOrphanedProfiles took every folder under save/0000000000000000 for a user ID, so a title
 // folder copied in by hand showed the orphaned-profile dialog at every start, and an empty one was
 // deleted. Only a 32-hex user ID is a profile candidate now.

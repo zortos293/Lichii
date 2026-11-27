@@ -165,7 +165,7 @@ jobs:
             libpulse-dev libtool libudev-dev libxkbcommon-x11-0 \
             mesa-common-dev nasm ninja-build qt6-base-private-dev \
             qt6-charts-dev qt6-tools-dev libavfilter-dev libavcodec-dev \
-            libswscale-dev pkg-config zlib1g-dev libva-dev libvdpau-dev \
+            libswscale-dev pkg-config zlib1g-dev libminizip-dev libva-dev libvdpau-dev \
             spirv-tools spirv-headers libusb-1.0-0-dev \
             libboost-dev libboost-fiber-dev libboost-context-dev \
             libopus-dev libasound2-dev ccache llvm python3-zstandard \
@@ -185,7 +185,7 @@ jobs:
           HOMEBREW_NO_AUTO_UPDATE: 1
         run: |
           brew install autoconf automake boost ffmpeg fmt glslang hidapi libtool libusb lz4 ninja \
-            nlohmann-json openssl pkg-config qt@6 sdl3 speexdsp zlib zstd cmake catch2 molten-vk \
+            nlohmann-json openssl pkg-config qt@6 sdl3 speexdsp zlib minizip zstd cmake catch2 molten-vk \
             vulkan-loader spirv-tools vulkan-utility-libraries ccache
           freetype="$(brew --prefix freetype)/lib/libfreetype.6.dylib"
           if otool -L "$freetype" | grep -F /usr/lib/libhvf.dylib > /dev/null; then

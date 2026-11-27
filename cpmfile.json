@@ -123,7 +123,7 @@
     },
     "httplib": {
         "find_args": "MODULE GLOBAL",
-        "hash": "159ed94965018f2a371d45a3bfc1961e5fb1549e501ded70a6b4532d7fe99d0579c18b5195aff6e35f96f399b426cea2650ec9fb75ef80d4c9edeccb51f2e6c9",
+        "hash": "02763759b1d5c0988d6365faa6c98fa7dc5281e0ea619a08cdb9c8acdc36b8ff0d78081cbe0ce9ab14b3a22ae4e0f09548078672dbd4a44e3a3e9aa05fd868b3",
         "options": [
             "HTTPLIB_REQUIRE_OPENSSL ON",
             "HTTPLIB_DISABLE_MACOSX_AUTOMATIC_ROOT_CERTIFICATES ON"
@@ -132,7 +132,7 @@
             "0001-mingw.patch"
         ],
         "repo": "yhirose/cpp-httplib",
-        "version": "v0.46.0"
+        "version": "v0.67.0"
     },
     "lagoon": {
         "hash": "b9380f99c6effaeccc6d8f81d4942e852c11ad28613df637e155451556ae5826f93765bee57a5c87a9740d2bd1db463ad0f55a947772fe9d57eeabae3efa373e",
@@ -385,7 +385,8 @@
         "options": [
             "ZLIB_BUILD_SHARED OFF",
             "ZLIB_BUILD_TESTING OFF",
-            "ZLIB_INSTALL OFF"
+            "ZLIB_INSTALL OFF",
+            "ZLIB_BUILD_MINIZIP ON"
         ],
         "package": "ZLIB",
         "repo": "madler/zlib",

@@ -8,6 +8,8 @@ add_library(lichii-android SHARED
     emu_window/emu_window.h
     native.cpp
     native.h
+    native_cloud_sync.cpp
+    native_cloud_sync.h
     native_config.cpp
     native_freedreno.cpp
     android_settings.cpp

@@ -77,6 +77,9 @@ option(ENABLE_QT_TRANSLATION "Enable translations for the Qt frontend" OFF)
 option(ENABLE_UPDATE_CHECKER "Enable update checker (for Qt and Android)" OFF)
 set(LICHII_BUILD_TAG "" CACHE STRING "Published build-N release tag; empty for local builds")
 set(LICHII_BUILD_PLATFORM "" CACHE STRING "Release asset platform and variant, such as linux-x86_64-pgo")
+# Google Drive sync's OAuth client ("TVs and Limited Input devices"). Empty: users import their own.
+set(LICHII_GDRIVE_CLIENT_ID "" CACHE STRING "Google OAuth client id for Drive sync")
+set(LICHII_GDRIVE_CLIENT_SECRET "" CACHE STRING "Google OAuth client secret for Drive sync")
 cmake_dependent_option(LICHII_USE_QT_MULTIMEDIA "Use QtMultimedia for Camera"  OFF "NOT LICHII_USE_BUNDLED_QT" OFF)
 cmake_dependent_option(LICHII_USE_QT_WEB_ENGINE "Use QtWebEngine for web applet implementation" OFF "NOT LICHII_USE_BUNDLED_QT" OFF)
 set(LICHII_QT_MIRROR "" CACHE STRING "What mirror to use for downloading the bundled Qt libraries")
@@ -509,6 +512,13 @@ if (NOT LICHII_STATIC_ROOM)
 
     if (ZLIB_ADDED)
         add_library(ZLIB::ZLIB ALIAS zlibstatic)
+        # zlib's contrib/minizip (ZLIB_BUILD_MINIZIP), included as <minizip/...> like an installed one
+        target_include_directories(libminizipstatic INTERFACE ${ZLIB_SOURCE_DIR}/contrib)
+        add_library(minizip::minizip ALIAS libminizipstatic)
+    else()
+        find_package(PkgConfig REQUIRED)
+        pkg_check_modules(minizip REQUIRED IMPORTED_TARGET GLOBAL minizip)
+        add_library(minizip::minizip ALIAS PkgConfig::minizip)
     endif()
 
     # Opus

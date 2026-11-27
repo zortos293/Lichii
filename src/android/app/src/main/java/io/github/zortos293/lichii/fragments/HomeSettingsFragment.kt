@@ -138,6 +138,20 @@ class HomeSettingsFragment : Fragment() {
             )
             add(
                 HomeSetting(
+                    R.string.cloud_sync,
+                    R.string.cloud_sync_description,
+                    R.drawable.ic_refresh,
+                    {
+                        val action = HomeNavigationDirections.actionGlobalSettingsSubscreenActivity(
+                            SettingsSubscreen.CLOUD_SYNC,
+                            null
+                        )
+                        binding.root.findNavController().navigate(action)
+                    }
+                )
+            )
+            add(
+                HomeSetting(
                     R.string.gpu_driver_manager,
                     R.string.install_gpu_driver_description,
                     R.drawable.ic_build,

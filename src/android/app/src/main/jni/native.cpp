@@ -91,6 +91,7 @@ extern "C" {
 #include "hid_core/hid_types.h"
 #include "input_common/drivers/virtual_amiibo.h"
 #include "jni/native.h"
+#include "jni/native_cloud_sync.h"
 #include "video_core/frame_gen/lossless_dll.h"
 #include "video_core/renderer_base.h"
 #include "video_core/renderer_vulkan/renderer_vulkan.h"
@@ -282,6 +283,7 @@ Core::SystemResultStatus EmulationSession::InitializeEmulation(const std::string
                                                                const std::size_t program_index,
                                                                const bool frontend_initiated) {
     std::scoped_lock lock(m_mutex);
+    m_halt_stop = std::stop_source{};
 
     // Create the render window.
     m_window = std::make_unique<EmuWindow_Android>(m_native_window, m_vulkan_library);
@@ -354,10 +356,11 @@ Core::SystemResultStatus EmulationSession::InitializeEmulation(const std::string
     return Core::SystemResultStatus::Success;
 }
 
-void EmulationSession::ShutdownEmulation() {
+bool EmulationSession::ShutdownEmulation() {
     std::scoped_lock lock(m_mutex);
 
-    if (m_next_program_index != -1) {
+    const bool program_changes = m_next_program_index != -1;
+    if (program_changes) {
         ChangeProgram(m_next_program_index);
         m_next_program_index = -1;
     }
@@ -377,11 +380,12 @@ void EmulationSession::ShutdownEmulation() {
         m_load_result = Core::SystemResultStatus::ErrorNotInitialized;
         m_window.reset();
         OnEmulationStopped(Core::SystemResultStatus::Success);
-        return;
+        return program_changes;
     }
 
     // Tear down the render window.
     m_window.reset();
+    return program_changes;
 }
 
 void EmulationSession::PauseEmulation() {
@@ -399,12 +403,23 @@ void EmulationSession::UnPauseEmulation() {
 void EmulationSession::HaltEmulation() {
     std::scoped_lock lock(m_mutex);
     m_is_running = false;
+    m_halt_stop.request_stop();
     m_cv.notify_one();
+}
+
+std::stop_token EmulationSession::HaltToken() const {
+    std::scoped_lock lock(m_mutex);
+    return m_halt_stop.get_token();
 }
 
 void EmulationSession::RunEmulation() {
     {
         std::scoped_lock lock(m_mutex);
+        // Stopped since it loaded, e.g. during the cloud sync of a program change.
+        if (m_halt_stop.stop_requested()) {
+            m_applet_id = static_cast<int>(Service::AM::AppletId::Application);
+            return;
+        }
         m_is_running = true;
     }
 
@@ -526,11 +541,15 @@ static Core::SystemResultStatus RunEmulation(const std::string& filepath,
 
     if (filepath.empty()) {
         LOG_CRITICAL(Frontend, "failed to load: filepath empty!");
+        AndroidCloudSync::GuestStopped();
         return Core::SystemResultStatus::ErrorLoader;
     }
 
     SCOPE_EXIT {
-        EmulationSession::GetInstance().ShutdownEmulation();
+        // A program change boots the next program right away: the guest goes on.
+        if (!EmulationSession::GetInstance().ShutdownEmulation()) {
+            AndroidCloudSync::GuestStopped();
+        }
     };
 
     jconst result = EmulationSession::GetInstance().InitializeEmulation(filepath, program_index,
@@ -538,6 +557,9 @@ static Core::SystemResultStatus RunEmulation(const std::string& filepath,
     if (result != Core::SystemResultStatus::Success) {
         return result;
     }
+    AndroidCloudSync::GuestLoaded(
+        EmulationSession::GetInstance().System().GetApplicationProcessProgramID(),
+        EmulationSession::GetInstance().HaltToken());
 
     EmulationSession::GetInstance().RunEmulation();
 

@@ -46,6 +46,8 @@
 #include "ryujinx_dialog.h"
 #include "set_play_time_dialog.h"
 #include "util/util.h"
+#include "frontend_common/cloud_sync/google_auth.h"
+#include "lichii/cloud_sync_controller.h"
 #include "lichii/game/game_list.h"
 #include "lichii/mod_store/mod_store_dialog.h"
 #include "lichii/nup_dialogs.h"
@@ -92,6 +94,9 @@
 
 #include <QActionGroup>
 #include <QCheckBox>
+#include <QDateTime>
+#include <QToolButton>
+#include <QPainter>
 #include <QClipboard>
 #include <QDate>
 #include <QDesktopServices>
@@ -600,7 +605,10 @@ MainWindow::MainWindow(bool has_broken_vulkan)
                 if (pull && Common::Nextendo::OnlinePlayActive() &&
                     Settings::values.nextendo_sync_profile.GetValue()) {
                     // A game that booted meanwhile reads the profile: write it once the game stops.
+                    // Nor while a cloud sync may be changing the profiles.
                     if (QtCommon::system->IsPoweredOn() ||
+                        FrontendCommon::CloudSync::SyncRunning() ||
+                        (cloud_sync && cloud_sync->Busy()) ||
                         !WriteNextendoProfile(QtCommon::system->GetProfileManager(),
                                               nextendo_profile_user, *pull)) {
                         nextendo_profile_force = true;
@@ -1243,6 +1251,36 @@ void MainWindow::InitializeWidgets() {
     statusBar()->addPermanentWidget(multiplayer_state->GetStatusText(), 0);
     statusBar()->addPermanentWidget(multiplayer_state->GetStatusIcon(), 0);
 
+    // Cloud sync, beside the network status: a light blue cloud when on, a grey one when off or
+    // signed out. When it last synced is in the tooltip.
+    cloud_sync_button = new QToolButton();
+    cloud_sync_button->setAutoRaise(true);
+    cloud_sync_button->setFocusPolicy(Qt::NoFocus);
+    cloud_sync_button->setIconSize(QSize{16, 16});
+    connect(cloud_sync_button, &QToolButton::clicked, this, [this] {
+        if (FrontendCommon::CloudSync::SignedInSnapshot()) {
+            Settings::values.cloud_sync_enabled.SetValue(
+                !Settings::values.cloud_sync_enabled.GetValue());
+            UpdateCloudSyncButton();
+        } else {
+            OnConfigure();
+        }
+    });
+    cloud_sync_button->setContextMenuPolicy(Qt::CustomContextMenu);
+    connect(cloud_sync_button, &QToolButton::customContextMenuRequested, this,
+            [this](const QPoint& menu_location) {
+                QMenu context_menu;
+                QAction* const sync_now =
+                    context_menu.addAction(tr("Sync Now"), [this] { cloud_sync->SyncAll(); });
+                sync_now->setEnabled(cloud_sync && cloud_sync->Enabled() && !cloud_sync->Busy());
+                context_menu.addAction(tr("Configure..."), this, &MainWindow::OnConfigure);
+                context_menu.exec(cloud_sync_button->mapToGlobal(menu_location));
+            });
+    connect(&cloud_sync_button_timer, &QTimer::timeout, this, &MainWindow::UpdateCloudSyncButton);
+    cloud_sync_button_timer.start(std::chrono::seconds{30});
+    UpdateCloudSyncButton();
+    statusBar()->addPermanentWidget(cloud_sync_button, 0);
+
     tas_label = new QLabel();
     tas_label->setObjectName(QStringLiteral("TASlabel"));
     tas_label->setFocusPolicy(Qt::NoFocus);
@@ -1806,6 +1844,28 @@ void MainWindow::ConnectWidgetEvents() {
     connect(game_list, &GameList::GameChosen, this, &MainWindow::OnGameListLoadFile);
     connect(game_list, &GameList::OpenDirectory, this, &MainWindow::OnGameListOpenDirectory);
     connect(game_list, &GameList::OpenFolderRequested, this, &MainWindow::OnGameListOpenFolder);
+    cloud_sync = new CloudSyncController(this);
+    cloud_sync->SetTitleSource([this] {
+        std::vector<FrontendCommon::CloudSync::Title> titles;
+        for (const auto& [program_id, name] : game_list->GameTitles()) {
+            titles.push_back({program_id, name.toStdString()});
+        }
+        return titles;
+    });
+    connect(cloud_sync, &CloudSyncController::StatusMessage, this,
+            [this](const QString& message) { statusBar()->showMessage(message, 15000); });
+    connect(cloud_sync, &CloudSyncController::SettingsChanged, this, &MainWindow::OnSaveConfig);
+    // A Nextendo profile pulled during the sync was left for now.
+    connect(cloud_sync, &CloudSyncController::BusyChanged, this, [this](bool busy) {
+        UpdateCloudSyncButton();
+        if (!busy) {
+            SyncNextendoProfile(false);
+        }
+    });
+    connect(game_list, &GameList::SyncSaveRequested, this,
+            [this](u64 program_id, const QString& title) {
+                cloud_sync->SyncTitle({program_id, title.toStdString()});
+            });
     connect(game_list, &GameList::OpenTransferableShaderCacheRequested, this,
             [this](u64 program_id) { QtCommon::Path::OpenShaderCache(program_id, this); });
     connect(game_list, &GameList::RemoveInstalledEntryRequested, this,
@@ -2452,6 +2512,10 @@ void MainWindow::BootGame(const QString& filename, Service::AM::FrontendAppletPa
         boot_in_progress = false;
         LOG_INFO(Frontend, "Launch finished: elapsed_ms={} running={}", boot_timer.elapsed(),
                  emulation_running);
+        if (!emulation_running && cloud_sync_title) {
+            cloud_sync->GuestStopped(*cloud_sync_title, false);
+            cloud_sync_title.reset();
+        }
         if (!emulation_running && !close_pending) {
             game_list->SetScanEnabled(true);
             game_list->PopulateAsync(UISettings::values.game_dirs);
@@ -2513,6 +2577,22 @@ void MainWindow::BootGame(const QString& filename, Service::AM::FrontendAppletPa
     PrepareShaderPrecache(title_id, std::filesystem::path{filename.toStdU16String()});
     speed_limit_before_hotkeys.reset();
     Settings::LogSettings();
+
+    // No cloud sync touches the title (or, while it runs, the profiles) from here on; the saves
+    // changed on Drive come in first. A cancelled or failed pull still boots. Before the user
+    // picker, which reads the profiles a sync may be changing.
+    {
+        std::string name = QtCommon::Game::ReadCustomTitle(title_id);
+        if (name.empty() && loader) {
+            loader->ReadTitle(name);
+        }
+        cloud_sync_title = FrontendCommon::CloudSync::Title{
+            title_id, name.empty() ? fmt::format("{:016X}", title_id) : name};
+        cloud_sync->PrepareBoot(*cloud_sync_title);
+        if (close_pending) {
+            return;
+        }
+    }
 
     if (UISettings::values.select_user_on_boot && !user_flag_cmd_line) {
         const Core::Frontend::ProfileSelectParameters parameters{
@@ -3015,6 +3095,10 @@ void MainWindow::OnEmulationStopped() {
 
     emulation_running = false;
     nextendo_version_check.reset();
+    if (cloud_sync_title) {
+        cloud_sync->GuestStopped(*cloud_sync_title, true);
+        cloud_sync_title.reset();
+    }
 
     nextendo_social_timer.stop();
     if (Common::Nextendo::OnlinePlayActive()) {
@@ -5917,6 +6001,7 @@ void MainWindow::SyncNextendoProfile(bool force) {
     nextendo_profile_force |= force;
     if (!Common::Nextendo::OnlinePlayActive() ||
         !Settings::values.nextendo_sync_profile.GetValue() || QtCommon::system->IsPoweredOn() ||
+        FrontendCommon::CloudSync::SyncRunning() || (cloud_sync && cloud_sync->Busy()) ||
         nextendo_profile_watcher.isRunning()) {
         return;
     }
@@ -6487,6 +6572,54 @@ void MainWindow::UpdateStatusButtons() {
     UpdateAAText();
     UpdateFrameGenButton();
     UpdateVolumeUI();
+    UpdateCloudSyncButton();
+}
+
+void MainWindow::UpdateCloudSyncButton() {
+    namespace CloudSync = FrontendCommon::CloudSync;
+    const bool signed_in = CloudSync::SignedInSnapshot();
+    const bool active = Settings::values.cloud_sync_enabled.GetValue() && signed_in;
+
+    // Lichii's grey cloud, tinted light blue when sync is on.
+    const QIcon cloud{QStringLiteral(":/lichii/icons/cloud.png")};
+    if (!active) {
+        cloud_sync_button->setIcon(cloud);
+    } else {
+        QPixmap pixmap = cloud.pixmap(QSize{16, 16}, devicePixelRatioF());
+        QPainter painter{&pixmap};
+        painter.setCompositionMode(QPainter::CompositionMode_SourceIn);
+        painter.fillRect(pixmap.rect(), QColor{0x7d, 0xd3, 0xfc});
+        painter.end();
+        cloud_sync_button->setIcon(QIcon{pixmap});
+    }
+
+    if (!active) {
+        cloud_sync_button->setToolTip(
+            signed_in ? tr("Google Drive sync is off. Click to turn it on.")
+                      : tr("Not signed in to Google Drive. Click to set up cloud sync."));
+        return;
+    }
+    QString status;
+    if (cloud_sync && cloud_sync->Busy()) {
+        status = tr("Syncing with Google Drive...");
+    } else if (const auto last = CloudSync::LastSyncTime(); !last) {
+        status = tr("Not synced with Google Drive yet.");
+    } else {
+        const s64 ago = std::max<s64>(QDateTime::currentSecsSinceEpoch() - *last, 0);
+        QString when;
+        if (ago < 60) {
+            when = tr("just now");
+        } else if (ago < 60 * 60) {
+            when = tr("%1m ago", "minutes since the last cloud sync").arg(ago / 60);
+        } else if (ago < 24 * 60 * 60) {
+            when = tr("%1h ago", "hours since the last cloud sync").arg(ago / (60 * 60));
+        } else {
+            when = tr("%1d ago", "days since the last cloud sync").arg(ago / (24 * 60 * 60));
+        }
+        status = tr("Synced with Google Drive %1.").arg(when);
+    }
+    cloud_sync_button->setToolTip(
+        tr("%1\nClick to turn sync off; right-click to sync now.").arg(status));
 }
 
 // TODO(crueter): Use this for game list stuff
@@ -6755,6 +6888,7 @@ void MainWindow::closeEvent(QCloseEvent* event) {
         return;
     }
     LOG_INFO(Frontend, "Closing frontend after emulation cleanup");
+    cloud_sync->Shutdown();
 
     UpdateUISettings();
     game_list->SaveInterfaceLayout();

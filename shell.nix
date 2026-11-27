@@ -15,7 +15,7 @@ pkgs.mkShellNoCC {
     # essential programs
     git cmake clang gnumake ninja patch jq pkg-config
     # libraries
-    openssl boost fmt_11 nlohmann_json lz4 zlib zstd
+    openssl boost fmt_11 nlohmann_json lz4 zlib minizip zstd
     enet libopus vulkan-headers vulkan-utility-libraries
     spirv-tools spirv-headers vulkan-loader mesa unzip
     glslang python3 httplib cpp-jwt ffmpeg-headless

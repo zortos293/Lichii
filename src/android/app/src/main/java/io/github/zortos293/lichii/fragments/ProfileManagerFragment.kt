@@ -22,8 +22,10 @@ import io.github.zortos293.lichii.adapters.ProfileAdapter
 import io.github.zortos293.lichii.databinding.FragmentProfileManagerBinding
 import io.github.zortos293.lichii.model.HomeViewModel
 import io.github.zortos293.lichii.model.UserProfile
+import io.github.zortos293.lichii.utils.CloudSyncManager
 import io.github.zortos293.lichii.utils.NativeConfig
 import io.github.zortos293.lichii.utils.ViewUtils.updateMargins
+import io.github.zortos293.lichii.utils.collect
 
 class ProfileManagerFragment : Fragment() {
     private var _binding: FragmentProfileManagerBinding? = null
@@ -60,6 +62,9 @@ class ProfileManagerFragment : Fragment() {
         loadProfiles()
 
         binding.buttonAddUser.setOnClickListener {
+            if (cloudSyncRunning()) {
+                return@setOnClickListener
+            }
             if (NativeLibrary.canCreateUser()) {
                 findNavController().navigate(R.id.action_profileManagerFragment_to_newUserDialog)
             } else {
@@ -68,6 +73,13 @@ class ProfileManagerFragment : Fragment() {
                     .setMessage(R.string.profile_max_users_message)
                     .setPositiveButton(android.R.string.ok, null)
                     .show()
+            }
+        }
+
+        // Reloads the profiles a cloud sync may have changed.
+        CloudSyncManager.busy.collect(viewLifecycleOwner) { busy ->
+            if (!busy) {
+                loadProfiles()
             }
         }
 
@@ -91,7 +103,23 @@ class ProfileManagerFragment : Fragment() {
         }
     }
 
+    // A cloud sync may be changing the profiles: they are left alone until it is done.
+    private fun cloudSyncRunning(): Boolean {
+        if (!CloudSyncManager.isSyncing()) {
+            return false
+        }
+        MaterialAlertDialogBuilder(requireContext())
+            .setTitle(R.string.cloud_sync)
+            .setMessage(R.string.cloud_sync_profiles_busy)
+            .setPositiveButton(android.R.string.ok, null)
+            .show()
+        return true
+    }
+
     private fun loadProfiles() {
+        if (CloudSyncManager.isSyncing()) {
+            return
+        }
         val profiles = mutableListOf<UserProfile>()
         val userUUIDs = NativeLibrary.getAllUsers() ?: emptyArray()
         val currentUserUUID = NativeLibrary.getCurrentUser()
@@ -113,6 +141,9 @@ class ProfileManagerFragment : Fragment() {
     }
 
     private fun selectProfile(profile: UserProfile) {
+        if (cloudSyncRunning()) {
+            return
+        }
         if (NativeLibrary.setCurrentUser(profile.uuid)) {
             loadProfiles()
         }
@@ -120,6 +151,9 @@ class ProfileManagerFragment : Fragment() {
 
 
     private fun editProfile(profile: UserProfile) {
+        if (cloudSyncRunning()) {
+            return
+        }
         val bundle = Bundle().apply {
             putString("uuid", profile.uuid)
             putString("username", profile.username)
@@ -128,6 +162,9 @@ class ProfileManagerFragment : Fragment() {
     }
 
     private fun confirmDeleteProfile(profile: UserProfile) {
+        if (cloudSyncRunning()) {
+            return
+        }
         val currentUser = NativeLibrary.getCurrentUser()
         val isCurrentUser = profile.uuid == currentUser
 
@@ -148,6 +185,9 @@ class ProfileManagerFragment : Fragment() {
     }
 
     private fun deleteProfile(profile: UserProfile) {
+        if (cloudSyncRunning()) {
+            return
+        }
         val currentUser = NativeLibrary.getCurrentUser()
         if (!currentUser.isNullOrEmpty() && profile.uuid == currentUser) {
             val users = NativeLibrary.getAllUsers() ?: emptyArray()

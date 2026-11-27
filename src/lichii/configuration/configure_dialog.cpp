@@ -26,6 +26,7 @@
 #include "lichii/configuration/configuration_shared.h"
 #include "lichii/configuration/configure_applets.h"
 #include "lichii/configuration/configure_audio.h"
+#include "lichii/configuration/configure_cloud_sync.h"
 #include "lichii/configuration/configure_cpu.h"
 #include "lichii/configuration/configure_debug_tab.h"
 #include "lichii/configuration/configure_dialog.h"
@@ -53,6 +54,7 @@ ConfigureDialog::ConfigureDialog(QWidget* parent, HotkeyRegistry& registry_,
       builder{std::make_unique<ConfigurationShared::Builder>(this, !system_.IsPoweredOn())},
       applets_tab{std::make_unique<ConfigureApplets>(system_, nullptr, *builder, this)},
       audio_tab{std::make_unique<ConfigureAudio>(system_, nullptr, *builder, this)},
+      cloud_sync_tab{std::make_unique<ConfigureCloudSync>(system_, this)},
       cpu_tab{std::make_unique<ConfigureCpu>(system_, nullptr, *builder, this)},
       debug_tab_tab{std::make_unique<ConfigureDebugTab>(system_, this)},
       filesystem_tab{std::make_unique<ConfigureFilesystem>(this)},
@@ -91,6 +93,7 @@ ConfigureDialog::ConfigureDialog(QWidget* parent, HotkeyRegistry& registry_,
     ui->tabWidget->addTab(input_tab.get(), tr("Controls"));
     ui->tabWidget->addTab(profile_tab.get(), tr("Profiles"));
     ui->tabWidget->addTab(network_tab.get(), tr("Network"));
+    ui->tabWidget->addTab(cloud_sync_tab.get(), tr("Cloud Sync"));
     ui->tabWidget->addTab(system_tab.get(), tr("System"));
     ui->tabWidget->addTab(ui_tab.get(), tr("Game List"));
     ui->tabWidget->addTab(web_tab.get(), tr("Web"));
@@ -104,7 +107,7 @@ ConfigureDialog::ConfigureDialog(QWidget* parent, HotkeyRegistry& registry_,
 
     SetConfiguration();
 
-    const std::array<std::pair<QWidget*, const char*>, 15> tab_icons{{
+    const std::array<std::pair<QWidget*, const char*>, 16> tab_icons{{
         {general_tab.get(), "sliders"},
         {hotkeys_tab.get(), "keyboard"},
         {ui_tab.get(), "list"},
@@ -113,6 +116,7 @@ ConfigureDialog::ConfigureDialog(QWidget* parent, HotkeyRegistry& registry_,
         {system_tab.get(), "system"},
         {profile_tab.get(), "user"},
         {network_tab.get(), "globe"},
+        {cloud_sync_tab.get(), "cloud"},
         {filesystem_tab.get(), "drive"},
         {applets_tab.get(), "apps"},
         {cpu_tab.get(), "cpu"},
@@ -179,6 +183,7 @@ void ConfigureDialog::ApplyConfiguration() {
     debug_tab_tab->ApplyConfiguration();
     web_tab->ApplyConfiguration();
     network_tab->ApplyConfiguration();
+    cloud_sync_tab->ApplyConfiguration();
     applets_tab->ApplyConfiguration();
     system.ApplySettings();
     Settings::LogSettings();
@@ -292,8 +297,8 @@ void ConfigureDialog::PopulateSelectionList() {
           {general_tab.get(), hotkeys_tab.get(), ui_tab.get(), web_tab.get(), debug_tab_tab.get()}},
          {tr("System"),
           "system",
-          {system_tab.get(), profile_tab.get(), network_tab.get(), filesystem_tab.get(),
-           applets_tab.get()}},
+          {system_tab.get(), profile_tab.get(), network_tab.get(), cloud_sync_tab.get(),
+           filesystem_tab.get(), applets_tab.get()}},
          {tr("CPU"), "cpu", {cpu_tab.get()}},
          {tr("Graphics"),
           "monitor",

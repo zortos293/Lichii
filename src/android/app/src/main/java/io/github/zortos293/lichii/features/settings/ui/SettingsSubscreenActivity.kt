@@ -26,6 +26,7 @@ import io.github.zortos293.lichii.utils.ThemeHelper
 
 enum class SettingsSubscreen {
     PROFILE_MANAGER,
+    CLOUD_SYNC,
     DRIVER_MANAGER,
     DRIVER_FETCHER,
     FREEDRENO_SETTINGS,
@@ -124,6 +125,7 @@ class SettingsSubscreenActivity : AppCompatActivity() {
     private fun resolveStartDestination(): Int =
         when (args.destination) {
             SettingsSubscreen.PROFILE_MANAGER -> R.id.profileManagerFragment
+            SettingsSubscreen.CLOUD_SYNC -> R.id.cloudSyncFragment
             SettingsSubscreen.DRIVER_MANAGER -> R.id.driverManagerFragment
             SettingsSubscreen.DRIVER_FETCHER -> R.id.driverFetcherFragment
             SettingsSubscreen.FREEDRENO_SETTINGS -> R.id.freedrenoSettingsFragment

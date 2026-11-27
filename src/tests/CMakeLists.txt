@@ -102,6 +102,16 @@ add_executable(tests
     core/npdm_kac.cpp
     core/nx_archive.cpp
     frontend_common/nx_archive.cpp
+    frontend_common/cloud_sync_zip.cpp
+    frontend_common/cloud_sync_save.cpp
+    frontend_common/cloud_sync_auth.cpp
+    frontend_common/cloud_sync_drive.cpp
+    frontend_common/cloud_sync_engine.cpp
+    frontend_common/cloud_sync_profiles.cpp
+    frontend_common/cloud_sync_web_service.cpp
+    frontend_common/cloud_sync_machine.h
+    frontend_common/fake_drive.h
+    frontend_common/fake_google.h
     core/vfs_vector.cpp
     core/vfs_real.cpp
     core/kip_ini.cpp

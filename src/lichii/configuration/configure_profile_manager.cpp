@@ -33,6 +33,7 @@
 #include "core/hle/service/acc/profile_manager.h"
 #include "core/hle/service/filesystem/filesystem.h"
 #include "ui_configure_profile_manager.h"
+#include "lichii/cloud_sync_controller.h"
 #include "lichii/configuration/configure_profile_manager.h"
 #include "lichii/util/limitable_input_dialog.h"
 
@@ -124,6 +125,17 @@ ConfigureProfileManager::ConfigureProfileManager(Core::System& system_, QWidget*
 
     RetranslateUI();
     SetConfiguration();
+
+    // A cloud sync may add or change profiles: none is edited meanwhile.
+    if (auto* const cloud_sync = CloudSyncController::Instance()) {
+        setEnabled(!cloud_sync->Busy());
+        connect(cloud_sync, &CloudSyncController::BusyChanged, this, [this](bool busy) {
+            setEnabled(!busy);
+            if (!busy) {
+                SetConfiguration();
+            }
+        });
+    }
 }
 
 ConfigureProfileManager::~ConfigureProfileManager() = default;
@@ -143,6 +155,11 @@ void ConfigureProfileManager::RetranslateUI() {
 
 void ConfigureProfileManager::SetConfiguration() {
     enabled = !system.IsPoweredOn();
+    // The list reloads the profiles from profiles.dat, which a running cloud sync may be writing.
+    if (const auto* const cloud_sync = CloudSyncController::Instance();
+        cloud_sync && cloud_sync->Busy()) {
+        return;
+    }
     item_model->removeRows(0, item_model->rowCount());
     list_items.clear();
 

@@ -23,6 +23,8 @@
 #include "core/hle/service/acc/profile_manager.h"
 #include "core/internal_network/network_interface.h"
 #include "ui_configure_network.h"
+#include "frontend_common/cloud_sync/sync_engine.h"
+#include "lichii/cloud_sync_controller.h"
 #include "lichii/configuration/configure_network.h"
 
 namespace {
@@ -73,6 +75,18 @@ ConfigureNetwork::ConfigureNetwork(const Core::System& system_, QWidget* parent,
     ui->nextendo_status->setTextFormat(Qt::PlainText);
     ui->nextendo_status->setTextInteractionFlags(Qt::TextSelectableByMouse);
     ShowNextendoProfiles();
+    if (auto* const cloud_sync = CloudSyncController::Instance()) {
+        connect(cloud_sync, &CloudSyncController::BusyChanged, this, [this](bool busy) {
+            if (busy) {
+                return;
+            }
+            const Common::UUID shown = NextendoProfile();
+            ShowNextendoProfiles();
+            if (!per_game && NextendoProfile() != shown) {
+                SwitchNextendoProfile();
+            }
+        });
+    }
     RetranslateUI();
     this->SetConfiguration();
 
@@ -220,6 +234,11 @@ Common::UUID ConfigureNetwork::NextendoProfile() const {
 }
 
 void ConfigureNetwork::ShowNextendoProfiles() {
+    // A cloud sync may be changing the profiles: filled once it ends.
+    const auto* const cloud_sync = CloudSyncController::Instance();
+    if (FrontendCommon::CloudSync::SyncRunning() || (cloud_sync && cloud_sync->Busy())) {
+        return;
+    }
     const Common::UUID shown = nextendo_profiles.empty()
                                    ? Service::Account::Nextendo::CurrentProfile(system)
                                    : NextendoProfile();

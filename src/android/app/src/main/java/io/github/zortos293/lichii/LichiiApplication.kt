@@ -24,6 +24,7 @@ import io.github.zortos293.lichii.utils.GpuDriverHelper
 import io.github.zortos293.lichii.utils.Log
 import io.github.zortos293.lichii.utils.PowerStateUpdater
 import io.github.zortos293.lichii.utils.ControllerNavigationGlobalHook
+import io.github.zortos293.lichii.utils.CloudSyncManager
 import java.util.Locale
 
 fun Context.getPublicFilesDir(): File = getExternalFilesDir(null) ?: filesDir
@@ -73,6 +74,7 @@ class LichiiApplication : Application() {
         PowerStateUpdater.start()
         Log.logDeviceInfo()
         ControllerNavigationGlobalHook.install(this)
+        CloudSyncManager.install(this)
 
         createNotificationChannels()
     }

@@ -38,6 +38,7 @@ import io.github.zortos293.lichii.databinding.FragmentEditUserDialogBinding
 import io.github.zortos293.lichii.model.HomeViewModel
 import io.github.zortos293.lichii.model.ProfileUtils
 import io.github.zortos293.lichii.model.UserProfile
+import io.github.zortos293.lichii.utils.CloudSyncManager
 import java.io.File
 import java.io.FileOutputStream
 import androidx.core.graphics.scale
@@ -314,6 +315,11 @@ class EditUserDialogFragment : Fragment() {
     }
 
     private fun saveUser() {
+        // A cloud sync may be changing the profiles.
+        if (CloudSyncManager.isSyncing()) {
+            showError(getString(R.string.cloud_sync_profiles_busy))
+            return
+        }
         val username = binding.editUsername.text.toString()
 
         if (isEditMode) {

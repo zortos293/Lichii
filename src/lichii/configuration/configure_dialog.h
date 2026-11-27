@@ -33,6 +33,7 @@ class ConfigureInput;
 class ConfigureProfileManager;
 class ConfigureSystem;
 class ConfigureNetwork;
+class ConfigureCloudSync;
 class ConfigureUi;
 class ConfigureWeb;
 
@@ -92,6 +93,7 @@ private:
 
     std::unique_ptr<ConfigureApplets> applets_tab;
     std::unique_ptr<ConfigureAudio> audio_tab;
+    std::unique_ptr<ConfigureCloudSync> cloud_sync_tab;
     std::unique_ptr<ConfigureCpu> cpu_tab;
     std::unique_ptr<ConfigureDebugTab> debug_tab_tab;
     std::unique_ptr<ConfigureFilesystem> filesystem_tab;
