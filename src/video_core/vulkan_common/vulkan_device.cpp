@@ -1269,9 +1269,11 @@ void Device::ReportUnresponsive() const {
     std::_Exit(EXIT_FAILURE);
 }
 
-void Device::ReportLoss() const {
+void Device::ReportLoss(std::source_location location) const {
     ClaimDeviceReport();
-    LOG_CRITICAL(Render_Vulkan, "Device loss occurred!");
+    LOG_CRITICAL(Render_Vulkan, "Device loss occurred! First seen at {}:{} ({}) on thread {}",
+                 location.file_name(), location.line(), location.function_name(),
+                 std::hash<std::thread::id>{}(std::this_thread::get_id()));
     ReportDeviceFault();
     if (nsight_aftermath_tracker) {
         // Give Nsight Aftermath time to write its dump.

@@ -70,6 +70,9 @@ private:
 
     vk::Fence GetFreeFence();
 
+    /// Logs a timeline wait that has run for WAIT_STALL_LOG_AFTER, with the submit state around it.
+    void LogStall(u64 tick, u64 known_at_start, std::chrono::milliseconds elapsed) const;
+
     /// Logs the stall and ends the process (EDEN_NX2_GPU_WATCHDOG).
     [[noreturn]] void ReportUnresponsive(u64 tick, std::chrono::steady_clock::duration stalled) const;
 

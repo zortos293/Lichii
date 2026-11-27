@@ -13,6 +13,7 @@
 #include "video_core/nx2.h"
 #include "video_core/nx2_profile.h"
 #include "video_core/renderer_vulkan/vk_master_semaphore.h"
+#include "video_core/renderer_vulkan/vk_wait_stall.h"
 #include "video_core/vulkan_common/vulkan_device.h"
 #include "video_core/vulkan_common/vulkan_wrapper.h"
 
@@ -158,12 +159,17 @@ void MasterSemaphore::Wait(u64 tick) {
     try {
         u64 last_known = KnownGpuTick();
         auto last_progress = std::chrono::steady_clock::now();
+        WaitStall stall{last_progress};
+        const u64 known_at_start = last_known;
         while (!semaphore.Wait(tick, WAIT_SLICE_NS)) {
             Refresh();
             if (IsFree(tick)) {
                 break;
             }
             const auto now = std::chrono::steady_clock::now();
+            if (stall.Poll(now)) {
+                LogStall(tick, known_at_start, stall.Elapsed(now));
+            }
             const u64 known = KnownGpuTick();
             // Only accepted work counts: a tick still waiting to be submitted is not a GPU stall.
             if (known != last_known || tick > accepted_tick.load(std::memory_order_acquire)) {
@@ -174,6 +180,12 @@ void MasterSemaphore::Wait(u64 tick) {
             if (watchdog.count() != 0 && now - last_progress >= watchdog) {
                 ReportUnresponsive(tick, now - last_progress);
             }
+        }
+        if (const auto total = stall.End(std::chrono::steady_clock::now())) {
+            Refresh();
+            LOG_WARNING(Render_Vulkan,
+                        "GPU wait for tick {} ended after {} ms; GPU now at tick {}", tick,
+                        total->count(), KnownGpuTick());
         }
     } catch (const vk::Exception& exception) {
         if (exception.GetResult() == VK_ERROR_DEVICE_LOST) {
@@ -196,7 +208,7 @@ VkResult MasterSemaphore::SubmitQueue(vk::CommandBuffer& cmdbuf, vk::CommandBuff
                                         host_tick)
                   : SubmitQueueFence(cmdbuf, upload_cmdbuf, signal_semaphore, wait_semaphore,
                                      host_tick);
-    if (result == VK_SUCCESS && watchdog.count() != 0) {
+    if (result == VK_SUCCESS) {
         const s64 now = SteadyNs();
         accepted_ns.store(now, std::memory_order_relaxed);
         accepted_tick.store(host_tick, std::memory_order_release);
@@ -444,6 +456,23 @@ void MasterSemaphore::WaitThread(std::stop_token token) {
         gpu_tick.notify_one();
         Tegra::Nx2PendingWake::Get().OnGpuTick(host_tick);
     }
+}
+
+void MasterSemaphore::LogStall(u64 tick, u64 known_at_start,
+                              std::chrono::milliseconds elapsed) const {
+    const s64 now = SteadyNs();
+    const auto ago_ms = [now](const std::atomic<s64>& ns) {
+        const s64 value = ns.load(std::memory_order_acquire);
+        return value == 0 ? s64{-1} : (now - value) / 1'000'000;
+    };
+    LOG_WARNING(Render_Vulkan,
+                "GPU wait for tick {} has run {} ms; GPU at tick {} (was {} when the wait began), "
+                "current tick {}, last accepted submit tick {} ({} ms ago), last submit that "
+                "signals a present tick {} ({} ms ago, {} so far)",
+                tick, elapsed.count(), KnownGpuTick(), known_at_start, CurrentTick(),
+                accepted_tick.load(std::memory_order_acquire), ago_ms(accepted_ns),
+                present_tick.load(std::memory_order_acquire), ago_ms(present_ns),
+                present_submits.load(std::memory_order_acquire));
 }
 
 void MasterSemaphore::ReportUnresponsive(u64 tick,

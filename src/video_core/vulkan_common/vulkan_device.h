@@ -11,6 +11,7 @@
 #include <mutex>
 #include <optional>
 #include <set>
+#include <source_location>
 #include <span>
 #include <string>
 #include "common/container/unordered_map.h"
@@ -267,7 +268,7 @@ public:
     /// Logs a device loss and what the driver knows about it, then ends the process. Nothing can
     /// run on a lost device, and the vk::Exception a caller would throw ends it anyway, as an
     /// unhandled exception on whichever thread saw the loss (#1934).
-    [[noreturn]] void ReportLoss() const;
+    [[noreturn]] void ReportLoss(std::source_location location = std::source_location::current()) const;
 
     /// Ends the process when submitted GPU work stopped making progress without the driver
     /// reporting a loss (EDEN_NX2_GPU_WATCHDOG). Makes no Vulkan calls.
