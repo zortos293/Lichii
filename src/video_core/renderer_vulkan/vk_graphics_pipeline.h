@@ -140,6 +140,7 @@ public:
         const Device& device, DescriptorPool& descriptor_pool,
         GuestDescriptorQueue& guest_descriptor_queue,
         DescriptorBufferRing& descriptor_buffer_ring, const PipelineBuildQueue& build_queue,
+        Common::ThreadWorker* fragment_workers,
         PipelineStatistics* pipeline_statistics, RenderPassCache& render_pass_cache,
         const GraphicsPipelineCacheKey& key, std::array<std::vector<u32>, NUM_STAGES> stages,
         const std::array<const Shader::Info*, NUM_STAGES>& infos,
@@ -478,7 +479,7 @@ private:
 
     void RecordBinding(const PreparedBinding& binding, const DescriptorUpdateEntry* descriptor_data);
 
-    void MakePipeline(VkRenderPass render_pass);
+    void MakePipeline(VkRenderPass render_pass, Common::ThreadWorker* fragment_workers);
 
     void Validate();
 
@@ -569,6 +570,7 @@ private:
     DescriptorAllocator descriptor_allocator;
     VkPipelineLayout pipeline_layout{}; ///< Owned by the PipelineLayoutCache
     vk::DescriptorUpdateTemplate descriptor_update_template;
+    std::array<vk::Pipeline, 4> linked_libraries;
     vk::Pipeline pipeline;
 
     DescriptorBufferLayout descriptor_buffer_layout;

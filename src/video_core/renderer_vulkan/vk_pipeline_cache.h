@@ -318,6 +318,7 @@ private:
     bool use_vulkan_pipeline_cache{};
     /// Whether this boot's Vulkan pipeline cache started from the saved file, not empty
     bool vulkan_pipeline_cache_restored{};
+    std::unique_ptr<Common::ThreadWorker> fragment_library_workers;
     /// The pipelines' builds, the prebuild and the precache. Declared before the pipelines, whose
     /// builds it runs.
     std::optional<VideoCommon::ShaderJobScheduler> shader_jobs;
