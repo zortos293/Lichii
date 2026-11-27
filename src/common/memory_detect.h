@@ -62,12 +62,12 @@ struct ProcessMemoryUsage {
 /// a job object's commit limit. No value if the query fails or the host is not Windows.
 [[nodiscard]] std::optional<u64> GetProcessCommitRoom();
 
-/// Physical memory the host can hand out now without paging anything out (0 when unknown).
-[[nodiscard]] u64 GetAvailablePhysicalMemory();
+/// Physical memory the host can hand out now without paging anything out, or no value when unknown.
+[[nodiscard]] std::optional<u64> GetAvailablePhysicalMemory();
 
 /// Whether the host is short of RAM: less than a quarter of it, and less than 4 GiB, free.
-[[nodiscard]] constexpr bool IsLowOnMemory(u64 available, u64 total) {
-    return available != 0 && available < (std::min<u64>)(total / 4, u64{4} << 30);
+[[nodiscard]] constexpr bool IsLowOnMemory(std::optional<u64> available, u64 total) {
+    return available.has_value() && *available < (std::min<u64>)(total / 4, u64{4} << 30);
 }
 
 /// IsLowOnMemory for this host, read again at most once a second.

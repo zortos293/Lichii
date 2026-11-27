@@ -230,21 +230,21 @@ std::optional<u64> GetProcessCommitRoom() {
     return std::nullopt;
 }
 
-u64 GetAvailablePhysicalMemory() {
+std::optional<u64> GetAvailablePhysicalMemory() {
 #ifdef _WIN32
     MEMORYSTATUSEX memorystatus;
     memorystatus.dwLength = sizeof(memorystatus);
     if (!GlobalMemoryStatusEx(&memorystatus)) {
-        return 0;
+        return std::nullopt;
     }
     return memorystatus.ullAvailPhys;
 #elif defined(__linux__)
     // MemAvailable counts the page cache the kernel can drop, which sysinfo's freeram doesn't.
     std::FILE* const file = std::fopen("/proc/meminfo", "r");
     if (file == nullptr) {
-        return 0;
+        return std::nullopt;
     }
-    u64 available_kib = 0;
+    std::optional<u64> available_kib;
     char line[128];
     while (std::fgets(line, sizeof(line), file) != nullptr) {
         unsigned long long value = 0;
@@ -254,9 +254,12 @@ u64 GetAvailablePhysicalMemory() {
         }
     }
     std::fclose(file);
-    return available_kib * 1024;
+    if (!available_kib) {
+        return std::nullopt;
+    }
+    return *available_kib * 1024;
 #else
-    return 0;
+    return std::nullopt;
 #endif
 }
 
