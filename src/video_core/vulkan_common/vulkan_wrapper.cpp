@@ -509,11 +509,35 @@ Instance Instance::Create(u32 version, Span<const char*> layers, Span<const char
     return Instance(instance, dispatch);
 }
 
+std::vector<VkPhysicalDevice> detail::EnumeratePhysicalDevicesWithRetry(
+    VkInstance instance, PFN_vkEnumeratePhysicalDevices enumerate) {
+    // A device appearing between the count and fill calls makes Vulkan return VK_INCOMPLETE.
+    // Retry the pair of calls with a fresh count rather than hiding every Vulkan device.
+    constexpr u32 max_attempts = 4;
+    for (u32 attempt = 0; attempt < max_attempts; ++attempt) {
+        u32 count = 0;
+        Check(enumerate(instance, &count, nullptr));
+        if (count == 0) {
+            return {};
+        }
+
+        std::vector<VkPhysicalDevice> devices(count);
+        const VkResult result = enumerate(instance, &count, devices.data());
+        if (result == VK_INCOMPLETE) {
+            continue;
+        }
+        Check(result);
+        // The list can also shrink between calls; never return unused null handles.
+        devices.resize(count);
+        return devices;
+    }
+    // A persistently incomplete driver enumeration must remain visible as an error.
+    throw Exception(VK_INCOMPLETE);
+}
+
 std::vector<VkPhysicalDevice> Instance::EnumeratePhysicalDevices() const {
-    u32 num;
-    Check(dld->vkEnumeratePhysicalDevices(handle, &num, nullptr));
-    std::vector<VkPhysicalDevice> physical_devices(num);
-    Check(dld->vkEnumeratePhysicalDevices(handle, &num, physical_devices.data()));
+    auto physical_devices =
+        detail::EnumeratePhysicalDevicesWithRetry(handle, dld->vkEnumeratePhysicalDevices);
     SortPhysicalDevices(physical_devices, *dld);
     return physical_devices;
 }
