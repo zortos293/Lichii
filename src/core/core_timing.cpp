@@ -173,7 +173,12 @@ void CoreTiming::Initialize(std::function<void()>&& on_thread_init_) {
     if (is_multicore) {
         timer_thread = std::jthread([this](std::stop_token stop_token) {
             Common::SetCurrentThreadName("HostTiming");
+#ifdef _WIN32
+            // Keep timer events runnable alongside the time-critical guest CPU threads.
+            Common::SetCurrentThreadPriority(Common::ThreadPriority::Critical);
+#else
             Common::SetCurrentThreadPriority(Common::ThreadPriority::VeryHigh);
+#endif
             Common::SetCurrentThreadToPerformanceCores();
             on_thread_init();
             has_started = true;
