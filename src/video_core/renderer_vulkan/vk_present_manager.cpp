@@ -651,7 +651,12 @@ void PresentManager::CopyToSwapchainImpl(Frame* frame) {
     if (host_vsync) {
         WaitForDisplay();
     }
+    u32 acquire_attempts = 0;
     while (swapchain.AcquireNextImage(!use_present_thread, frame->game_frame_presents)) {
+        if (++acquire_attempts >= MAX_PRESENT_ATTEMPTS) {
+            DiscardFrame(frame);
+            return;
+        }
         if (!RecreateSwapchain(frame)) {
             return;
         }
