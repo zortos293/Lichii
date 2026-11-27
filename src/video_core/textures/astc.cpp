@@ -1945,30 +1945,47 @@ static void DecompressBlock(std::span<const u8, 16> inBuf, const u32 blockWidth,
 
     // Now that we have endpoints and weights, we can interpolate and generate
     // the proper decoding...
+    // The endpoints don't change per texel: expand them once per partition and channel.
+    struct ChannelEndpoints {
+        u32 c0;
+        u32 c1;
+        bool is_hdr;
+    };
+    ChannelEndpoints channel_endpoints[4][4];
+    for (u32 part = 0; part < nPartitions; part++) {
+        for (u32 c = 0; c < 4; c++) {
+            const u32 C0 = endpoints[part][0].Component(c);
+            const u32 C1 = endpoints[part][1].Component(c);
+            const bool is_hdr = IsHDRColorEndpointMode(colorEndpointMode[part]) &&
+                                !(colorEndpointMode[part] == 14 && c == 0);
+            channel_endpoints[part][c] =
+                is_hdr ? ChannelEndpoints{C0 << 4, C1 << 4, true}
+                       : ChannelEndpoints{ReplicateByteTo16(C0), ReplicateByteTo16(C1), false};
+        }
+    }
+    // Pixel::Pack puts the components A, R, G, B at these bits.
+    static constexpr u32 component_shift[4] = {24, 0, 8, 16};
+    const bool small_block = (blockHeight * blockWidth) < 32;
     for (u32 j = 0; j < blockHeight; j++)
         for (u32 i = 0; i < blockWidth; i++) {
-            u32 partition = Select2DPartition(partitionIndex, i, j, nPartitions,
-                                              (blockHeight * blockWidth) < 32);
+            const u32 partition = nPartitions == 1
+                                      ? 0
+                                      : Select2DPartition(partitionIndex, i, j, nPartitions,
+                                                          small_block);
             assert(partition < nPartitions);
 
-            Pixel p;
+            u32 packed = 0;
             for (u32 c = 0; c < 4; c++) {
-                u32 C0 = endpoints[partition][0].Component(c);
-                u32 C1 = endpoints[partition][1].Component(c);
-
+                const ChannelEndpoints& ep = channel_endpoints[partition][c];
                 u32 plane = 0;
                 if (weightParams.m_bDualPlane && (((planeIdx + 1) & 3) == c)) {
                     plane = 1;
                 }
-                u32 weight = weights[plane][j * blockWidth + i];
+                const u32 weight = weights[plane][j * blockWidth + i];
+                const u32 C = (ep.c0 * (64 - weight) + ep.c1 * weight + 32) / 64;
 
-                const bool is_hdr = IsHDRColorEndpointMode(colorEndpointMode[partition]) &&
-                                    !(colorEndpointMode[partition] == 14 && c == 0);
-
-                if (is_hdr) {
-                    C0 <<= 4;
-                    C1 <<= 4;
-                    const u32 C = (C0 * (64 - weight) + C1 * weight + 32) / 64;
+                u32 value;
+                if (ep.is_hdr) {
                     const u32 E = (C & 0xF800) >> 11;
                     const u32 M = C & 0x7FF;
                     u32 Mt;
@@ -1981,21 +1998,16 @@ static void DecompressBlock(std::span<const u8, 16> inBuf, const u32 blockWidth,
                     }
                     const u32 Cf = (E << 10) + (Mt >> 3);
                     const u16 half_bits = (Cf >= 0x7C00) ? u16{0x7BFF} : static_cast<u16>(Cf);
-                    p.Component(c) = HalfToClampedByte(half_bits);
+                    value = HalfToClampedByte(half_bits);
                 } else {
-                    C0 = ReplicateByteTo16(C0);
-                    C1 = ReplicateByteTo16(C1);
-                    const u32 C = (C0 * (64 - weight) + C1 * weight + 32) / 64;
-                    if (C == 65535) {
-                        p.Component(c) = 255;
-                    } else {
-                        double Cf = static_cast<double>(C);
-                        p.Component(c) = static_cast<u16>(255.0 * (Cf / 65536.0) + 0.5);
-                    }
+                    // Exactly floor(255 * (C / 65536.0) + 0.5): C * 255 fits a double without
+                    // rounding, so this integer form gives the same byte (65535 gives 255 too).
+                    value = (C * 255 + 32768) >> 16;
                 }
+                packed |= (value & 0xFF) << component_shift[c];
             }
 
-            outBuf[j * blockWidth + i] = p.Pack();
+            outBuf[j * blockWidth + i] = packed;
         }
 }
 
