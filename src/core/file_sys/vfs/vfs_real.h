@@ -5,6 +5,7 @@
 
 #pragma once
 
+#include <chrono>
 #include <map>
 #include <mutex>
 #include <optional>
@@ -24,6 +25,8 @@ struct FileReference : public Common::IntrusiveListBaseNode<FileReference> {
     std::optional<u64> size;
     std::shared_ptr<Common::FS::IOFile> file{};
     bool detached{};
+    const char* detach_reason{};
+    std::chrono::steady_clock::time_point opened{std::chrono::steady_clock::now()};
 };
 
 class RealVfsFile;
@@ -79,7 +82,7 @@ private:
     VirtualFile OpenFileLocked(const std::string& path, std::optional<u64> size, OpenMode perms);
     bool RenameFileLocked(const std::string& old_path, const std::string& new_path);
     Result DeleteFileWithResult(std::string_view path);
-    void DetachReferenceLocked(FileCache::iterator entry);
+    void DetachReferenceLocked(FileCache::iterator entry, const char* reason);
     void CloseReferenceLocked(FileReference& reference);
     void EvictSingleReferenceLocked();
     void InsertReferenceIntoListLocked(FileReference& reference);

@@ -4,7 +4,10 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 
 #include <algorithm>
+#include <atomic>
+#include <cctype>
 #include <cstddef>
+#include <cstdlib>
 #include <iterator>
 #include <utility>
 #ifdef _WIN32
@@ -71,6 +74,37 @@ bool IsWithinRoot(std::string_view root, std::string_view full_path) {
     return full_path.size() == root.size() || full_path[root.size()] == '/' || full_path[root.size()] == '\\';
 }
 
+// EDEN_NX2_SAVE_REOPEN_LEGACY=1 makes a handle that a replace, rename-over or delete detached from
+// the cache reopen its path on the next access, as handles did before #2420. Off by default.
+bool SaveReopenLegacy() {
+    static const bool enabled = [] {
+        const char* value = std::getenv("EDEN_NX2_SAVE_REOPEN_LEGACY");
+        return value != nullptr && value[0] != '\0' && value[0] != '0';
+    }();
+    return enabled;
+}
+
+bool IsSavePath(const std::string& path) {
+    std::string lower(path.size(), '\0');
+    std::ranges::transform(path, lower.begin(), [](unsigned char ch) {
+        return static_cast<char>(ch == '\\' ? '/' : std::tolower(ch));
+    });
+    return lower.find("/save/") != std::string::npos;
+}
+
+bool SaveLogBudget(std::atomic<int>& budget) {
+    return budget.fetch_sub(1, std::memory_order_relaxed) > 0;
+}
+
+std::atomic<int> save_read_log_budget{500};
+std::atomic<int> save_event_log_budget{500};
+
+s64 AgeMs(const FileReference& reference) {
+    return std::chrono::duration_cast<std::chrono::milliseconds>(
+               std::chrono::steady_clock::now() - reference.opened)
+        .count();
+}
+
 constexpr FS::FileAccessMode ModeFlagsToFileAccessMode(OpenMode mode) {
     switch (mode) {
     case OpenMode::Read:
@@ -130,10 +164,13 @@ VirtualFile RealVfsFilesystem::OpenFileLocked(const std::string& path, std::opti
             return file;
         }
         CloseReferenceLocked(*it->second.reference);
-        DetachReferenceLocked(it);
+        DetachReferenceLocked(it, "expired");
     }
 
     if (!size && !FS::IsFile(path)) {
+        if (IsSavePath(path) && SaveLogBudget(save_event_log_budget)) {
+            LOG_WARNING(Common_Filesystem, "SaveVfs open failed, not a file: {}", path);
+        }
         return nullptr;
     }
 
@@ -143,6 +180,10 @@ VirtualFile RealVfsFilesystem::OpenFileLocked(const std::string& path, std::opti
     auto file = std::make_shared<RealVfsFile>(*this, std::move(reference), perms);
     InsertReferenceIntoListLocked(*file->reference);
     cache[path] = {file, file->reference.get()};
+    if (IsSavePath(path) && SaveLogBudget(save_event_log_budget)) {
+        LOG_INFO(Common_Filesystem, "SaveVfs new handle: {}, size_hint={}, perms={}", path,
+                 size ? static_cast<s64>(*size) : -1, static_cast<u32>(perms));
+    }
 
     return file;
 }
@@ -174,7 +215,7 @@ VirtualFile RealVfsFilesystem::CreateFile(std::string_view path_, OpenMode perms
 
     if (entry != cache.end()) {
         entry->second.reference->size.reset();
-        DetachReferenceLocked(entry);
+        DetachReferenceLocked(entry, "create");
     }
     return OpenFileLocked(path, {}, perms);
 }
@@ -209,7 +250,7 @@ bool RealVfsFilesystem::RenameFileLocked(const std::string& old_path, const std:
     }
 
     if (auto destination = cache.find(new_path); destination != cache.end()) {
-        DetachReferenceLocked(destination);
+        DetachReferenceLocked(destination, "rename-over");
     }
     if (source != cache.end()) {
 #ifndef _WIN32
@@ -253,7 +294,7 @@ Result RealVfsFilesystem::DeleteFileWithResult(std::string_view path_) {
         return ResultUnknown;
     }
     if (entry != cache.end()) {
-        DetachReferenceLocked(entry);
+        DetachReferenceLocked(entry, "delete");
     }
     return ResultSuccess;
 }
@@ -298,13 +339,20 @@ void RealVfsFilesystem::RefreshReferenceLocked(FileReference& reference, OpenMod
     this->RemoveReferenceFromListLocked(reference);
 
     // Restore file if needed.
-    if (!reference.file && !reference.detached) {
+    if (!reference.file && (!reference.detached || SaveReopenLegacy())) {
         this->EvictSingleReferenceLocked();
 
         reference.file = FS::FileOpen(reference.path, ModeFlagsToFileAccessMode(perms),
                                       FS::FileType::BinaryFile);
         if (reference.file) {
             num_open_files++;
+        }
+        if (IsSavePath(reference.path) && SaveLogBudget(save_event_log_budget)) {
+            LOG_INFO(Common_Filesystem,
+                     "SaveVfs reopen: {}, ok={}, detached={} ({}), age_ms={}, legacy={}",
+                     reference.path, reference.file != nullptr, reference.detached,
+                     reference.detach_reason ? reference.detach_reason : "-", AgeMs(reference),
+                     SaveReopenLegacy());
         }
     }
 
@@ -332,8 +380,15 @@ void RealVfsFilesystem::DropReference(FileReference& reference) {
     }
 }
 
-void RealVfsFilesystem::DetachReferenceLocked(FileCache::iterator entry) {
-    entry->second.reference->detached = true;
+void RealVfsFilesystem::DetachReferenceLocked(FileCache::iterator entry, const char* reason) {
+    auto& reference = *entry->second.reference;
+    reference.detached = true;
+    reference.detach_reason = reason;
+    if (IsSavePath(reference.path) && SaveLogBudget(save_event_log_budget)) {
+        LOG_INFO(Common_Filesystem, "SaveVfs detach ({}): {}, file_open={}, live_handle={}, age_ms={}",
+                 reason, reference.path, reference.file != nullptr, !entry->second.file.expired(),
+                 AgeMs(reference));
+    }
     cache.erase(entry);
 }
 
@@ -403,7 +458,14 @@ std::size_t RealVfsFile::GetSize() const {
         return *reference->size;
     }
     base.RefreshReferenceLocked(*reference, perms);
-    return reference->file ? reference->file->GetSize() : 0;
+    const std::size_t size = reference->file ? reference->file->GetSize() : 0;
+    if (size == 0 && IsSavePath(reference->path) && SaveLogBudget(save_read_log_budget)) {
+        LOG_WARNING(Common_Filesystem,
+                    "SaveVfs GetSize returned 0: {}, file_open={}, detached={} ({}), age_ms={}",
+                    reference->path, reference->file != nullptr, reference->detached,
+                    reference->detach_reason ? reference->detach_reason : "-", AgeMs(*reference));
+    }
+    return size;
 }
 
 bool RealVfsFile::Resize(std::size_t new_size) {
@@ -433,10 +495,18 @@ bool RealVfsFile::IsReadable() const {
 std::size_t RealVfsFile::Read(u8* data, std::size_t length, std::size_t offset) const {
     std::scoped_lock lk{base.list_lock};
     base.RefreshReferenceLocked(*reference, perms);
-    if (!reference->file || !reference->file->Seek(static_cast<s64>(offset))) {
-        return 0;
+    const bool seeked = reference->file && reference->file->Seek(static_cast<s64>(offset));
+    const std::size_t read = seeked ? reference->file->ReadSpan(std::span{data, length}) : 0;
+    if (read < length && IsSavePath(reference->path) && SaveLogBudget(save_read_log_budget)) {
+        LOG_WARNING(Common_Filesystem,
+                    "SaveVfs short read: {}, offset={:#x}, requested={}, returned={}, "
+                    "file_open={}, seeked={}, file_size={}, detached={} ({}), age_ms={}",
+                    reference->path, offset, length, read, reference->file != nullptr, seeked,
+                    reference->file ? static_cast<s64>(reference->file->GetSize()) : -1,
+                    reference->detached,
+                    reference->detach_reason ? reference->detach_reason : "-", AgeMs(*reference));
     }
-    return reference->file->ReadSpan(std::span{data, length});
+    return read;
 }
 
 std::size_t RealVfsFile::Write(const u8* data, std::size_t length, std::size_t offset) {
