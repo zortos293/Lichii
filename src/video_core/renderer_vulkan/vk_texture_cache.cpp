@@ -2003,8 +2003,9 @@ void TextureCacheRuntime::ReinterpretImage(Image& dst, Image& src,
         // actual layout (VUID-vkCmdCopyBufferToImage-dstImageLayout-00180).
         cmdbuf.CopyBufferToImage(copy_buffer, dst_image, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
                                  vk_out_copies);
-        cmdbuf.PipelineBarrier(VK_PIPELINE_STAGE_TRANSFER_BIT, vk::PIPELINE_STAGE_GRAPHICS_COMPUTE,
-                       0, {}, {}, post_barriers);
+        cmdbuf.PipelineBarrier(VK_PIPELINE_STAGE_TRANSFER_BIT,
+                               vk::PIPELINE_STAGE_GRAPHICS_COMPUTE_TRANSFER,
+                               0, {}, {}, post_barriers);
     });
 }
 
