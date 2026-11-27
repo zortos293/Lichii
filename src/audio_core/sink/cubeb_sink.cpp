@@ -3,7 +3,12 @@
 
 // SPDX-License-Identifier: GPL-2.0-or-later
 
+#include <atomic>
+#include <chrono>
+#include <mutex>
 #include <span>
+#include <stop_token>
+#include <thread>
 #include <vector>
 
 #include "audio_core/common/common.h"
@@ -38,8 +43,8 @@ public:
      * @param event            - Event used only for audio renderer, signalled on buffer consume.
      */
     CubebSinkStream(cubeb* ctx_, u32 device_channels_, u32 system_channels_,
-                    cubeb_devid output_device, cubeb_devid input_device, const std::string& name_,
-                    StreamType type_, Core::System& system_)
+                    cubeb_devid output_device_, cubeb_devid input_device_,
+                    const std::string& name_, StreamType type_, Core::System& system_)
         : SinkStream(system_, type_), ctx{ctx_} {
 #ifdef _WIN32
         com_init_result = CoInitializeEx(nullptr, COINIT_MULTITHREADED);
@@ -52,54 +57,9 @@ public:
             return;
         }
 
-        cubeb_stream_params params{};
-        params.rate = TargetSampleRate;
-        params.channels = device_channels;
-        params.format = CUBEB_SAMPLE_S16LE;
-        params.prefs = CUBEB_STREAM_PREF_NONE;
-        switch (params.channels) {
-        case 1:
-            params.layout = CUBEB_LAYOUT_MONO;
-            break;
-        case 2:
-            params.layout = CUBEB_LAYOUT_STEREO;
-            break;
-        case 6:
-            params.layout = CUBEB_LAYOUT_3F2_LFE;
-            break;
-        }
-
-        u32 minimum_latency{0};
-        const auto latency_error = cubeb_get_min_latency(ctx, &params, &minimum_latency);
-        if (latency_error != CUBEB_OK) {
-            LOG_CRITICAL(Audio_Sink, "Error getting minimum latency, error: {}", latency_error);
-            minimum_latency = TargetSampleCount * 2;
-        }
-
-        minimum_latency = (std::max)(minimum_latency, TargetSampleCount * 2);
-
-        LOG_INFO(Service_Audio,
-                 "Opening cubeb stream {} type {} with: rate {} channels {} (system channels {}) "
-                 "latency {}",
-                 name, type, params.rate, params.channels, system_channels, minimum_latency);
-
-        auto init_error{0};
-        if (type == StreamType::In) {
-            init_error = cubeb_stream_init(ctx, &stream_backend, name.c_str(), input_device,
-                                           &params, output_device, nullptr, minimum_latency,
-                                           &CubebSinkStream::DataCallback,
-                                           &CubebSinkStream::StateCallback, this);
-        } else {
-            init_error = cubeb_stream_init(ctx, &stream_backend, name.c_str(), input_device,
-                                           nullptr, output_device, &params, minimum_latency,
-                                           &CubebSinkStream::DataCallback,
-                                           &CubebSinkStream::StateCallback, this);
-        }
-
-        if (init_error != CUBEB_OK) {
-            LOG_CRITICAL(Audio_Sink, "Error initializing cubeb stream, error: {}", init_error);
-            return;
-        }
+        output_device = output_device_;
+        input_device = input_device_;
+        OpenBackend();
     }
 
     /**
@@ -123,16 +83,25 @@ public:
      * Finalize the sink stream.
      */
     void Finalize() override {
+        std::scoped_lock lk{backend_mutex};
+        finalized = true;
+        device_lost = false; // a finalized stream is never reopened, so it is not ready
         if (!stream_backend) {
             return;
         }
-        Stop();
+        StopLocked();
+        backend_open = false;
         cubeb_stream_destroy(stream_backend);
         stream_backend = nullptr;
     }
 
+    /// Callers outside backend_mutex read this while the watchdog replaces the backend: it reads
+    /// backend_open and device_lost, published under the mutex, not the pointer.
+    /// A stream whose device was lost stays ready while the watchdog reopens it: callers that
+    /// treat not-ready as a permanent fault (sysmix Pump and SetEngaged) must not end a stream
+    /// the watchdog would bring back. Only a failed first open and a real fault are not ready.
     bool IsReady() const override {
-        return stream_backend != nullptr && !failed;
+        return (backend_open || device_lost) && !failed;
     }
 
     /**
@@ -142,14 +111,25 @@ public:
      *                 Default false.
      */
     void Start(bool resume = false) override {
-        if (!IsReady() || !paused) {
+        std::scoped_lock lk{backend_mutex};
+        if (failed || !paused) {
+            return;
+        }
+        if (!stream_backend) {
+            // Being reopened after a lost device: the watchdog starts it once it is open again.
+            if (device_lost) {
+                paused = false;
+            }
             return;
         }
 
+        last_callback = Now();
+        stalled_ticks = 0;
         if (cubeb_stream_start(stream_backend) != CUBEB_OK) {
-            failed = true;
-            LOG_CRITICAL(Audio_Sink, "Error starting cubeb stream");
-            return;
+            // The device may be gone for a moment (the computer woke up, a headset was unplugged):
+            // the sink's watchdog opens the stream again.
+            device_lost = true;
+            LOG_ERROR(Audio_Sink, "Error starting cubeb stream {}, it will be reopened", name);
         }
         paused = false;
     }
@@ -158,18 +138,152 @@ public:
      * Stop the sink stream.
      */
     void Stop() override {
-        if (!stream_backend || paused) {
+        std::scoped_lock lk{backend_mutex};
+        StopLocked();
+    }
+
+    /**
+     * Called by the sink's watchdog about once a second. When the host device was lost (cubeb
+     * reported an error, or a running stream stopped asking for data, as happens after the
+     * computer sleeps), the backend stream is closed and opened again on the current device.
+     * The guest sees nothing: the stream object, its queue and its state stay.
+     */
+    void Watch() {
+        std::scoped_lock lk{backend_mutex};
+        if (!ctx || finalized || failed) {
             return;
         }
-
-        SignalPause();
-        if (cubeb_stream_stop(stream_backend) != CUBEB_OK) {
-            failed = true;
-            LOG_CRITICAL(Audio_Sink, "Error stopping cubeb stream");
+        const char* why = nullptr;
+        if (device_lost) {
+            why = "the device reported an error";
+        } else if (stream_backend && !paused) {
+            // Two ticks in a row: the first one after a sleep always sees a long gap.
+            if (Now() - last_callback > StallMs) {
+                if (++stalled_ticks >= 2) {
+                    why = "no audio callback for 5 s";
+                }
+            } else {
+                stalled_ticks = 0;
+            }
         }
+        if (why == nullptr) {
+            return;
+        }
+        const bool running = !paused;
+        if (!reopen_logged) {
+            LOG_WARNING(Audio_Sink, "cubeb stream {}: {}, reopening it", name, why);
+        }
+        // device_lost before backend_open goes: IsReady stays true across the swap.
+        device_lost = true;
+        if (stream_backend) {
+            backend_open = false;
+            cubeb_stream_stop(stream_backend);
+            cubeb_stream_destroy(stream_backend);
+            stream_backend = nullptr;
+        }
+        stalled_ticks = 0;
+        if (!OpenBackend()) {
+            if (!reopen_logged) {
+                LOG_ERROR(Audio_Sink, "cubeb stream {} could not be reopened yet, trying on", name);
+            }
+            reopen_logged = true;
+            return;
+        }
+        last_callback = Now();
+        if (running && cubeb_stream_start(stream_backend) != CUBEB_OK) {
+            reopen_logged = true;
+            return; // device_lost stays set: tried again at the next tick
+        }
+        device_lost = false;
+        reopen_logged = false;
+        LOG_WARNING(Audio_Sink, "cubeb stream {} reopened ({})", name, running ? "running" : "paused");
     }
 
 private:
+    static constexpr s64 StallMs = 5000;
+
+    static s64 Now() {
+        return std::chrono::duration_cast<std::chrono::milliseconds>(
+                   std::chrono::steady_clock::now().time_since_epoch())
+            .count();
+    }
+
+    void StopLocked() {
+        if (paused) {
+            return;
+        }
+
+        // Recorded even with no backend (a reopen that failed): the watchdog must not start the
+        // stream again when it reopens it.
+        SignalPause();
+        if (stream_backend && cubeb_stream_stop(stream_backend) != CUBEB_OK) {
+            device_lost = true;
+            LOG_ERROR(Audio_Sink, "Error stopping cubeb stream {}, it will be reopened", name);
+        }
+    }
+
+    /// Opens the backend stream on the current device. Returns false when it could not.
+    bool OpenBackend() {
+        cubeb_stream_params params{};
+        params.rate = TargetSampleRate;
+        params.channels = device_channels;
+        params.format = CUBEB_SAMPLE_S16LE;
+        params.prefs = CUBEB_STREAM_PREF_NONE;
+        switch (params.channels) {
+        case 1:
+            params.layout = CUBEB_LAYOUT_MONO;
+            break;
+        case 2:
+            params.layout = CUBEB_LAYOUT_STEREO;
+            break;
+        case 6:
+            params.layout = CUBEB_LAYOUT_3F2_LFE;
+            break;
+        }
+
+        u32 minimum_latency{0};
+        const auto latency_error = cubeb_get_min_latency(ctx, &params, &minimum_latency);
+        if (latency_error != CUBEB_OK) {
+            if (!reopen_logged) {
+                LOG_CRITICAL(Audio_Sink, "Error getting minimum latency, error: {}", latency_error);
+            }
+            minimum_latency = TargetSampleCount * 2;
+        }
+
+        minimum_latency = (std::max)(minimum_latency, TargetSampleCount * 2);
+
+        if (!reopen_logged) {
+            LOG_INFO(Service_Audio,
+                     "Opening cubeb stream {} type {} with: rate {} channels {} (system channels "
+                     "{}) latency {}",
+                     name, type, params.rate, params.channels, system_channels, minimum_latency);
+        }
+
+        auto init_error{0};
+        cubeb_stream* opened{};
+        if (type == StreamType::In) {
+            init_error = cubeb_stream_init(ctx, &opened, name.c_str(), input_device,
+                                           &params, output_device, nullptr, minimum_latency,
+                                           &CubebSinkStream::DataCallback,
+                                           &CubebSinkStream::StateCallback, this);
+        } else {
+            init_error = cubeb_stream_init(ctx, &opened, name.c_str(), input_device,
+                                           nullptr, output_device, &params, minimum_latency,
+                                           &CubebSinkStream::DataCallback,
+                                           &CubebSinkStream::StateCallback, this);
+        }
+
+        if (init_error != CUBEB_OK) {
+            if (!reopen_logged) {
+                LOG_CRITICAL(Audio_Sink, "Error initializing cubeb stream, error: {}", init_error);
+            }
+            return false;
+        }
+        stream_backend = opened;
+        backend_open = true;
+        return true;
+    }
+
     /**
      * Main callback from Cubeb. Either expects samples from us (audio render/audio out), or will
      * provide samples to be copied (audio in).
@@ -188,6 +302,7 @@ private:
             return -1;
         }
 
+        impl->last_callback.store(Now(), std::memory_order_relaxed);
         const std::size_t num_channels = impl->GetDeviceChannels();
         const std::size_t frame_size = num_channels;
         const std::size_t num_frames{static_cast<size_t>(num_frames_)};
@@ -205,7 +320,8 @@ private:
     }
 
     /**
-     * Cubeb callback for if a device state changes. Unused currently.
+     * Cubeb callback for if a device state changes. An error means the device was lost: the
+     * stream cannot be closed from its own callback, so the sink's watchdog reopens it.
      *
      * @param stream      - Cubeb-specific data about the stream.
      * @param user_data   - Custom data pointer passed along, points to a CubebSinkStream.
@@ -213,7 +329,7 @@ private:
      */
     static void StateCallback(cubeb_stream*, void* user_data, cubeb_state state) {
         if (state == CUBEB_STATE_ERROR) {
-            static_cast<CubebSinkStream*>(user_data)->MarkFaulted();
+            static_cast<CubebSinkStream*>(user_data)->device_lost = true;
         }
     }
 
@@ -221,6 +337,19 @@ private:
     cubeb* ctx{};
     /// Cubeb stream backend
     cubeb_stream* stream_backend{};
+    std::atomic<bool> backend_open{}; ///< stream_backend is set; IsReady reads this
+    /// The devices the backend stream is opened on (null: the default one)
+    cubeb_devid output_device{};
+    cubeb_devid input_device{};
+    /// Guards stream_backend against the watchdog reopening it
+    std::mutex backend_mutex;
+    /// The host device was lost; the watchdog reopens the stream
+    std::atomic<bool> device_lost{};
+    /// When cubeb last asked for (or delivered) data, ms on the steady clock
+    std::atomic<s64> last_callback{};
+    int stalled_ticks{};
+    bool reopen_logged{};
+    bool finalized{};
 #ifdef _WIN32
     /// Result of this stream's COM initialization, balanced only when it succeeded
     HRESULT com_init_result{};
@@ -265,11 +394,40 @@ CubebSink::CubebSink(std::string_view target_device_name) {
 
     cubeb_get_max_channel_count(ctx, &device_channels);
     device_channels = device_channels >= 6U ? 6U : 2U;
+
+    // Reopens a stream whose host device was lost (the computer slept, the device was unplugged).
+    watchdog = std::jthread([this](std::stop_token stop) {
+#ifdef _WIN32
+        const HRESULT com = CoInitializeEx(nullptr, COINIT_MULTITHREADED);
+#endif
+        while (!stop.stop_requested()) {
+            for (int i = 0; i < 10 && !stop.stop_requested(); i++) {
+                std::this_thread::sleep_for(std::chrono::milliseconds(100));
+            }
+            if (stop.stop_requested()) {
+                break;
+            }
+            std::scoped_lock lk{streams_mutex};
+            for (auto& stream : sink_streams) {
+                static_cast<CubebSinkStream*>(stream.get())->Watch();
+            }
+        }
+#ifdef _WIN32
+        if (SUCCEEDED(com)) {
+            CoUninitialize();
+        }
+#endif
+    });
 }
 
 CubebSink::~CubebSink() {
     if (!ctx) {
         return;
+    }
+
+    watchdog.request_stop();
+    if (watchdog.joinable()) {
+        watchdog.join();
     }
 
     for (auto& sink_stream : sink_streams) {
@@ -289,6 +447,7 @@ CubebSink::~CubebSink() {
 SinkStream* CubebSink::AcquireSinkStream(Core::System& system, u32 system_channels_,
                                          const std::string& name, StreamType type) {
     system_channels = system_channels_;
+    std::scoped_lock lk{streams_mutex};
     SinkStreamPtr& stream = sink_streams.emplace_back(std::make_unique<CubebSinkStream>(
         ctx, type == StreamType::In ? 2U : device_channels, system_channels,
         type == StreamType::In ? nullptr : output_device,
@@ -299,6 +458,7 @@ SinkStream* CubebSink::AcquireSinkStream(Core::System& system, u32 system_channe
 }
 
 void CubebSink::CloseStream(SinkStream* stream) {
+    std::scoped_lock lk{streams_mutex};
     for (size_t i = 0; i < sink_streams.size(); i++) {
         if (sink_streams[i].get() == stream) {
             sink_streams[i].reset();
@@ -309,6 +469,7 @@ void CubebSink::CloseStream(SinkStream* stream) {
 }
 
 void CubebSink::CloseStreams() {
+    std::scoped_lock lk{streams_mutex};
     sink_streams.clear();
 }
 
@@ -318,12 +479,14 @@ f32 CubebSink::GetDeviceVolume() const {
 
 void CubebSink::SetDeviceVolume(f32 volume) {
     device_volume = volume;
+    std::scoped_lock lk{streams_mutex};
     for (auto& stream : sink_streams) {
         stream->SetDeviceVolume(volume);
     }
 }
 
 void CubebSink::SetSystemVolume(f32 volume) {
+    std::scoped_lock lk{streams_mutex};
     for (auto& stream : sink_streams) {
         stream->SetSystemVolume(volume);
     }
