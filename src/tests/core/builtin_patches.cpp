@@ -1558,6 +1558,10 @@ TEST_CASE("OoT compaction interval is opt-in and skips changed code or state",
     SECTION("Static cheat writes the BSS timestamp") {
         cheat = "[Compaction overlap]\n08000000 04E9D200 00000000 00000000\n";
     }
+    SECTION("Single-pass loop cheat overwrites the compaction hook") {
+        cheat = "[Loop overlap]\n30000000 00000001\n"
+                "04010000 0177E828 00000000\n31000000\n";
+    }
 
     PatchManagerTestContext context{mod, mod_offset};
     const auto manager = context.Manager(title);
@@ -1705,6 +1709,32 @@ TEST_CASE("Built-in patch overlap check follows registers from earlier cheats",
                         "[Store]\n"
                         "04000000 03C46A00 D503201F\n",
                         {FpsUnlock})
+              .empty());
+}
+
+TEST_CASE("Compaction overlap detects stable loop stores but not changed offsets",
+          "[patch_manager][oot_compaction]") {
+    constexpr std::string_view Compaction{"Texture heap compaction interval (built-in)"};
+    const auto stable = CheatOverlaps(
+        "[Constant offset loop]\n"
+        "30000000 00000001\n"
+        "04010000 0177E828 00000000\n"
+        "31000000\n",
+        {Compaction});
+    REQUIRE(stable.size() == 1);
+    CHECK(stable[0].cheat == "Constant offset loop");
+    CHECK(stable[0].patch == Compaction);
+    CHECK(stable[0].cheat_begin == 0x177E828);
+    CHECK(stable[0].cheat_end == 0x177E82C);
+
+    // Changing the offset after the store makes subsequent iterations ambiguous.
+    CHECK(CheatOverlaps(
+              "[Changing offset loop]\n"
+              "30000000 00000001\n"
+              "04010000 0177E828 00000000\n"
+              "40010000 00000000 00000004\n"
+              "31000000\n",
+              {Compaction})
               .empty());
 }
 
