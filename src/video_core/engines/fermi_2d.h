@@ -304,7 +304,15 @@ public:
         s32 src_y0;
         s32 src_x1;
         s32 src_y1;
+        bool centered_2x2_filter = false;
     };
+
+    [[nodiscard]] static constexpr bool IsCentered2x2Filter(Origin origin, s64 x, s64 y,
+                                                           s64 dx, s64 dy) {
+        constexpr s64 half = s64{1} << 31;
+        constexpr s64 two = s64{2} << 32;
+        return origin == Origin::Center && x == half && y == half && dx == two && dy == two;
+    }
 
 private:
     VideoCore::RasterizerInterface* rasterizer = nullptr;

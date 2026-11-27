@@ -13,6 +13,7 @@
 #include "video_core/host_shaders/blit_color_float_frag_spv.h"
 #include "video_core/host_shaders/blit_color_srgb_to_linear_frag_spv.h"
 #include "video_core/host_shaders/blit_color_msaa_frag_spv.h"
+#include "video_core/host_shaders/resolve_depth_to_color_frag_spv.h"
 #include "video_core/host_shaders/blit_depth_frag_spv.h"
 #include "video_core/host_shaders/blit_depth_msaa_frag_spv.h"
 #include "video_core/host_shaders/blit_depth_stencil_msaa_frag_spv.h"
@@ -711,6 +712,7 @@ BlitImageHelper::BlitImageHelper(const Device& device_, Scheduler& scheduler_,
       temporal_sharpen_frag(BuildShader(device, TEMPORAL_SHARPEN_FRAG_SPV)),
       blit_color_srgb_to_linear_frag(BuildShader(device, BLIT_COLOR_SRGB_TO_LINEAR_FRAG_SPV)),
       blit_color_msaa_frag(BuildShader(device, BLIT_COLOR_MSAA_FRAG_SPV)),
+      resolve_depth_to_color_frag(BuildShader(device, RESOLVE_DEPTH_TO_COLOR_FRAG_SPV)),
       blit_depth_stencil_frag(device.IsExtShaderStencilExportSupported()
                              ? BuildShader(device, VULKAN_BLIT_DEPTH_STENCIL_FRAG_SPV)
                              : vk::ShaderModule{}),
@@ -926,6 +928,19 @@ void BlitImageHelper::BlitColorMSAA(const Framebuffer* dst_framebuffer,
     BlitImpl(dst_framebuffer, src_image_view, dst_region, src_region,
              FindOrEmplaceBlitColorMSAAPipeline(key), *nearest_sampler,
              src_image_view.Handle(Shader::TextureType::Color2D), VK_NULL_HANDLE, false);
+}
+
+void BlitImageHelper::ResolveDepthToColor(const Framebuffer* dst_framebuffer,
+                                          ImageView& src_image_view, const Region2D& dst_region,
+                                          const Region2D& src_region) {
+    const BlitMSAAPipelineKey key{
+        .renderpass = dst_framebuffer->RenderPass(),
+        .samples = dst_framebuffer->Samples(),
+        .resolve_depth_to_color = true,
+    };
+    BlitImpl(dst_framebuffer, src_image_view, dst_region, src_region,
+             FindOrEmplaceBlitColorMSAAPipeline(key), *nearest_sampler,
+             src_image_view.DepthView(), VK_NULL_HANDLE, false);
 }
 
 void BlitImageHelper::BlitDepthStencilMSAA(const Framebuffer* dst_framebuffer,
@@ -1737,13 +1752,15 @@ VkPipeline BlitImageHelper::FindOrEmplaceBlitColorMSAAPipeline(const BlitMSAAPip
         return *blit_msaa_color_pipelines[std::distance(blit_msaa_color_keys.begin(), it)];
     }
     blit_msaa_color_keys.push_back(key);
-    const std::array stages = MakeStages(*full_screen_vert, *blit_color_msaa_frag);
+    const std::array stages = MakeStages(
+        *full_screen_vert,
+        key.resolve_depth_to_color ? *resolve_depth_to_color_frag : *blit_color_msaa_frag);
     const VkPipelineMultisampleStateCreateInfo multisample_ci{
         .sType = VK_STRUCTURE_TYPE_PIPELINE_MULTISAMPLE_STATE_CREATE_INFO,
         .pNext = nullptr,
         .flags = 0,
         .rasterizationSamples = key.samples,
-        .sampleShadingEnable = VK_TRUE,
+        .sampleShadingEnable = key.resolve_depth_to_color ? VK_FALSE : VK_TRUE,
         .minSampleShading = 1.0f,
         .pSampleMask = nullptr,
         .alphaToCoverageEnable = VK_FALSE,

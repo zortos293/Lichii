@@ -2892,7 +2892,8 @@ bool TextureCache<P>::CopyVolumeSlice(const Tegra::Engines::Fermi2D::Surface& ds
 template <class P>
 bool TextureCache<P>::BlitImage(const Tegra::Engines::Fermi2D::Surface& dst,
                                 const Tegra::Engines::Fermi2D::Surface& src,
-                                const Tegra::Engines::Fermi2D::Config& copy) {
+                                const Tegra::Engines::Fermi2D::Config& copy,
+                                const PendingWriteCheck& has_pending_write) {
     VideoCommon::GpuSplit::RenderOwned("TextureCache::BlitImage");
     VideoCommon::Nx2Profile::Scope profile_scope{VideoCommon::Nx2Profile::Zone::TextureCache};
     // A deferred clear parked before this copy has to land before it: realizing it afterwards
@@ -2907,7 +2908,15 @@ bool TextureCache<P>::BlitImage(const Tegra::Engines::Fermi2D::Surface& dst,
     if (CopyVolumeSlice(dst, src, copy)) {
         return true;
     }
-    const auto result = GetBlitImages(dst, src, copy);
+    std::optional<BlitImages> result;
+    if constexpr (!FRAMEBUFFER_BLITS) {
+        if (has_pending_write && IsFourSampleDepthResolve(dst, src, copy)) {
+            result = GetDepthResolveImages(dst, src, has_pending_write);
+        }
+    }
+    if (!result) {
+        result = GetBlitImages(dst, src, copy);
+    }
     if (!result) {
         return false;
     }
@@ -2917,7 +2926,7 @@ bool TextureCache<P>::BlitImage(const Tegra::Engines::Fermi2D::Surface& dst,
     const ImageId src_id = images.src_id;
 
     PrepareImage(src_id, false, false);
-    PrepareImage(dst_id, true, false);
+    PrepareImage(dst_id, !images.average_depth, false);
 
     Image& dst_image = slot_images[dst_id];
     Image& src_image = slot_images[src_id];
@@ -3004,6 +3013,14 @@ bool TextureCache<P>::BlitImage(const Tegra::Engines::Fermi2D::Surface& dst,
         // Provide a framebuffer in case it's necessary
         ImageView& dst_view = slot_image_views[dst_view_id];
         ImageView& src_view = slot_image_views[src_view_id];
+        if (images.average_depth) {
+            if (!runtime.ResolveDepthToColor(dst_framebuffer, dst_view, src_view, dst_region,
+                                             src_region)) {
+                return false;
+            }
+            MarkModification(dst_id);
+            return true;
+        }
         runtime.BlitImage(dst_framebuffer, dst_view, src_view, dst_region, src_region, copy.filter,
                           copy.operation);
     }
@@ -5078,6 +5095,112 @@ ImageId TextureCache<P>::JoinImages(const ImageInfo& info, GPUVAddr gpu_addr, DA
 }
 
 template <class P>
+std::optional<typename TextureCache<P>::BlitImages> TextureCache<P>::GetDepthResolveImages(
+    const Tegra::Engines::Fermi2D::Surface& dst, const Tegra::Engines::Fermi2D::Surface& src,
+    const PendingWriteCheck& has_pending_write) {
+    if (!maxwell3d) {
+        return std::nullopt;
+    }
+    const auto& regs = maxwell3d->regs;
+    if (!regs.zeta_enable || regs.zeta.Address() != src.Address() ||
+        regs.zeta.format != Tegra::DepthFormat::Z32_FLOAT ||
+        regs.zeta.tile_mode.is_pitch_linear ||
+        regs.zeta.tile_mode.dim_control != Tegra::Engines::Maxwell3D::Regs::TileMode::
+                                              DimensionControl::DefineArraySize ||
+        regs.anti_alias_samples_mode != Tegra::Texture::MsaaMode::Msaa2x2) {
+        return std::nullopt;
+    }
+
+    ImageInfo depth_info(regs.zeta, regs.zeta_size, regs.anti_alias_samples_mode);
+    ImageInfo fermi_src(src);
+    fermi_src.num_samples = depth_info.num_samples;
+    const bool native_tiling = gpu_memory->UsesNativeTiling();
+    depth_info.native_tiling = fermi_src.native_tiling = native_tiling;
+    if (depth_info.format != PixelFormat::D32_FLOAT ||
+        !MatchesDepthResolveLayout(fermi_src, depth_info)) {
+        return std::nullopt;
+    }
+    ImageInfo dst_info(dst);
+    dst_info.native_tiling = native_tiling;
+    const auto src_size = CalculateGuestSizeInBytes(depth_info);
+    const auto dst_size = CalculateGuestSizeInBytes(dst_info);
+    const auto src_ranges = gpu_memory->GetSubmappedDeviceRange(src.Address(), src_size);
+    const auto dst_ranges = gpu_memory->GetSubmappedDeviceRange(dst.Address(), dst_size);
+    if (!src_size || !dst_size || src_ranges.size() != 1 || src_ranges.front().second != src_size ||
+        dst_ranges.size() != 1 || dst_ranges.front().second != dst_size ||
+        !DepthResolveRangesAreDisjoint(src_ranges.front().first, src_size,
+                                       dst_ranges.front().first, dst_size)) {
+        return std::nullopt;
+    }
+    const DAddr src_device_addr = src_ranges.front().first;
+    const DAddr dst_device_addr = dst_ranges.front().first;
+    if (WritebackPendingOver(src_device_addr, src_size) ||
+        WritebackPendingOver(dst_device_addr, dst_size) ||
+        has_pending_write(src_device_addr, src_size) ||
+        has_pending_write(dst_device_addr, dst_size)) {
+        return std::nullopt;
+    }
+
+    const auto find_source = [&] {
+        const ImageId id = FindImage(depth_info, src.Address(), RelaxedOptions{});
+        if (!id) {
+            return ImageId{};
+        }
+        const ImageBase& depth = slot_images[id];
+        const auto ownership = depth_resolve_sources.find(id);
+        if (depth.gpu_addr != src.Address() || depth.cpu_addr != src_device_addr ||
+            depth.info.format != depth_info.format ||
+            !MatchesDepthResolveLayout(depth_info, depth.info) ||
+            !IsDepthResolveSourceCurrent(depth) || ownership == depth_resolve_sources.end() ||
+            ownership->second.ConflictsWith(ownership->second.retired_writer_tick)) {
+            return ImageId{};
+        }
+        // Scan backing storage, including writers with another format, layout or GPU mapping.
+        bool newer_writer = false;
+        ForEachImageInRegion(src_device_addr, src_size, [&](ImageId other, const ImageBase& image) {
+            newer_writer = other != id && ownership->second.ConflictsWith(image.modification_tick);
+            return newer_writer;
+        });
+        return newer_writer ? ImageId{} : id;
+    };
+    ImageId src_id = find_source();
+    if (!src_id) {
+        return std::nullopt;
+    }
+    bool multisampled_destination_alias = false;
+    ForEachImageInRegion(dst_device_addr, dst_size, [&](ImageId, const ImageBase& image) {
+        multisampled_destination_alias = ConflictsWithDepthResolveDestination(image);
+        return multisampled_destination_alias;
+    });
+    if (multisampled_destination_alias) {
+        return std::nullopt;
+    }
+    ImageId dst_id = FindImage(dst_info, dst.Address(), RelaxedOptions{});
+    if (!dst_id) {
+        dst_id = InsertImage(dst_info, dst.Address(), RelaxedOptions{});
+        if (WritebackPendingOver(src_device_addr, src_size) ||
+            WritebackPendingOver(dst_device_addr, dst_size)) {
+            return std::nullopt;
+        }
+        src_id = find_source();
+    }
+    if (!src_id || !dst_id) {
+        return std::nullopt;
+    }
+    const ImageBase& destination = slot_images[dst_id];
+    if (destination.gpu_addr != dst.Address() || destination.cpu_addr != dst_device_addr ||
+        !MatchesDepthResolveDestination(dst_info, destination.info,
+                                        runtime.HasBrokenTextureViewFormats(),
+                                        runtime.HasNativeBgr()) ||
+        True(destination.flags & (ImageFlagBits::Remapped | ImageFlagBits::Unbacked |
+                                  ImageFlagBits::Sparse |
+                                  ImageFlagBits::TrimmedLevels))) {
+        return std::nullopt;
+    }
+    return BlitImages{dst_id, src_id, dst_info.format, depth_info.format, true};
+}
+
+template <class P>
 std::optional<typename TextureCache<P>::BlitImages> TextureCache<P>::GetBlitImages(
     const Tegra::Engines::Fermi2D::Surface& dst, const Tegra::Engines::Fermi2D::Surface& src,
     const Tegra::Engines::Fermi2D::Config& copy) {
@@ -5590,6 +5713,11 @@ void TextureCache<P>::RegisterImage(ImageId image_id) {
     ASSERT_MSG(False(image.flags & ImageFlagBits::Registered),
                "Trying to register an already registered image");
     image.flags |= ImageFlagBits::Registered;
+    if constexpr (!FRAMEBUFFER_BLITS) {
+        if (image.info.format == PixelFormat::D32_FLOAT && image.info.num_samples == 4) {
+            depth_resolve_sources.try_emplace(image_id);
+        }
+    }
     image.channel = current_channel_id;
     image.address_space = current_address_space;
     total_used_memory += ImageMemoryBytes(slot_images[image_id]);
@@ -5658,6 +5786,24 @@ void TextureCache<P>::UnregisterImage(ImageId image_id) {
     Image& image = slot_images[image_id];
     ASSERT_MSG(True(image.flags & ImageFlagBits::Registered),
                "Trying to unregister an already registered image");
+    if constexpr (!FRAMEBUFFER_BLITS) {
+        depth_resolve_sources.erase(image_id);
+        for (auto& [depth_id, ownership] : depth_resolve_sources) {
+            if (!ownership.ConflictsWith(image.modification_tick)) {
+                continue;
+            }
+            const auto& depth = slot_images[depth_id];
+            const bool overlaps = True(image.flags & ImageFlagBits::Sparse)
+                ? std::ranges::any_of(sparse_views.at(image_id), [&](const auto map_id) {
+                      return slot_map_views[map_id].Overlaps(depth.cpu_addr, depth.guest_size_bytes);
+                  })
+                : image.Overlaps(depth.cpu_addr, depth.guest_size_bytes);
+            if (overlaps) {
+                ownership.retired_writer_tick =
+                    (std::max)(ownership.retired_writer_tick, image.modification_tick);
+            }
+        }
+    }
     image.flags &= ~ImageFlagBits::Registered;
     image.flags &= ~ImageFlagBits::BadOverlap;
     lru_cache.Free(image.lru_index);
@@ -6030,6 +6176,33 @@ void TextureCache<P>::MarkModification(ImageBase& image) noexcept {
         if (image.info.native_tiling != other.info.native_tiling) {
             InvalidateXc2LutViews(other);
         }
+    }
+}
+
+template <class P>
+void TextureCache<P>::MarkFullDepthClear(u32 width, u32 height) {
+    const auto view_id = render_targets.depth_buffer_id;
+    if (!view_id) {
+        return;
+    }
+    const auto& view = slot_image_views[view_id];
+    const auto ownership = depth_resolve_sources.find(view.image_id);
+    if (ownership == depth_resolve_sources.end()) {
+        return;
+    }
+    const auto& image = slot_images[view.image_id];
+    const auto& info = image.info;
+    if (info.format != PixelFormat::D32_FLOAT || info.num_samples != 4 ||
+        info.resources.levels != 1 || info.resources.layers != 1) {
+        return;
+    }
+    const auto& resolution = Settings::values.resolution_info;
+    const bool rescaled = True(image.flags & ImageFlagBits::Rescaled);
+    const u32 image_width = rescaled ? resolution.ScaleUp(info.size.width / 2) : info.size.width / 2;
+    const u32 image_height =
+        rescaled ? resolution.ScaleUp(info.size.height / 2) : info.size.height / 2;
+    if (width == image_width && height == image_height) {
+        ownership->second.full_clear_tick = image.modification_tick;
     }
 }
 

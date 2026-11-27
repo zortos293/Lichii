@@ -137,6 +137,10 @@ void Fermi2D::Blit() {
         .src_y0 = static_cast<s32>(srcY >> 32),
         .src_x1 = static_cast<s32>((srcX + args.du_dx * args.dst_width) >> 32),
         .src_y1 = static_cast<s32>((srcY + args.dv_dy * args.dst_height) >> 32),
+        .centered_2x2_filter =
+            IsCentered2x2Filter(args.sample_mode.origin, args.src_x0, args.src_y0,
+                                args.du_dx, args.dv_dy) && !regs.clip_enable &&
+            !regs.color_key_enable,
     };
 
     const auto need_align_to_pitch =

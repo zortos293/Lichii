@@ -328,6 +328,7 @@ void QueryCacheBase<Traits>::CounterReport(GPUVAddr addr, QueryType counter_type
                                         static_cast<u32>(cur_addr & Core::DEVICE_PAGEMASK));
     };
     const u64 report_size = has_timestamp ? 16 : 4;
+    page_filter.Mark(cpu_addr, report_size);
     // Written later: the buffer cache keeps GPU writes over it until then (NoteReportPending).
     if (!posted && VideoCommon::GpuSplit::TracksPendingReports()) {
         NotePendingReport(cpu_addr);
@@ -454,7 +455,6 @@ void QueryCacheBase<Traits>::CounterReport(GPUVAddr addr, QueryType counter_type
     {
         std::scoped_lock lock(cache_mutex);
         auto it1 = cached_queries.try_emplace(cont_addr);
-        page_filter.Mark(cpu_addr, 16);
         auto& sub_container = it1.first->second;
         auto it_current = sub_container.find(base);
         if (it_current == sub_container.end()) {
@@ -470,7 +470,10 @@ void QueryCacheBase<Traits>::CounterReport(GPUVAddr addr, QueryType counter_type
 template <typename Traits>
 void QueryCacheBase<Traits>::WriteImmediate(GPUVAddr addr, DAddr cpu_addr, u32 payload,
                                             bool has_timestamp, bool mirrored) {
-    FinishReads(cpu_addr, has_timestamp ? 16 : 4);
+    const u64 report_size = has_timestamp ? 16 : 4;
+    // Immediate reports bypass cached_queries.
+    page_filter.Mark(cpu_addr, report_size);
+    FinishReads(cpu_addr, report_size);
     u8* const pointer = impl->device_memory.template GetPointer<u8>(cpu_addr);
     auto& shadow = Tegra::Nx2MirrorShadow::Get();
     if (pointer == nullptr) {

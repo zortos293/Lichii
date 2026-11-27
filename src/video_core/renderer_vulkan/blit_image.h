@@ -64,6 +64,7 @@ struct BlitMSAAPipelineKey {
 
     VkRenderPass renderpass;
     VkSampleCountFlagBits samples;
+    bool resolve_depth_to_color = false;
 };
 
 class BlitImageHelper {
@@ -99,6 +100,9 @@ public:
 
     void BlitColorMSAA(const Framebuffer* dst_framebuffer, const ImageView& src_image_view,
                        const Region2D& dst_region, const Region2D& src_region);
+
+    void ResolveDepthToColor(const Framebuffer* dst_framebuffer, ImageView& src_image_view,
+                             const Region2D& dst_region, const Region2D& src_region);
 
     void BlitDepthStencilMSAA(const Framebuffer* dst_framebuffer, ImageView& src_image_view,
                               const Region2D& dst_region, const Region2D& src_region);
@@ -246,6 +250,7 @@ private:
     vk::ShaderModule temporal_sharpen_frag;
     vk::ShaderModule blit_color_srgb_to_linear_frag;
     vk::ShaderModule blit_color_msaa_frag;
+    vk::ShaderModule resolve_depth_to_color_frag;
     vk::ShaderModule blit_depth_stencil_frag;
     vk::ShaderModule blit_depth_frag;
     vk::ShaderModule blit_depth_msaa_frag;

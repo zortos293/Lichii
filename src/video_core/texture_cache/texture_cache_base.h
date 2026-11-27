@@ -9,6 +9,7 @@
 #include <atomic>
 #include <chrono>
 #include <deque>
+#include <functional>
 #include <limits>
 #include <map>
 #include <mutex>
@@ -44,6 +45,7 @@
 #include "video_core/game_dlss_status.h"
 #include "video_core/surface.h"
 #include "video_core/texture_cache/descriptor_table.h"
+#include "video_core/texture_cache/depth_resolve.h"
 #include "video_core/texture_cache/image_base.h"
 #include "video_core/texture_cache/image_info.h"
 #include "video_core/texture_cache/image_view_base.h"
@@ -302,6 +304,7 @@ class TextureCache : public VideoCommon::ChannelSetupCaches<TextureCacheChannelI
         ImageId src_id;
         PixelFormat dst_format;
         PixelFormat src_format;
+        bool average_depth = false;
     };
 
 public:
@@ -459,9 +462,12 @@ public:
                          const Tegra::Engines::Fermi2D::Surface& src,
                          const Tegra::Engines::Fermi2D::Config& copy);
 
+    using PendingWriteCheck = std::function<bool(DAddr, size_t)>;
+
     bool BlitImage(const Tegra::Engines::Fermi2D::Surface& dst,
                    const Tegra::Engines::Fermi2D::Surface& src,
-                   const Tegra::Engines::Fermi2D::Config& copy);
+                   const Tegra::Engines::Fermi2D::Config& copy,
+                   const PendingWriteCheck& has_pending_write = {});
 
     /// Stand-in for a DLSS evaluation: temporal upscale of src into dst (see the runtime's
     /// TemporalUpscale). False when unsupported; the caller retains its native dispatch.
@@ -526,6 +532,8 @@ public:
 
     /// Prepare an image to be used
     void PrepareImage(ImageId image_id, bool is_modification, bool invalidate);
+
+    void MarkFullDepthClear(u32 width, u32 height);
 
     Common::SpinRecursiveMutex mutex;
 
@@ -608,6 +616,10 @@ private:
     [[nodiscard]] std::optional<BlitImages> GetBlitImages(
         const Tegra::Engines::Fermi2D::Surface& dst, const Tegra::Engines::Fermi2D::Surface& src,
         const Tegra::Engines::Fermi2D::Config& copy);
+
+    [[nodiscard]] std::optional<BlitImages> GetDepthResolveImages(
+        const Tegra::Engines::Fermi2D::Surface& dst, const Tegra::Engines::Fermi2D::Surface& src,
+        const PendingWriteCheck& has_pending_write);
 
     /// Find or create a sampler from a guest descriptor sampler
     [[nodiscard]] SamplerId FindSampler(const TSCEntry& config, bool compute);
@@ -1006,6 +1018,7 @@ private:
     Tegra::Texture::UnswizzleWorker unswizzle_worker;
 
     u64 modification_tick = 0;
+    ::Common::unordered_map<ImageId, DepthResolveOwnership> depth_resolve_sources;
     u64 frame_tick = 0;
 
     Common::ThreadWorker texture_decode_worker{1, "TextureDecoder", {},

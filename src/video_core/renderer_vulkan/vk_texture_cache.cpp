@@ -2514,6 +2514,31 @@ bool TextureCacheRuntime::TemporalUpscale(Framebuffer* dst_framebuffer, ImageVie
     return true;
 }
 
+bool TextureCacheRuntime::CanResolveFourSampleDepthToColor() const {
+    // A tiler clear pass can discard the multisample attachment after storing sample zero.
+    // Its single-sample shadow cannot supply the other three samples.
+    return !(ENABLE_MSAA_TILER_RESOLVE && ENABLE_MSAA_RESOLVE_CONSUME &&
+             ENABLE_MSAA_DEPTH_STENCIL_DISCARD && device.IsTiler() &&
+             SupportsDepthStencilResolve(device, PixelFormat::D32_FLOAT));
+}
+
+bool TextureCacheRuntime::ResolveDepthToColor(Framebuffer* dst_framebuffer, const ImageView& dst,
+                                              ImageView& src, const Region2D& dst_region,
+                                              const Region2D& src_region) {
+    const VkExtent2D area = dst_framebuffer->RenderArea();
+    if (src.format != PixelFormat::D32_FLOAT || dst.format != PixelFormat::R32_FLOAT ||
+        src.Samples() != VK_SAMPLE_COUNT_4_BIT || dst.Samples() != VK_SAMPLE_COUNT_1_BIT ||
+        dst_framebuffer->Samples() != VK_SAMPLE_COUNT_1_BIT || !dst_framebuffer->RenderPass() ||
+        src_region.start != dst_region.start || src_region.end != dst_region.end ||
+        dst_region.end.x <= dst_region.start.x || dst_region.end.y <= dst_region.start.y ||
+        !std::cmp_less_equal(dst_region.end.x, area.width) ||
+        !std::cmp_less_equal(dst_region.end.y, area.height)) {
+        return false;
+    }
+    blit_image_helper.ResolveDepthToColor(dst_framebuffer, src, dst_region, src_region);
+    return true;
+}
+
 void TextureCacheRuntime::BlitImage(Framebuffer* dst_framebuffer, ImageView& dst, ImageView& src,
                                     const Region2D& dst_region, const Region2D& src_region,
                                     Tegra::Engines::Fermi2D::Filter filter,
