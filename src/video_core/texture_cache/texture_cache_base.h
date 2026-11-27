@@ -27,15 +27,14 @@
 #include <boost/container/static_vector.hpp>
 #include <queue>
 
+#include <ranges>
 #include "common/common_types.h"
-#include "common/spin_recursive_mutex.h"
 #include "common/hash.h"
 #include "common/literals.h"
 #include "common/lru_cache.h"
-#include <ranges>
 #include "common/scratch_buffer.h"
 #include "common/slot_vector.h"
-#include "video_core/texture_cache/pending_download.h"
+#include "common/spin_recursive_mutex.h"
 #include "common/thread_worker.h"
 #include "video_core/compatible_formats.h"
 #include "video_core/control/channel_state_cache.h"
@@ -48,11 +47,13 @@
 #include "video_core/texture_cache/image_info.h"
 #include "video_core/texture_cache/image_view_base.h"
 #include "video_core/texture_cache/image_view_slots.h"
+#include "video_core/texture_cache/pending_download.h"
 #include "video_core/texture_cache/render_targets.h"
 #include "video_core/texture_cache/sampled_views.h"
 #include "video_core/texture_cache/stale_pages.h"
 #include "video_core/texture_cache/types.h"
 #include "video_core/texture_cache/util.h"
+#include "video_core/texture_cache/writeback_chunks.h"
 #include "video_core/texture_cache/writeback_ranges.h"
 #include "video_core/textures/texture.h"
 #include "video_core/textures/unswizzle_worker.h"
@@ -832,11 +833,27 @@ private:
         /// The image's address space: gpu_addr is in it, whichever channel is bound on landing.
         size_t address_space{};
         bool gob_view{};
+        // A collector source has left the image cache; this queue owns it until the last copy.
+        bool collector{};
+        ImageId collector_source_id{};
+        std::shared_ptr<Image> collector_source;
+        WritebackChunks::Chunk collector_chunk{};
+        u64 collector_cursor{};
+        bool collector_copy_pending{};
     };
     std::deque<AsyncOverlapDownload> async_overlap_downloads;
     /// The GPU memory of an address space the cache has seen, or null.
     [[nodiscard]] std::shared_ptr<Tegra::MemoryManager> AddressSpaceMemory(size_t as_id);
     void FinishAsyncOverlapDownloads(bool wait_all);
+    enum class CollectorQueueResult { Unsupported, Deferred, Queued };
+    CollectorQueueResult QueueCollectorDownload(ImageId image_id);
+    void SubmitCollectorChunk(AsyncOverlapDownload& download, u64 budget);
+    void LandCollectorChunk(AsyncOverlapDownload& download);
+    u64 collector_held_bytes{};
+    size_t collector_count{};
+    std::vector<u8> collector_scratch;
+    static constexpr u64 CollectorChunkBytes = 4_MiB;
+    static constexpr u64 CollectorMaxBytes = 512_MiB;
     /// After a write-back of [cpu_addr, cpu_addr + size) at modification tick `tick` landed,
     /// waiting or not: images over it the GPU did not write, with contents no newer, load it again.
     void ReloadUnderLanded(DAddr cpu_addr, u64 size, u64 tick);

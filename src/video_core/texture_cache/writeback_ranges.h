@@ -114,7 +114,8 @@ void CapPageRecords(Records& records, DAddr page_begin, DAddr page_end) {
         const auto& record = records[index];
         const DAddr begin = (std::max)(record.begin, page_begin);
         const DAddr end = (std::min)(record.end, page_end);
-        boost::container::small_vector<std::pair<DAddr, DAddr>, 16> cover;
+        // A capped page plus the one record being inserted needs no heap allocation.
+        boost::container::small_vector<std::pair<DAddr, DAddr>, MaxPageRecords + 1> cover;
         for (size_t other = 0; other < records.size(); ++other) {
             const auto& range = records[other];
             if (other != index && range.tick >= record.tick && (record.lost || !range.lost) &&
