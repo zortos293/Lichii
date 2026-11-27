@@ -30,6 +30,13 @@ struct A64JitState {
     u32 fpsr = 0;
     u32 fpcr = 0;
 
+    // This Jit's own objects, read by emitted code so one block serves every Jit of a code cache.
+    u64 callbacks = 0;  // A64::UserCallbacks*
+    u64 user_config = 0;  // const A64::UserConfig*
+    u64 jit_impl = 0;  // The dispatcher's block lookup argument
+    u64 tpidr_el0 = 0;  // u64*
+    u64 tpidrro_el0 = 0;  // const u64*
+
     IR::LocationDescriptor GetLocationDescriptor() const {
         const u64 fpcr_u64 = static_cast<u64>(fpcr & A64::LocationDescriptor::fpcr_mask) << A64::LocationDescriptor::fpcr_shift;
         const u64 pc_u64 = pc & A64::LocationDescriptor::pc_mask;

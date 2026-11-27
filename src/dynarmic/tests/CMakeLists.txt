@@ -53,6 +53,8 @@ if ("arm64" IN_LIST ARCHITECTURE)
     target_architecture_specific_sources(dynarmic_tests "arm64"
         A64/cache_clear_rsb.cpp
         A64/shared_fastmem.cpp
+        A64/block_table.cpp
+        A64/jit_cache_replay.cpp
     )
 endif()
 

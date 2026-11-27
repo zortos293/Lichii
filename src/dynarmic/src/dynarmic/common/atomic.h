@@ -36,6 +36,14 @@ inline void And(volatile u32* ptr, u32 value) {
 #endif
 }
 
+inline u32 Load(const volatile u32* ptr) {
+#ifdef _MSC_VER
+    return static_cast<u32>(_InterlockedOr(reinterpret_cast<volatile long*>(const_cast<volatile u32*>(ptr)), 0));
+#else
+    return __atomic_load_n(ptr, __ATOMIC_SEQ_CST);
+#endif
+}
+
 inline u32 Exchange(volatile u32* ptr, u32 value) {
 #ifdef _MSC_VER
     return static_cast<u32>(_InterlockedExchange(reinterpret_cast<volatile long*>(ptr), value));

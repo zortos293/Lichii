@@ -8,15 +8,19 @@
 
 #pragma once
 
+#include <functional>
 #include <map>
 #include <optional>
+#include <vector>
 
+#include "common/assert.h"
 #include "common/common_types.h"
 #include <oaknut/code_block.hpp>
 #include <oaknut/oaknut.hpp>
 #include "common/container/unordered_map.h"
 #include "common/container/unordered_set.h"
 
+#include "dynarmic/backend/arm64/block_table.h"
 #include "dynarmic/backend/arm64/emit_arm64.h"
 #include "dynarmic/backend/arm64/fastmem.h"
 #include "dynarmic/interface/halt_reason.h"
@@ -27,7 +31,9 @@ namespace Dynarmic::Backend::Arm64 {
 
 class AddressSpace {
 public:
-    AddressSpace(std::size_t code_cache_size, std::optional<std::uintptr_t> fastmem_arena);
+    /// `regions`: whether the cache may be a row of regions (EmitRegionPrelude), and so larger
+    /// than a direct branch reaches.
+    AddressSpace(std::size_t code_cache_size, std::optional<std::uintptr_t> fastmem_arena, bool regions = false);
     virtual ~AddressSpace();
 
     virtual void GenerateIR(IR::Block& ir_block, IR::LocationDescriptor) const = 0;
@@ -39,12 +45,20 @@ public:
 
     // Returns "most likely" entry_point associated with the emitted code at that location
     CodePtr ReverseGetEntryPoint(CodePtr host_pc);
+    /// Where in a block's code the memory access with the given marker index is done as fastmem, if it is.
+    /// The caller holds the cache's lock.
+    std::optional<u64> FastmemPatchPc(CodePtr entry_point, unsigned access_index) const;
 
     CodePtr GetOrEmit(IR::LocationDescriptor descriptor);
 
     void InvalidateBasicBlocks(const ::Common::unordered_set<IR::LocationDescriptor>& descriptors);
 
-    void ClearCache();
+    virtual void ClearCache();
+
+    /// A direct branch reaches 128 MiB. A larger cache is a row of regions of this size, each
+    /// with its own prelude at its start; a link to a block out of reach goes through a veneer
+    /// at the end of the linking block's region.
+    static constexpr std::size_t MaxRegionSize = 128 * 1024 * 1024;
 
     /// Totals since creation; the JIT adds their growth to UserConfig::counters.
     struct CompileStats {
@@ -55,7 +69,14 @@ public:
         u64 blocks_invalidated = 0;
         u64 invalidated_bytes = 0;
         u64 fastmem_recompiles = 0;
+        u64 fastmem_stale_faults = 0;  ///< Fastmem faults in code that was already replaced
+        u64 veneers = 0;  ///< Veneers made for links out of a direct branch's reach
+        u64 unlinked_far_links = 0;  ///< Such links left to the dispatcher: no room for a veneer
     };
+    /// Called for each block InvalidateBasicBlocks drops (its code stays until the cache is cleared).
+    void SetBlockDroppedCallback(std::function<void(IR::LocationDescriptor)> callback) {
+        block_dropped = std::move(callback);
+    }
     const CompileStats& GetCompileStats() const {
         return compile_stats;
     }
@@ -78,16 +99,33 @@ protected:
 #endif
     }
 
-    std::size_t GetRemainingSize();
+    struct PreludeInfo;
+
+    /// Makes room for a block, moving to the next region when this one is full. False when the
+    /// whole cache is full: the caller clears it.
+    bool PrepareSpace();
+    /// Emits the prelude of a region after the first at the code pointer.
+    virtual void EmitRegionPrelude(PreludeInfo&) {
+        UNREACHABLE();
+    }
     EmittedBlockInfo Emit(IR::Block ir_block);
     void Link(EmittedBlockInfo& block);
-    void LinkBlockLinks(const CodePtr entry_point, const CodePtr target_ptr, const std::vector<BlockRelocation>& block_relocations_list);
+    /// `live`: other threads may run the block, and its instruction cache is up to date.
+    void LinkBlockLinks(const CodePtr entry_point, IR::LocationDescriptor target_descriptor, const CodePtr target_ptr, const std::vector<BlockRelocation>& block_relocations_list, bool live);
     void RelinkForDescriptor(IR::LocationDescriptor target_descriptor, CodePtr target_ptr);
+
+    std::size_t RegionOf(CodePtr ptr) const;
+    const PreludeInfo& PreludeOf(CodePtr ptr) const;
+    /// The veneer in `region` that jumps to `target_ptr`, or nullptr when the region has no room.
+    CodePtr GetVeneer(std::size_t region, IR::LocationDescriptor target_descriptor, CodePtr target_ptr);
 
     FakeCall FastmemCallback(u64 host_pc);
 
     IR::Block ir_block;
     const std::size_t code_cache_size;
+    /// MaxRegionSize, or less for tests (DYNARMIC_ARM64_REGION_SIZE): links then count as out of
+    /// reach beyond it too.
+    const std::size_t region_size;
     u64 cache_generation = 0;
     oaknut::CodeBlock mem;
     oaknut::CodeGenerator code;
@@ -95,7 +133,8 @@ protected:
     // A IR::LocationDescriptor will have one current CodePtr.
     // However, there can be multiple other CodePtrs which are older, previously invalidated blocks.
     std::map<CodePtr, IR::LocationDescriptor> reverse_block_entries;
-    ::Common::unordered_map<IR::LocationDescriptor, CodePtr> block_entries;
+    BlockTable block_entries;  ///< Find needs no lock; see block_table.h
+    std::function<void(IR::LocationDescriptor)> block_dropped;
     ::Common::unordered_map<CodePtr, EmittedBlockInfo> block_infos;
     ::Common::unordered_map<IR::LocationDescriptor, ::Common::unordered_set<CodePtr>> block_references;
 
@@ -154,6 +193,18 @@ protected:
         void* add_ticks;
         void* get_ticks_remaining;
     } prelude_info;
+
+    struct Region {
+        PreludeInfo prelude;  ///< Regions after the first; the first has prelude_info
+        bool has_prelude = false;
+        std::ptrdiff_t begin = 0;
+        std::ptrdiff_t end = 0;
+        std::ptrdiff_t code_end = 0;  ///< Where its blocks end, once emission has moved on
+        std::ptrdiff_t veneer_begin = 0;  ///< Veneers grow down from `end`
+        ::Common::unordered_map<IR::LocationDescriptor, CodePtr> veneers;
+    };
+    std::vector<Region> regions;
+    std::size_t current_region = 0;
 };
 
 }  // namespace Dynarmic::Backend::Arm64

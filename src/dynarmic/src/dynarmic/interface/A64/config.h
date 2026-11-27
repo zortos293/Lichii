@@ -210,13 +210,15 @@ struct UserConfig {
     /// This is only used if fastmem_pointer is set.
     std::uint32_t fastmem_address_space_bits = 36;
 
-    // Minimum size is about 8MiB. Maximum size is about 128MiB (arm64 host) or 2GiB (x64 host).
-    // Maximum size is limited by the maximum length of a x86_64 / arm64 jump.
+    // Minimum size is about 8MiB. Maximum size is about 2GiB, the maximum length of a x86_64
+    // jump. An arm64 host uses whole multiples of 128MiB, the length of its jump (A32: 128MiB).
     std::uint32_t code_cache_size = 128 * 1024 * 1024;  // bytes
 
-    /// x64 backend: Jits made with the same cache (MakeSharedCodeCache) run each other's code.
-    /// They must emulate one process (same page table and fastmem arena), count no cycles, use
-    /// compact_block_exits and be destroyed together. The first Jit's config sizes the cache.
+    /// x64 and arm64 backends: Jits made with the same cache (MakeSharedCodeCache) run each
+    /// other's code. They must emulate one process (same page table and fastmem arena) and be
+    /// destroyed together; on x64 they must also count no cycles and use compact_block_exits. On
+    /// arm64 their callbacks must be of one class, and the cache may be larger than 128 MiB. The
+    /// first Jit's config sizes the cache.
     std::shared_ptr<SharedCodeCache> shared_code_cache;
 
     /// Diagnostics: when set, the x64 backend counts here the dispatcher's C++ block lookups,
@@ -233,8 +235,22 @@ struct UserConfig {
         std::uint64_t blocks_invalidated = 0; ///< arm64 only
         std::uint64_t invalidated_bytes = 0; ///< Code space they keep until a clear (arm64 only)
         std::uint64_t fastmem_recompiles = 0; ///< Fastmem faults that request block invalidation
-        std::uint64_t fastmem_faults = 0; ///< Faults matched to a fastmem access (x64 only)
+        std::uint64_t fastmem_faults = 0; ///< Faults matched to a fastmem access
+        std::uint64_t fastmem_stale_faults = 0; ///< Fastmem faults in code already replaced (arm64 only)
+        // Diagnostics of the arm64 code cache (shared or private), for deciding what to improve.
+        std::uint64_t lookup_hits = 0; ///< Dispatcher lookups answered by this Jit's own table, without a lock
+        std::uint64_t lookup_lock_wait_ns = 0; ///< Waiting for the cache lock (shared) on the other lookups
+        std::uint64_t emit_lock_wait_ns = 0; ///< Waiting for the cache lock (exclusive) to emit a translated block
+        std::uint64_t emit_lock_hold_ns = 0; ///< Holding it while emitting and linking
+        std::uint64_t discarded_translations = 0; ///< Blocks translated here that another Jit emitted first
+        std::uint64_t discarded_translate_ns = 0; ///< Time those translations took
+        std::uint64_t compiles_with_company = 0; ///< Translations begun while another Jit was translating
+        std::uint64_t invalidation_requests = 0; ///< InvalidateCacheRange calls (each halts every Jit of the cache)
+        std::uint64_t fastmem_handler_ns = 0; ///< Time in the fault handler, lock wait included (arm64 only)
+        std::uint64_t fastmem_lock_wait_ns = 0; ///< Of that, waiting for the cache lock (arm64 only)
         std::uint64_t code_bytes = 0; ///< Code cache in use at the last update (arm64 only)
+        std::uint64_t far_link_veneers = 0; ///< Veneers for links over 128 MiB (arm64 only)
+        std::uint64_t unlinked_far_links = 0; ///< Such links without room for one (arm64 only)
     };
     Counters* counters = nullptr;
 

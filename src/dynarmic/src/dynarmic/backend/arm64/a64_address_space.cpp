@@ -30,17 +30,15 @@ template<auto mfp, typename T>
 static void* EmitCallReadTrampoline(oaknut::CodeGenerator& code, T* this_, size_t bitsize) {
     using namespace oaknut::util;
     const auto info = Devirtualize<mfp>(this_);
-    oaknut::Label l_addr, l_this;
+    oaknut::Label l_addr;
     void* target = code.xptr<void*>();
     // params = { this, vaddr, bitsize }
-    code.LDR(X0, l_this);
+    code.LDR(X0, Xstate, offsetof(A64JitState, callbacks));
     // X1 = vaddr
     code.MOV(X2, bitsize);
     code.LDR(Xscratch0, l_addr);
     code.BR(Xscratch0);
     code.align(8);
-    code.l(l_this);
-    code.dx(info.this_ptr);
     code.l(l_addr);
     code.dx(info.fn_ptr);
     return target;
@@ -50,18 +48,16 @@ template<auto mfp, typename T>
 static void* EmitCallWriteTrampoline(oaknut::CodeGenerator& code, T* this_, size_t bitsize) {
     using namespace oaknut::util;
     const auto info = Devirtualize<mfp>(this_);
-    oaknut::Label l_addr, l_this;
+    oaknut::Label l_addr;
     void* target = code.xptr<void*>();
     // params = { this, vaddr, value, bitsize }
-    code.LDR(X0, l_this);
+    code.LDR(X0, Xstate, offsetof(A64JitState, callbacks));
     // X1 = vaddr
     // X2 = value
     code.MOV(X3, bitsize);
     code.LDR(Xscratch0, l_addr);
     code.BR(Xscratch0);
     code.align(8);
-    code.l(l_this);
-    code.dx(info.this_ptr);
     code.l(l_addr);
     code.dx(info.fn_ptr);
     return target;
@@ -71,14 +67,12 @@ template<auto mfp, typename T>
 static void* EmitCallTrampoline(oaknut::CodeGenerator& code, T* this_) {
     using namespace oaknut::util;
     const auto info = Devirtualize<mfp>(this_);
-    oaknut::Label l_addr, l_this;
+    oaknut::Label l_addr;
     void* target = code.xptr<void*>();
-    code.LDR(X0, l_this);
+    code.LDR(X0, Xstate, offsetof(A64JitState, callbacks));
     code.LDR(Xscratch0, l_addr);
     code.BR(Xscratch0);
     code.align(8);
-    code.l(l_this);
-    code.dx(info.this_ptr);
     code.l(l_addr);
     code.dx(info.fn_ptr);
     return target;
@@ -90,13 +84,13 @@ static void* EmitWrappedReadCallTrampoline(oaknut::CodeGenerator& code, T* this_
 
     const auto info = Devirtualize<mfp>(this_);
 
-    oaknut::Label l_addr, l_this;
+    oaknut::Label l_addr;
 
     constexpr u64 save_regs = ABI_CALLER_SAVE & ~ToRegList(Xscratch0);
 
     void* target = code.xptr<void*>();
     ABI_PushRegisters(code, save_regs, 0);
-    code.LDR(X0, l_this);
+    code.LDR(X0, Xstate, offsetof(A64JitState, callbacks));
     code.MOV(X1, Xscratch0);
     code.MOV(X2, bitsize);
     code.LDR(Xscratch0, l_addr);
@@ -106,8 +100,6 @@ static void* EmitWrappedReadCallTrampoline(oaknut::CodeGenerator& code, T* this_
     code.RET();
 
     code.align(8);
-    code.l(l_this);
-    code.dx(info.this_ptr);
     code.l(l_addr);
     code.dx(info.fn_ptr);
 
@@ -115,10 +107,10 @@ static void* EmitWrappedReadCallTrampoline(oaknut::CodeGenerator& code, T* this_
 }
 
 template<auto callback, typename T>
-static void* EmitExclusiveReadCallTrampoline(oaknut::CodeGenerator& code, const A64::UserConfig& conf) {
+static void* EmitExclusiveReadCallTrampoline(oaknut::CodeGenerator& code, const A64::UserConfig&) {
     using namespace oaknut::util;
 
-    oaknut::Label l_addr, l_this;
+    oaknut::Label l_addr;
 
     auto fn = [](const A64::UserConfig& conf, A64::VAddr vaddr) -> T {
         return conf.global_monitor->ReadAndMark<T>(conf.processor_id, vaddr, [&]() -> T {
@@ -127,13 +119,11 @@ static void* EmitExclusiveReadCallTrampoline(oaknut::CodeGenerator& code, const 
     };
 
     void* target = code.xptr<void*>();
-    code.LDR(X0, l_this);
+    code.LDR(X0, Xstate, offsetof(A64JitState, user_config));
     code.LDR(Xscratch0, l_addr);
     code.BR(Xscratch0);
 
     code.align(8);
-    code.l(l_this);
-    code.dx(std::bit_cast<u64>(&conf));
     code.l(l_addr);
     code.dx(std::bit_cast<u64>(Common::FptrCast(fn)));
 
@@ -146,13 +136,13 @@ static void* EmitWrappedWriteCallTrampoline(oaknut::CodeGenerator& code, T* this
 
     const auto info = Devirtualize<mfp>(this_);
 
-    oaknut::Label l_addr, l_this;
+    oaknut::Label l_addr;
 
     constexpr u64 save_regs = ABI_CALLER_SAVE;
 
     void* target = code.xptr<void*>();
     ABI_PushRegisters(code, save_regs, 0);
-    code.LDR(X0, l_this);
+    code.LDR(X0, Xstate, offsetof(A64JitState, callbacks));
     code.MOV(X1, Xscratch0);
     code.MOV(X2, Xscratch1);
     code.MOV(X3, bitsize);
@@ -162,8 +152,6 @@ static void* EmitWrappedWriteCallTrampoline(oaknut::CodeGenerator& code, T* this
     code.RET();
 
     code.align(8);
-    code.l(l_this);
-    code.dx(info.this_ptr);
     code.l(l_addr);
     code.dx(info.fn_ptr);
 
@@ -171,10 +159,10 @@ static void* EmitWrappedWriteCallTrampoline(oaknut::CodeGenerator& code, T* this
 }
 
 template<auto callback, typename T>
-static void* EmitExclusiveWriteCallTrampoline(oaknut::CodeGenerator& code, const A64::UserConfig& conf) {
+static void* EmitExclusiveWriteCallTrampoline(oaknut::CodeGenerator& code, const A64::UserConfig&) {
     using namespace oaknut::util;
 
-    oaknut::Label l_addr, l_this;
+    oaknut::Label l_addr;
     auto fn = [](const A64::UserConfig& conf, A64::VAddr vaddr, T value) -> u32 {
         return conf.global_monitor->DoExclusiveOperation<T>(conf.processor_id, vaddr, [&](T expected) -> bool {
             return (conf.callbacks->*callback)(vaddr, value, expected);
@@ -182,13 +170,11 @@ static void* EmitExclusiveWriteCallTrampoline(oaknut::CodeGenerator& code, const
     };
 
     void* target = code.xptr<void*>();
-    code.LDR(X0, l_this);
+    code.LDR(X0, Xstate, offsetof(A64JitState, user_config));
     code.LDR(Xscratch0, l_addr);
     code.BR(Xscratch0);
 
     code.align(8);
-    code.l(l_this);
-    code.dx(std::bit_cast<u64>(&conf));
     code.l(l_addr);
     code.dx(std::bit_cast<u64>(Common::FptrCast(fn)));
 
@@ -200,11 +186,11 @@ static void* EmitRead128CallTrampoline(oaknut::CodeGenerator& code, A64::UserCal
 
     const auto info = Devirtualize<&A64::UserCallbacks::MemoryRead128>(this_);
 
-    oaknut::Label l_addr, l_this;
+    oaknut::Label l_addr;
 
     void* target = code.xptr<void*>();
     ABI_PushRegisters(code, (1ull << 29) | (1ull << 30), 0);
-    code.LDR(X0, l_this);
+    code.LDR(X0, Xstate, offsetof(A64JitState, callbacks));
     code.LDR(Xscratch0, l_addr);
     code.BLR(Xscratch0);
     code.FMOV(D0, X0);
@@ -213,8 +199,6 @@ static void* EmitRead128CallTrampoline(oaknut::CodeGenerator& code, A64::UserCal
     code.RET();
 
     code.align(8);
-    code.l(l_this);
-    code.dx(info.this_ptr);
     code.l(l_addr);
     code.dx(info.fn_ptr);
 
@@ -226,13 +210,13 @@ static void* EmitWrappedRead128CallTrampoline(oaknut::CodeGenerator& code, A64::
 
     const auto info = Devirtualize<&A64::UserCallbacks::MemoryRead128>(this_);
 
-    oaknut::Label l_addr, l_this;
+    oaknut::Label l_addr;
 
     constexpr u64 save_regs = ABI_CALLER_SAVE & ~ToRegList(Q0);
 
     void* target = code.xptr<void*>();
     ABI_PushRegisters(code, save_regs, 0);
-    code.LDR(X0, l_this);
+    code.LDR(X0, Xstate, offsetof(A64JitState, callbacks));
     code.MOV(X1, Xscratch0);
     code.LDR(Xscratch0, l_addr);
     code.BLR(Xscratch0);
@@ -242,18 +226,16 @@ static void* EmitWrappedRead128CallTrampoline(oaknut::CodeGenerator& code, A64::
     code.RET();
 
     code.align(8);
-    code.l(l_this);
-    code.dx(info.this_ptr);
     code.l(l_addr);
     code.dx(info.fn_ptr);
 
     return target;
 }
 
-static void* EmitExclusiveRead128CallTrampoline(oaknut::CodeGenerator& code, const A64::UserConfig& conf) {
+static void* EmitExclusiveRead128CallTrampoline(oaknut::CodeGenerator& code, const A64::UserConfig&) {
     using namespace oaknut::util;
 
-    oaknut::Label l_addr, l_this;
+    oaknut::Label l_addr;
 
     auto fn = [](const A64::UserConfig& conf, A64::VAddr vaddr) -> Vector {
         return conf.global_monitor->ReadAndMark<Vector>(conf.processor_id, vaddr, [&]() -> Vector {
@@ -263,7 +245,7 @@ static void* EmitExclusiveRead128CallTrampoline(oaknut::CodeGenerator& code, con
 
     void* target = code.xptr<void*>();
     ABI_PushRegisters(code, (1ull << 29) | (1ull << 30), 0);
-    code.LDR(X0, l_this);
+    code.LDR(X0, Xstate, offsetof(A64JitState, user_config));
     code.LDR(Xscratch0, l_addr);
     code.BLR(Xscratch0);
     code.FMOV(D0, X0);
@@ -272,8 +254,6 @@ static void* EmitExclusiveRead128CallTrampoline(oaknut::CodeGenerator& code, con
     code.RET();
 
     code.align(8);
-    code.l(l_this);
-    code.dx(std::bit_cast<u64>(&conf));
     code.l(l_addr);
     code.dx(std::bit_cast<u64>(Common::FptrCast(fn)));
 
@@ -285,18 +265,16 @@ static void* EmitWrite128CallTrampoline(oaknut::CodeGenerator& code, A64::UserCa
 
     const auto info = Devirtualize<&A64::UserCallbacks::MemoryWrite128>(this_);
 
-    oaknut::Label l_addr, l_this;
+    oaknut::Label l_addr;
 
     void* target = code.xptr<void*>();
-    code.LDR(X0, l_this);
+    code.LDR(X0, Xstate, offsetof(A64JitState, callbacks));
     code.FMOV(X2, D0);
     code.FMOV(X3, V0.D()[1]);
     code.LDR(Xscratch0, l_addr);
     code.BR(Xscratch0);
 
     code.align(8);
-    code.l(l_this);
-    code.dx(info.this_ptr);
     code.l(l_addr);
     code.dx(info.fn_ptr);
 
@@ -308,13 +286,13 @@ static void* EmitWrappedWrite128CallTrampoline(oaknut::CodeGenerator& code, A64:
 
     const auto info = Devirtualize<&A64::UserCallbacks::MemoryWrite128>(this_);
 
-    oaknut::Label l_addr, l_this;
+    oaknut::Label l_addr;
 
     constexpr u64 save_regs = ABI_CALLER_SAVE;
 
     void* target = code.xptr<void*>();
     ABI_PushRegisters(code, save_regs, 0);
-    code.LDR(X0, l_this);
+    code.LDR(X0, Xstate, offsetof(A64JitState, callbacks));
     code.MOV(X1, Xscratch0);
     code.FMOV(X2, D0);
     code.FMOV(X3, V0.D()[1]);
@@ -324,18 +302,16 @@ static void* EmitWrappedWrite128CallTrampoline(oaknut::CodeGenerator& code, A64:
     code.RET();
 
     code.align(8);
-    code.l(l_this);
-    code.dx(info.this_ptr);
     code.l(l_addr);
     code.dx(info.fn_ptr);
 
     return target;
 }
 
-static void* EmitExclusiveWrite128CallTrampoline(oaknut::CodeGenerator& code, const A64::UserConfig& conf) {
+static void* EmitExclusiveWrite128CallTrampoline(oaknut::CodeGenerator& code, const A64::UserConfig&) {
     using namespace oaknut::util;
 
-    oaknut::Label l_addr, l_this;
+    oaknut::Label l_addr;
 
     auto fn = [](const A64::UserConfig& conf, A64::VAddr vaddr, Vector value) -> u32 {
         return conf.global_monitor->DoExclusiveOperation<Vector>(conf.processor_id, vaddr,
@@ -347,25 +323,24 @@ static void* EmitExclusiveWrite128CallTrampoline(oaknut::CodeGenerator& code, co
     };
 
     void* target = code.xptr<void*>();
-    code.LDR(X0, l_this);
+    code.LDR(X0, Xstate, offsetof(A64JitState, user_config));
     code.FMOV(X2, D0);
     code.FMOV(X3, V0.D()[1]);
     code.LDR(Xscratch0, l_addr);
     code.BR(Xscratch0);
 
     code.align(8);
-    code.l(l_this);
-    code.dx(std::bit_cast<u64>(&conf));
     code.l(l_addr);
     code.dx(std::bit_cast<u64>(Common::FptrCast(fn)));
 
     return target;
 }
 
-A64AddressSpace::A64AddressSpace(const A64::UserConfig& conf)
-        : AddressSpace(conf.code_cache_size, conf.fastmem_pointer)
-        , conf(conf) {
-    EmitPrelude();
+A64AddressSpace::A64AddressSpace(const A64::UserConfig& conf, LookupBlock lookup_block)
+        : AddressSpace(conf.code_cache_size, conf.fastmem_pointer, true)
+        , conf(conf)
+        , lookup_block(lookup_block) {
+    EmitPrelude(prelude_info);
 }
 
 void A64AddressSpace::GenerateIR(IR::Block& ir_block, IR::LocationDescriptor descriptor) const {
@@ -375,57 +350,65 @@ void A64AddressSpace::GenerateIR(IR::Block& ir_block, IR::LocationDescriptor des
     Optimization::Optimize(ir_block, conf, {});
 }
 
-void A64AddressSpace::InvalidateCacheRanges(const boost::icl::interval_set<u64>& ranges) {
-    InvalidateBasicBlocks(block_ranges.InvalidateRanges(ranges));
+bool A64AddressSpace::InvalidateCacheRanges(const boost::icl::interval_set<u64>& ranges) {
+    const auto descriptors = block_ranges.InvalidateRanges(ranges);
+    InvalidateBasicBlocks(descriptors);
+    return !descriptors.empty();
 }
 
-void A64AddressSpace::EmitPrelude() {
+void A64AddressSpace::ClearCache() {
+    AddressSpace::ClearCache();
+    block_ranges.ClearCache();
+}
+
+void A64AddressSpace::EmitPrelude(PreludeInfo& info) {
     using namespace oaknut::util;
 
+    const auto prelude_begin = code.offset();
     UnprotectCodeMemory();
 
-    prelude_info.read_memory_8 = EmitCallReadTrampoline<&A64::UserCallbacks::MemoryRead>(code, conf.callbacks, sizeof(u8));
-    prelude_info.read_memory_16 = EmitCallReadTrampoline<&A64::UserCallbacks::MemoryRead>(code, conf.callbacks, sizeof(u16));
-    prelude_info.read_memory_32 = EmitCallReadTrampoline<&A64::UserCallbacks::MemoryRead>(code, conf.callbacks, sizeof(u32));
-    prelude_info.read_memory_64 = EmitCallReadTrampoline<&A64::UserCallbacks::MemoryRead>(code, conf.callbacks, sizeof(u64));
-    prelude_info.read_memory_128 = EmitRead128CallTrampoline(code, conf.callbacks);
-    prelude_info.wrapped_read_memory_8 = EmitWrappedReadCallTrampoline<&A64::UserCallbacks::MemoryRead>(code, conf.callbacks, sizeof(u8));
-    prelude_info.wrapped_read_memory_16 = EmitWrappedReadCallTrampoline<&A64::UserCallbacks::MemoryRead>(code, conf.callbacks, sizeof(u16));
-    prelude_info.wrapped_read_memory_32 = EmitWrappedReadCallTrampoline<&A64::UserCallbacks::MemoryRead>(code, conf.callbacks, sizeof(u32));
-    prelude_info.wrapped_read_memory_64 = EmitWrappedReadCallTrampoline<&A64::UserCallbacks::MemoryRead>(code, conf.callbacks, sizeof(u64));
-    prelude_info.wrapped_read_memory_128 = EmitWrappedRead128CallTrampoline(code, conf.callbacks);
-    prelude_info.exclusive_read_memory_8 = EmitExclusiveReadCallTrampoline<&A64::UserCallbacks::MemoryRead, u8>(code, conf);
-    prelude_info.exclusive_read_memory_16 = EmitExclusiveReadCallTrampoline<&A64::UserCallbacks::MemoryRead, u16>(code, conf);
-    prelude_info.exclusive_read_memory_32 = EmitExclusiveReadCallTrampoline<&A64::UserCallbacks::MemoryRead, u32>(code, conf);
-    prelude_info.exclusive_read_memory_64 = EmitExclusiveReadCallTrampoline<&A64::UserCallbacks::MemoryRead, u64>(code, conf);
-    prelude_info.exclusive_read_memory_128 = EmitExclusiveRead128CallTrampoline(code, conf);
-    prelude_info.write_memory_8 = EmitCallWriteTrampoline<&A64::UserCallbacks::MemoryWrite>(code, conf.callbacks, sizeof(u8));
-    prelude_info.write_memory_16 = EmitCallWriteTrampoline<&A64::UserCallbacks::MemoryWrite>(code, conf.callbacks, sizeof(u16));
-    prelude_info.write_memory_32 = EmitCallWriteTrampoline<&A64::UserCallbacks::MemoryWrite>(code, conf.callbacks, sizeof(u32));
-    prelude_info.write_memory_64 = EmitCallWriteTrampoline<&A64::UserCallbacks::MemoryWrite>(code, conf.callbacks, sizeof(u64));
-    prelude_info.write_memory_128 = EmitWrite128CallTrampoline(code, conf.callbacks);
-    prelude_info.wrapped_write_memory_8 = EmitWrappedWriteCallTrampoline<&A64::UserCallbacks::MemoryWrite>(code, conf.callbacks, sizeof(u8));
-    prelude_info.wrapped_write_memory_16 = EmitWrappedWriteCallTrampoline<&A64::UserCallbacks::MemoryWrite>(code, conf.callbacks, sizeof(u16));
-    prelude_info.wrapped_write_memory_32 = EmitWrappedWriteCallTrampoline<&A64::UserCallbacks::MemoryWrite>(code, conf.callbacks, sizeof(u32));
-    prelude_info.wrapped_write_memory_64 = EmitWrappedWriteCallTrampoline<&A64::UserCallbacks::MemoryWrite>(code, conf.callbacks, sizeof(u64));
-    prelude_info.wrapped_write_memory_128 = EmitWrappedWrite128CallTrampoline(code, conf.callbacks);
-    prelude_info.exclusive_write_memory_8 = EmitExclusiveWriteCallTrampoline<&A64::UserCallbacks::MemoryWriteExclusive8, u8>(code, conf);
-    prelude_info.exclusive_write_memory_16 = EmitExclusiveWriteCallTrampoline<&A64::UserCallbacks::MemoryWriteExclusive16, u16>(code, conf);
-    prelude_info.exclusive_write_memory_32 = EmitExclusiveWriteCallTrampoline<&A64::UserCallbacks::MemoryWriteExclusive32, u32>(code, conf);
-    prelude_info.exclusive_write_memory_64 = EmitExclusiveWriteCallTrampoline<&A64::UserCallbacks::MemoryWriteExclusive64, u64>(code, conf);
-    prelude_info.exclusive_write_memory_128 = EmitExclusiveWrite128CallTrampoline(code, conf);
-    prelude_info.call_svc = EmitCallTrampoline<&A64::UserCallbacks::CallSVC>(code, conf.callbacks);
-    prelude_info.exception_raised = EmitCallTrampoline<&A64::UserCallbacks::ExceptionRaised>(code, conf.callbacks);
-    prelude_info.isb_raised = EmitCallTrampoline<&A64::UserCallbacks::InstructionSynchronizationBarrierRaised>(code, conf.callbacks);
-    prelude_info.ic_raised = EmitCallTrampoline<&A64::UserCallbacks::InstructionCacheOperationRaised>(code, conf.callbacks);
-    prelude_info.dc_raised = EmitCallTrampoline<&A64::UserCallbacks::DataCacheOperationRaised>(code, conf.callbacks);
-    prelude_info.get_cntpct = EmitCallTrampoline<&A64::UserCallbacks::GetCNTPCT>(code, conf.callbacks);
-    prelude_info.add_ticks = EmitCallTrampoline<&A64::UserCallbacks::AddTicks>(code, conf.callbacks);
-    prelude_info.get_ticks_remaining = EmitCallTrampoline<&A64::UserCallbacks::GetTicksRemaining>(code, conf.callbacks);
+    info.read_memory_8 = EmitCallReadTrampoline<&A64::UserCallbacks::MemoryRead>(code, conf.callbacks, sizeof(u8));
+    info.read_memory_16 = EmitCallReadTrampoline<&A64::UserCallbacks::MemoryRead>(code, conf.callbacks, sizeof(u16));
+    info.read_memory_32 = EmitCallReadTrampoline<&A64::UserCallbacks::MemoryRead>(code, conf.callbacks, sizeof(u32));
+    info.read_memory_64 = EmitCallReadTrampoline<&A64::UserCallbacks::MemoryRead>(code, conf.callbacks, sizeof(u64));
+    info.read_memory_128 = EmitRead128CallTrampoline(code, conf.callbacks);
+    info.wrapped_read_memory_8 = EmitWrappedReadCallTrampoline<&A64::UserCallbacks::MemoryRead>(code, conf.callbacks, sizeof(u8));
+    info.wrapped_read_memory_16 = EmitWrappedReadCallTrampoline<&A64::UserCallbacks::MemoryRead>(code, conf.callbacks, sizeof(u16));
+    info.wrapped_read_memory_32 = EmitWrappedReadCallTrampoline<&A64::UserCallbacks::MemoryRead>(code, conf.callbacks, sizeof(u32));
+    info.wrapped_read_memory_64 = EmitWrappedReadCallTrampoline<&A64::UserCallbacks::MemoryRead>(code, conf.callbacks, sizeof(u64));
+    info.wrapped_read_memory_128 = EmitWrappedRead128CallTrampoline(code, conf.callbacks);
+    info.exclusive_read_memory_8 = EmitExclusiveReadCallTrampoline<&A64::UserCallbacks::MemoryRead, u8>(code, conf);
+    info.exclusive_read_memory_16 = EmitExclusiveReadCallTrampoline<&A64::UserCallbacks::MemoryRead, u16>(code, conf);
+    info.exclusive_read_memory_32 = EmitExclusiveReadCallTrampoline<&A64::UserCallbacks::MemoryRead, u32>(code, conf);
+    info.exclusive_read_memory_64 = EmitExclusiveReadCallTrampoline<&A64::UserCallbacks::MemoryRead, u64>(code, conf);
+    info.exclusive_read_memory_128 = EmitExclusiveRead128CallTrampoline(code, conf);
+    info.write_memory_8 = EmitCallWriteTrampoline<&A64::UserCallbacks::MemoryWrite>(code, conf.callbacks, sizeof(u8));
+    info.write_memory_16 = EmitCallWriteTrampoline<&A64::UserCallbacks::MemoryWrite>(code, conf.callbacks, sizeof(u16));
+    info.write_memory_32 = EmitCallWriteTrampoline<&A64::UserCallbacks::MemoryWrite>(code, conf.callbacks, sizeof(u32));
+    info.write_memory_64 = EmitCallWriteTrampoline<&A64::UserCallbacks::MemoryWrite>(code, conf.callbacks, sizeof(u64));
+    info.write_memory_128 = EmitWrite128CallTrampoline(code, conf.callbacks);
+    info.wrapped_write_memory_8 = EmitWrappedWriteCallTrampoline<&A64::UserCallbacks::MemoryWrite>(code, conf.callbacks, sizeof(u8));
+    info.wrapped_write_memory_16 = EmitWrappedWriteCallTrampoline<&A64::UserCallbacks::MemoryWrite>(code, conf.callbacks, sizeof(u16));
+    info.wrapped_write_memory_32 = EmitWrappedWriteCallTrampoline<&A64::UserCallbacks::MemoryWrite>(code, conf.callbacks, sizeof(u32));
+    info.wrapped_write_memory_64 = EmitWrappedWriteCallTrampoline<&A64::UserCallbacks::MemoryWrite>(code, conf.callbacks, sizeof(u64));
+    info.wrapped_write_memory_128 = EmitWrappedWrite128CallTrampoline(code, conf.callbacks);
+    info.exclusive_write_memory_8 = EmitExclusiveWriteCallTrampoline<&A64::UserCallbacks::MemoryWriteExclusive8, u8>(code, conf);
+    info.exclusive_write_memory_16 = EmitExclusiveWriteCallTrampoline<&A64::UserCallbacks::MemoryWriteExclusive16, u16>(code, conf);
+    info.exclusive_write_memory_32 = EmitExclusiveWriteCallTrampoline<&A64::UserCallbacks::MemoryWriteExclusive32, u32>(code, conf);
+    info.exclusive_write_memory_64 = EmitExclusiveWriteCallTrampoline<&A64::UserCallbacks::MemoryWriteExclusive64, u64>(code, conf);
+    info.exclusive_write_memory_128 = EmitExclusiveWrite128CallTrampoline(code, conf);
+    info.call_svc = EmitCallTrampoline<&A64::UserCallbacks::CallSVC>(code, conf.callbacks);
+    info.exception_raised = EmitCallTrampoline<&A64::UserCallbacks::ExceptionRaised>(code, conf.callbacks);
+    info.isb_raised = EmitCallTrampoline<&A64::UserCallbacks::InstructionSynchronizationBarrierRaised>(code, conf.callbacks);
+    info.ic_raised = EmitCallTrampoline<&A64::UserCallbacks::InstructionCacheOperationRaised>(code, conf.callbacks);
+    info.dc_raised = EmitCallTrampoline<&A64::UserCallbacks::DataCacheOperationRaised>(code, conf.callbacks);
+    info.get_cntpct = EmitCallTrampoline<&A64::UserCallbacks::GetCNTPCT>(code, conf.callbacks);
+    info.add_ticks = EmitCallTrampoline<&A64::UserCallbacks::AddTicks>(code, conf.callbacks);
+    info.get_ticks_remaining = EmitCallTrampoline<&A64::UserCallbacks::GetTicksRemaining>(code, conf.callbacks);
 
     oaknut::Label return_from_run_code, l_return_to_dispatcher;
 
-    prelude_info.run_code = code.xptr<PreludeInfo::RunCodeFuncType>();
+    info.run_code = code.xptr<PreludeInfo::RunCodeFuncType>();
     {
         ABI_PushRegisters(code, ABI_CALLEE_SAVE | (1 << 30), sizeof(StackLayout));
 
@@ -450,7 +433,7 @@ void A64AddressSpace::EmitPrelude() {
         }
 
         if (conf.enable_cycle_counting) {
-            code.BL(prelude_info.get_ticks_remaining);
+            code.BL(info.get_ticks_remaining);
             code.MOV(Xticks, X0);
             code.STR(Xticks, SP, offsetof(StackLayout, cycles_to_run));
         }
@@ -466,7 +449,7 @@ void A64AddressSpace::EmitPrelude() {
         code.BR(X19);
     }
 
-    prelude_info.step_code = code.xptr<PreludeInfo::RunCodeFuncType>();
+    info.step_code = code.xptr<PreludeInfo::RunCodeFuncType>();
     {
         ABI_PushRegisters(code, ABI_CALLEE_SAVE | (1 << 30), sizeof(StackLayout));
 
@@ -511,9 +494,9 @@ void A64AddressSpace::EmitPrelude() {
         code.BR(X19);
     }
 
-    prelude_info.return_to_dispatcher = code.xptr<void*>();
+    info.return_to_dispatcher = code.xptr<void*>();
     {
-        oaknut::Label l_this, l_addr;
+        oaknut::Label l_addr;
 
         code.LDAR(Wscratch0, Xhalt);
         code.CBNZ(Wscratch0, return_from_run_code);
@@ -523,31 +506,25 @@ void A64AddressSpace::EmitPrelude() {
             code.B(LE, return_from_run_code);
         }
 
-        code.LDR(X0, l_this);
+        code.LDR(X0, Xstate, offsetof(A64JitState, jit_impl));
         code.MOV(X1, Xstate);
         code.LDR(Xscratch0, l_addr);
         code.BLR(Xscratch0);
         code.BR(X0);
 
-        const auto fn = [](A64AddressSpace& self, A64JitState& context) -> CodePtr {
-            return self.GetOrEmit(context.GetLocationDescriptor());
-        };
-
         code.align(8);
-        code.l(l_this);
-        code.dx(std::bit_cast<u64>(this));
         code.l(l_addr);
-        code.dx(std::bit_cast<u64>(Common::FptrCast(fn)));
+        code.dx(std::bit_cast<u64>(lookup_block));
     }
 
-    prelude_info.return_from_run_code = code.xptr<void*>();
+    info.return_from_run_code = code.xptr<void*>();
     {
         code.l(return_from_run_code);
 
         if (conf.enable_cycle_counting) {
             code.LDR(X1, SP, offsetof(StackLayout, cycles_to_run));
             code.SUB(X1, X1, Xticks);
-            code.BL(prelude_info.add_ticks);
+            code.BL(info.add_ticks);
         }
 
         code.LDR(Wscratch0, SP, offsetof(StackLayout, save_host_fpcr));
@@ -565,11 +542,11 @@ void A64AddressSpace::EmitPrelude() {
 
     code.align(8);
     code.l(l_return_to_dispatcher);
-    code.dx(std::bit_cast<u64>(prelude_info.return_to_dispatcher));
+    code.dx(std::bit_cast<u64>(info.return_to_dispatcher));
 
-    prelude_info.end_of_prelude = code.offset();
+    info.end_of_prelude = code.offset();
 
-    mem.invalidate_all();
+    mem.invalidate(mem.ptr() + prelude_begin / sizeof(u32), static_cast<std::size_t>(code.offset() - prelude_begin));
     ProtectCodeMemory();
 }
 
@@ -582,8 +559,6 @@ EmitConfig A64AddressSpace::GetEmitConfig() {
         .cntfreq_el0 = conf.cntfrq_el0,
         .ctr_el0 = conf.ctr_el0,
         .dczid_el0 = conf.dczid_el0,
-        .tpidrro_el0 = conf.tpidrro_el0,
-        .tpidr_el0 = conf.tpidr_el0,
 
         .check_halt_on_memory_access = conf.check_halt_on_memory_access,
 

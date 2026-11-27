@@ -31,7 +31,7 @@ namespace {
 std::array<Dynarmic::A64::UserConfig::Counters, Hardware::NUM_CPU_CORES> g_jit_counters{};
 // EDEN_NX2_STUTTER_TRACE: each core's counters already added to the stutter trace.
 std::array<Dynarmic::A64::UserConfig::Counters, Hardware::NUM_CPU_CORES> g_jit_traced{};
-#ifdef ARCHITECTURE_x86_64
+#if defined(ARCHITECTURE_x86_64) || defined(ARCHITECTURE_arm64)
 // A core sharing emitted code must refetch its cached code page after another core invalidates it.
 std::atomic<u64> g_code_invalidations{0};
 #endif
@@ -568,6 +568,22 @@ void ArmDynarmic64::MakeJit(Common::PageTable* page_table, std::size_t address_s
             !config.check_halt_on_memory_access) {
             config.shared_code_cache = m_shared_code_cache;
             config.code_cache_size = std::uint32_t(1_GiB);
+            m_cb->code_generation = &g_code_invalidations;
+        }
+    }
+#elif defined(ARCHITECTURE_arm64)
+    // One code cache for all cores of the process, as on x86-64. Off unless
+    // EDEN_NX2_SHARED_JIT_CACHE=<MiB> is set (128 to 2048) until it is measured in a game.
+    if (m_shared_code_cache && page_table && !config.check_halt_on_memory_access &&
+        Settings::values.cpu_accuracy.GetValue() != Settings::CpuAccuracy::Paranoid) {
+        static const u32 shared_mib = [] {
+            const char* const value = std::getenv("EDEN_NX2_SHARED_JIT_CACHE");
+            const long mib = value ? std::strtol(value, nullptr, 10) : 0;
+            return mib >= 128 && mib <= 2048 ? u32(mib) : 0;
+        }();
+        if (shared_mib != 0) {
+            config.shared_code_cache = m_shared_code_cache;
+            config.code_cache_size = shared_mib * std::uint32_t(1_MiB);
             m_cb->code_generation = &g_code_invalidations;
         }
     }

@@ -119,8 +119,6 @@ struct EmitConfig {
     u64 cntfreq_el0;
     u32 ctr_el0;
     u32 dczid_el0;
-    const u64* tpidrro_el0;
-    u64* tpidr_el0;
 
     // Memory
     bool check_halt_on_memory_access;

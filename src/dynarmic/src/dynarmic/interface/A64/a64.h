@@ -21,7 +21,7 @@
 namespace Dynarmic {
 namespace A64 {
 
-/// An empty code cache for UserConfig::shared_code_cache (x64 backend only).
+/// An empty code cache for UserConfig::shared_code_cache (x64 and arm64 backends).
 std::shared_ptr<SharedCodeCache> MakeSharedCodeCache();
 
 class Jit final {
@@ -127,6 +127,15 @@ public:
 
     /// @brief Disassemble the instructions following the current pc and return
     /// the resulting instructions as a vector of their string representations.
+/// Benchmark hooks (tests/A64/jit_cache_replay.cpp replays a DYNARMIC_JIT_TRACE recording through them, with
+    /// no guest code run). What the dispatcher does to find the block of a location: looks it up, and translates
+    /// and emits it if it is missing. Returns its entry point.
+    void* DebugLookupBlock(std::uint64_t location_descriptor);
+    /// A fastmem fault at the memory access `access_index` of a location's block: of the block that now stands
+    /// for the location, or of `stale_entry_point` if given (code that has since been replaced). False if there
+    /// is no such block or access (arm64 only).
+    bool DebugFastmemFault(std::uint64_t location_descriptor, unsigned access_index, void* stale_entry_point);
+
     std::string Disassemble() const;
 
 private:

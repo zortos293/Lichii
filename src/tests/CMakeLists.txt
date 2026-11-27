@@ -344,8 +344,8 @@ if (TARGET dynarmic::dynarmic)
     target_sources(tests PRIVATE core/jit_codegen_options.cpp core/jit_ordered_loads.cpp core/window_trace.cpp)
     target_link_libraries(tests PRIVATE dynarmic::dynarmic)
 
-    # The shared code cache is x64 only.
-    if (ARCHITECTURE_x86_64)
+    # The shared code cache is in the x64 and arm64 backends.
+    if (ARCHITECTURE_x86_64 OR ARCHITECTURE_arm64)
         target_sources(tests PRIVATE core/jit_shared_cache.cpp)
 
         # The shared code cache test on its own for ThreadSanitizer: configure a separate build with

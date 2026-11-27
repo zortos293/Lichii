@@ -1357,7 +1357,7 @@ void KProcess::InitializeInterfaces(KernelCore& kernel) {
         if (this->Is64Bit()) {
         // One JIT code cache for all cores; MakeJit falls back to a cache per core where it can't.
         std::shared_ptr<Dynarmic::A64::SharedCodeCache> code_cache;
-#ifdef ARCHITECTURE_x86_64
+#if defined(ARCHITECTURE_x86_64) || defined(ARCHITECTURE_arm64)
         if (kernel.IsMulticore()) {
             code_cache = Dynarmic::A64::MakeSharedCodeCache();
         }

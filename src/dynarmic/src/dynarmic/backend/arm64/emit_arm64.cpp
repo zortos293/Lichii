@@ -275,15 +275,24 @@ void EmitRelocation(oaknut::CodeGenerator& code, EmitContext& ctx, LinkTarget li
 }
 
 void EmitBlockLinkRelocation(oaknut::CodeGenerator& code, EmitContext& ctx, const IR::LocationDescriptor& descriptor, BlockRelocationType type) {
-    ctx.ebi.block_relocations[descriptor].emplace_back(BlockRelocation{code.xptr<CodePtr>() - ctx.ebi.entry_point, type});
     switch (type) {
     case BlockRelocationType::Branch:
+        ctx.ebi.block_relocations[descriptor].emplace_back(BlockRelocation{code.xptr<CodePtr>() - ctx.ebi.entry_point, type});
         code.NOP();
         break;
-    case BlockRelocationType::MoveToScratch1:
-        code.BRK(0);
-        code.NOP();
+    case BlockRelocationType::MoveToScratch1: {
+        // A literal after the block: a link is one aligned store, made while other threads may
+        // run the block.
+        SharedLabel literal = GenSharedLabel();
+        code.LDR(Xscratch1, *literal);
+        ctx.deferred_emits.emplace_back([&code, &ctx, descriptor, literal] {
+            code.align(8);
+            code.l(*literal);
+            ctx.ebi.block_relocations[descriptor].emplace_back(BlockRelocation{code.xptr<CodePtr>() - ctx.ebi.entry_point, BlockRelocationType::MoveToScratch1});
+            code.dx(0);
+        });
         break;
+    }
     default:
         UNREACHABLE();
     }
