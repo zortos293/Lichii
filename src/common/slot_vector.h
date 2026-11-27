@@ -219,6 +219,7 @@ private:
         stored_bitset.resize((new_capacity + 63) / 64);
 
         const size_t old_free_size = free_list.size();
+        free_list.reserve(new_capacity);
         free_list.resize(old_free_size + (new_capacity - values_capacity));
         std::iota(free_list.begin() + old_free_size, free_list.end(), u32(values_capacity));
         delete[] values;
