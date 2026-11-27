@@ -3,6 +3,7 @@
 
 // SPDX-License-Identifier: GPL-2.0-or-later
 
+#include <algorithm>
 #include <cstring>
 #include <string_view>
 #include <vector>
@@ -22,6 +23,7 @@ extern "C" {
 #endif
 
 #include <libavutil/hwcontext.h>
+#include <libavutil/imgutils.h>
 }
 
 namespace FFmpeg {
@@ -283,6 +285,76 @@ bool HardwareContext::InitializeWithType(AVHWDeviceType type) {
     return true;
 }
 
+DownloadBufferPool::~DownloadBufferPool() {
+    av_buffer_pool_uninit(&m_pool);
+}
+
+AVBufferRef* DownloadBufferPool::GetBuffer(size_t buffer_size) {
+    constexpr size_t max_bytes = 32 * 1024 * 1024;
+    constexpr size_t max_buffers = 8;
+    if (!buffer_size || buffer_size > max_bytes || (m_pool && m_buffer_size != buffer_size)) {
+        return nullptr;
+    }
+    if (!m_pool) {
+        using BufferSize = decltype(AVBufferRef::size);
+        m_remaining_allocations = std::min(max_buffers, max_bytes / buffer_size);
+        // Only pool_get invokes the allocator. Frames can outlive this pool owner.
+        const auto allocate = [](void* opaque, BufferSize size) -> AVBufferRef* {
+            auto& remaining = *static_cast<size_t*>(opaque);
+            if (remaining == 0) {
+                return nullptr;
+            }
+            auto* buffer = av_buffer_allocz(size);
+            if (buffer) {
+                --remaining;
+            }
+            return buffer;
+        };
+        m_pool = av_buffer_pool_init2(static_cast<BufferSize>(buffer_size),
+                                      &m_remaining_allocations, allocate, nullptr);
+        if (!m_pool) {
+            return nullptr;
+        }
+        m_buffer_size = buffer_size;
+    }
+    return av_buffer_pool_get(m_pool);
+}
+
+namespace {
+bool PrepareDownloadFrame(DownloadBufferPool& pool, AVFrame* dst, const AVFrame* src) {
+    if (src->format != AV_PIX_FMT_CUDA || !src->hw_frames_ctx) {
+        return false;
+    }
+    const auto* frames = reinterpret_cast<const AVHWFramesContext*>(src->hw_frames_ctx->data);
+    if (frames->format != AV_PIX_FMT_CUDA || frames->sw_format != AV_PIX_FMT_NV12 ||
+        src->width <= 0 || src->height <= 0 || src->width > frames->width ||
+        src->height > frames->height) {
+        return false;
+    }
+    // The hardware allocation can be taller than the visible picture.
+    constexpr int alignment = 32;
+    const int size =
+        av_image_get_buffer_size(AV_PIX_FMT_NV12, frames->width, frames->height, alignment);
+    if (size <= 0) {
+        return false;
+    }
+    auto* buffer = pool.GetBuffer(static_cast<size_t>(size) + AV_INPUT_BUFFER_PADDING_SIZE);
+    if (!buffer) {
+        return false;
+    }
+    dst->buf[0] = buffer;
+    if (av_image_fill_arrays(dst->data, dst->linesize, buffer->data, AV_PIX_FMT_NV12, frames->width,
+                             frames->height, alignment) < 0) {
+        av_frame_unref(dst);
+        return false;
+    }
+    dst->format = AV_PIX_FMT_NV12;
+    dst->width = src->width;
+    dst->height = src->height;
+    return true;
+}
+} // namespace
+
 DecoderContext::DecoderContext(const Decoder& decoder) : m_decoder{decoder} {
     m_codec_context = avcodec_alloc_context3(m_decoder.GetCodec());
     av_opt_set(m_codec_context->priv_data, "tune", "zerolatency", 0);
@@ -337,6 +409,20 @@ bool DecoderContext::SendPacket(const Packet& packet) {
     return true;
 }
 
+int DecoderContext::DownloadFrame(AVFrame* dst, const AVFrame* src) {
+    // Newer libavutil pools transfers itself and can use CUDA page-locked memory.
+    constexpr unsigned native_pool_version = AV_VERSION_INT(61, 16, 100);
+    if (m_codec_context->codec_id == AV_CODEC_ID_AV1 && avutil_version() < native_pool_version &&
+        PrepareDownloadFrame(m_download_pool, dst, src)) {
+        if (av_hwframe_transfer_data(dst, src, 0) >= 0) {
+            return 0;
+        }
+        av_frame_unref(dst);
+    }
+    dst->format = PreferredGpuFormat;
+    return av_hwframe_transfer_data(dst, src, 0);
+}
+
 std::shared_ptr<Frame> DecoderContext::ReceiveFrame() {
     auto ReceiveImpl = [&](AVFrame* frame) -> int {
         const int ret = avcodec_receive_frame(m_codec_context, frame);
@@ -353,8 +439,8 @@ std::shared_ptr<Frame> DecoderContext::ReceiveFrame() {
 
     m_final_frame = std::make_shared<Frame>();
     if (m_codec_context->hw_device_ctx) {
-        m_final_frame->SetFormat(PreferredGpuFormat);
-        if (const int ret = av_hwframe_transfer_data(m_final_frame->GetFrame(), intermediate_frame->GetFrame(), 0); ret < 0) {
+        const int ret = DownloadFrame(m_final_frame->GetFrame(), intermediate_frame->GetFrame());
+        if (ret < 0) {
             LOG_ERROR(HW_GPU, "av_hwframe_transfer_data error: {}", AVError(ret));
             return {};
         }

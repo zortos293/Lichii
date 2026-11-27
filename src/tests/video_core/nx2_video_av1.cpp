@@ -139,3 +139,35 @@ TEST_CASE("NX2 video decodes AV1 on the CPU with libdav1d whatever NVDEC emulati
                                  pictures[0].frame->GetPlane(0) + 1));
     }
 }
+
+TEST_CASE("AV1 download buffers stay valid until the last frame releases them", "[video_core]") {
+    constexpr size_t bytes = 64;
+    FFmpeg::Frame retained;
+    auto*& retained_buffer = retained.GetFrame()->buf[0];
+    {
+        FFmpeg::DownloadBufferPool pool;
+        retained_buffer = pool.GetBuffer(bytes);
+        REQUIRE(retained_buffer);
+        retained_buffer->data[0] = 42;
+
+        std::array<FFmpeg::Frame, 7> queued;
+        for (auto& frame : queued) {
+            frame.GetFrame()->buf[0] = pool.GetBuffer(bytes);
+            REQUIRE(frame.GetFrame()->buf[0]);
+        }
+        FFmpeg::Frame next;
+        auto*& next_buffer = next.GetFrame()->buf[0];
+        next_buffer = pool.GetBuffer(bytes);
+        REQUIRE_FALSE(next_buffer);
+
+        auto*& released = queued[0].GetFrame()->buf[0];
+        const auto* address = released->data;
+        av_buffer_unref(&released);
+        next_buffer = pool.GetBuffer(bytes * 2);
+        REQUIRE_FALSE(next_buffer);
+        next_buffer = pool.GetBuffer(bytes);
+        REQUIRE(next_buffer);
+        CHECK(next_buffer->data == address);
+    }
+    CHECK(retained_buffer->data[0] == 42);
+}

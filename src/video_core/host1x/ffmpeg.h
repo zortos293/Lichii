@@ -23,6 +23,7 @@ extern "C" {
 
 #include <libavcodec/avcodec.h>
 #include <libavcodec/codec.h>
+#include <libavutil/buffer.h>
 #include <libavutil/opt.h>
 #include <libavutil/pixdesc.h>
 
@@ -168,6 +169,23 @@ private:
     AVBufferRef* m_gpu_decoder{};
 };
 
+// Reuses host memory for NV12 downloads from CUDA frames.
+class DownloadBufferPool {
+public:
+    LICHII_NON_COPYABLE(DownloadBufferPool);
+    LICHII_NON_MOVEABLE(DownloadBufferPool);
+
+    DownloadBufferPool() = default;
+    ~DownloadBufferPool();
+
+    AVBufferRef* GetBuffer(size_t size);
+
+private:
+    AVBufferPool* m_pool{};
+    size_t m_buffer_size{};
+    size_t m_remaining_allocations{};
+};
+
 // Wraps an AVCodecContext.
 class DecoderContext {
 public:
@@ -191,9 +209,12 @@ public:
     }
 
 private:
+    int DownloadFrame(AVFrame* dst, const AVFrame* src);
+
     const Decoder& m_decoder;
     AVCodecContext* m_codec_context{};
     std::shared_ptr<Frame> m_final_frame{};
+    DownloadBufferPool m_download_pool;
     bool m_decode_order{};
 };
 
