@@ -622,6 +622,15 @@ Device::Device(VkInstance instance_, vk::PhysicalDevice physical_, VkSurfaceKHR 
                  "system memory");
     }
 
+    if (driver_id == VK_DRIVER_ID_AMD_PROPRIETARY) {
+        // AMD hardware has no 24-bit depth (GPUOpen AMD-Gfx-Drivers#64). The D24 formats this
+        // driver can report don't round two passes' depths to the same value as the guest does,
+        // so store Z24 as D32 and round shader-written depth instead.
+        for (const VkFormat format : {VK_FORMAT_D24_UNORM_S8_UINT, VK_FORMAT_X8_D24_UNORM_PACK32}) {
+            format_properties[format] = {};
+        }
+    }
+
     is_blit_depth24_stencil8_supported = TestDepthStencilBlits(VK_FORMAT_D24_UNORM_S8_UINT);
     is_blit_depth32_stencil8_supported = TestDepthStencilBlits(VK_FORMAT_D32_SFLOAT_S8_UINT);
     is_optimal_astc_supported = ComputeIsOptimalAstcSupported();
