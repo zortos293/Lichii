@@ -163,6 +163,25 @@ TEST_CASE("Ampere geometry exit setup results must be dead before the body reads
     RequireAccepted(code);
     code[9].words[0] = 0x03037324;
     RequireRejected(code, reads, 0x90);
+
+    // FMUL R3, R29, c[0x3][0x4] (Fire Emblem: Fortune's Weave's geometry programs): writes R3;
+    // with R3 as a source it reads it.
+    code = Program;
+    code[9] = Instruction{{0x1d037a20, 0x00c00100, 0x00410000, 0x041fe200}};
+    RequireAccepted(code);
+    code[9].words[0] = 0x03037a20;
+    RequireRejected(code, reads, 0x90);
+    // FFMA R3, R7, R8, R3 reads its third source.
+    code[9] = Instruction{{0x07037223, 0x00000008, 0x00000003, 0x000fe200}};
+    RequireRejected(code, reads, 0x90);
+    code[9].words[2] = 0x00000009;
+    RequireAccepted(code);
+    // FSETP P0, PT, R7, R8, PT writes P0; with P0 as its combining predicate it reads it.
+    code = Program;
+    code[8] = Instruction{{0x0700720b, 0x00000008, 0x03f0e000, 0x000fe200}};
+    RequireAccepted(code);
+    code[8].words[2] = 0x0000e000;
+    RequireRejected(code, reads, 0x80);
 }
 
 TEST_CASE("Ampere geometry exit tracks the reverse-encoded global load predicate",

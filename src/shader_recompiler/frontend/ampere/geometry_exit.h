@@ -136,6 +136,16 @@ GeometryExitEnvelope AnalyzeGeometryExit(const Code& code) {
             if (opcode == 0x923) read_register(bits(index, 24, 8));
             write_register(bits(index, 16, 8));
         } else if (opcode == 0x805 || opcode == 0xab9 || opcode == 0x945) {
+        } else if ((family == 0x020 || family == 0x021 || family == 0x023) && form != 0) {
+            // FMUL, FADD, FFMA.
+            read_sources(family == 0x023);
+            write_register(bits(index, 16, 8));
+        } else if (family == 0x00b && form != 0) {
+            // FSETP, as ISETP below.
+            read_sources(false);
+            read_predicate(bits(index, 87, 3));
+            write_predicate(bits(index, 81, 3));
+            write_predicate(bits(index, 84, 3));
         } else if (opcode == 0x381 || opcode == 0x981) {
             const u32 address = bits(index, 24, 8), size = bits(index, 73, 3);
             if (opcode == 0x381) read_predicate(7 - bits(index, 64, 3));
