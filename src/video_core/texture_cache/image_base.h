@@ -145,6 +145,11 @@ struct ImageBase {
     u64 load_tick = 0;
     /// frame_tick + 1 of the first frame a render pass other than a clear wrote it, or 0.
     u64 first_written_frame = 0;
+    /// frame_tick + 1 of the frame the GPU last wrote it (for contents joined or synchronized from
+    /// other images, the frame they were written), and of the last frame it was prepared for
+    /// reading, or 0 (EDEN_NX2_OOT_STALE_WRITEBACK=1).
+    u64 last_written_frame = 0;
+    u64 last_sampled_frame = 0;
     bool xc2_lut_view = false;
     /// Levels whose every layer a shader last wrote through a storage view. Any other GPU write
     /// (render pass, clear, copy, alias copy) and an upload from guest memory clear them.
