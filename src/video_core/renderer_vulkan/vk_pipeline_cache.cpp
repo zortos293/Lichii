@@ -3795,10 +3795,15 @@ ComputePipelineCacheEntry PipelineCache::CreateComputePipeline(
         throw Shader::RuntimeError("Compute program reads constant buffer mask {:#x}",
                                    program.info.constant_buffer_mask);
     }
+    // VK_DRIVER_ID_AURORA_BOREALIS (Vulkan-Docs #2841), not yet in a tagged Vulkan-Headers.
+    constexpr auto driver_id_aurora_borealis = static_cast<VkDriverIdKHR>(35);
     const VkDriverIdKHR driver_id = device.GetDriverID();
+    // The Apple GPU drivers have the same 32 KiB limit as MoltenVK on the same hardware.
     const bool needs_shared_mem_clamp =
         driver_id == VK_DRIVER_ID_QUALCOMM_PROPRIETARY ||
-        driver_id == VK_DRIVER_ID_ARM_PROPRIETARY || driver_id == VK_DRIVER_ID_MOLTENVK;
+        driver_id == VK_DRIVER_ID_ARM_PROPRIETARY || driver_id == VK_DRIVER_ID_MOLTENVK ||
+        driver_id == VK_DRIVER_ID_MESA_HONEYKRISP || driver_id == VK_DRIVER_ID_MESA_KOSMICKRISP ||
+        driver_id == driver_id_aurora_borealis;
     const u32 max_shared_memory = device.GetMaxComputeSharedMemorySize();
     if (needs_shared_mem_clamp && program.shared_memory_size > max_shared_memory) {
         LOG_WARNING(Render_Vulkan,
@@ -3806,6 +3811,7 @@ ComputePipelineCacheEntry PipelineCache::CreateComputePipeline(
                     key.unique_hash,
                     program.shared_memory_size / 1024,
                     max_shared_memory / 1024);
+        Shader::Optimization::SharedMemoryBoundsPass(program, max_shared_memory);
         program.shared_memory_size = max_shared_memory;
     }
     std::unique_ptr<ComputePipeline> pipeline;

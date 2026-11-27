@@ -189,6 +189,7 @@ add_library(shader_recompiler STATIC
     ir_opt/predicate_mask.h
     ir_opt/position_pass.cpp
     ir_opt/rescaling_pass.cpp
+    ir_opt/shared_memory_bounds_pass.cpp
     ir_opt/ssa_rewrite_pass.cpp
     ir_opt/texture_pass.cpp
     ir_opt/vendor_workaround_pass.cpp
