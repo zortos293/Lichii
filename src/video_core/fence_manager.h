@@ -29,6 +29,7 @@
 #include "video_core/host1x/host1x.h"
 #include "video_core/host1x/syncpoint_manager.h"
 #include "video_core/nx2_fast_draw.h"
+#include "video_core/nx2_movie_playback.h"
 #include "video_core/nx2_profile.h"
 #include "video_core/rasterizer_interface.h"
 
@@ -303,6 +304,9 @@ private:
         Common::SetCurrentThreadName("GPUFencingThread");
         Common::SetCurrentThreadPriority(Common::ThreadPriority::High);
         Common::SetCurrentThreadToPerformanceCores();
+#ifdef _WIN32
+        bool movie_priority = false;
+#endif
 
         // Every fence the host GPU has already passed is released together: Switch 2 titles
         // signal thousands a second and the host GPU completes them in bursts, so each cache's
@@ -352,6 +356,17 @@ private:
                 }
                 take_front();
             }
+#ifdef _WIN32
+            // Ocarina's movie thread polls a progress word written by this worker. Run at
+            // guest CPU priority during playback, and restore the normal fence priority
+            // before processing the next batch after the movie ends.
+            const bool playing_movie = VideoCore::Nx2MoviePlayback::AnyActive();
+            if (playing_movie != movie_priority) {
+                Common::SetCurrentThreadPriority(playing_movie ? Common::ThreadPriority::Critical
+                                                               : Common::ThreadPriority::High);
+                movie_priority = playing_movie;
+            }
+#endif
             if (!batch.front().fence->IsStubbed()) {
                 WaitFence(batch.front().fence);
             }

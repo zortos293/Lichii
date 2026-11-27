@@ -3,11 +3,51 @@
 #include <catch2/catch_test_macros.hpp>
 
 #include "core/hle/service/nx2_movie_clock.h"
+#include "core/hle/service/nx2_video_frame_queue.h"
+#include "video_core/nx2_movie_playback.h"
 
 namespace {
 constexpr s64 Frame = 16667;
 constexpr s64 Start = 5'000'000;
 } // namespace
+
+TEST_CASE("NX2 movie playback ends with the last active decoder session", "[nx2_movie_clock]") {
+    VideoCore::Nx2MoviePlayback first;
+    REQUIRE_FALSE(first.AnyActive());
+    first.SetActive(true);
+    first.SetActive(true);
+    {
+        VideoCore::Nx2MoviePlayback second;
+        second.SetActive(true);
+        first.SetActive(false);
+        first.SetActive(false);
+        REQUIRE(second.AnyActive());
+    }
+    REQUIRE_FALSE(first.AnyActive());
+}
+
+TEST_CASE("An in-flight movie EOS preserves a later picture from the same session",
+          "[nx2_movie_clock]") {
+    Service::Nx2VideoFrameQueue queue;
+    VideoCore::Nx2MoviePlayback playback;
+    const auto generation = queue.Generation();
+    REQUIRE(queue.Push({Tegra::Host1x::Nx2Picture{}, 0, true}, generation));
+    playback.SetActive(true);
+    const auto old_end = queue.Pop();
+    REQUIRE(old_end.end);
+
+    // The output worker is writing the old EOS. The producer starts another stream without
+    // reconfiguring and publishes its picture behind an empty end marker.
+    REQUIRE(queue.Push({std::nullopt, 0, true}, generation));
+    REQUIRE(queue.Push({Tegra::Host1x::Nx2Picture{}, 0, true}, generation));
+    playback.SetActive(queue.HasPicture());
+    REQUIRE(playback.AnyActive());
+    REQUIRE_FALSE(queue.Pop().picture.has_value());
+    REQUIRE(queue.Pop().end);
+    REQUIRE(queue.Push({std::nullopt, 0, true}, generation));
+    playback.SetActive(queue.HasPicture());
+    REQUIRE_FALSE(playback.AnyActive());
+}
 
 TEST_CASE("NX2 movie clock ignores frames acquired ahead of it", "[nx2_movie_clock]") {
     // A player with two output images that takes each frame as soon as it is written, a frame
@@ -108,4 +148,31 @@ TEST_CASE("NX2 movie clock doesn't follow a client that shows frames as it gets 
         clock.Released(now + 500, present + 1);
         REQUIRE(clock.Due(now + 500, 0) == static_cast<u64>(now + 500 - Start));
     }
+}
+
+TEST_CASE("NX2 movie clock keeps elapsed time when a running movie returns an old image late",
+          "[nx2_movie_clock]") {
+    using Clock = Service::Nx2MovieClock;
+    constexpr auto timing = Clock::ReleaseTiming::AlignAtStart;
+    Clock clock;
+    clock.Acquired(Start, 0, 0, 100);
+    clock.Acquired(Start + 2000, Frame, 0, 100);
+    clock.Released(Start + Frame, 101, timing);
+
+    const s64 acquired = Start + 2 * Frame;
+    clock.Acquired(acquired, 2 * Frame, 0, 102);
+    const s64 late = acquired + 330'000;
+    clock.Released(late, 104, timing);
+    REQUIRE(clock.Due(late, 0) == static_cast<u64>(late - Start));
+
+    // Resuming opens a new first handoff. A genuinely held startup frame can still align it.
+    const s64 resumed = late + Clock::PauseGap + 1;
+    clock.Acquired(resumed, 3 * Frame, resumed, 105);
+    clock.Acquired(resumed + 1000, 4 * Frame, resumed, 105);
+    const s64 shown = resumed + 100'000;
+    clock.Released(shown, 111, timing);
+    REQUIRE(clock.Due(shown, resumed) == static_cast<u64>(4 * Frame));
+    clock.Acquired(shown + Frame, 5 * Frame, resumed, 112);
+    clock.Released(shown + 3 * Frame, 114, timing);
+    REQUIRE(clock.Due(shown + 3 * Frame, resumed) == static_cast<u64>(7 * Frame));
 }
