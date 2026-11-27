@@ -31,6 +31,10 @@ namespace {
 std::array<Dynarmic::A64::UserConfig::Counters, Hardware::NUM_CPU_CORES> g_jit_counters{};
 // EDEN_NX2_STUTTER_TRACE: each core's counters already added to the stutter trace.
 std::array<Dynarmic::A64::UserConfig::Counters, Hardware::NUM_CPU_CORES> g_jit_traced{};
+#ifdef ARCHITECTURE_x86_64
+// A core sharing emitted code must refetch its cached code page after another core invalidates it.
+std::atomic<u64> g_code_invalidations{0};
+#endif
 
 void TraceJit(size_t core) {
     const auto& now = g_jit_counters[core];
@@ -92,7 +96,7 @@ std::optional<u32> DynarmicCallbacks64::MemoryReadCode(u64 vaddr) {
     if (!m_memory.IsValidVirtualAddressRange(vaddr, sizeof(u32)))
         return std::nullopt;
     auto const aligned_vaddr = vaddr & ~Core::Memory::LICHII_PAGEMASK;
-    const u32 generation = code_generation.load(std::memory_order_acquire);
+    const u64 generation = code_generation->load(std::memory_order_acquire);
     if (last_code_addr != aligned_vaddr || cached_code_generation != generation) {
         m_memory.ReadBlock(aligned_vaddr, &cached_code_page, sizeof(cached_code_page));
         last_code_addr = aligned_vaddr;
@@ -557,6 +561,15 @@ void ArmDynarmic64::MakeJit(Common::PageTable* page_table, std::size_t address_s
         // address: the CPU's return predictor predicts guest returns instead of one shared
         // indirect jump through the return stack buffer (multicore only, no cycle counter).
         config.host_call_return = !config.enable_cycle_counting;
+        // One code cache for all cores of the process: a block is compiled once, not per core
+        // (72-74% of the six caches' code was duplicated in Ocarina of Time). 1 GiB of address
+        // space, committed as used.
+        if (m_shared_code_cache && config.host_call_return && page_table &&
+            !config.check_halt_on_memory_access) {
+            config.shared_code_cache = m_shared_code_cache;
+            config.code_cache_size = std::uint32_t(1_GiB);
+            m_cb->code_generation = &g_code_invalidations;
+        }
     }
 #endif
     m_jit.emplace(config);
@@ -623,10 +636,11 @@ void ArmDynarmic64::RewindBreakpointInstruction() {
     this->SetContext(m_breakpoint_context);
 }
 
-ArmDynarmic64::ArmDynarmic64(System& system, bool uses_wall_clock, Kernel::KProcess* process, DynarmicExclusiveMonitor& exclusive_monitor, std::size_t core_index)
+ArmDynarmic64::ArmDynarmic64(System& system, bool uses_wall_clock, Kernel::KProcess* process, DynarmicExclusiveMonitor& exclusive_monitor, std::size_t core_index, std::shared_ptr<Dynarmic::A64::SharedCodeCache> shared_code_cache)
     : ArmInterface{uses_wall_clock}, m_system{system}, m_exclusive_monitor{exclusive_monitor}
     , m_cb(std::in_place, *this, process)
     , m_core_index{core_index}
+    , m_shared_code_cache{std::move(shared_code_cache)}
 {
     auto& page_table = process->GetPageTable().GetBasePageTable();
     auto& page_table_impl = page_table.GetImpl();
@@ -680,7 +694,7 @@ void ArmDynarmic64::SignalInterrupt(Kernel::KThread* thread) {
 }
 
 void ArmDynarmic64::ClearInstructionCache() {
-    m_cb->code_generation.fetch_add(1, std::memory_order_release);
+    m_cb->code_generation->fetch_add(1, std::memory_order_release);
     m_jit->ClearCache();
 }
 
@@ -688,7 +702,7 @@ void ArmDynarmic64::InvalidateCacheRange(u64 addr, std::size_t size) {
     // Drop the cached code page too: blocks recompiled after the invalidation would
     // otherwise still decode the old instructions (e.g. a gdbstub breakpoint written
     // into or removed from that page).
-    m_cb->code_generation.fetch_add(1, std::memory_order_release);
+    m_cb->code_generation->fetch_add(1, std::memory_order_release);
     m_jit->InvalidateCacheRange(addr, size);
 }
 

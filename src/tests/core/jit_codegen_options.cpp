@@ -430,6 +430,45 @@ std::vector<State> RunFastmemProgram(bool options, bool recompile = true) {
     return states;
 }
 
+void CheckSharedFastmemCounters() {
+    FastmemFaultEnv first;
+    FastmemFaultEnv second;
+    first.code = second.code = {LdrX(1, 0, 0), Svc0};
+    A64::UserConfig::Counters first_counters{};
+    A64::UserConfig::Counters second_counters{};
+    A64::UserConfig config{};
+    EnableCodegenOptions(config);
+    config.enable_cycle_counting = false;
+    config.fastmem_pointer = reinterpret_cast<uintptr_t>(first.arena);
+    config.fastmem_address_space_bits = 64;
+    config.silently_mirror_fastmem = false;
+    config.recompile_on_fastmem_failure = false;
+    config.shared_code_cache = A64::MakeSharedCodeCache();
+    config.callbacks = &first;
+    config.counters = &first_counters;
+    A64::Jit first_jit{config};
+    first.jit = &first_jit;
+    config.callbacks = &second;
+    config.counters = &second_counters;
+    A64::Jit second_jit{config};
+    second.jit = &second_jit;
+
+    second_jit.SetRegister(0, FastmemFaultEnv::FaultPage);
+    second_jit.Step();
+    REQUIRE(first_counters.fastmem_faults == 0);
+    REQUIRE(second_counters.fastmem_faults == 1);
+    second_jit.SetPC(0);
+    second_jit.Run();
+    REQUIRE(first_counters.fastmem_faults == 0);
+    REQUIRE(second_counters.fastmem_faults == 2);
+    first_jit.SetRegister(0, FastmemFaultEnv::FaultPage);
+    first_jit.Run();
+    REQUIRE(first_counters.fastmem_faults == 1);
+    REQUIRE(second_counters.fastmem_faults == 2);
+    REQUIRE(first_counters.fastmem_recompiles == 0);
+    REQUIRE(second_counters.fastmem_recompiles == 0);
+}
+
 } // namespace
 
 TEST_CASE(FaultTestName, "[jit_codegen_options]") {
@@ -455,6 +494,7 @@ TEST_CASE(FaultTestName, "[jit_codegen_options]") {
     REQUIRE(on[0] == off[0]);
     REQUIRE(on[1] == off[1]);
     REQUIRE(no_recompile == on);
+    CheckSharedFastmemCounters();
 }
 
 #endif

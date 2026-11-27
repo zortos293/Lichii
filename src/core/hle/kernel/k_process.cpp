@@ -1355,10 +1355,17 @@ void KProcess::InitializeInterfaces(KernelCore& kernel) {
     } else
 #endif
         if (this->Is64Bit()) {
+        // One JIT code cache for all cores; MakeJit falls back to a cache per core where it can't.
+        std::shared_ptr<Dynarmic::A64::SharedCodeCache> code_cache;
+#ifdef ARCHITECTURE_x86_64
+        if (kernel.IsMulticore()) {
+            code_cache = Dynarmic::A64::MakeSharedCodeCache();
+        }
+#endif
         for (size_t i = 0; i < Core::Hardware::NUM_CPU_CORES; i++) {
             m_arm_interfaces[i] = std::make_unique<Core::ArmDynarmic64>(
                 kernel.System(), kernel.IsMulticore(), this,
-                static_cast<Core::DynarmicExclusiveMonitor&>(*m_exclusive_monitor), i);
+                static_cast<Core::DynarmicExclusiveMonitor&>(*m_exclusive_monitor), i, code_cache);
         }
     } else {
         for (size_t i = 0; i < Core::Hardware::NUM_CPU_CORES; i++) {

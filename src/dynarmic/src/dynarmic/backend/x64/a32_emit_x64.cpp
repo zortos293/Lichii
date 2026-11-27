@@ -89,8 +89,8 @@ A32EmitX64::A32EmitX64(BlockOfCode& code, A32::UserConfig conf, A32::Jit* jit_in
     ClearFastDispatchTable();
 
     if (conf.fastmem_pointer.has_value()) {
-        exception_handler.SetFastmemCallback([this](u64 rip_) {
-            return FastmemCallback(rip_);
+        exception_handler.SetFastmemCallback([this](u64 rip_, u64 jit_state) {
+            return FastmemCallback(rip_, jit_state);
         });
     }
 }
