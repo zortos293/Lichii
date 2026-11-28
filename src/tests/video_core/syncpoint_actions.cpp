@@ -2,6 +2,9 @@
 
 #include <atomic>
 #include <chrono>
+#include <cstdio>
+#include <cstdlib>
+#include <future>
 #include <thread>
 #include <vector>
 
@@ -245,12 +248,90 @@ TEST_CASE("Cancelling a running syncpoint action returns once it is done",
     while (!entered) {
         std::this_thread::yield();
     }
-    std::thread releaser{[&] {
-        std::this_thread::sleep_for(std::chrono::milliseconds{20});
-        release = true;
+    // The cancel runs on its own thread: it must not return while the action still runs.
+    std::atomic<bool> cancelled{false};
+    std::thread canceller{[&] {
+        manager.DeregisterGuestAction(0, handle);
+        cancelled = true;
     }};
-    manager.DeregisterGuestAction(0, handle);
+    // A cancel that returned at once would show here; one too slow to have started yet only
+    // makes this check pass without testing, never fail wrongly.
+    std::this_thread::sleep_for(std::chrono::milliseconds{20});
+    CHECK_FALSE(cancelled.load()); // CHECK: the threads below still get released and joined
+    release = true;
+    canceller.join();
+    REQUIRE(cancelled.load());
     REQUIRE(done);
-    releaser.join();
+    incrementer.join();
+}
+
+TEST_CASE("Cancelling a running host syncpoint action returns once it is done",
+          "[video_core][syncpoint_actions]") {
+    SyncpointManager manager;
+    std::atomic<bool> entered{false};
+    std::atomic<bool> release{false};
+    std::atomic<bool> done{false};
+    const auto handle = manager.RegisterHostAction(0, 1, [&] {
+        entered = true;
+        while (!release) {
+            std::this_thread::yield();
+        }
+        done = true;
+    });
+    std::thread incrementer{[&] { manager.IncrementHost(0); }};
+    while (!entered) {
+        std::this_thread::yield();
+    }
+    // The cancel runs on its own thread: it must not return while the action still runs.
+    std::atomic<bool> cancelled{false};
+    std::thread canceller{[&] {
+        manager.DeregisterHostAction(0, handle);
+        cancelled = true;
+    }};
+    // A cancel that returned at once would show here; one too slow to have started yet only
+    // makes this check pass without testing, never fail wrongly.
+    std::this_thread::sleep_for(std::chrono::milliseconds{20});
+    CHECK_FALSE(cancelled.load()); // CHECK: the threads below still get released and joined
+    release = true;
+    canceller.join();
+    REQUIRE(cancelled.load());
+    REQUIRE(done);
+    incrementer.join();
+}
+
+TEST_CASE("Cancelling a completed host action returns while a later one of its increment blocks",
+          "[video_core][syncpoint_actions]") {
+    SyncpointManager manager;
+    std::atomic<bool> entered{false};
+    std::atomic<bool> release{false};
+    bool first_done = false;
+    // Actions for the same value run newest first: `completed` runs, then `blocking` holds the
+    // increment.
+    manager.RegisterHostAction(0, 1, [&] {
+        entered = true;
+        while (!release) {
+            std::this_thread::yield();
+        }
+    });
+    const auto completed = manager.RegisterHostAction(0, 1, [&first_done] { first_done = true; });
+    std::thread incrementer{[&] { manager.IncrementHost(0); }};
+    while (!entered) {
+        std::this_thread::yield();
+    }
+    REQUIRE(first_done);
+    std::promise<void> cancelled;
+    auto returned = cancelled.get_future();
+    std::thread canceller{[&] {
+        manager.DeregisterHostAction(0, completed);
+        cancelled.set_value();
+    }};
+    // Waiting for the blocked action instead would never end: release it and end the run.
+    if (returned.wait_for(std::chrono::seconds{5}) != std::future_status::ready) {
+        std::fputs("Cancelling a completed action waited for another action\n", stderr);
+        std::abort();
+    }
+    REQUIRE_FALSE(release.load());
+    release = true;
+    canceller.join();
     incrementer.join();
 }

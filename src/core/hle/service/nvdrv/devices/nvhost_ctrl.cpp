@@ -29,7 +29,17 @@ nvhost_ctrl::nvhost_ctrl(Core::System& system_, EventInterface& events_interface
       syncpoint_manager{core_.GetSyncpointManager()} {}
 
 nvhost_ctrl::~nvhost_ctrl() {
+    // A wait still registered on Host1x's syncpoint manager would run after this device is gone,
+    // writing its event's status and signalling its freed KEvent. The syncpoint can still be
+    // incremented: by the GPU's fencing thread and by Host1x's device lists (Nvdec, Vic), which
+    // outlive nvdrv at shutdown, and by anything at all when the guest closes this device during
+    // play. Deregistering returns once an action already running has finished.
+    auto& host1x_syncpoint_manager = system.Host1x().GetSyncpointManager();
     for (auto& event : events) {
+        if (event.wait_handle != 0) {
+            host1x_syncpoint_manager.DeregisterHostAction(event.assigned_syncpt, event.wait_handle);
+            event.wait_handle = {};
+        }
         if (!event.registered) {
             continue;
         }
@@ -290,12 +300,19 @@ NvResult nvhost_ctrl::IocCtrlClearEventWait(IocCtrlEventClearParams& params) {
     if (!event.registered) {
         return NvResult::BadParameter;
     }
-    if (event.status.exchange(EventState::Cancelling, std::memory_order_acq_rel) ==
-        EventState::Waiting) {
+    const EventState previous =
+        event.status.exchange(EventState::Cancelling, std::memory_order_acq_rel);
+    // Deregistered whatever the state was: a callback that already moved the event to
+    // Signalling is still running, and returning before it ends would let a new wait reuse the
+    // slot and the old callback's last store mark it Signalled. Deregistering waits for a
+    // running callback, which does not take events_mutex.
+    if (event.wait_handle != 0) {
         auto& host1x_syncpoint_manager = system.Host1x().GetSyncpointManager();
         host1x_syncpoint_manager.DeregisterHostAction(event.assigned_syncpt, event.wait_handle);
-        syncpoint_manager.UpdateMin(event.assigned_syncpt);
         event.wait_handle = {};
+    }
+    if (previous == EventState::Waiting) {
+        syncpoint_manager.UpdateMin(event.assigned_syncpt);
     }
     event.fails++;
     event.status.store(EventState::Cancelled, std::memory_order_release);
