@@ -584,6 +584,7 @@ void PresentManager::CopyToSwapchain(Frame* frame) {
     bool requires_recreation = false;
 
     for (u32 attempt = 0; attempt < MAX_PRESENT_ATTEMPTS; ++attempt) {
+        const auto began = std::chrono::steady_clock::now();
         try {
             // Recreate surface and swapchain if needed.
             if (requires_recreation) {
@@ -604,6 +605,7 @@ void PresentManager::CopyToSwapchain(Frame* frame) {
                 throw;
             }
 
+            swapchain.ReportRecovery(result, "present", std::chrono::steady_clock::now() - began);
             requires_recreation = true;
         }
     }
@@ -621,13 +623,22 @@ void PresentManager::CopyToSwapchainImpl(Frame* frame) {
 
     // Recreate for size changes, SDR/HDR10/scRGB transitions, or a suboptimal swapchain.
     const bool is_suboptimal = swapchain.NeedsRecreation() || swapchain.IsOutDated();
+    const bool surface_changed = swapchain.SurfaceExtentChanged();
     const bool size_changed =
         swapchain.GetWidth() != frame->width || swapchain.GetHeight() != frame->height;
     const bool format_changed = swapchain.GetRequestedFormat() != frame->format;
     const bool color_space_changed = swapchain.GetRequestedColorSpace() != frame->color_space;
-    if (is_suboptimal || size_changed || format_changed || color_space_changed) {
+    if (is_suboptimal || surface_changed || size_changed || format_changed ||
+        color_space_changed) {
+        const VkExtent2D old_extent = swapchain.GetExtent();
         if (!RecreateSwapchain(frame)) {
             return;
+        }
+        if (surface_changed) {
+            const VkExtent2D new_extent = swapchain.GetExtent();
+            LOG_WARNING(Render_Vulkan,
+                        "The surface changed size under a {}x{} swapchain, recreated it at {}x{}",
+                        old_extent.width, old_extent.height, new_extent.width, new_extent.height);
         }
     } else if (frame->color_space == VK_COLOR_SPACE_HDR10_ST2084_EXT &&
                Common::DisplayHdrMonitor::Instance().Generation() != hdr_metadata_generation) {
@@ -651,7 +662,15 @@ void PresentManager::CopyToSwapchainImpl(Frame* frame) {
     if (host_vsync) {
         WaitForDisplay();
     }
+    // Bounded like CopyToSwapchain: a surface that keeps going out of date (or an acquire that
+    // keeps timing out) must not hold this frame for ever. The swapchain stays marked outdated,
+    // so the next frame recreates it again (RomainROCH, #2626).
+    u32 acquire_attempts = 0;
     while (swapchain.AcquireNextImage(!use_present_thread, frame->game_frame_presents)) {
+        if (++acquire_attempts >= MAX_PRESENT_ATTEMPTS) {
+            DiscardFrame(frame);
+            return;
+        }
         if (!RecreateSwapchain(frame)) {
             return;
         }
@@ -786,6 +805,8 @@ void PresentManager::CopyToSwapchainImpl(Frame* frame) {
 
     // Submit the image copy/blit to the swapchain
     {
+        const Swapchain::WaitScope waiting{swapchain, "swapchain copy submit",
+                                           swapchain.GetImageIndex(), scheduler.CurrentTick()};
         std::scoped_lock submit_lock{scheduler.submit_mutex};
         switch (const VkResult result =
                     device.GetGraphicsQueue().Submit(submit_info, *frame->present_done)) {

@@ -307,6 +307,11 @@ public:
         return master_semaphore->CurrentTick();
     }
 
+    /// Returns the last tick the GPU is known to have reached.
+    [[nodiscard]] u64 KnownGpuTick() const noexcept {
+        return master_semaphore->KnownGpuTick();
+    }
+
     /// Changes whenever recorded command buffer state may have been reset (InvalidateState, the
     /// end of a render pass), so a binding recorded at the same epoch is still bound.
     [[nodiscard]] u64 RecordingEpoch() const noexcept {

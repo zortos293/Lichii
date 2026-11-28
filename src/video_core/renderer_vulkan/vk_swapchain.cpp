@@ -21,6 +21,7 @@
 #include "common/logging.h"
 #include "common/settings.h"
 #include "common/settings_enums.h"
+#include "common/thread.h"
 #include "video_core/renderer_vulkan/vk_scheduler.h"
 #include "video_core/renderer_vulkan/vk_swapchain.h"
 #include "video_core/vulkan_common/vk_enum_string_helper.h"
@@ -226,6 +227,7 @@ Swapchain::Swapchain(
         LOG_ERROR(Render_Vulkan, "Initial swapchain creation failed: surface has zero extent");
         throw vk::Exception(VK_ERROR_INITIALIZATION_FAILED);
     }
+    watchdog = std::jthread([this](std::stop_token token) { WatchWaits(token); });
 }
 
 Swapchain::~Swapchain() {
@@ -257,6 +259,8 @@ bool Swapchain::Create(
     // Submitted work may still wait on the old acquire/present semaphores; destroying them under
     // it loses the device on MoltenVK (window moved to a display with a different scale).
     if (swapchain) {
+        const WaitScope waiting{*this, "device idle before recreating the swapchain", 0,
+                                scheduler.CurrentTick()};
         std::scoped_lock lock{scheduler.submit_mutex};
         const VkResult result = device.GetLogical().WaitIdle();
         if (result == VK_ERROR_DEVICE_LOST) {
@@ -289,33 +293,33 @@ std::unique_lock<std::mutex> Swapchain::LockForUse() {
 }
 
 bool Swapchain::AcquireNextImage(bool may_flush, u32 game_frame_presents) {
+    const auto began = std::chrono::steady_clock::now();
     const VkResult result = [this] {
         const auto use_lock = LockForUse();
-        return device.GetLogical().AcquireNextImageKHR(
-            *swapchain, (std::numeric_limits<u64>::max)(), *present_semaphores[frame_index],
-            VK_NULL_HANDLE, &image_index);
+        return device.GetLogical().AcquireNextImageKHR(*swapchain, ACQUIRE_TIMEOUT_NS,
+                                                       *present_semaphores[frame_index],
+                                                       VK_NULL_HANDLE, &image_index);
     }();
-    switch (result) {
-    case VK_SUCCESS:
+    switch (ClassifyAcquire(result)) {
+    case AcquireAction::Present:
+        is_suboptimal |= result == VK_SUBOPTIMAL_KHR;
         break;
-    case VK_SUBOPTIMAL_KHR:
-        is_suboptimal = true;
-        break;
-    case VK_ERROR_OUT_OF_DATE_KHR:
-        is_outdated = true;
-        break;
-    case VK_ERROR_SURFACE_LOST_KHR:
-        vk::Check(result);
-        break;
-    default:
-        LOG_ERROR(Render_Vulkan, "vkAcquireNextImageKHR returned {}", string_VkResult(result));
-        break;
-    }
-    if (result == VK_ERROR_OUT_OF_DATE_KHR) {
+    case AcquireAction::Recreate:
         // No image was acquired, so image_index is stale: the caller recreates and tries again.
+        // A timeout lands here too: a display that went away can leave the acquire waiting.
+        is_outdated = true;
+        ReportRecovery(result, "vkAcquireNextImageKHR", std::chrono::steady_clock::now() - began);
         return true;
+    case AcquireAction::Throw:
+        ReportRecovery(result, "vkAcquireNextImageKHR", std::chrono::steady_clock::now() - began);
+        if (result == VK_ERROR_DEVICE_LOST) {
+            device.ReportLoss();
+        }
+        throw vk::Exception(result);
     }
 
+    const WaitScope waiting{*this, "scheduler wait for the image's last use", image_index,
+                            resource_ticks[image_index]};
     const auto wait_with_frame_pacing = [this, may_flush, game_frame_presents] {
     switch (Settings::values.frame_pacing_mode.GetValue()) {
     case Settings::FramePacingMode::Target_Auto:
@@ -382,9 +386,11 @@ bool Swapchain::Present(VkSemaphore render_semaphore, u64 present_id) {
         .pImageIndices = &image_index,
         .pResults = nullptr,
     };
+    const WaitScope waiting{*this, "vkQueuePresentKHR", image_index, scheduler.CurrentTick()};
     const auto use_lock = LockForUse();
     std::scoped_lock lock{scheduler.submit_mutex};
     bool accepted = false;
+    const auto began = std::chrono::steady_clock::now();
     switch (const VkResult result = present_queue.Present(present_info)) {
     case VK_SUCCESS:
         accepted = true;
@@ -395,19 +401,78 @@ bool Swapchain::Present(VkSemaphore render_semaphore, u64 present_id) {
         break;
     case VK_ERROR_OUT_OF_DATE_KHR:
         is_outdated = true;
+        ReportRecovery(result, "vkQueuePresentKHR", std::chrono::steady_clock::now() - began);
         break;
     case VK_ERROR_SURFACE_LOST_KHR:
+        ReportRecovery(result, "vkQueuePresentKHR", std::chrono::steady_clock::now() - began);
         vk::Check(result);
         break;
     default:
         LOG_CRITICAL(Render_Vulkan, "Failed to present with error {}", string_VkResult(result));
         break;
     }
+    if (accepted) {
+        if (const auto recovered = recovery.Succeed(std::chrono::steady_clock::now())) {
+            LOG_WARNING(Render_Vulkan,
+                        "Present recovered after {} ms and {} failed attempt(s), first failure {}",
+                        recovered->duration.count(), recovered->failures,
+                        string_VkResult(recovered->first_result));
+        }
+    }
     ++frame_index;
     if (frame_index >= image_count) {
         frame_index = 0;
     }
     return accepted;
+}
+
+void Swapchain::BeginWait(const char* what, u64 index, u64 tick) {
+    wait_watch.Begin(what, index, tick, std::chrono::steady_clock::now());
+}
+
+void Swapchain::EndWait() {
+    if (const auto ended = wait_watch.End(std::chrono::steady_clock::now())) {
+        LOG_WARNING(Render_Vulkan, "Present path wait ended: {} took {} ms (image index {}, tick {})",
+                    ended->what, ended->elapsed.count(), ended->index, ended->tick);
+    }
+}
+
+void Swapchain::WatchWaits(std::stop_token token) {
+    Common::SetCurrentThreadName("VulkanPresentWatch");
+    std::unique_lock lock{watchdog_mutex};
+    while (!token.stop_requested()) {
+        watchdog_cv.wait_for(lock, token, std::chrono::milliseconds{250}, [] { return false; });
+        const auto stalled = wait_watch.Poll(std::chrono::steady_clock::now(), WAIT_STALL_THRESHOLD);
+        if (!stalled) {
+            continue;
+        }
+        LOG_WARNING(Render_Vulkan,
+                    "Present path wait stalled: {} for over {} ms (image index {}, waiting for "
+                    "tick {}, current tick {}, GPU tick {})",
+                    stalled->what, stalled->elapsed.count(), stalled->index, stalled->tick,
+                    scheduler.CurrentTick(), scheduler.KnownGpuTick());
+    }
+}
+
+bool Swapchain::SurfaceExtentChanged() const {
+    if (!swapchain) {
+        return false;
+    }
+    const auto capabilities = device.GetPhysical().GetSurfaceCapabilitiesKHR(VkSurfaceKHR(surface));
+    return Vulkan::SurfaceExtentChanged(capabilities.currentExtent, extent);
+}
+
+void Swapchain::ReportRecovery(VkResult result, std::string_view what,
+                               std::chrono::steady_clock::duration took) {
+    if (!recovery.Fail(result, std::chrono::steady_clock::now())) {
+        return;
+    }
+    LOG_WARNING(Render_Vulkan,
+                "Present path stalled: {} returned {} after {} ms (swapchain {}x{} {}), "
+                "recreating the swapchain",
+                what, string_VkResult(result),
+                std::chrono::duration_cast<std::chrono::milliseconds>(took).count(), extent.width,
+                extent.height, string_VkFormat(surface_format.format));
 }
 
 VkResult Swapchain::WaitForPresent(u64 wanted_generation, u64 present_id, u64 timeout_ns) {

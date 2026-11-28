@@ -28,6 +28,7 @@ add_executable(tests
     video_core/semaphore_waiters.cpp
     video_core/hdr_output.cpp
     video_core/host_vsync.cpp
+    video_core/present_recovery.cpp
     core/mii_model.cpp
     core/address_space.cpp
     core/nx2_streamplay.cpp

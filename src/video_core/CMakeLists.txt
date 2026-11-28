@@ -280,6 +280,7 @@ add_library(video_core STATIC
     renderer_vulkan/vk_shader_cache_v2.h
     renderer_vulkan/vk_present_manager.cpp
     renderer_vulkan/vk_present_manager.h
+    renderer_vulkan/vk_present_recovery.h
     renderer_vulkan/vk_query_cache.cpp
     renderer_vulkan/vk_query_cache.h
     renderer_vulkan/vk_rasterizer.cpp
