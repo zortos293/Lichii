@@ -172,6 +172,7 @@ static FileSys::VirtualFile VfsDirectoryCreateFileWrapper(const FileSys::Virtual
 #endif
 
 // Core //
+#include "core/constants.h"
 #include "core/frontend/applets/general.h"
 #include "core/frontend/applets/mii_edit.h"
 #include "core/frontend/applets/software_keyboard.h"
@@ -606,6 +607,8 @@ MainWindow::MainWindow(bool has_broken_vulkan)
                         nextendo_profile_force = true;
                     }
                 }
+                // The pull can rename the profile or change its avatar.
+                UpdateProfileButton();
                 if (pending) {
                     SyncNextendoProfile(false);
                 }
@@ -641,6 +644,8 @@ MainWindow::MainWindow(bool has_broken_vulkan)
         launch =
             Core::ParseLaunchParams(*QtCommon::system, args_cstr.size(), args_cstr.data(), nullptr);
     }
+    // -u may have picked another profile than the chip shows.
+    UpdateProfileButton();
     const bool launch_home = launch && launch->filepath.empty() && !launch->launch_setup &&
                              launch->launch_qlaunch;
     const bool launching_content =
@@ -1548,6 +1553,18 @@ void MainWindow::InitializeWidgets() {
                 renderer_status_button->repaint();
             });
     statusBar()->insertPermanentWidget(0, renderer_status_button);
+
+    // Setup the user profile button: switches the profile games start with.
+    profile_status_button = new QPushButton();
+    profile_status_button->setObjectName(QStringLiteral("TogglableStatusBarButton"));
+    profile_status_button->setProperty("chip", QStringLiteral("profile"));
+    profile_status_button->setCheckable(true);
+    profile_status_button->setChecked(true);
+    profile_status_button->setFocusPolicy(Qt::NoFocus);
+    profile_status_button->setIconSize({14, 14});
+    connect(profile_status_button, &QPushButton::clicked, this, &MainWindow::ShowProfileMenu);
+    UpdateProfileButton();
+    statusBar()->insertPermanentWidget(0, profile_status_button);
 
     // Setup Refresh Button
     refresh_button = new QPushButton();
@@ -2726,6 +2743,8 @@ void MainWindow::BootGame(const QString& filename, Service::AM::FrontendAppletPa
     }
     status_bar_update_timer.start(500);
     renderer_status_button->setDisabled(true);
+    profile_status_button->setDisabled(true);
+    UpdateProfileButton();
     frame_gen_status_button->setDisabled(true);
     frame_gen_state = VideoCore::FrameGenState::Pending;
     frame_gen_frames = 0;
@@ -3079,6 +3098,8 @@ void MainWindow::OnEmulationStopped() {
     dlss_status_label->setVisible(false);
     emu_frametime_label->setVisible(false);
     renderer_status_button->setEnabled(!UISettings::values.has_broken_vulkan);
+    profile_status_button->setEnabled(true);
+    UpdateProfileButton();
     frame_gen_status_button->setEnabled(true);
     refresh_button->setEnabled(true);
 
@@ -4541,6 +4562,8 @@ void MainWindow::OnConfigure() {
     if (!multiplayer_state->IsHostingPublicRoom()) {
         multiplayer_state->UpdateCredentials();
     }
+    // Profiles may have been added, renamed or switched in the dialog.
+    UpdateProfileButton();
 
     emit UpdateThemedIcons();
 
@@ -6307,6 +6330,91 @@ void MainWindow::UpdateGPUAccuracyButton() {
         translator, ConfigurationShared::gpu_accuracy_texts_map.find(gpu_accuracy)->second);
     gpu_accuracy_button->setText(gpu_accuracy_text.toUpper());
     gpu_accuracy_button->setChecked(gpu_accuracy != Settings::GpuAccuracy::Low);
+}
+
+namespace {
+
+QPixmap ProfileAvatar(const Common::UUID& uuid, int size) {
+    const auto path =
+        Common::FS::GetEdenPath(Common::FS::EdenPath::NANDDir) /
+        fmt::format("system/save/8000000000000010/su/avators/{}.jpg", uuid.FormattedString());
+    QPixmap avatar{QString::fromStdString(Common::FS::PathToUTF8String(path))};
+    if (avatar.isNull()) {
+        avatar.loadFromData(Core::Constants::ACCOUNT_BACKUP_JPEG.data(),
+                            static_cast<u32>(Core::Constants::ACCOUNT_BACKUP_JPEG.size()));
+    }
+    return avatar.scaled(size, size, Qt::IgnoreAspectRatio, Qt::SmoothTransformation);
+}
+
+QString ProfileName(const Service::Account::ProfileManager& manager, const Common::UUID& uuid) {
+    Service::Account::ProfileBase profile{};
+    if (!manager.GetProfileBase(uuid, profile)) {
+        return {};
+    }
+    return QString::fromStdString(Common::StringFromFixedZeroTerminatedBuffer(
+        reinterpret_cast<const char*>(profile.username.data()), profile.username.size()));
+}
+
+} // Anonymous namespace
+
+void MainWindow::UpdateProfileButton() {
+    if (profile_status_button == nullptr) {
+        return;
+    }
+    const auto& manager = QtCommon::system->GetProfileManager();
+    const auto user =
+        manager.GetUser(static_cast<std::size_t>(Settings::values.current_user.GetValue()));
+    if (!user || user->IsInvalid()) {
+        profile_status_button->setVisible(false);
+        return;
+    }
+    profile_status_button->setVisible(true);
+    profile_status_button->setIcon(QIcon{ProfileAvatar(*user, 32)});
+    profile_status_button->setText(ProfileName(manager, *user));
+    profile_status_button->setToolTip(
+        profile_status_button->isEnabled()
+            ? tr("The user profile games start with. Click to switch.")
+            : tr("The user profile can't be changed while a game is running."));
+}
+
+void MainWindow::ShowProfileMenu() {
+    const auto& manager = QtCommon::system->GetProfileManager();
+    const auto current = static_cast<std::size_t>(Settings::values.current_user.GetValue());
+
+    QMenu menu(this);
+    for (std::size_t index = 0; index < manager.GetUserCount(); ++index) {
+        const auto user = manager.GetUser(index);
+        if (!user || user->IsInvalid()) {
+            continue;
+        }
+        QAction* action =
+            menu.addAction(QIcon{ProfileAvatar(*user, 32)}, ProfileName(manager, *user));
+        action->setCheckable(true);
+        action->setChecked(index == current);
+        // Styles that frame the icon instead of drawing a check mark hide the checked state.
+        if (index == current) {
+            QFont font = action->font();
+            font.setBold(true);
+            action->setFont(font);
+        }
+        connect(action, &QAction::triggered, this, [this, index, current] {
+            if (index == current) {
+                return;
+            }
+            Settings::values.current_user = static_cast<s32>(index);
+            OnSaveConfig();
+            UpdateProfileButton();
+            SyncNextendoProfile(true);
+            if (!multiplayer_state->IsHostingPublicRoom()) {
+                multiplayer_state->UpdateCredentials();
+            }
+        });
+    }
+    // The status bar sits at the bottom of the window, so open the menu above the button.
+    const QPoint anchor = profile_status_button->mapToGlobal(QPoint{0, 0});
+    menu.exec(anchor - QPoint{0, menu.sizeHint().height()});
+    // The button is checkable only for the status bar style; keep it lit.
+    profile_status_button->setChecked(true);
 }
 
 void MainWindow::UpdateDockedButton() {

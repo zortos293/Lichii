@@ -335,14 +335,17 @@ void ConfigureProfileManager::ConfirmDeleteUser() {
 }
 
 void ConfigureProfileManager::DeleteUser(const int index) {
-    if (Settings::values.current_user.GetValue() == tree_view->currentIndex().row()) {
-        Settings::values.current_user = 0;
-    }
-
     const auto uuid = profile_manager.GetUser(index);
     const auto account = uuid ? Common::Nextendo::LoadAccount(*uuid) : std::nullopt;
     if (!profile_manager.RemoveProfileAtIndex(index)) {
         return;
+    }
+    // The profiles after the deleted one move up a row: keep the same one selected.
+    const auto current = Settings::values.current_user.GetValue();
+    if (current == index) {
+        Settings::values.current_user = 0;
+    } else if (index < current) {
+        Settings::values.current_user = current - 1;
     }
     if (account && !account->refresh_token.empty()) {
         void(QtConcurrent::run([client_id = Settings::values.nextendo_client_id.GetValue(),

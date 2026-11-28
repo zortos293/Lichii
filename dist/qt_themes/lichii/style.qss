@@ -967,6 +967,12 @@ QPushButton#TogglableStatusBarButton[chip="volume"] {
     color: #e879f9;
 }
 
+/* user profile */
+QPushButton#TogglableStatusBarButton[chip="profile"] {
+    background-color: rgba(52, 211, 153, 0.14);
+    color: #34d399;
+}
+
 QPushButton#TogglableStatusBarButton:!checked {
     background-color: transparent;
     color: #55575d;
