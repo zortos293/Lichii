@@ -42,9 +42,31 @@ permissions:
 
 # Clang major the Linux PGO build uses, from apt.llvm.org. A profile is written by a current clang
 # and an older reader refuses it, so this has to stay at or above whatever produced
-# eglantine.profdata; bump it when a refreshed profile needs a newer LLVM.
+# eglantine.profdata and lichii-linux.profdata (LLVM 23); bump it when a refreshed profile needs
+# a newer LLVM.
 env:
   PGO_LLVM_VERSION: "23"
+  # The Linux PGO summary warns when the build gives more missing-profile warnings than this
+  # (one per function and translation unit the profile has no entry for). Measured on a Steam
+  # Deck with the job's flags, training in one checkout and building in another: the committed
+  # profile gives 1,282 on its own tree, and eglantine.profdata 31,799. Code added after training
+  # raises the count, so 3000 leaves room for that drift and still flags a profile that no
+  # longer fits the tree or its paths (docs/CI.md).
+  PGO_MISSING_MAX: "3000"
+  # The summary also warns when more functions than this lost profile data that had counts
+  # (hash mismatches, template and inline functions included): the committed profile gives one
+  # on its own tree (lichii-cmd's main, which shares the name of lichii's). Past it, retrain.
+  PGO_MISMATCH_MAX: "10"
+  # The GCC whose C++ standard library headers the Linux PGO build compiles against, and the clang
+  # build that trained lichii-linux.profdata. A profile hashes each function's control flow with
+  # the std:: code inlined into it, so training and the job must use the same headers: Ubuntu
+  # 24.04's default GCC 13 here, while the runner image also carries a newer GCC that clang
+  # would pick by itself (a fork's release build lost the profile of 308 functions that way). The
+  # clang build is checked against PGO_CLANG_BUILD and only warned about: apt.llvm.org keeps the
+  # newest snapshot of each major, so an exact pin would fail the install once it moves
+  # (docs/CI.md).
+  PGO_GCC_MAJOR: "13"
+  PGO_CLANG_BUILD: "23.1.6~++20261116013850+5b10d2d74929-1~exp1~20261116133903.98"
 
 # A running build is never cancelled: it finishes and publishes. A push meanwhile queues one build;
 # a later push replaces it, so the newest commit builds as soon as the running one is done.
@@ -115,8 +137,9 @@ jobs:
         include:
           - platform: linux-x86_64
             runner: ubuntu-24.04
-          # Linux x86-64 PGO builds the same programs with clang against the repo's
-          # eglantine.profdata. Eden's profile (Eden-CI/PGO) comes from Switch 1 games: with it Mario
+          # Linux x86-64 PGO builds the same programs with clang against lichii-linux.profdata,
+          # eglantine.profdata merged with Ocarina of Time gameplay on x86-64 (see docs/CI.md).
+          # Eden's profile (Eden-CI/PGO) comes from Switch 1 games: with it Mario
           # Kart World ran at about half the speed of the normal build, with eglantine.profdata at
           # about the same speed. Both Windows builds are clang-cl with ThinLTO; windows-x86_64-pgo
           # adds lichii-windows.profdata, an MSVC-ABI profile trained on Ocarina of Time (see
@@ -124,6 +147,7 @@ jobs:
           - platform: linux-x86_64-pgo
             runner: ubuntu-24.04
             pgo: true
+            profile: lichii-linux.profdata
           - platform: windows-x86_64
             runner: windows-2022
           - platform: windows-x86_64-pgo
@@ -236,6 +260,18 @@ jobs:
           sudo apt-get install -y --no-install-recommends \
             "clang-$PGO_LLVM_VERSION" "lld-$PGO_LLVM_VERSION"
           "clang-$PGO_LLVM_VERSION" --version
+          installed=$(dpkg-query -W -f '${Version}' "clang-$PGO_LLVM_VERSION" | sed 's/^[0-9]*://')
+          if [ "$installed" != "$PGO_CLANG_BUILD" ]; then
+            echo "::warning::clang-$PGO_LLVM_VERSION is $installed, not the $PGO_CLANG_BUILD that trained ${{ matrix.profile }}; a different build can change function hashes (see the mismatch summary and docs/CI.md)"
+          fi
+          # The standard library headers the profile was trained against must exist: said here,
+          # before the configure step, whose --gcc-install-dir would only fail on the missing
+          # directory.
+          gcc_dir="/usr/lib/gcc/$(gcc -dumpmachine)/$PGO_GCC_MAJOR"
+          if [ ! -d "$gcc_dir" ] || [ ! -d "/usr/include/c++/$PGO_GCC_MAJOR" ]; then
+            echo "::error::GCC $PGO_GCC_MAJOR's libstdc++ headers are missing on this runner ($gcc_dir, /usr/include/c++/$PGO_GCC_MAJOR): the PGO build would compile against another standard library than the profile was trained with (docs/CI.md)"
+            exit 1
+          fi
 
       # Branch builds restore nx2's caches without saving their own, which no other branch can
       # restore: only nx2 saves and keeps one entry per cache family (docs/CI.md).
@@ -267,7 +303,9 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          test -s "${{ matrix.profile || 'eglantine.profdata' }}"
+          profile='${{ matrix.profile }}'
+          if [ -z "$profile" ]; then echo "::error::PGO matrix entry without a profile"; exit 1; fi
+          test -s "$profile"
 
       - name: Set up MSVC
         if: startsWith(matrix.platform, 'windows')
@@ -385,9 +423,23 @@ jobs:
             -DUSE_CCACHE=ON
           )
           if [ '${{ matrix.pgo }}' = 'true' ]; then
-            # Same flags Eden's CI passes for its clang PGO build.
-            profile="-fprofile-use=$PWD/eglantine.profdata -Wbackend-plugin -Wno-error=backend-plugin \
-              -Wno-profile-instr-unprofiled -Wno-profile-instr-out-of-date"
+            # Eden's CI flags for its clang PGO build, plus two LLVM options. A profile names a
+            # file-local (static or anonymous-namespace) function by its file's path, so
+            # static-func-strip-dirname-prefix drops the directories down to the source root, which
+            # makes a profile trained in another checkout match; training passes the same line
+            # (docs/CI.md). pgo-warn-missing-function warns for each function the profile has no entry
+            # for, which the summary below counts.
+            strip_n=$(( $(printf '%s' "$PWD" | tr -cd / | wc -c) + 1 ))
+            # no-pgo-warn-mismatch-comdat-weak=false also reports the hash mismatches of template and
+            # inline functions, which clang otherwise keeps silent; it changes only diagnostics.
+            gcc_dir="/usr/lib/gcc/$(gcc -dumpmachine)/$PGO_GCC_MAJOR"
+            profile="-fprofile-use=$PWD/${{ matrix.profile }} -mllvm -static-func-strip-dirname-prefix=$strip_n \
+              -mllvm -pgo-warn-missing-function -mllvm -no-pgo-warn-mismatch-comdat-weak=false \
+              -Wbackend-plugin -Wno-error=backend-plugin \
+              -Wno-profile-instr-unprofiled -Wno-profile-instr-out-of-date \
+              --gcc-install-dir=$gcc_dir"
+            # CMake passes CMAKE_CXX_FLAGS to the link step too, so that GCC's crt files and libgcc
+            # are linked; libstdc++.so.6 is the system's single copy either way.
             flags+=(
               "-DCMAKE_C_COMPILER=clang-$PGO_LLVM_VERSION"
               "-DCMAKE_CXX_COMPILER=clang++-$PGO_LLVM_VERSION"
@@ -395,6 +447,19 @@ jobs:
               "-DCMAKE_C_FLAGS=$profile"
               "-DCMAKE_CXX_FLAGS=$profile"
             )
+          fi
+          # Which standard library the build compiles against (docs/CI.md, Linux PGO profile). For
+          # the PGO entry it must be the pinned GCC's: anything else stops the job.
+          if [ '${{ matrix.pgo }}' = 'true' ]; then
+            selected=$("clang++-$PGO_LLVM_VERSION" -v --gcc-install-dir="$gcc_dir" \
+              -x c++ -E /dev/null -o /dev/null 2>&1 | grep -E 'clang version|Selected GCC' || true)
+            printf '%s\n' "$selected"
+            if ! printf '%s\n' "$selected" | grep -qxF "Selected GCC installation: $gcc_dir"; then
+              echo "::error::clang did not select $gcc_dir, the GCC the profile was trained against (docs/CI.md)"
+              exit 1
+            fi
+          else
+            c++ -v 2>&1 | grep -E '^gcc version|Selected GCC' || true
           fi
           cmake -S . -B build/release -G Ninja "${flags[@]}"
 
@@ -493,17 +558,45 @@ jobs:
           if [[ '${{ matrix.pgo }}' == 'true' ]]; then
             if cmake --build build/release --target $targets --parallel 2>&1 |
                 tee --output-error=warn "$RUNNER_TEMP/pgo-build.log"; then
-              awk -v platform='${{ matrix.platform }}' '
-                /function control flow change detected \(hash mismatch\).* up to [0-9]+ count discarded/ {
-                  total++
-                  if ($0 ~ / up to [1-9][0-9]* count discarded/) nonzero++
-                }
-                END {
-                  printf "### PGO profile mismatches: %s\n\n", platform
-                  printf "- Discarded profile warnings: %d\n- With nonzero counts: %d\n", total, nonzero
-                }
-              ' "$RUNNER_TEMP/pgo-build.log" >> "$GITHUB_STEP_SUMMARY" ||
-                echo "::warning::Could not write PGO mismatch summary"
+              # The summary only reports: the binaries are built by now, so nothing in it may fail
+              # the step. It runs in a subshell whose failure is a warning.
+              (
+                # Counted as functions: one that lost its data in several translation units warns
+                # once per unit. The name follows "(hash mismatch) ".
+                awk -v platform='${{ matrix.platform }}' '
+                  /function control flow change detected \(hash mismatch\).* up to [0-9]+ count discarded/ {
+                    name = match($0, /\(hash mismatch\) [^ ]+/) ? substr($0, RSTART + 16, RLENGTH - 16) : $0
+                    if (!(name in all)) { all[name] = 1; total++ }
+                    if ($0 ~ / up to [1-9][0-9]* count discarded/ && !(name in counted)) {
+                      counted[name] = 1; nonzero++
+                    }
+                  }
+                  /no profile data available for function/ { missing++ }
+                  END {
+                    printf "### PGO profile mismatches: %s\n\n", platform
+                    printf "- Functions whose profile data was discarded: %d\n", total
+                    printf "- Of them, with nonzero counts: %d\n", nonzero
+                    if (platform ~ /^linux/) printf "- Missing-profile warnings (one per function and translation unit): %d\n", missing
+                  }
+                ' "$RUNNER_TEMP/pgo-build.log" >> "$GITHUB_STEP_SUMMARY" ||
+                  echo "::warning::Could not write PGO mismatch summary"
+                if [[ "${{ matrix.platform }}" == linux* ]]; then
+                  missing=$(grep -c 'no profile data available for function' "$RUNNER_TEMP/pgo-build.log" || true)
+                  if (( missing > PGO_MISSING_MAX )); then
+                    echo "::warning::$missing missing-profile warnings (more than $PGO_MISSING_MAX): the profile no longer matches this tree or its paths, see docs/CI.md"
+                  fi
+                  # None at all is not a perfect profile: the flags that report them were dropped,
+                  # or the warnings were silenced. The summary could not see a lost profile then.
+                  if (( missing == 0 )); then
+                    echo "::warning::No missing-profile warnings: the PGO build's warning flags did not reach it, so the summary cannot show a profile that no longer fits (docs/CI.md)"
+                  fi
+                  lost=$({ grep -E 'hash mismatch\).* up to [1-9][0-9]* count discarded' "$RUNNER_TEMP/pgo-build.log" || true; } |
+                    sed -E 's/.*\(hash mismatch\) ([^ ]+).*/\1/' | sort -u | wc -l)
+                  if (( lost > PGO_MISMATCH_MAX )); then
+                    echo "::warning::$lost functions lost profile data that had counts (more than $PGO_MISMATCH_MAX): the profile no longer fits this tree or its toolchain, retrain (docs/CI.md)"
+                  fi
+                fi
+              ) || echo "::warning::PGO mismatch summary failed; the build itself succeeded"
             else
               build_status=${PIPESTATUS[0]}
               if (( build_status != 0 )); then exit "$build_status"; fi
@@ -865,7 +958,7 @@ jobs:
           }
           pgo_note=""
           if [[ -n "$has_pgo" ]]; then
-            pgo_note="The PGO builds are the same programs compiled with profile-guided optimization. Linux uses clang with Eglantine's profile; Windows uses clang-cl and ThinLTO with a profile trained in Lichii on Ocarina of Time, so other games gain less. Prefer them when your CPU supports it."
+            pgo_note="The PGO builds are the same programs compiled with profile-guided optimization. Linux uses clang with Eglantine's profile merged with one trained in Lichii on Ocarina of Time; Windows uses clang-cl and ThinLTO with a profile trained in Lichii on Ocarina of Time, so other games gain less. Prefer them when your CPU supports it."
           fi
 
           cat > notes.md <<EOF

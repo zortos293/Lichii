@@ -2,7 +2,7 @@
 
 ## Lichii release builds
 
-Run `release-binaries` on the desired branch. Set `publish_release`, `include_whats_new`, and `nsight_aftermath` to false for an unpublished test of the full release matrix. The PGO mismatch summary runs only for the Linux x86_64 and Windows x86_64 PGO jobs. It counts compiler warnings, including how many report discarding nonzero counts.
+Run `release-binaries` on the desired branch. Set `publish_release`, `include_whats_new`, and `nsight_aftermath` to false for an unpublished test of the full release matrix. The PGO mismatch summary runs only for the Linux x86_64 and Windows x86_64 PGO jobs. It counts compiler warnings, including how many report discarding nonzero counts and, for Linux, how many warn that a function has no profile data.
 
 Linux ARM64 PGO installations with the fallback updater (starting with build 116) select the standard ARM64 package on their next update to a release without PGO: AppImage for AppImage installations, `.tar.gz` for unpacked installations. A writable AppImage can be replaced in place; a tarball must be unpacked manually. Builds 75 and 83 match only PGO assets and can first update through an existing PGO release such as [build 386](https://github.com/zortos293/Lichii/releases/tag/build-386) while the updater still lists it. If no update appears, or if you use build 70, which shipped without an updater, download the standard ARM64 package from [GitHub Releases](https://github.com/zortos293/Lichii/releases).
 
@@ -102,6 +102,34 @@ Build artifacts are retained for seven days. Published GitHub Release assets rem
 So only `nx2` saves compiler, CPM and apt caches. Pull requests and branch release builds restore `nx2`'s entries and save none: their own entries helped only that ref, and with one per pull request push they filled the 10 GB and evicted the release caches, whose builds then compiled from scratch. After each save, `tools/ci/prune-caches.sh` deletes the older `nx2` entries of the same family, and each build evicts the ccache entries it didn't use, so a family's entry stays one build's size. A run on `nx2` doesn't save when it was cancelled.
 
 The nightly `release-binaries` run (03:17 UTC) builds `nx2` without publishing to keep those caches close to `nx2`'s head. It skips a commit that already has a successful `nx2` build.
+
+## Linux PGO profile
+
+`linux-x86_64-pgo` is the `linux-x86_64` build compiled by clang (`PGO_LLVM_VERSION`) with `-fprofile-use=lichii-linux.profdata`. That profile is `eglantine.profdata`, weight 1, merged with an indexed profile of two sessions of about five minutes of Ocarina of Time gameplay on x86_64 Linux (a Steam Deck), weight 12, so the Switch 2 paths Ocarina reaches get most of the weight and Eglantine's records keep some where they still match. Eglantine's were trained against libstdc++ 14 or later (they include `std::vector::_M_realloc_append`, which GCC 13's headers lack), so with the job pinned to GCC 13 those whose inlined library code differs no longer match and add nothing. `eglantine.profdata` is no longer read by any build; it stays in the repository as the input for retraining.
+
+A profile names a file-local function (static, or in an anonymous namespace) by the path of its source file. The job and the training build therefore both pass `-mllvm -static-func-strip-dirname-prefix=N`, with N computed in the source root as
+
+```sh
+strip_n=$(( $(printf '%s' "$PWD" | tr -cd / | wc -c) + 1 ))
+```
+
+so those names start at `src/` and a profile trained in any checkout matches the runner's. Without it about a fifth of the profile's functions (14,763 of the committed profile's 78,301 records) silently get no data. It is an internal LLVM option, verified with clang 23.1.6; if a later LLVM drops it, the build fails on the unknown option.
+
+An older profile only produces warnings, and code it never reached is compiled as in the normal build. The job summary counts functions whose code changed since training (hash mismatches, template and inline functions included through `-mllvm -no-pgo-warn-mismatch-comdat-weak=false`, which changes only diagnostics) and missing-profile warnings (`-mllvm -pgo-warn-missing-function`, one per function and translation unit the profile has no entry for). It warns when more than `PGO_MISMATCH_MAX` (10) functions lost data that had counts, when the missing-profile count passes `PGO_MISSING_MAX` (3000), and when it is 0 (the flags that report them did not reach the build, so the summary would show nothing). The committed profile gives 1,282 missing-profile warnings and one function with counts lost (`lichii-cmd`'s `main`) on its own tree; `eglantine.profdata` gives 31,799. Training and the job must agree on three things, or functions lose their profile data as "hash mismatch" warnings:
+
+- **The clang build.** The job installs `clang-$PGO_LLVM_VERSION` from apt.llvm.org, which keeps only the newest snapshot of each major, so the exact build cannot be pinned without the install failing once it moves. The job prints it and warns when it differs from `PGO_CLANG_BUILD`, the build that trained the profile; train with that same package (an Ubuntu 24.04 container with apt.llvm.org's `llvm-toolchain-noble-$PGO_LLVM_VERSION`), and set `PGO_CLANG_BUILD` to it when the profile is replaced.
+- **The standard library headers.** A function's hash covers the std:: code inlined into it, and clang compiles against the newest GCC it finds. The runner image carries a newer GCC than Ubuntu 24.04's default, so the job passes `--gcc-install-dir` for GCC `PGO_GCC_MAJOR` (13) to compiling and linking, prints the GCC it selected, and fails early if that GCC's headers are missing. Train with the same: `--gcc-install-dir=/usr/lib/gcc/x86_64-linux-gnu/13` in the training build's flags, in a container that has GCC 13. A release build of a fork of this job was compiled against libstdc++ 14 with a profile trained against 13 and lost the profile of 308 functions, among them the renderer's state updates and the macro engine.
+- **The configuration.** The training build uses the job's CMake options and Release build type; only `LICHII_BUILD_TAG` and `LICHII_USE_PENDING_RELEASE_NOTES` may differ, as they change no code the profile covers.
+
+**Measure the binary the job builds.** A measurement that backs a profile, or a change to how the job builds, is taken on a binary built with the job's own steps, on the job's runner image or in a container shown to hold the same toolchain: the same clang build, the same standard library headers, and the same source paths the profile keys use. The same flags on another machine are not enough. The fork's build above was measured on a build that used GCC 13's libstdc++, while the runner's clang used GCC 14's, and the measurement could not show the 308 functions the published package lost. Compare the job's PGO summary (hash mismatches and missing-profile warnings) with the measured build's: a difference means the measurement was not of the job's binary.
+
+To retrain:
+
+1. Configure a Release build as the `linux-x86_64-pgo` job does (build directory `build/release`), with clang `PGO_LLVM_VERSION` and `-fprofile-generate=<dir> -fprofile-update=atomic -mllvm -static-func-strip-dirname-prefix=$strip_n --gcc-install-dir=/usr/lib/gcc/x86_64-linux-gnu/13` in `CMAKE_C_FLAGS` and `CMAKE_CXX_FLAGS` in place of `-fprofile-use`, `strip_n` computed as above in the checkout's root, and build `lichii`.
+2. Run it, play the scenes the profile should cover, and exit normally (counters are written at exit).
+3. Merge with the same LLVM. `eglantine.profdata` names its local functions with its author's checkout path, so strip that first: `llvm-profdata merge -text -o eglantine.txt eglantine.profdata`, `sed -E 's#^/home/[^/]+/Eglantine/##' eglantine.txt > eglantine-rel.txt`, `llvm-profdata merge -o eglantine-rel.profdata eglantine-rel.txt`. Then `llvm-profdata merge -o ocarina.profdata <dir>/*.profraw` and `llvm-profdata merge -o lichii-linux.profdata -weighted-input=1,eglantine-rel.profdata -weighted-input=12,ocarina.profdata`, and replace the file in the repository root. `llvm-profdata show --all-functions lichii-linux.profdata | grep -c '^  /'` should print 0.
+
+A profile ages with the tree: applied to a tree 20 upstream commits newer than the one it was trained on, the previous profile lost its data for 12 functions training had reached, among them the shader compiler's SSA rewrite pass and the Vulkan fence manager's release thread. Retrain when the summary's count of functions that lost data with counts passes `PGO_MISMATCH_MAX`, or names code that matters; that count, not the number of commits, is the signal.
 
 ## Windows PGO profile
 
