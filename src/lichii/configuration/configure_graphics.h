@@ -8,6 +8,7 @@
 
 #include <functional>
 #include <memory>
+#include <string>
 #include <type_traits>
 #include <typeindex>
 #include <vector>
@@ -113,4 +114,11 @@ private:
     QComboBox* aspect_ratio_combobox;
     QComboBox* resolution_combobox;
     QWidget* amd_fsr4_group{}; ///< The FSR 4 setting and AmdFsr4Panel
+    QComboBox* post_shader_preset_combobox{}; ///< A game's own effects preset (per-game only)
+    /// The item for effects only the game's config has ("Custom effects" or a missing preset),
+    /// and the preset name and chain it stands for
+    int post_shader_saved_index{-1};
+    std::string post_shader_saved_preset;
+    std::string post_shader_saved_chain;
+    bool post_shader_saved_chain_global{};
 };

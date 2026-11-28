@@ -2506,6 +2506,16 @@ void MainWindow::BootGame(const QString& filename, Service::AM::FrontendAppletPa
                                           ? Common::FS::PathToUTF8String(file_path.filename())
                                           : fmt::format("{:016X}", title_id);
         QtConfig per_game_config(config_file_name, Config::ConfigType::PerGameConfig);
+#ifdef HAS_RESHADE
+        // A game's own preset starts with the effects the preset has now.
+        const auto& game_preset = Settings::values.post_shader_preset;
+        if (!game_preset.UsingGlobal()) {
+            if (const auto* preset = VideoCore::FindFxPreset(game_preset.GetValue())) {
+                Settings::values.post_shader_chain.SetGlobal(false);
+                Settings::values.post_shader_chain.SetValue(preset->chain);
+            }
+        }
+#endif
         QtCommon::system->HIDCore().ReloadInputDevices();
         QtCommon::system->ApplySettings();
     }
@@ -6487,6 +6497,9 @@ void MainWindow::UpdateStatusButtons() {
     UpdateAAText();
     UpdateFrameGenButton();
     UpdateVolumeUI();
+#ifdef HAS_RESHADE
+    UpdatePostShaderText();
+#endif
 }
 
 // TODO(crueter): Use this for game list stuff
