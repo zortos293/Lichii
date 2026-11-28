@@ -8,6 +8,7 @@
 #include <vector>
 #include <QComboBox>
 #include <QPushButton>
+#include <QSignalBlocker>
 
 #include "audio_core/sink/sink.h"
 #include "audio_core/sink/sink_details.h"
@@ -95,11 +96,21 @@ void ConfigureAudio::Setup(const ConfigurationShared::Builder& builder) {
                 connect(restore_sink_button, &QAbstractButton::clicked, [this](bool) {
                     Settings::values.sink_id.SetGlobal(true);
                     const int sink_index = static_cast<int>(Settings::values.sink_id.GetValue());
-                    sink_combo_box->setCurrentIndex(sink_index);
+                    {
+                        // Restoring the global sink is not a user edit: without
+                        // this block the currentIndexChanged handler re-pins all
+                        // three values as per-game.
+                        const QSignalBlocker blocker(sink_combo_box);
+                        sink_combo_box->setCurrentIndex(sink_index);
+                    }
                     ConfigureAudio::UpdateAudioDevices(sink_index);
                     Settings::values.audio_output_device_id.SetGlobal(true);
                     Settings::values.audio_input_device_id.SetGlobal(true);
+                    SetOutputDevicesFromDeviceID();
+                    SetInputDevicesFromDeviceID();
                     restore_sink_button->setVisible(false);
+                    restore_output_device_button->setVisible(false);
+                    restore_input_device_button->setVisible(false);
                 });
                 connect(sink_combo_box, qOverload<int>(&QComboBox::currentIndexChanged),
                         [this, global_sink_match](const int slot) {
@@ -211,6 +222,10 @@ void ConfigureAudio::SetOutputSinkFromSinkID() {
 }
 
 void ConfigureAudio::SetOutputDevicesFromDeviceID() {
+    // Selecting the configured device is not a user edit: without this block the
+    // currentIndexChanged handler pins the shown device as a per-game value.
+    const QSignalBlocker blocker(output_device_combo_box);
+
     int new_device_index = 0;
 
     const QString output_device_id =
@@ -230,6 +245,11 @@ void ConfigureAudio::SetInputDevicesFromDeviceID() {
     if (!input_device_combo_box) {
         return;
     }
+
+    // Same guard as SetOutputDevicesFromDeviceID(): restoring the configured
+    // device must not pin it as a per-game value.
+    const QSignalBlocker blocker(input_device_combo_box);
+
     int new_device_index = 0;
     const QString input_device_id =
         QString::fromStdString(Settings::values.audio_input_device_id.GetValue());
