@@ -117,6 +117,7 @@ add_executable(tests
     core/ncz_container.cpp
     core/file_sys_parsers.cpp
     core/nca_header_authentication.cpp
+    core/nca_verify_integrity.cpp
     core/system_data_view.cpp
     input_common/calibration_lifetime.cpp
     video_core/ampere_logged_numeric.cpp
