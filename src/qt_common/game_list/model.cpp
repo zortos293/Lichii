@@ -1,6 +1,8 @@
 // SPDX-FileCopyrightText: Copyright 2026 Eden Emulator Project
 // SPDX-License-Identifier: GPL-3.0-or-later
 
+#include <functional>
+#include <limits>
 #include <QDir>
 #include <QIcon>
 #include <QJsonArray>
@@ -19,6 +21,7 @@
 #include "qt_common/util/game.h"
 
 #include "qt_common/game_list/game_list_p.h"
+#include "qt_common/game_list/game_order.h"
 #include "qt_common/game_list/model.h"
 #include "qt_common/game_list/worker.h"
 
@@ -162,6 +165,57 @@ void GameListModel::ToggleFavorite(u64 program_id) {
         RemoveFavorite(program_id);
     }
     emit SaveConfig();
+}
+
+namespace {
+
+// Where a game sorts in the user's order. Games not in it come after the rest.
+constexpr int OrderRankRole = Qt::UserRole + 32;
+
+bool IsGame(const QStandardItem* item) {
+    return item->data(GameListItem::TypeRole).value<GameListItemType>() == GameListItemType::Game;
+}
+
+QString OrderKey(const QStandardItem* game) {
+    return GameOrder::Key(game->data(GameListItemPath::ProgramIdRole).toULongLong(),
+                          game->data(GameListItemPath::FullPathRole).toString());
+}
+
+} // Anonymous namespace
+
+void GameListModel::SortGames(int column, Qt::SortOrder order) {
+    sort(column, order);
+    if (!UISettings::values.custom_game_order.GetValue()) {
+        return;
+    }
+    // Sorting is stable, so games not in the user's order stay sorted by the column.
+    const QHash<QString, int> ranks = GameOrder::Ranks(UISettings::values.game_order);
+    const std::function<void(QStandardItem*)> rank = [&](QStandardItem* parent) {
+        for (int row = 0; row < parent->rowCount(); ++row) {
+            QStandardItem* item = parent->child(row);
+            if (IsGame(item)) {
+                item->setData(ranks.value(OrderKey(item), std::numeric_limits<int>::max()),
+                              OrderRankRole);
+            } else {
+                rank(item);
+            }
+        }
+    };
+    rank(invisibleRootItem());
+    setSortRole(OrderRankRole);
+    sort(COLUMN_NAME, Qt::AscendingOrder);
+    setSortRole(GameListItemPath::SortRole);
+}
+
+QStringList GameListModel::GameKeys(const QStandardItem* parent) {
+    QStringList keys;
+    for (int row = 0; row < parent->rowCount(); ++row) {
+        const QStandardItem* item = parent->child(row);
+        if (IsGame(item)) {
+            keys.append(OrderKey(item));
+        }
+    }
+    return keys;
 }
 
 void GameListModel::AddFavorite(u64 program_id) {

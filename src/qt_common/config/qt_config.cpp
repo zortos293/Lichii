@@ -7,6 +7,7 @@
 
 #include "common/logging.h"
 #include "input_common/main.h"
+#include "qt_common/game_list/game_order.h"
 #include "qt_config.h"
 #include "uisettings.h"
 
@@ -353,6 +354,15 @@ void QtConfig::ReadUIGamelistValues() {
     }
     EndArray();
 
+    UISettings::values.game_order.clear();
+    const int order_size = BeginArray("game_order");
+    for (int i = 0; i < order_size; i++) {
+        SetArrayIndex(i);
+        UISettings::values.game_order.append(
+            GameOrder::Decode(QString::fromStdString(ReadStringSetting(std::string("game")))));
+    }
+    EndArray();
+
     const int linked_size = BeginArray("ryujinx_linked");
     for (int i = 0; i < linked_size; ++i) {
         SetArrayIndex(i);
@@ -582,6 +592,14 @@ void QtConfig::SaveUIGamelistValues() {
         WriteIntegerSetting(std::string("program_id"), UISettings::values.favorited_ids[i]);
     }
     EndArray(); // favorites
+
+    BeginArray(std::string("game_order"));
+    for (int i = 0; i < UISettings::values.game_order.size(); i++) {
+        SetArrayIndex(i);
+        WriteStringSetting(std::string("game"),
+                           GameOrder::Encode(UISettings::values.game_order[i]).toStdString());
+    }
+    EndArray(); // game_order
 
     BeginArray(std::string("ryujinx_linked"));
     int i = 0;

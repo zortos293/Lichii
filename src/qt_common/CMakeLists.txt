@@ -35,6 +35,7 @@ add_library(qt_common STATIC
     game_list/model.h game_list/model.cpp
     game_list/worker.h game_list/worker.cpp
     game_list/patch_cache.h
+    game_list/game_order.h
     game_list/game_list_p.h
 
     qt_string_lookup.h
@@ -50,6 +51,11 @@ if (LICHII_TESTS)
     target_include_directories(game_list_patch_cache_tests PRIVATE ..)
     target_link_libraries(game_list_patch_cache_tests PRIVATE Qt6::Core)
     add_test(NAME game_list_patch_cache_tests COMMAND game_list_patch_cache_tests)
+
+    add_executable(game_list_order_tests ../../tools/integration/game_list_order_test.cpp)
+    target_include_directories(game_list_order_tests PRIVATE ..)
+    target_link_libraries(game_list_order_tests PRIVATE Qt6::Core)
+    add_test(NAME game_list_order_tests COMMAND game_list_order_tests)
 endif()
 
 if (UNIX)

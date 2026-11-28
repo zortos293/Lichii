@@ -11,8 +11,12 @@
 
 #include <QAbstractItemView>
 #include <QApplication>
+#include <QCursor>
 #include <QDir>
+#include <QDrag>
+#include <QDropEvent>
 #include <QFileInfo>
+#include <QGuiApplication>
 #include <QHeaderView>
 #include <QJsonArray>
 #include <QJsonDocument>
@@ -20,9 +24,11 @@
 #include <QList>
 #include <QListView>
 #include <QMenu>
+#include <QPersistentModelIndex>
 #include <QScrollBar>
 #include <QScroller>
 #include <QScrollerProperties>
+#include <QTimer>
 #include <QToolButton>
 #include <QFutureWatcher>
 #include <QVariantAnimation>
@@ -41,6 +47,7 @@
 #include "core/file_sys/registered_cache.h"
 #include "qt_common/config/uisettings.h"
 #include "qt_common/game_list/game_list_p.h"
+#include "qt_common/game_list/game_order.h"
 #include "qt_common/game_list/model.h"
 #include "qt_common/qt_common.h"
 #include "qt_common/util/game.h"
@@ -58,6 +65,8 @@
 namespace {
 // A few at a time keeps SteamGridDB happy and the scan of a large library short.
 constexpr int MaxParallelLookups = 2;
+// How long a game is held, after the scroller passes the press on, before it is dragged
+constexpr int DragHoldMs = 300;
 } // namespace
 
 GameList::GameList(FileSys::VirtualFilesystem vfs_, FileSys::ManualContentProvider* provider_,
@@ -84,6 +93,11 @@ GameList::GameList(FileSys::VirtualFilesystem vfs_, FileSys::ManualContentProvid
 
     SetupScrollAnimation();
 
+    drag_hold_timer = new QTimer(this);
+    drag_hold_timer->setSingleShot(true);
+    drag_hold_timer->setInterval(DragHoldMs);
+    connect(drag_hold_timer, &QTimer::timeout, this, &GameList::StartHeldDrag);
+
     connect(tree_view, &QTreeView::activated, this, &GameList::ValidateEntry);
     connect(tree_view, &QTreeView::customContextMenuRequested, this, &GameList::PopupContextMenu);
 
@@ -107,6 +121,15 @@ GameList::GameList(FileSys::VirtualFilesystem vfs_, FileSys::ManualContentProvid
 
     connect(item_model, &GameListModel::PopulatingCompleted, this,
             &GameList::OnPopulatingCompleted);
+
+    // Sorting by a column leaves the custom order, which is kept for when it is used again.
+    connect(tree_view->header(), &QHeaderView::sectionClicked, this, [this] {
+        if (UISettings::values.custom_game_order.GetValue()) {
+            UISettings::values.custom_game_order = false;
+            tree_view->header()->setSortIndicatorShown(true);
+            emit SaveConfig();
+        }
+    });
 
     connect(item_model, &GameListModel::ShowList, this, &GameList::ShowList);
     connect(item_model, &GameListModel::SaveConfig, this, &GameList::SaveConfig);
@@ -400,9 +423,7 @@ void GameList::OnPopulatingCompleted(const QStringList& watch_list) {
         search_field->setFocus();
     }
 
-    // TODO: carousel/grid impl.
-    item_model->sort(tree_view->header()->sortIndicatorSection(),
-                     tree_view->header()->sortIndicatorOrder());
+    SortGames();
 
     // A repopulate (a directory removed, deep scan toggled) replaces the rows: apply the search
     // text the user still has typed to them.
@@ -625,8 +646,7 @@ void GameList::SetGameTitle(u64 program_id, const QString& title) {
     // A list sorted by name puts the renamed game in its new place. This only reorders the rows
     // already shown: no rescan.
     if (display.isValid() || !copies.isEmpty()) {
-        item_model->sort(tree_view->header()->sortIndicatorSection(),
-                         tree_view->header()->sortIndicatorOrder());
+        SortGames();
     }
     // A new name can match the search text, or stop matching it.
     if (!search_field->filterText().isEmpty()) {
@@ -737,13 +757,140 @@ void GameList::ToggleFavorite(u64 program_id) {
     if (UISettings::values.favorited_ids.contains(program_id)) {
         tree_view->setRowHidden(0, item_model->invisibleRootItem()->index(),
                                 !search_field->filterText().isEmpty());
-        item_model->sort(tree_view->header()->sortIndicatorSection(),
-                         tree_view->header()->sortIndicatorOrder());
+        SortGames();
     } else {
         if (UISettings::values.favorited_ids.size() == 0) {
             tree_view->setRowHidden(0, item_model->invisibleRootItem()->index(), true);
         }
     }
+}
+
+void GameList::SortGames() {
+    QHeaderView* header = tree_view->header();
+    item_model->SortGames(header->sortIndicatorSection(), header->sortIndicatorOrder());
+    header->setSortIndicatorShown(!UISettings::values.custom_game_order.GetValue());
+}
+
+void GameList::MoveGame(const QModelIndex& game, const QModelIndex& target, bool after) {
+    const QModelIndex moved = game.siblingAtColumn(0);
+    const QModelIndex next_to = target.siblingAtColumn(0);
+    if (!moved.isValid() || !next_to.isValid() || moved.parent() != next_to.parent() ||
+        moved.row() == next_to.row()) {
+        return;
+    }
+    const QStandardItem* parent = moved.parent().isValid()
+                                      ? item_model->itemFromIndex(moved.parent())
+                                      : item_model->invisibleRootItem();
+    QStringList shown = GameListModel::GameKeys(parent);
+    // Only a folder of games (or the flat list) can be reordered.
+    if (shown.size() != parent->rowCount()) {
+        return;
+    }
+    GameOrder::Move(shown, moved.row(), next_to.row(), after);
+    GameOrder::Place(UISettings::values.game_order, shown);
+    UISettings::values.custom_game_order = true;
+
+    const QPersistentModelIndex kept{moved};
+    SortGames();
+    m_currentView->setCurrentIndex(kept);
+    m_currentView->scrollTo(kept);
+    emit SaveConfig();
+}
+
+void GameList::StartHeldDrag() {
+    // The scroller keeps the mouse while the list can scroll, so the view would never see the
+    // game dragged. A drag started here owns the mouse until the drop.
+    QWidget* viewport = m_currentView->viewport();
+    const QScroller::State scroll = QScroller::scroller(viewport)->state();
+    if (scroll == QScroller::Dragging || scroll == QScroller::Scrolling ||
+        QGuiApplication::mouseButtons() != Qt::LeftButton) {
+        return;
+    }
+    // The game pressed, if it is still the one under the press.
+    const QModelIndex game = drag_hold_game;
+    if (!game.isValid() || m_currentView->indexAt(drag_hold_start).siblingAtColumn(0) != game) {
+        return;
+    }
+    m_currentView->setCurrentIndex(game);
+    const QRect rect = m_currentView->visualRect(game);
+    auto* drag = new QDrag(m_currentView);
+    drag->setMimeData(item_model->mimeData({game}));
+    drag->setPixmap(viewport->grab(rect));
+    drag->setHotSpot(drag_hold_start - rect.topLeft());
+    drag->exec(Qt::CopyAction);
+
+    // The drag took the button's release: end the press for the scroller and the view too.
+    const QPoint pos = viewport->mapFromGlobal(QCursor::pos());
+    QMouseEvent release(QEvent::MouseButtonRelease, pos, viewport->mapToGlobal(pos), Qt::LeftButton,
+                        Qt::NoButton, Qt::NoModifier);
+    QCoreApplication::sendEvent(viewport, &release);
+}
+
+void GameList::AddMovePopup(QMenu& context_menu, const QModelIndex& game) {
+    const QModelIndex parent = game.parent();
+    // The shown games around this one: a search can hide some.
+    QModelIndex first, previous, next, last;
+    bool found = false;
+    for (int row = 0; row < item_model->rowCount(parent); ++row) {
+        const bool hidden = m_isTreeMode ? tree_view->isRowHidden(row, parent)
+                                         : static_cast<QListView*>(m_currentView)->isRowHidden(row);
+        if (hidden) {
+            continue;
+        }
+        if (row == game.row()) {
+            found = true;
+            continue;
+        }
+        const QModelIndex index = item_model->index(row, 0, parent);
+        if (!found) {
+            if (!first.isValid()) {
+                first = index;
+            }
+            previous = index;
+        } else {
+            if (!next.isValid()) {
+                next = index;
+            }
+            last = index;
+        }
+    }
+
+    QMenu* move_menu = context_menu.addMenu(tr("Move"));
+    move_menu->menuAction()->setIcon(MenuIcon("sliders"));
+    const auto add = [&](const QString& text, const QModelIndex& target, bool after) {
+        QAction* action = move_menu->addAction(text);
+        action->setEnabled(target.isValid());
+        const QPersistentModelIndex moved{game};
+        const QPersistentModelIndex next_to{target};
+        connect(action, &QAction::triggered, this,
+                [this, moved, next_to, after] { MoveGame(moved, next_to, after); });
+    };
+    // The list and grid lay games out down the page, the carousel across it.
+    const bool across = game_list_mode == Settings::GameListMode::CarouselView;
+    add(across ? tr("Move Left") : tr("Move Up"), previous, false);
+    add(across ? tr("Move Right") : tr("Move Down"), next, true);
+    add(across ? tr("Move to Start") : tr("Move to Top"), first, false);
+    add(across ? tr("Move to End") : tr("Move to Bottom"), last, true);
+    move_menu->addSeparator();
+
+    QAction* use_order = move_menu->addAction(tr("Use Custom Order"));
+    use_order->setCheckable(true);
+    use_order->setChecked(UISettings::values.custom_game_order.GetValue());
+    use_order->setEnabled(UISettings::values.custom_game_order.GetValue() ||
+                          !UISettings::values.game_order.isEmpty());
+    connect(use_order, &QAction::toggled, this, [this](bool checked) {
+        UISettings::values.custom_game_order = checked;
+        SortGames();
+        emit SaveConfig();
+    });
+    QAction* reset_order = move_menu->addAction(tr("Reset Custom Order"));
+    reset_order->setEnabled(!UISettings::values.game_order.isEmpty());
+    connect(reset_order, &QAction::triggered, this, [this] {
+        UISettings::values.game_order.clear();
+        UISettings::values.custom_game_order = false;
+        SortGames();
+        emit SaveConfig();
+    });
 }
 
 void GameList::PopupContextMenu(const QPoint& menu_location) {
@@ -765,7 +912,8 @@ void GameList::PopupContextMenu(const QPoint& menu_location) {
     QMenu context_menu;
     switch (selected.data(GameListItem::TypeRole).value<GameListItemType>()) {
     case GameListItemType::Game:
-        AddGamePopup(context_menu, selected.data(GameListItemPath::ProgramIdRole).toULongLong(),
+        AddGamePopup(context_menu, selected,
+                     selected.data(GameListItemPath::ProgramIdRole).toULongLong(),
                      selected.data(GameListItemPath::FullPathRole).toString().toStdString());
         break;
     case GameListItemType::CustomDir:
@@ -790,9 +938,11 @@ void GameList::SetReportableProgramId(u64 program_id) {
     reportable_program_id = program_id;
 }
 
-void GameList::AddGamePopup(QMenu& context_menu, u64 program_id, const std::string& path) {
+void GameList::AddGamePopup(QMenu& context_menu, const QModelIndex& game, u64 program_id,
+                            const std::string& path) {
     // TODO(crueter): Refactor this and make it less bad
     QAction* favorite = context_menu.addAction(tr("Favorite"));
+    AddMovePopup(context_menu, game);
     context_menu.addSeparator();
     QAction* start_game = context_menu.addAction(tr("Start Game"));
     QAction* start_game_global =
@@ -1154,6 +1304,8 @@ void GameList::SetupScrollAnimation() {
 
 bool GameList::eventFilter(QObject* obj, QEvent* event) {
     if (obj == m_currentView->viewport() && event->type() == QEvent::Wheel) {
+        // Scrolling moves another game under a held one.
+        drag_hold_timer->stop();
         QWheelEvent* wheelEvent = static_cast<QWheelEvent*>(event);
 
         bool horizontal = wheelEvent->modifiers() & Qt::ShiftModifier;
@@ -1194,6 +1346,70 @@ bool GameList::eventFilter(QObject* obj, QEvent* event) {
             horizontal_scroll->start();
         }
 
+        return true;
+    }
+
+    // Dragging the list scrolls it, so a game held still for a moment is dragged instead.
+    if (obj == m_currentView->viewport()) {
+        switch (event->type()) {
+        case QEvent::MouseButtonPress: {
+            const auto* mouse = static_cast<QMouseEvent*>(event);
+            const QModelIndex index = m_currentView->indexAt(mouse->position().toPoint());
+            if (mouse->button() == Qt::LeftButton &&
+                index.siblingAtColumn(0).data(GameListItem::TypeRole).value<GameListItemType>() ==
+                    GameListItemType::Game) {
+                drag_hold_start = mouse->position().toPoint();
+                drag_hold_game = index.siblingAtColumn(0);
+                drag_hold_timer->start();
+            }
+            break;
+        }
+        case QEvent::MouseMove:
+            if (drag_hold_timer->isActive() &&
+                (static_cast<QMouseEvent*>(event)->position().toPoint() - drag_hold_start)
+                        .manhattanLength() >= QApplication::startDragDistance()) {
+                drag_hold_timer->stop();
+            }
+            break;
+        case QEvent::MouseButtonRelease:
+            drag_hold_timer->stop();
+            break;
+        default:
+            break;
+        }
+    }
+
+    // The carousel, a static icon mode view, refuses drops between its games.
+    if (obj == m_currentView->viewport() &&
+        game_list_mode == Settings::GameListMode::CarouselView &&
+        (event->type() == QEvent::DragEnter || event->type() == QEvent::DragMove)) {
+        auto* drag = static_cast<QDropEvent*>(event);
+        if (drag->source() == m_currentView) {
+            drag->setDropAction(Qt::CopyAction);
+            drag->accept();
+        } else {
+            drag->ignore();
+        }
+        return true;
+    }
+
+    if (obj == m_currentView->viewport() && event->type() == QEvent::Drop) {
+        // A game dropped on another of its folder takes its place, before or after it. The drop
+        // is taken here so that the view does not move the row itself.
+        auto* drop = static_cast<QDropEvent*>(event);
+        if (drop->source() != m_currentView) {
+            drop->ignore();
+            return true;
+        }
+        const QPoint pos = drop->position().toPoint();
+        if (const QModelIndex target = m_currentView->indexAt(pos); target.isValid()) {
+            const QRect rect = m_currentView->visualRect(target);
+            const bool after =
+                m_isTreeMode ? pos.y() >= rect.center().y() : pos.x() >= rect.center().x();
+            MoveGame(m_currentView->currentIndex(), target, after);
+        }
+        drop->setDropAction(Qt::CopyAction);
+        drop->accept();
         return true;
     }
 

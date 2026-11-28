@@ -144,6 +144,8 @@ public:
                      const QString& game_name, const QString& game_type, u64 program_id,
                      u64 play_time, const QString& patch_versions) {
         setData(type(), TypeRole);
+        // Dropped before or after, not on: games are dragged to reorder them.
+        setDropEnabled(false);
         setData(game_path, FullPathRole);
         setData(game_name, TitleRole);
         setData(qulonglong(program_id), ProgramIdRole);
@@ -367,6 +369,7 @@ public:
                          GameListItemType dir_type_ = GameListItemType::CustomDir)
         : dir_type{dir_type_} {
         setData(type(), TypeRole);
+        setDragEnabled(false);
 
         UISettings::GameDir* game_dir = &directory;
         setData(QVariant(UISettings::values.game_dirs.indexOf(directory)), GameDirRole);
@@ -419,6 +422,8 @@ class GameListAddDir : public GameListItem {
 public:
     explicit GameListAddDir() {
         setData(type(), TypeRole);
+        setDragEnabled(false);
+        setDropEnabled(false);
 
         setData(ThemeIcon("list-add"), Qt::DecorationRole);
         setData(QObject::tr("Add New Game Directory"), Qt::DisplayRole);
@@ -437,6 +442,7 @@ class GameListFavorites : public GameListItem {
 public:
     explicit GameListFavorites() {
         setData(type(), TypeRole);
+        setDragEnabled(false);
 
         setData(ThemeIcon("star"), Qt::DecorationRole);
         setData(QObject::tr("Favorites"), Qt::DisplayRole);

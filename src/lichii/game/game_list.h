@@ -11,6 +11,7 @@
 #include <QHash>
 #include <QList>
 #include <QSet>
+#include <QPersistentModelIndex>
 #include <QPushButton>
 #include <QStandardItemModel>
 #include <QString>
@@ -28,6 +29,7 @@
 #include "qt_common/game_list/model.h"
 #include "qt_common/util/game.h"
 
+class QTimer;
 class QVariantAnimation;
 
 class GameCard;
@@ -160,8 +162,19 @@ private:
 
     void ToggleFavorite(u64 program_id);
 
+    /// Sorts by the list's column, or in the custom order while it is on.
+    void SortGames();
+    /// Puts `game` just before or after `target`, a game of the same folder, in the custom order
+    /// and turns that order on.
+    void MoveGame(const QModelIndex& game, const QModelIndex& target, bool after);
+    /// Drags the game held under the mouse, when the list is not being scrolled.
+    void StartHeldDrag();
+
     void PopupContextMenu(const QPoint& menu_location);
-    void AddGamePopup(QMenu& context_menu, u64 program_id, const std::string& path);
+    void AddGamePopup(QMenu& context_menu, const QModelIndex& game, u64 program_id,
+                      const std::string& path);
+    /// Adds the Move menu, which moves the game among the shown games of its folder.
+    void AddMovePopup(QMenu& context_menu, const QModelIndex& game);
     void AddCustomDirPopup(QMenu& context_menu, QModelIndex selected);
     void AddPermDirPopup(QMenu& context_menu, QModelIndex selected);
     void AddFavoritesPopup(QMenu& context_menu);
@@ -207,6 +220,10 @@ private:
     bool nx_tool_running{};
     u64 reportable_program_id{};
     QAbstractItemView* m_currentView = nullptr;
+    /// Runs while a game is held still; when it fires the game is dragged instead of the list.
+    QTimer* drag_hold_timer = nullptr;
+    QPoint drag_hold_start;
+    QPersistentModelIndex drag_hold_game;
 
     struct ArtworkLookup {
         u64 program_id;

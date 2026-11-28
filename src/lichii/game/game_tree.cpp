@@ -146,6 +146,13 @@ GameTree::GameTree(QWidget* parent) : QTreeView{parent} {
     setEditTriggers(QHeaderView::NoEditTriggers);
     setContextMenuPolicy(Qt::CustomContextMenu);
     setAttribute(Qt::WA_AcceptTouchEvents, true);
+
+    // Games are dragged to reorder them; GameList takes the drop.
+    setDragEnabled(true);
+    setAcceptDrops(true);
+    setDropIndicatorShown(true);
+    setDragDropMode(QAbstractItemView::DragDrop);
+    setDefaultDropAction(Qt::CopyAction);
     setStyleSheet(QStringLiteral("QTreeView{ border: none; }"));
 
     connect(this, &QTreeView::expanded, this, &GameTree::OnItemExpanded);

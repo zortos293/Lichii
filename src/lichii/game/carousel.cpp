@@ -29,6 +29,15 @@ GameCarousel::GameCarousel(QWidget* parent) : QListView{parent} {
     setTextElideMode(Qt::ElideRight);
     setFlow(QListView::LeftToRight);
     setWrapping(false);
+
+    // Games are dragged to reorder them; GameList takes the drop.
+    setDragEnabled(true);
+    setAcceptDrops(true);
+    setDropIndicatorShown(true);
+    setDragDropMode(QAbstractItemView::DragDrop);
+    setDefaultDropAction(Qt::CopyAction);
+    // A static icon mode view turns drops off on its viewport.
+    viewport()->setAcceptDrops(true);
 }
 
 void GameCarousel::SetModel(GameListModel* model) {

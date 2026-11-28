@@ -4502,6 +4502,7 @@ void MainWindow::OnConfigure() {
         // so.
         QVector<UISettings::GameDir> old_game_dirs = std::move(UISettings::values.game_dirs);
         QVector<u64> old_favorited_ids = std::move(UISettings::values.favorited_ids);
+        QStringList old_game_order = std::move(UISettings::values.game_order);
 
         Settings::values.disabled_addons.clear();
 
@@ -4510,6 +4511,7 @@ void MainWindow::OnConfigure() {
 
         UISettings::values.game_dirs = std::move(old_game_dirs);
         UISettings::values.favorited_ids = std::move(old_favorited_ids);
+        UISettings::values.game_order = std::move(old_game_order);
 
         InitializeRecentFileMenuActions();
 

@@ -59,6 +59,11 @@ public:
 
     void ToggleFavorite(u64 program_id);
 
+    /// Sorts the games by `column`, or in the order the user gave them while that order is on.
+    void SortGames(int column, Qt::SortOrder order);
+    /// The order keys of the games under `parent`, in row order.
+    static QStringList GameKeys(const QStandardItem* parent);
+
     void RefreshGameDirectory();
     void RefreshExternalContent();
     void ResetExternalWatcher();

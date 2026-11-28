@@ -225,6 +225,10 @@ struct Values {
     Setting<bool> cache_game_list{linkage, true, "cache_game_list", Category::UiGameList};
     Setting<bool> favorites_expanded{linkage, true, "favorites_expanded", Category::UiGameList};
     QVector<u64> favorited_ids;
+    /// Sorts the game list in the order the user gave it, game_order, instead of by a column
+    Setting<bool> custom_game_order{linkage, false, "custom_game_order", Category::UiGameList};
+    /// Game keys (GameOrder::Key) in the order the user gave them
+    QStringList game_order;
     QMap<u64, QDir> ryujinx_link_paths;
 
     // perf overlay
