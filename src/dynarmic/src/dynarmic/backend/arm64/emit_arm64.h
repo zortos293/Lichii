@@ -97,6 +97,7 @@ enum class BlockRelocationType {
 };
 
 struct BlockRelocation {
+    IR::LocationDescriptor target;
     std::ptrdiff_t code_offset;
     BlockRelocationType type;
 };
@@ -105,8 +106,11 @@ struct EmittedBlockInfo {
     CodePtr entry_point;
     std::size_t size;
     std::vector<Relocation> relocations;
-    ::Common::unordered_map<IR::LocationDescriptor, std::vector<BlockRelocation>> block_relocations;
-    ::Common::unordered_map<std::ptrdiff_t, FastmemPatchInfo> fastmem_patch_info;
+    // Vectors rather than hash maps: a block has a few of each, and every core's JIT keeps them for
+    // each block it has compiled. As hash maps they cost 1-1.3 KB a block even when nearly empty
+    // (3.4 GB of the heap in Ocarina of Time's Kokiri Forest on a 6-core arm64 host).
+    std::vector<BlockRelocation> block_relocations;
+    std::vector<std::pair<std::ptrdiff_t, FastmemPatchInfo>> fastmem_patch_info;  ///< Sorted by offset
 };
 
 struct EmitConfig {

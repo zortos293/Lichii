@@ -275,7 +275,7 @@ void EmitRelocation(oaknut::CodeGenerator& code, EmitContext& ctx, LinkTarget li
 }
 
 void EmitBlockLinkRelocation(oaknut::CodeGenerator& code, EmitContext& ctx, const IR::LocationDescriptor& descriptor, BlockRelocationType type) {
-    ctx.ebi.block_relocations[descriptor].emplace_back(BlockRelocation{code.xptr<CodePtr>() - ctx.ebi.entry_point, type});
+    ctx.ebi.block_relocations.push_back(BlockRelocation{descriptor, code.xptr<CodePtr>() - ctx.ebi.entry_point, type});
     switch (type) {
     case BlockRelocationType::Branch:
         code.NOP();
