@@ -906,12 +906,21 @@ private:
         std::vector<IR::U1> demote_conds;
         u32 num_epilogues{};
         u32 branch_depth{};
+        // A demote in a loop stays: its condition is one iteration's value, and a break before
+        // it can leave the loop on a path that never computed it
+        u32 loop_depth{};
         for (const IR::AbstractSyntaxNode& node : syntax_list) {
             if (node.type == Type::If) {
                 ++branch_depth;
             }
             if (node.type == Type::EndIf) {
                 --branch_depth;
+            }
+            if (node.type == Type::Loop) {
+                ++loop_depth;
+            }
+            if (node.type == Type::Repeat) {
+                --loop_depth;
             }
             if (node.type != Type::Block) {
                 continue;
@@ -920,7 +929,7 @@ private:
                 const IR::Opcode op{inst.GetOpcode()};
                 if (op == IR::Opcode::DemoteToHelperInvocation) {
                     // Skip reordering nested demote branches.
-                    if (branch_depth <= 1) {
+                    if (branch_depth <= 1 && loop_depth == 0) {
                         demote_blocks.push_back(node.data.block);
                     }
                     break;
@@ -940,16 +949,97 @@ private:
             LOG_DEBUG(Shader, "Combining demotes with more than one return is not implemented.");
             return;
         }
-        s64 last_iterator_offset{};
+        // Every demote must be the body of a selection before any is moved: stopping halfway
+        // would lose the demotes already taken out
+        const auto is_if_body{[&](const IR::Block* demote_block) {
+            return std::ranges::any_of(syntax_list, [&](const IR::AbstractSyntaxNode& asn) {
+                return asn.type == Type::If && asn.data.if_node.body == demote_block;
+            });
+        }};
+        if (!std::ranges::all_of(demote_blocks, is_if_body)) {
+            return;
+        }
         auto& asl{syntax_list};
+        // A demote moves only when its selection holds nothing else: the demote alone in the
+        // body block, then the empty block the kill opens, then the end of the selection. Code
+        // beside it keeps the demote in place, as a nested demote stays: moving the body would
+        // run the code after the demote on every invocation, and the code before it would move
+        // after the code that uses its values. The goto variables a label sets where the body
+        // starts are not read again outside loops, so they go with the demote.
+        const auto alone_in_selection{[&](const IR::Block* demote_block) {
+            const auto& insts{demote_block->Instructions()};
+            const auto demote_it{std::ranges::find_if_not(insts, [](const IR::Inst& inst) {
+                return inst.GetOpcode() == IR::Opcode::SetGotoVariable;
+            })};
+            if (demote_it == insts.end() ||
+                demote_it->GetOpcode() != IR::Opcode::DemoteToHelperInvocation ||
+                std::next(demote_it) != insts.end()) {
+                return false;
+            }
+            const auto if_it{std::ranges::find_if(asl, [&](const IR::AbstractSyntaxNode& asn) {
+                return asn.type == Type::If && asn.data.if_node.body == demote_block;
+            })};
+            const auto body_it{std::next(if_it)};
+            if (body_it == asl.end() || body_it->type != Type::Block ||
+                body_it->data.block != demote_block) {
+                return false;
+            }
+            const auto rest_it{std::next(body_it)};
+            if (rest_it == asl.end() || rest_it->type != Type::Block ||
+                !rest_it->data.block->Instructions().empty()) {
+                return false;
+            }
+            const auto end_if_it{std::next(rest_it)};
+            return end_if_it != asl.end() && end_if_it->type == Type::EndIf &&
+                   end_if_it->data.end_if.merge == if_it->data.if_node.merge;
+        }};
+        std::erase_if(demote_blocks, [&](const IR::Block* demote_block) {
+            return !alone_in_selection(demote_block);
+        });
+        if (demote_blocks.empty()) {
+            return;
+        }
+        const auto epilogue_func{[](const IR::AbstractSyntaxNode& asn) {
+            if (asn.type != Type::Block) {
+                return false;
+            }
+            for (const auto& inst : asn.data.block->Instructions()) {
+                if (inst.GetOpcode() == IR::Opcode::Epilogue) {
+                    return true;
+                }
+            }
+            return false;
+        }};
+        // The combined demote goes before the last block with the epilogue, so that block must
+        // follow every demote's selection: a program whose only EXIT comes before a demote would
+        // use the demote's condition before computing it
+        const auto epilogue_it{std::find_if(asl.rbegin(), asl.rend(), epilogue_func)};
+        if (epilogue_it == asl.rend()) {
+            return;
+        }
+        const auto epilogue_index{std::distance(asl.begin(), epilogue_it.base()) - 1};
+        const auto ends_before_epilogue{[&](const IR::Block* demote_block) {
+            const auto if_it{std::ranges::find_if(asl, [&](const IR::AbstractSyntaxNode& asn) {
+                return asn.type == Type::If && asn.data.if_node.body == demote_block;
+            })};
+            const IR::Block* const merge{if_it->data.if_node.merge};
+            const auto end_if_it{
+                std::find_if(if_it, asl.end(), [&](const IR::AbstractSyntaxNode& asn) {
+                    return asn.type == Type::EndIf && asn.data.end_if.merge == merge;
+                })};
+            return std::distance(asl.begin(), end_if_it) < epilogue_index;
+        }};
+        if (!std::ranges::all_of(demote_blocks, ends_before_epilogue)) {
+            return;
+        }
+        s64 last_iterator_offset{};
         for (const IR::Block* demote_block : demote_blocks) {
             const auto start_it{asl.begin() + last_iterator_offset};
             auto asl_it{std::find_if(start_it, asl.end(), [&](const IR::AbstractSyntaxNode& asn) {
                 return asn.type == Type::If && asn.data.if_node.body == demote_block;
             })};
             if (asl_it == asl.end()) {
-                // Demote without a conditional branch.
-                // No need to proceed since all fragment instances will be demoted regardless.
+                // Not reached: the check above found a selection for every demote.
                 return;
             }
             const IR::Block* const end_if = asl_it->data.if_node.merge;
@@ -967,17 +1057,6 @@ private:
             });
             asl_it = asl.erase(asl_it);
         }
-        const auto epilogue_func{[](const IR::AbstractSyntaxNode& asn) {
-            if (asn.type != Type::Block) {
-                return false;
-            }
-            for (const auto& inst : asn.data.block->Instructions()) {
-                if (inst.GetOpcode() == IR::Opcode::Epilogue) {
-                    return true;
-                }
-            }
-            return false;
-        }};
         const auto reverse_it{std::find_if(asl.rbegin(), asl.rend(), epilogue_func)};
         const auto return_block_it{(reverse_it + 1).base()};
 
