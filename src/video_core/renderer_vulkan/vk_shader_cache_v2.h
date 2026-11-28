@@ -43,7 +43,8 @@ void ClearDriverFields(GraphicsPipelineCacheKey& key);
 [[nodiscard]] u64 GraphicsRecordKey(const GraphicsPipelineCacheKey& key);
 
 struct LegacyCacheMigration {
-    std::optional<u32> version; ///< The cache version migrated from
+    std::optional<u32> version; ///< The newest cache version migrated from
+    u32 sources{};              ///< How many older caches were migrated
     u32 graphics{};
     u32 compute{};
     u32 collapsed{}; ///< Records a later one of the same record key replaced
@@ -51,10 +52,13 @@ struct LegacyCacheMigration {
     bool failed{};   ///< There was a cache to migrate, but the log couldn't be written
 };
 
-/// Starts the v2 `log` from the newest Vulkan disk cache in `directory` (vulkan.fork-v<version>,
-/// the current version first, then the compatible ones) and the used list beside it, unless the log
-/// exists. Graphics keys lose their driver fields; records sharing a record key collapse into the
-/// last one. A Migrated record names the source. The older files are only read.
+/// Starts the v2 `log` from every compatible Vulkan disk cache in `directory`
+/// (vulkan.fork-v<version>, the current version and the ones before it) and the used lists beside
+/// them, unless the log exists. The caches are read oldest first, so a record of a key from a newer
+/// cache replaces the same key in an older one; a newer cache holding a few pipelines therefore no
+/// longer hides the larger caches before it. Graphics keys lose their driver fields; records
+/// sharing a record key collapse into the newest one. A Migrated record names each source. The
+/// older files are only read.
 LegacyCacheMigration MigrateLegacyPipelineCache(const std::filesystem::path& directory,
                                                 const std::filesystem::path& log, u8 max_used_age);
 
