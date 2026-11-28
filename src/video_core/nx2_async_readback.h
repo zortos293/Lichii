@@ -70,6 +70,10 @@ inline constexpr std::array<const char*, static_cast<size_t>(Landing::Count)> la
 
 /// Set on a guest thread while GPU::OnCPURead writes its downloads to guest memory.
 inline thread_local bool t_reading{};
+/// Set on the fence thread while it writes a released fence's downloads with a cache lock held.
+/// Reads before that fence are done, and waiting for a later one would wait for the GPU back,
+/// which may be waiting for the same lock.
+inline thread_local bool t_finished_reads_only{};
 /// The reads this thread waited for (EDEN_NX2_GUEST_THREAD_STATS tells read-backs apart by it).
 inline thread_local u64 t_reads{};
 

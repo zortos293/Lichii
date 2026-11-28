@@ -28,6 +28,7 @@
 #include "video_core/gpu_split.h"
 #include "video_core/host1x/host1x.h"
 #include "video_core/host1x/syncpoint_manager.h"
+#include "video_core/nx2_async_readback.h"
 #include "video_core/nx2_fast_draw.h"
 #include "video_core/nx2_profile.h"
 #include "video_core/rasterizer_interface.h"
@@ -371,6 +372,7 @@ private:
                 texture_pops += (released.flushes & TextureFlushes) != 0 ? 1 : 0;
                 buffer_pops += (released.flushes & BufferFlushes) != 0 ? 1 : 0;
             }
+            VideoCore::AsyncReadback::t_finished_reads_only = true;
             if (texture_pops != 0) {
                 std::scoped_lock lock{texture_cache.mutex};
                 for (size_t i = 0; i < texture_pops; ++i) {
@@ -383,6 +385,7 @@ private:
                     buffer_cache.PopAsyncFlushes();
                 }
             }
+            VideoCore::AsyncReadback::t_finished_reads_only = false;
             // Queries and operations keep their per-fence order.
             for (Released& released : batch) {
                 query_cache.PopAsyncFlushes();

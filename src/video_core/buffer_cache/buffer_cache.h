@@ -923,10 +923,14 @@ std::optional<u64> BufferCache<P>::FinishReadDownloads(DAddr device_addr, u64 si
         std::unique_lock lock{mutex};
         // The newest one over the range: those before it are written first.
         std::optional<u64> tick;
+        const bool finished_only = VideoCore::AsyncReadback::t_finished_reads_only;
         for (const ReadDownload& download : read_downloads) {
             // EDEN_NX2_READ_CHECK: a check alone is waited for too, as its read's download.
             if (download.write_ranges.Intersects(device_addr, size) ||
                 (download.check && download.check->own.Intersects(device_addr, size))) {
+                if (finished_only && !runtime.IsFree(download.tick)) {
+                    continue;
+                }
                 tick = download.tick;
             }
         }
