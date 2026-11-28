@@ -21,6 +21,14 @@ using boost::asio::ip::udp;
 
 namespace InputCommon::CemuhookUDP {
 
+// EmulatedConsole::SetTouchParams reads UDP touch without a guid, port or pad. Touch from pad 0
+// of the first server is reported here too, like the mouse's touch_identifier.
+constexpr PadIdentifier touch_identifier = {
+    .guid = Common::UUID{},
+    .port = 0,
+    .pad = 0,
+};
+
 struct SocketCallback {
     std::function<void(Response::Version)> version;
     std::function<void(Response::PortInfo)> port_info;
@@ -142,6 +150,7 @@ static void SocketLoop(Socket* socket) {
 
 UDPClient::UDPClient(std::string input_engine_) : InputEngine(std::move(input_engine_)) {
     LOG_INFO(Input, "Udp Initialization started");
+    PreSetController(touch_identifier);
     ReloadSockets();
 }
 
@@ -291,15 +300,21 @@ void UDPClient::OnPadData(Response::PadData data, std::size_t client) {
             static_cast<f32>(std::clamp(static_cast<u16>(touch_pad.y), min_y, max_y) - min_y) /
             static_cast<f32>(max_y - min_y);
 
-        if (touch_pad.is_active) {
-            SetAxis(identifier, touch_axis_x_id, x);
-            SetAxis(identifier, touch_axis_y_id, y);
-            SetButton(identifier, touch_button_id, true);
-            continue;
+        const auto set_touch = [&](const PadIdentifier& touch_pad_identifier) {
+            if (touch_pad.is_active) {
+                SetAxis(touch_pad_identifier, touch_axis_x_id, x);
+                SetAxis(touch_pad_identifier, touch_axis_y_id, y);
+                SetButton(touch_pad_identifier, touch_button_id, true);
+                return;
+            }
+            SetAxis(touch_pad_identifier, touch_axis_x_id, 0);
+            SetAxis(touch_pad_identifier, touch_axis_y_id, 0);
+            SetButton(touch_pad_identifier, touch_button_id, false);
+        };
+        set_touch(identifier);
+        if (pad_index == 0) {
+            set_touch(touch_identifier);
         }
-        SetAxis(identifier, touch_axis_x_id, 0);
-        SetAxis(identifier, touch_axis_y_id, 0);
-        SetButton(identifier, touch_button_id, false);
     }
 
     SetAxis(identifier, static_cast<int>(PadAxes::LeftStickX),
