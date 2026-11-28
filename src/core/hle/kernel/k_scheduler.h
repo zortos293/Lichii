@@ -110,9 +110,11 @@ public:
     static void RotateScheduledQueue(KernelCore& kernel, s32 core_id, s32 priority);
     static void RescheduleCores(KernelCore& kernel, u64 cores_needing_scheduling);
 
-    static void YieldWithoutCoreMigration(KernelCore& kernel);
-    static void YieldWithCoreMigration(KernelCore& kernel);
-    static void YieldToAnyThread(KernelCore& kernel);
+    // Each returns true when the yield did nothing: the thread found nothing to switch to
+    // already, and the process has not been scheduled since.
+    static bool YieldWithoutCoreMigration(KernelCore& kernel);
+    static bool YieldWithCoreMigration(KernelCore& kernel);
+    static bool YieldToAnyThread(KernelCore& kernel);
 
 private:
     // Static private API.

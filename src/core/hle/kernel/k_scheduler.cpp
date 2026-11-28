@@ -684,7 +684,7 @@ void KScheduler::RotateScheduledQueue(KernelCore& kernel, s32 core_id, s32 prior
     SetSchedulerUpdateNeeded(kernel);
 }
 
-void KScheduler::YieldWithoutCoreMigration(KernelCore& kernel) {
+bool KScheduler::YieldWithoutCoreMigration(KernelCore& kernel) {
     // Validate preconditions.
     ASSERT(CanSchedule(kernel));
     ASSERT(GetCurrentProcessPointer(kernel) != nullptr);
@@ -695,7 +695,7 @@ void KScheduler::YieldWithoutCoreMigration(KernelCore& kernel) {
 
     // If the thread's yield count matches, there's nothing for us to do.
     if (cur_thread.GetYieldScheduleCount() == cur_process.GetScheduledCount()) {
-        return;
+        return true;
     }
 
     // Get a reference to the priority queue.
@@ -721,9 +721,10 @@ void KScheduler::YieldWithoutCoreMigration(KernelCore& kernel) {
             }
         }
     }
+    return false;
 }
 
-void KScheduler::YieldWithCoreMigration(KernelCore& kernel) {
+bool KScheduler::YieldWithCoreMigration(KernelCore& kernel) {
     // Validate preconditions.
     ASSERT(CanSchedule(kernel));
     ASSERT(GetCurrentProcessPointer(kernel) != nullptr);
@@ -734,7 +735,7 @@ void KScheduler::YieldWithCoreMigration(KernelCore& kernel) {
 
     // If the thread's yield count matches, there's nothing for us to do.
     if (cur_thread.GetYieldScheduleCount() == cur_process.GetScheduledCount()) {
-        return;
+        return true;
     }
 
     // Get a reference to the priority queue.
@@ -809,9 +810,10 @@ void KScheduler::YieldWithCoreMigration(KernelCore& kernel) {
             }
         }
     }
+    return false;
 }
 
-void KScheduler::YieldToAnyThread(KernelCore& kernel) {
+bool KScheduler::YieldToAnyThread(KernelCore& kernel) {
     // Validate preconditions.
     ASSERT(CanSchedule(kernel));
     ASSERT(GetCurrentProcessPointer(kernel) != nullptr);
@@ -822,7 +824,7 @@ void KScheduler::YieldToAnyThread(KernelCore& kernel) {
 
     // If the thread's yield count matches, there's nothing for us to do.
     if (cur_thread.GetYieldScheduleCount() == cur_process.GetScheduledCount()) {
-        return;
+        return true;
     }
 
     // Get a reference to the priority queue.
@@ -885,6 +887,7 @@ void KScheduler::YieldToAnyThread(KernelCore& kernel) {
             }
         }
     }
+    return false;
 }
 
 void KScheduler::RescheduleOtherCores(KernelCore& kernel, u64 cores_needing_scheduling) {
