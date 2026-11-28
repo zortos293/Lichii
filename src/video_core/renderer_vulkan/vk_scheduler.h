@@ -173,6 +173,39 @@ public:
     void NoteRenderPassStores() {
         JoinRecorders();
         render_pass_has_stores = true;
+        // A draw that writes buffers or images: a command hoisted over it could read them too
+        // early.
+        hoist_slot.reset();
+    }
+
+    /// A command Hoist places at an earlier point of the command buffer.
+    using HoistedCommand = std::function<void(vk::CommandBuffer)>;
+
+    /// Call outside a render pass, right before requesting one: leaves a slot at this point of the
+    /// command buffer. While the pass that begins next stays the active one, Hoist runs commands
+    /// at the slot, before that pass, so they need not end it.
+    void OpenHoistSlot();
+
+    /// Drops the slot: what is recorded next may write what a hoisted command would read.
+    void CloseHoistSlot() {
+        JoinRecorders();
+        hoist_slot.reset();
+    }
+
+    /// Whether a command can run at the slot instead of here: the pass that began after the slot
+    /// is still the active one, a draw to `framebuffer` continues it, and nothing that drops the
+    /// slot happened (the pass ended, a draw in it writes buffers or images or captures transform
+    /// feedback, or the slot's commands went to the worker thread). The caller answers for the
+    /// command not reading what that pass renders.
+    [[nodiscard]] bool CanHoist(const Framebuffer* framebuffer) const;
+
+    /// Runs `command` at the slot. Only right after CanHoist returned true.
+    void Hoist(HoistedCommand&& command);
+
+    /// Whether a slot is open at all (cheap; CanHoist decides for a given draw).
+    [[nodiscard]] bool HasHoistSlot() const {
+        JoinRecorders();
+        return hoist_slot != nullptr;
     }
 
     bool RenderPassHasStores() const {
@@ -398,6 +431,12 @@ private:
     std::chrono::steady_clock::time_point last_flush{};
     std::chrono::steady_clock::time_point next_idle_gpu_check{};
     bool flush_pending{};
+    /// OpenHoistSlot's slot, while Hoist may still add to it (only the recording thread
+    /// touches it: it is dropped before its chunk goes to the worker).
+    std::shared_ptr<std::vector<HoistedCommand>> hoist_slot;
+    u64 hoist_pass_serial{};   ///< render_pass_serial of the pass the slot precedes
+    u64 hoist_record_serial{}; ///< record_serial right after the slot was recorded
+    bool hoist_awaits_pass{};  ///< The pass after the slot has not begun yet
     u64 record_serial{};    ///< Commands recorded
     u64 submitted_serial{}; ///< record_serial at the last Flush or Finish
 
@@ -505,6 +544,9 @@ private:
     };
 
     /// Begins a render pass for the given framebuffer, optionally with clear values.
+    /// Whether a draw to `framebuffer` continues the active render pass instead of beginning one.
+    [[nodiscard]] bool ContinuesActivePass(const Framebuffer* framebuffer) const;
+
     void BeginRenderPassImpl(const Framebuffer* framebuffer, VkRenderPass renderpass,
                              const VkClearValue* clear_values, u32 clear_value_count);
 

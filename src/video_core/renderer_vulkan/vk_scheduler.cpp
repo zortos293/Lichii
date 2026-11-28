@@ -373,8 +373,57 @@ std::optional<double> Scheduler::GpuBusyMs() const {
     return gpu_busy->ms;
 }
 
+void Scheduler::OpenHoistSlot() {
+    JoinRecorders();
+    hoist_slot.reset();
+    hoist_awaits_pass = false;
+    if (state.renderpass) {
+        return;
+    }
+    auto slot = std::make_shared<std::vector<HoistedCommand>>();
+    Record([slot](vk::CommandBuffer cmdbuf) {
+        for (const HoistedCommand& command : *slot) {
+            command(cmdbuf);
+        }
+    });
+    // Assigned after Record: a full chunk makes Record dispatch, which drops the previous slot.
+    hoist_slot = std::move(slot);
+    hoist_record_serial = record_serial;
+    hoist_awaits_pass = true;
+}
+
+bool Scheduler::ContinuesActivePass(const Framebuffer* framebuffer) const {
+    // A draw continues the active pass whenever the same framebuffer and area are bound. The
+    // render-pass *variant* (a deferred clear's loadOp=CLEAR form) is only meaningful at begin -
+    // loadOps are applied once, and the base/variant passes are render-pass-compatible (only
+    // loadOp/storeOp differ). Comparing the exact handle here made every draw after a deferred
+    // clear restart the pass and re-LOAD what was just CLEARed (~118 MB of attachment traffic per
+    // world-target turn). The framebuffer handle already fixes the attachment structure and key,
+    // so it is the correct identity to compare.
+    const VkExtent2D render_area = framebuffer->RenderArea();
+    return state.renderpass && framebuffer->Handle() == state.framebuffer &&
+           render_area.width == state.render_area.width &&
+           render_area.height == state.render_area.height;
+}
+
+bool Scheduler::CanHoist(const Framebuffer* framebuffer) const {
+    JoinRecorders();
+    return hoist_slot && !hoist_awaits_pass && render_pass_serial == hoist_pass_serial &&
+           deferred_clear.framebuffer != framebuffer && ContinuesActivePass(framebuffer);
+}
+
+void Scheduler::Hoist(HoistedCommand&& command) {
+    if (VideoCommon::GpuSplit::check_owner) [[unlikely]] {
+        VideoCommon::GpuSplit::CheckOwner("Scheduler::Hoist");
+    }
+    ASSERT(hoist_slot != nullptr);
+    hoist_slot->push_back(std::move(command));
+}
+
 void Scheduler::DispatchWork() {
     JoinRecorders();
+    // The worker runs the slot's commands from here on.
+    hoist_slot.reset();
     if (VideoCommon::GpuSplit::check_owner) [[unlikely]] {
         VideoCommon::GpuSplit::CheckOwner("Scheduler::DispatchWork");
     }
@@ -434,6 +483,15 @@ void Scheduler::BeginRenderPassImpl(const Framebuffer* framebuffer, VkRenderPass
     const VkFramebuffer framebuffer_handle = framebuffer->Handle();
     const VkExtent2D render_area = framebuffer->RenderArea();
     ++render_pass_serial;
+    if (hoist_awaits_pass) {
+        hoist_awaits_pass = false;
+        if (record_serial == hoist_record_serial && !uploads_pending) {
+            hoist_pass_serial = render_pass_serial;
+        } else {
+            // Something else was recorded, or an upload batched, between the slot and this pass.
+            hoist_slot.reset();
+        }
+    }
     state.renderpass = renderpass;
     state.framebuffer = framebuffer_handle;
     state.render_area = render_area;
@@ -561,18 +619,7 @@ void Scheduler::RequestRenderpass(const Framebuffer* framebuffer, std::source_lo
         return;
     }
     const VkRenderPass renderpass = framebuffer->RenderPass();
-    const VkFramebuffer framebuffer_handle = framebuffer->Handle();
-    const VkExtent2D render_area = framebuffer->RenderArea();
-    // A draw continues the active pass whenever the same framebuffer and area are bound. The
-    // render-pass *variant* (a deferred clear's loadOp=CLEAR form) is only meaningful at begin -
-    // loadOps are applied once, and the base/variant passes are render-pass-compatible (only
-    // loadOp/storeOp differ). Comparing the exact handle here made every draw after a deferred
-    // clear restart the pass and re-LOAD what was just CLEARed (~118 MB of attachment traffic per
-    // world-target turn). The framebuffer handle already fixes the attachment structure and key,
-    // so it is the correct identity to compare.
-    if (state.renderpass && framebuffer_handle == state.framebuffer &&
-        render_area.width == state.render_area.width &&
-        render_area.height == state.render_area.height) {
+    if (ContinuesActivePass(framebuffer)) {
         return;
     }
     if (state.renderpass) {
@@ -1317,6 +1364,7 @@ void Scheduler::EndRenderPass()
         if (!state.renderpass) {
             return;
         }
+        hoist_slot.reset();
         ++recording_epoch;
         fragment_barrier.Reset();
         render_pass_has_stores = false;

@@ -472,11 +472,22 @@ private:
     void CheckColorFeedbackLoop(std::span<const VideoCommon::ImageViewInOut> views,
                                 const std::array<bool, NUM_STAGES>& stages, size_t fragment_entry);
 
+    /// `mesh_reads_target`: the draw samples one of its own render targets, so its emulated mesh
+    /// dispatch must stay in its place (only asked where HoistsMeshDispatches).
     bool ConfigureDraw(const RescalingPushConstant& rescaling,
                        const RenderAreaPushConstant& render_area,
-                       std::optional<PreparedBinding>* deferred);
+                       std::optional<PreparedBinding>* deferred, bool mesh_reads_target);
 
-    void RecordBinding(const PreparedBinding& binding, const DescriptorUpdateEntry* descriptor_data);
+    /// Whether this pipeline's emulated mesh dispatches may run before the render pass they feed
+    /// (Scheduler::OpenHoistSlot). On MoltenVK, whose GPUs are tile based and pay for every
+    /// reopened pass (Apple M6: 35.2 to 36.0 fps in Ocarina of Time); a desktop GPU reopens a pass
+    /// for free and gains nothing (RADV), so the dispatches stay in place there.
+    [[nodiscard]] bool HoistsMeshDispatches() const noexcept {
+        return mesh_emulation.has_value() && device.IsMoltenVK();
+    }
+
+    void RecordBinding(const PreparedBinding& binding, const DescriptorUpdateEntry* descriptor_data,
+                       std::shared_ptr<VkDescriptorSet> mesh_set = {});
 
     void MakePipeline(VkRenderPass render_pass);
 
@@ -585,7 +596,8 @@ private:
     std::optional<MeshEmulationSetup> mesh_emulation;
     vk::ShaderModule mesh_vertex_module;
     vk::Pipeline mesh_compute_pipeline;
-    VkDescriptorSet mesh_descriptor_set{}; ///< shared by the dispatch and the draw it feeds
+    /// The set a dispatch commits for its draw where dispatches are not hoisted (ConfigureDraw).
+    VkDescriptorSet mesh_descriptor_set{};
     VkBuffer mesh_output_buffer{};
     VkDeviceSize mesh_output_offset{};
     VkDeviceSize mesh_output_size{};
