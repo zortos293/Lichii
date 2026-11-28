@@ -56,6 +56,10 @@ struct ImageInfo {
     bool is_sparse = false;
     // ASTC data whose blocks carry no alpha: re-compressed to BC1 instead of BC3 (half the size).
     bool astc_opaque = false;
+    // Set by JoinImages when an overlap holds data the GPU wrote: the backend keeps the image at
+    // its guest size instead of re-compressing it at another one (Vulkan's RescalesUnevenBc),
+    // so that data can be copied in from guest extents.
+    bool keep_guest_size = false;
 };
 
 } // namespace VideoCommon

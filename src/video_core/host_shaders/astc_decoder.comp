@@ -33,6 +33,7 @@ UNIFORM(4) uint x_shift;
 UNIFORM(5) uint block_height;
 UNIFORM(6) uint block_height_mask;
 UNIFORM(7) uint native_tiling;
+UNIFORM(8) uvec2 level_extent; // texels of the level decoded; 0 when unset
 END_PUSH_CONSTANTS
 
 struct EncodingData {
@@ -1449,6 +1450,12 @@ void main() {
 
     const ivec3 coord = ivec3(gl_GlobalInvocationID * uvec3(block_dims, 1));
     if (any(greaterThanEqual(coord, imageSize(dest_image)))) {
+        return;
+    }
+    // A decode image larger than the level (reused for several textures): the dispatch's
+    // rounded-up invocations past the level would read input past its data. 0 = unset (OpenGL).
+    if (level_extent.x != 0 &&
+        (uint(coord.x) >= level_extent.x || uint(coord.y) >= level_extent.y)) {
         return;
     }
     local_buff = astc_data[offset / 16];

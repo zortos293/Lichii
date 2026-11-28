@@ -218,9 +218,14 @@ void TextureCache<P>::RunGarbageCollector(bool out_of_memory, bool at_critical) 
     bool async_downloads = download_overlaps && AsyncOverlapDownloadsEnabled();
     KeepRanges keep;
     WritebackRanges::TickedRanges keep_ticks;
+    // Set for a spill collect's last pass, which the passes before it left over the usage it
+    // started at: the rescaled BC images below may go then too.
+    bool release_rescaled = false;
     const auto CanEvict = [this, &high_priority_mode, &aggressive_mode, &evict_old_costly,
-                           &evict_bad_overlaps](ImageId image_id,
-                                                bool* out_must_download = nullptr) {
+                           &evict_bad_overlaps, &release_rescaled,
+                           out_of_memory](ImageId image_id, bool* out_must_download = nullptr) {
+        (void)out_of_memory; // only read where the backend has IsRescaledBc
+        (void)release_rescaled;
         const auto& image = slot_images[image_id];
         if (True(image.flags & ImageFlagBits::IsDecoding) ||
             (evict_bad_overlaps && False(image.flags & ImageFlagBits::BadOverlap))) {
@@ -230,6 +235,20 @@ void TextureCache<P>::RunGarbageCollector(bool out_of_memory, bool at_critical) 
             IsDownloadable(image) && False(image.flags & ImageFlagBits::BadOverlap);
         if (out_must_download != nullptr) {
             *out_must_download = must_download;
+        }
+        // Images the backend re-compresses at a rounded-up size (Vulkan's RescalesUnevenBc on
+        // AMD: title 1's terrain material arrays, ~405 MiB together) are only collected when an
+        // image could not be made, or once their GPU range was unmapped (Remapped: nothing reads
+        // it again). Re-made on every return to the field, each took a 0.4-2 s stall; kept, with
+        // the cache under its cap, the 2nd zone change went from 1951 ms to 364 ms. Up to 1 GiB
+        // of them in all: a title with more is collected as before. Memory spilled to host
+        // memory collects them only when nothing else could go (release_rescaled).
+        if constexpr (requires(const Image& img) { img.IsRescaledBc(); }) {
+            if (!out_of_memory && !release_rescaled && image.IsRescaledBc() &&
+                rescaled_bc_bytes <= MaxKeptRescaledBytes &&
+                False(image.flags & ImageFlagBits::Remapped)) {
+                return false;
+            }
         }
         if ((!aggressive_mode && !evict_old_costly &&
              True(image.flags & ImageFlagBits::CostlyLoad)) ||
@@ -447,7 +466,9 @@ void TextureCache<P>::RunGarbageCollector(bool out_of_memory, bool at_critical) 
     if (out_of_memory || total_used_memory >= critical_memory ||
         (at_critical && total_used_memory >= usage_at_start)) {
         Configure(true);
+        release_rescaled = at_critical && total_used_memory >= usage_at_start;
         Collect();
+        release_rescaled = false;
     }
     if (!overlap_downloads.empty() && async_downloads) {
         std::stable_sort(overlap_downloads.begin(), overlap_downloads.end(),
@@ -2622,6 +2643,12 @@ bool TextureCache<P>::IsDownloadable(const ImageBase& image) const noexcept {
     if (!image.IsSafeGpuCopy() || True(image.flags & (ImageFlagBits::Unbacked | ImageFlagBits::TrimmedLevels))) {
         return false;
     }
+    // Re-compressed at another size (IsRescaledBc): its host levels don't match the guest's.
+    if constexpr (requires(const Image& img) { img.IsRescaledBc(); }) {
+        if (static_cast<const Image&>(image).IsRescaledBc()) {
+            return false;
+        }
+    }
     if (image.info.num_samples == 1) {
         return true;
     }
@@ -3840,6 +3867,13 @@ bool TextureCache<P>::UploadsByLayer(const ImageBase& image) const noexcept {
         if (True(image.flags & ImageFlagBits::SparseLayers)) {
             return true;
         }
+        // Layers are decoded straight into the image (an RGBA8 storage view of it): not for
+        // images re-compressed to BC at another size (IsRescaledBc), which upload whole.
+        if constexpr (requires(const Image& img) { img.IsRescaledBc(); }) {
+            if (static_cast<const Image&>(image).IsRescaledBc()) {
+                return false;
+            }
+        }
         if (True(image.flags & ImageFlagBits::CompactLayers)) {
             return False(image.flags & ImageFlagBits::NonContiguous);
         }
@@ -4846,6 +4880,15 @@ ImageId TextureCache<P>::JoinImages(const ImageInfo& info, GPUVAddr gpu_addr, DA
             }
         }
     }
+    if constexpr (requires(const Image& img) { img.IsRescaledBc(); }) {
+        // What the GPU wrote to an overlap reaches the new image only by copies in guest extents,
+        // which an image re-compressed at another size (IsRescaledBc) does not have: keep the new
+        // image at its guest size then.
+        new_info.keep_guest_size =
+            std::ranges::any_of(join_copies_to_do, [this](const JoinCopy& copy) {
+                return True(slot_images[copy.id].flags & ImageFlagBits::GpuModified);
+            });
+    }
     const ImageId new_image_id = slot_images.insert(runtime, new_info, gpu_addr, cpu_addr);
     slot_images[new_image_id].load_tick = modification_tick;
     if constexpr (requires(const Image& image) { image.OutOfMemory(); }) {
@@ -4924,8 +4967,29 @@ ImageId TextureCache<P>::JoinImages(const ImageInfo& info, GPUVAddr gpu_addr, DA
         return lhs_image.modification_tick < rhs_image.modification_tick;
     });
 
+    // Copies between the new image and an overlap are made from guest extents. An image the
+    // backend re-compressed at another size (IsRescaledBc) does not have those: no copy is made
+    // to or from one, and the new image gets its contents from guest memory instead.
+    const auto rescaled_pair = [&](const Image& overlap) {
+        if constexpr (requires(const Image& img) { img.IsRescaledBc(); }) {
+            return overlap.IsRescaledBc() || new_image.IsRescaledBc();
+        } else {
+            return false;
+        }
+    };
     ImageBase& new_image_base = new_image;
+    // Nor are such images aliased: SynchronizeAliases would copy between them in guest extents.
+    // They only overlap, and each takes what it holds from guest memory. So they are not coherent
+    // with each other: a later GPU write to the other image does not reach the rescaled one,
+    // which keeps its BC contents until a guest-memory write (CpuModified) or an unmap re-makes
+    // it. Only ASTC is rescaled, which the GPU can't render into; a render target over its
+    // range means the game reused the memory, and what it wrote is not ASTC data for the old
+    // image to show (nor in guest memory, for a refresh to read).
     for (const ImageId aliased_id : join_right_aliased_ids) {
+        if (rescaled_pair(slot_images[aliased_id])) {
+            join_bad_overlap_ids.push_back(aliased_id);
+            continue;
+        }
         ImageBase& aliased = slot_images[aliased_id];
         size_t alias_index = new_image_base.aliased_images.size();
         if (!AddImageAlias(new_image_base, aliased, new_image_id, aliased_id)) {
@@ -4935,6 +4999,10 @@ ImageId TextureCache<P>::JoinImages(const ImageInfo& info, GPUVAddr gpu_addr, DA
         new_image.flags |= ImageFlagBits::Alias;
     }
     for (const ImageId aliased_id : join_left_aliased_ids) {
+        if (rescaled_pair(slot_images[aliased_id])) {
+            join_bad_overlap_ids.push_back(aliased_id);
+            continue;
+        }
         ImageBase& aliased = slot_images[aliased_id];
         size_t alias_index = new_image_base.aliased_images.size();
         if (!AddImageAlias(aliased, new_image_base, aliased_id, new_image_id)) {
@@ -4964,6 +5032,7 @@ ImageId TextureCache<P>::JoinImages(const ImageInfo& info, GPUVAddr gpu_addr, DA
         }
         const Image& overlap = slot_images[copy.id];
         if (!overlap.IsSafeGpuCopy() || overlap.info.num_samples != new_image.info.num_samples ||
+            rescaled_pair(overlap) ||
             (True((overlap.flags | new_image.flags) & ImageFlagBits::CompactLayers) &&
              overlap.info.format != new_image.info.format)) {
             return nullptr;
@@ -5003,7 +5072,7 @@ ImageId TextureCache<P>::JoinImages(const ImageInfo& info, GPUVAddr gpu_addr, DA
         for (const JoinCopy& copy : join_copies_to_do) {
             const Image& overlap = slot_images[copy.id];
             if (copy.is_alias || False(overlap.flags & ImageFlagBits::GpuModified) ||
-                overlap.info.num_samples != 1) {
+                overlap.info.num_samples != 1 || rescaled_pair(overlap)) {
                 continue;
             }
             const SubresourceBase base = new_image.TryFindBase(overlap.gpu_addr).value();
@@ -5041,6 +5110,17 @@ ImageId TextureCache<P>::JoinImages(const ImageInfo& info, GPUVAddr gpu_addr, DA
     for (size_t index = 0; index < join_copies_to_do.size(); ++index) {
         const JoinCopy& copy_object = join_copies_to_do[index];
         Image& overlap = slot_images[copy_object.id];
+        if (True(overlap.flags & ImageFlagBits::GpuModified) && rescaled_pair(overlap)) {
+            // Only when the overlap itself is re-compressed at another size (a GPU-written overlap
+            // keeps the new image at its guest size): it can't be copied or downloaded either.
+            static u32 logged{};
+            if (logged++ < 16) {
+                LOG_WARNING(HW_GPU,
+                            "GPU-written image at {:#x} is re-compressed at another size; the "
+                            "image joined over it at {:#x} gets guest memory instead",
+                            overlap.gpu_addr, new_image.gpu_addr);
+            }
+        }
         if (copy_object.is_alias) {
             const AliasedImage* const aliased =
                 index >= first_copy ? alias_copy(copy_object) : nullptr;
@@ -5051,7 +5131,7 @@ ImageId TextureCache<P>::JoinImages(const ImageInfo& info, GPUVAddr gpu_addr, DA
             SetModificationTick(slot_images, new_image, overlap.modification_tick);
             continue;
         }
-        if (True(overlap.flags & ImageFlagBits::GpuModified)) {
+        if (True(overlap.flags & ImageFlagBits::GpuModified) && !rescaled_pair(overlap)) {
             new_image.flags |= ImageFlagBits::GpuModified;
             const auto& resolution = Settings::values.resolution_info;
             const SubresourceBase base = new_image.TryFindBase(overlap.gpu_addr).value();
@@ -5593,6 +5673,11 @@ void TextureCache<P>::RegisterImage(ImageId image_id) {
     image.channel = current_channel_id;
     image.address_space = current_address_space;
     total_used_memory += ImageMemoryBytes(slot_images[image_id]);
+    if constexpr (requires(const Image& img) { img.IsRescaledBc(); }) {
+        if (slot_images[image_id].IsRescaledBc()) {
+            rescaled_bc_bytes += ImageAllocationBytes(slot_images[image_id]);
+        }
+    }
     image.lru_index = lru_cache.Insert(image_id, frame_tick);
 
     ForEachGPUPage(image.gpu_addr, image.guest_size_bytes, [this, image_id](u64 page) {
@@ -5854,6 +5939,11 @@ void TextureCache<P>::DeleteImage(ImageId image_id, bool immediate_delete) {
     }
     // TickFrame sets the total from the driver, which can be under the sum of these estimates.
     total_used_memory -= (std::min)(total_used_memory, ImageMemoryBytes(slot_images[image_id]));
+    if constexpr (requires(const Image& img) { img.IsRescaledBc(); }) {
+        if (slot_images[image_id].IsRescaledBc()) {
+            rescaled_bc_bytes -= (std::min)(rescaled_bc_bytes, ImageAllocationBytes(slot_images[image_id]));
+        }
+    }
     const u64 freed_bytes = (image.HasScaled() ? GetScaledImageSizeBytes(image) : 0) +
                             ImageAllocationBytes(slot_images[image_id]);
     const GPUVAddr gpu_addr = image.gpu_addr;

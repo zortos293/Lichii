@@ -910,6 +910,10 @@ private:
     bool depth_target_padded = false;
     RenderTargetClip render_target_clip;
     u64 total_used_memory = 0;
+    /// Registered images the backend re-compressed at a rounded-up size (IsRescaledBc), which
+    /// the collector keeps up to MaxKeptRescaledBytes.
+    u64 rescaled_bc_bytes = 0;
+    static constexpr u64 MaxKeptRescaledBytes = u64{1} << 30;
     u64 minimum_memory;
     u64 expected_memory;
     u64 critical_memory;
