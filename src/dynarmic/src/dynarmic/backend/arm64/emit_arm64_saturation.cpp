@@ -12,6 +12,7 @@
 #include "dynarmic/backend/arm64/abi.h"
 #include "dynarmic/backend/arm64/emit_arm64.h"
 #include "dynarmic/backend/arm64/emit_context.h"
+#include "dynarmic/backend/arm64/fpsr_manager.h"
 #include "dynarmic/backend/arm64/reg_alloc.h"
 #include "dynarmic/ir/basic_block.h"
 #include "dynarmic/ir/microinstruction.h"
@@ -20,6 +21,43 @@
 namespace Dynarmic::Backend::Arm64 {
 
 using namespace oaknut::util;
+
+/// A scalar saturating operation done with the SIMD instruction of the same name: it sets QC in
+/// the host FPSR, which the FPSR manager hands back to the guest's.
+template<std::size_t size, typename EmitFn>
+static void EmitScalarSaturated(oaknut::CodeGenerator&, EmitContext& ctx, IR::Inst* inst, EmitFn emit) {
+    auto args = ctx.reg_alloc.GetArgumentInfo(inst);
+    if constexpr (size == 8) {
+        auto Vresult = ctx.reg_alloc.WriteB(inst);
+        auto Va = ctx.reg_alloc.ReadB(args[0]);
+        auto Vb = ctx.reg_alloc.ReadB(args[1]);
+        RegAlloc::Realize(Vresult, Va, Vb);
+        ctx.fpsr.Load();
+        emit(*Vresult, *Va, *Vb);
+    } else if constexpr (size == 16) {
+        auto Vresult = ctx.reg_alloc.WriteH(inst);
+        auto Va = ctx.reg_alloc.ReadH(args[0]);
+        auto Vb = ctx.reg_alloc.ReadH(args[1]);
+        RegAlloc::Realize(Vresult, Va, Vb);
+        ctx.fpsr.Load();
+        emit(*Vresult, *Va, *Vb);
+    } else if constexpr (size == 32) {
+        auto Vresult = ctx.reg_alloc.WriteS(inst);
+        auto Va = ctx.reg_alloc.ReadS(args[0]);
+        auto Vb = ctx.reg_alloc.ReadS(args[1]);
+        RegAlloc::Realize(Vresult, Va, Vb);
+        ctx.fpsr.Load();
+        emit(*Vresult, *Va, *Vb);
+    } else {
+        static_assert(size == 64);
+        auto Vresult = ctx.reg_alloc.WriteD(inst);
+        auto Va = ctx.reg_alloc.ReadD(args[0]);
+        auto Vb = ctx.reg_alloc.ReadD(args[1]);
+        RegAlloc::Realize(Vresult, Va, Vb);
+        ctx.fpsr.Load();
+        emit(*Vresult, *Va, *Vb);
+    }
+}
 
 template<>
 void EmitIR<IR::Opcode::SignedSaturatedAddWithFlag32>(oaknut::CodeGenerator& code, EmitContext& ctx, IR::Inst* inst) {
@@ -131,146 +169,92 @@ void EmitIR<IR::Opcode::UnsignedSaturation>(oaknut::CodeGenerator& code, EmitCon
 
 template<>
 void EmitIR<IR::Opcode::SignedSaturatedAdd8>(oaknut::CodeGenerator& code, EmitContext& ctx, IR::Inst* inst) {
-    (void)code;
-    (void)ctx;
-    (void)inst;
-    UNREACHABLE();
+    EmitScalarSaturated<8>(code, ctx, inst, [&](auto Vresult, auto Va, auto Vb) { code.SQADD(Vresult, Va, Vb); });
 }
 
 template<>
 void EmitIR<IR::Opcode::SignedSaturatedAdd16>(oaknut::CodeGenerator& code, EmitContext& ctx, IR::Inst* inst) {
-    (void)code;
-    (void)ctx;
-    (void)inst;
-    UNREACHABLE();
+    EmitScalarSaturated<16>(code, ctx, inst, [&](auto Vresult, auto Va, auto Vb) { code.SQADD(Vresult, Va, Vb); });
 }
 
 template<>
 void EmitIR<IR::Opcode::SignedSaturatedAdd32>(oaknut::CodeGenerator& code, EmitContext& ctx, IR::Inst* inst) {
-    (void)code;
-    (void)ctx;
-    (void)inst;
-    UNREACHABLE();
+    EmitScalarSaturated<32>(code, ctx, inst, [&](auto Vresult, auto Va, auto Vb) { code.SQADD(Vresult, Va, Vb); });
 }
 
 template<>
 void EmitIR<IR::Opcode::SignedSaturatedAdd64>(oaknut::CodeGenerator& code, EmitContext& ctx, IR::Inst* inst) {
-    (void)code;
-    (void)ctx;
-    (void)inst;
-    UNREACHABLE();
+    EmitScalarSaturated<64>(code, ctx, inst, [&](auto Vresult, auto Va, auto Vb) { code.SQADD(Vresult, Va, Vb); });
 }
 
 template<>
 void EmitIR<IR::Opcode::SignedSaturatedDoublingMultiplyReturnHigh16>(oaknut::CodeGenerator& code, EmitContext& ctx, IR::Inst* inst) {
-    (void)code;
-    (void)ctx;
-    (void)inst;
-    UNREACHABLE();
+    EmitScalarSaturated<16>(code, ctx, inst, [&](auto Vresult, auto Va, auto Vb) { code.SQDMULH(Vresult, Va, Vb); });
 }
 
 template<>
 void EmitIR<IR::Opcode::SignedSaturatedDoublingMultiplyReturnHigh32>(oaknut::CodeGenerator& code, EmitContext& ctx, IR::Inst* inst) {
-    (void)code;
-    (void)ctx;
-    (void)inst;
-    UNREACHABLE();
+    EmitScalarSaturated<32>(code, ctx, inst, [&](auto Vresult, auto Va, auto Vb) { code.SQDMULH(Vresult, Va, Vb); });
 }
 
 template<>
 void EmitIR<IR::Opcode::SignedSaturatedSub8>(oaknut::CodeGenerator& code, EmitContext& ctx, IR::Inst* inst) {
-    (void)code;
-    (void)ctx;
-    (void)inst;
-    UNREACHABLE();
+    EmitScalarSaturated<8>(code, ctx, inst, [&](auto Vresult, auto Va, auto Vb) { code.SQSUB(Vresult, Va, Vb); });
 }
 
 template<>
 void EmitIR<IR::Opcode::SignedSaturatedSub16>(oaknut::CodeGenerator& code, EmitContext& ctx, IR::Inst* inst) {
-    (void)code;
-    (void)ctx;
-    (void)inst;
-    UNREACHABLE();
+    EmitScalarSaturated<16>(code, ctx, inst, [&](auto Vresult, auto Va, auto Vb) { code.SQSUB(Vresult, Va, Vb); });
 }
 
 template<>
 void EmitIR<IR::Opcode::SignedSaturatedSub32>(oaknut::CodeGenerator& code, EmitContext& ctx, IR::Inst* inst) {
-    (void)code;
-    (void)ctx;
-    (void)inst;
-    UNREACHABLE();
+    EmitScalarSaturated<32>(code, ctx, inst, [&](auto Vresult, auto Va, auto Vb) { code.SQSUB(Vresult, Va, Vb); });
 }
 
 template<>
 void EmitIR<IR::Opcode::SignedSaturatedSub64>(oaknut::CodeGenerator& code, EmitContext& ctx, IR::Inst* inst) {
-    (void)code;
-    (void)ctx;
-    (void)inst;
-    UNREACHABLE();
+    EmitScalarSaturated<64>(code, ctx, inst, [&](auto Vresult, auto Va, auto Vb) { code.SQSUB(Vresult, Va, Vb); });
 }
 
 template<>
 void EmitIR<IR::Opcode::UnsignedSaturatedAdd8>(oaknut::CodeGenerator& code, EmitContext& ctx, IR::Inst* inst) {
-    (void)code;
-    (void)ctx;
-    (void)inst;
-    UNREACHABLE();
+    EmitScalarSaturated<8>(code, ctx, inst, [&](auto Vresult, auto Va, auto Vb) { code.UQADD(Vresult, Va, Vb); });
 }
 
 template<>
 void EmitIR<IR::Opcode::UnsignedSaturatedAdd16>(oaknut::CodeGenerator& code, EmitContext& ctx, IR::Inst* inst) {
-    (void)code;
-    (void)ctx;
-    (void)inst;
-    UNREACHABLE();
+    EmitScalarSaturated<16>(code, ctx, inst, [&](auto Vresult, auto Va, auto Vb) { code.UQADD(Vresult, Va, Vb); });
 }
 
 template<>
 void EmitIR<IR::Opcode::UnsignedSaturatedAdd32>(oaknut::CodeGenerator& code, EmitContext& ctx, IR::Inst* inst) {
-    (void)code;
-    (void)ctx;
-    (void)inst;
-    UNREACHABLE();
+    EmitScalarSaturated<32>(code, ctx, inst, [&](auto Vresult, auto Va, auto Vb) { code.UQADD(Vresult, Va, Vb); });
 }
 
 template<>
 void EmitIR<IR::Opcode::UnsignedSaturatedAdd64>(oaknut::CodeGenerator& code, EmitContext& ctx, IR::Inst* inst) {
-    (void)code;
-    (void)ctx;
-    (void)inst;
-    UNREACHABLE();
+    EmitScalarSaturated<64>(code, ctx, inst, [&](auto Vresult, auto Va, auto Vb) { code.UQADD(Vresult, Va, Vb); });
 }
 
 template<>
 void EmitIR<IR::Opcode::UnsignedSaturatedSub8>(oaknut::CodeGenerator& code, EmitContext& ctx, IR::Inst* inst) {
-    (void)code;
-    (void)ctx;
-    (void)inst;
-    UNREACHABLE();
+    EmitScalarSaturated<8>(code, ctx, inst, [&](auto Vresult, auto Va, auto Vb) { code.UQSUB(Vresult, Va, Vb); });
 }
 
 template<>
 void EmitIR<IR::Opcode::UnsignedSaturatedSub16>(oaknut::CodeGenerator& code, EmitContext& ctx, IR::Inst* inst) {
-    (void)code;
-    (void)ctx;
-    (void)inst;
-    UNREACHABLE();
+    EmitScalarSaturated<16>(code, ctx, inst, [&](auto Vresult, auto Va, auto Vb) { code.UQSUB(Vresult, Va, Vb); });
 }
 
 template<>
 void EmitIR<IR::Opcode::UnsignedSaturatedSub32>(oaknut::CodeGenerator& code, EmitContext& ctx, IR::Inst* inst) {
-    (void)code;
-    (void)ctx;
-    (void)inst;
-    UNREACHABLE();
+    EmitScalarSaturated<32>(code, ctx, inst, [&](auto Vresult, auto Va, auto Vb) { code.UQSUB(Vresult, Va, Vb); });
 }
 
 template<>
 void EmitIR<IR::Opcode::UnsignedSaturatedSub64>(oaknut::CodeGenerator& code, EmitContext& ctx, IR::Inst* inst) {
-    (void)code;
-    (void)ctx;
-    (void)inst;
-    UNREACHABLE();
+    EmitScalarSaturated<64>(code, ctx, inst, [&](auto Vresult, auto Va, auto Vb) { code.UQSUB(Vresult, Va, Vb); });
 }
 
 }  // namespace Dynarmic::Backend::Arm64
