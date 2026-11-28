@@ -1205,6 +1205,12 @@ FN_MAX_LIMIT_LIST
     /// GetDeviceMemoryBudget() before the cap an integrated GPU gets: the heap's own budget.
     u64 GetDeviceHeapMemoryBudget() const;
 
+    /// Whether GetDeviceMemoryBudget() caps the heap's budget to the share an integrated GPU
+    /// gets. Elsewhere the two are the same figure, though two reads of it may differ.
+    bool CapsDeviceMemoryBudget() const {
+        return is_integrated && !IsMoltenVK();
+    }
+
     /// Memory the allocator holds from the driver in the main device-local heap but has no
     /// allocation in (the unused part of its blocks). GetDeviceMemoryUsage() does not count it,
     /// yet the driver does: with the heap at its budget it is not available to new images.

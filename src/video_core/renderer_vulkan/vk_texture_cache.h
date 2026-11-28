@@ -127,6 +127,8 @@ public:
 
     u64 GetDeviceHeapMemoryBudget() const;
 
+    bool CapsDeviceMemoryBudget() const;
+
     u64 GetDeviceMemorySlack() const;
 
     bool CanReportMemoryUsage() const;
