@@ -415,19 +415,37 @@ void ProfileManager::ParseUserSaveFile() {
     const auto save_path(FS::GetEdenPath(FS::EdenPath::NANDDir) / ACC_SAVE_AVATORS_BASE_PATH /
                          "profiles.dat");
     user_save_file_read = false;
+    user_save_file_locked = false;
+    user_save_file_damaged = false;
+
+    std::error_code error;
+    const auto status = std::filesystem::status(save_path, error);
+    if (status.type() == std::filesystem::file_type::not_found) {
+        LOG_WARNING(Service_ACC, "No profiles.dat yet... Generating new user 'Eden' with random "
+                                 "UUID.");
+        return;
+    }
 
     const FS::IOFile save(save_path, FS::FileAccessMode::Read, FS::FileType::BinaryFile);
 
-    if (!save.IsOpen()) {
-        LOG_WARNING(Service_ACC, "Failed to load profile data from save data... Generating new "
-                                 "user 'Eden' with random UUID.");
+    if (error || !std::filesystem::is_regular_file(status) || !save.IsOpen()) {
+        // Only a missing file is a new NAND. One that is there but won't open (another program
+        // holds it, no permission) still names the users whose saves are on disk, so the default
+        // user made for this session must not be written over it.
+        user_save_file_locked = true;
+        LOG_ERROR(Service_ACC,
+                  "Could not open {}: using a temporary user 'Eden' this session and leaving the "
+                  "file as it is",
+                  Common::FS::PathToUTF8String(save_path));
         return;
     }
 
     ProfileDataRaw data;
     if (!save.ReadObject(data)) {
-        LOG_WARNING(Service_ACC, "profiles.dat is smaller than expected... Generating new user "
-                                 "'Eden' with random UUID.");
+        user_save_file_damaged = true;
+        LOG_ERROR(Service_ACC, "profiles.dat is smaller than expected... Generating new user "
+                               "'Eden' with random UUID, the old file is kept as "
+                               "profiles.dat.unreadable");
         return;
     }
 
@@ -448,6 +466,12 @@ void ProfileManager::ParseUserSaveFile() {
     std::stable_partition(profiles.begin(), profiles.end(),
                           [](const ProfileInfo& profile) { return profile.user_uuid.IsValid(); });
     user_save_file_read = user_count > 0;
+    if (!user_save_file_read) {
+        // Usually a write that stopped part way (an older build wrote the file in place).
+        user_save_file_damaged = true;
+        LOG_ERROR(Service_ACC, "profiles.dat holds no user... Generating new user 'Eden' with "
+                               "random UUID, the old file is kept as profiles.dat.unreadable");
+    }
 }
 
 void ProfileManager::WriteUserSaveFile() {
@@ -474,13 +498,14 @@ void ProfileManager::WriteUserSaveFile() {
 
     const auto save_path(FS::GetEdenPath(FS::EdenPath::NANDDir) / ACC_SAVE_AVATORS_BASE_PATH /
                          "profiles.dat");
+    const auto path_string = Common::FS::PathToUTF8String(save_path);
 
-    if (FS::IsFile(save_path) && !FS::RemoveFile(save_path)) {
-        LOG_WARNING(Service_ACC, "Could not remove existing profiles.dat");
+    if (user_save_file_locked) {
+        LOG_ERROR(Service_ACC,
+                  "Not writing {}: it could not be read this session, and replacing it would "
+                  "lose its users",
+                  path_string);
         return;
-    } else {
-        LOG_INFO(Service_ACC, "Writing profiles.dat to {}",
-                 Common::FS::PathToUTF8String(save_path));
     }
 
     if (!FS::CreateParentDirs(save_path)) {
@@ -490,13 +515,43 @@ void ProfileManager::WriteUserSaveFile() {
         return;
     }
 
-    FS::IOFile save(save_path, FS::FileAccessMode::Write, FS::FileType::BinaryFile);
+    std::error_code error;
+    if (user_save_file_damaged) {
+        auto unreadable = save_path;
+        unreadable += ".unreadable";
+        std::filesystem::rename(save_path, unreadable, error);
+        if (error && error != std::errc::no_such_file_or_directory) {
+            LOG_WARNING(Service_ACC, "Could not keep the unreadable {}: {}", path_string,
+                        error.message());
+            return;
+        }
+        user_save_file_damaged = false;
+    }
 
-    if (!save.IsOpen() || !save.SetSize(sizeof(ProfileDataRaw)) || !save.WriteObject(raw)) {
-        LOG_WARNING(Service_ACC, "Failed to write save data to file... No changes to user data "
-                                 "made in current session will be saved.");
+    // Written beside profiles.dat and renamed over it once complete: a process that ends during
+    // the write keeps the previous users instead of an empty or missing file, which the next
+    // start would replace with a new random user and leave every save behind.
+    auto temporary = save_path;
+    temporary += ".tmp";
+    bool written = false;
+    {
+        FS::IOFile save(temporary, FS::FileAccessMode::Write, FS::FileType::BinaryFile);
+        written = save.IsOpen() && save.WriteObject(raw) && save.Commit() && save.Close();
+    }
+    if (!written) {
+        LOG_WARNING(Service_ACC, "Failed to write {}... No changes to user data made in current "
+                                 "session will be saved.",
+                    Common::FS::PathToUTF8String(temporary));
+        std::filesystem::remove(temporary, error);
         return;
     }
+    std::filesystem::rename(temporary, save_path, error);
+    if (error) {
+        LOG_WARNING(Service_ACC, "Could not replace {}: {}", path_string, error.message());
+        std::filesystem::remove(temporary, error);
+        return;
+    }
+    LOG_INFO(Service_ACC, "Wrote profiles.dat to {}", path_string);
 
     is_save_needed = false;
 }
@@ -571,7 +626,9 @@ std::vector<std::string> ProfileManager::FindGoodProfiles()
 
 std::vector<std::string> ProfileManager::FindOrphanedProfiles()
 {
-    if (IsScratch()) {
+    // With profiles.dat unopened every real user would look orphaned, and the dialog tells the
+    // player to delete orphans.
+    if (IsScratch() || user_save_file_locked) {
         return {};
     }
 

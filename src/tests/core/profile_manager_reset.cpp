@@ -121,4 +121,67 @@ TEST_CASE("Only user ID folders count as orphaned profiles", "[core][acc]") {
     CHECK(std::filesystem::exists(other / "sub"));
 }
 
+std::filesystem::path ProfilesDat(const NandFixture& fixture) {
+    return fixture.nand / "system/save/8000000000000010/su/avators/profiles.dat";
+}
+
+// profiles.dat was removed and then written in place, so a process that ended in between left it
+// missing or empty, and the next start made a new random user: every game lost its save.
+TEST_CASE("profiles.dat is replaced whole", "[core][acc]") {
+    NandFixture fixture;
+    Settings::values.current_user = 0;
+    ProfileManager manager;
+    manager.ResetUserSaveFile();
+    REQUIRE(manager.CreateNewUser(Common::UUID::MakeRandom(), "Second").IsSuccess());
+    manager.WriteUserSaveFile();
+    CHECK_FALSE(std::filesystem::exists(ProfilesDat(fixture).string() + ".tmp"));
+
+    manager.ResetUserSaveFile();
+    CHECK(manager.UserSaveFileRead());
+    CHECK(manager.GetUserCount() == 2);
+}
+
+TEST_CASE("An unreadable profiles.dat is kept beside the new one", "[core][acc]") {
+    NandFixture fixture;
+    Settings::values.current_user = 0;
+    ProfileManager manager;
+    const auto path = ProfilesDat(fixture);
+    std::filesystem::create_directories(path.parent_path());
+    std::ofstream{path, std::ios::binary | std::ios::trunc} << "short";
+
+    manager.ResetUserSaveFile();
+    CHECK_FALSE(manager.UserSaveFileRead());
+    REQUIRE(manager.GetUserCount() == 1);
+    const auto unreadable = std::filesystem::path{path.string() + ".unreadable"};
+    REQUIRE(std::filesystem::exists(unreadable));
+    CHECK(std::filesystem::file_size(unreadable) == 5);
+
+    manager.ResetUserSaveFile();
+    CHECK(manager.UserSaveFileRead());
+}
+
+// A profiles.dat that is there but won't open still names the users whose saves are on disk.
+TEST_CASE("A profiles.dat that won't open is left alone", "[core][acc]") {
+    NandFixture fixture;
+    Settings::values.current_user = 0;
+    ProfileManager manager;
+    const auto path = ProfilesDat(fixture);
+    std::error_code error;
+    std::filesystem::remove(path, error);
+    // A folder in its place: something is there, but not a file that can be read.
+    REQUIRE(std::filesystem::create_directories(path / "held"));
+    const auto saves = fixture.nand / "user/save/0000000000000000/11111111111111111111111111111111";
+    REQUIRE(std::filesystem::create_directories(saves / "01007EF00011E000"));
+    std::ofstream{saves / "01007EF00011E000/game_data.sav"} << "save";
+
+    manager.ResetUserSaveFile();
+    CHECK(manager.GetOpenUserCount() == 1);
+    REQUIRE(manager.CreateNewUser(Common::UUID::MakeRandom(), "Second").IsSuccess());
+    manager.WriteUserSaveFile();
+    CHECK(std::filesystem::exists(path / "held"));
+    CHECK_FALSE(std::filesystem::exists(path.string() + ".tmp"));
+    CHECK(manager.FindOrphanedProfiles().empty());
+    CHECK(std::filesystem::exists(saves / "01007EF00011E000/game_data.sav"));
+}
+
 } // namespace

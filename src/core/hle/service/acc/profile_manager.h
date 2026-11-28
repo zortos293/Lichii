@@ -137,6 +137,10 @@ private:
     const ProfileStorage storage;
     bool is_save_needed{};
     bool user_save_file_read{};
+    /// profiles.dat is there but could not be opened: it is not written over this session.
+    bool user_save_file_locked{};
+    /// profiles.dat was read but held no user: the next write keeps it as profiles.dat.unreadable.
+    bool user_save_file_damaged{};
     std::array<ProfileInfo, MAX_USERS> profiles{};
     std::array<ProfileInfo, MAX_USERS> stored_opened_profiles{};
     std::size_t user_count{};
