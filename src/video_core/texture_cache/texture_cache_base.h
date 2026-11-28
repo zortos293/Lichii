@@ -253,8 +253,8 @@ class TextureCache : public VideoCommon::ChannelSetupCaches<TextureCacheChannelI
     /// Splits large 2D image uploads into smaller chunks, avoiding multi-hundred MiB staging buffers.
     bool UploadInChunks(Image& image);
 
-    /// Large layered images whose refresh can decode only the layers written since the last one.
-    [[nodiscard]] bool UploadsByLayer(const ImageBase& image) const noexcept;
+    /// Large layered images whose refresh can upload only the layers written since the last one.
+    [[nodiscard]] static bool UploadsByLayer(const ImageBase& image) noexcept;
 
     /// Records the layers a write of [cpu_addr, +size) touches.
     void MarkLayersWritten(Image& image, DAddr cpu_addr, size_t size);

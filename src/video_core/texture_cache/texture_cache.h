@@ -7,6 +7,7 @@
 
 #include <algorithm>
 #include <atomic>
+#include <charconv>
 #include <numeric>
 #include <cstdlib>
 #include <limits>
@@ -18,6 +19,7 @@
 #include <bit>
 #include <chrono>
 #include <string>
+#include <string_view>
 #include <type_traits>
 #include <utility>
 #include "common/container/unordered_map.h"
@@ -759,6 +761,10 @@ void TextureCache<P>::ReloadUnderLanded(DAddr cpu_addr, u64 size, u64 tick) {
     ForEachImageInRegion(cpu_addr, size, [tick](ImageId, ImageBase& image) {
         if (False(image.flags & ImageFlagBits::GpuModified) && image.modification_tick <= tick) {
             image.flags |= ImageFlagBits::CpuModified;
+            if (False(image.flags & (ImageFlagBits::AcceleratedUpload |
+                                     ImageFlagBits::SparseLayers | ImageFlagBits::CompactLayers))) {
+                image.dirty_layers.clear();
+            }
         }
     });
 }
@@ -3833,7 +3839,7 @@ bool TextureCache<P>::UploadInChunks(Image& image) {
 }
 
 template <class P>
-bool TextureCache<P>::UploadsByLayer(const ImageBase& image) const noexcept {
+bool TextureCache<P>::UploadsByLayer(const ImageBase& image) noexcept {
     // Title 1's terrain arrays (8192x8192x68 ASTC, 1.45 GB each) get a few layers streamed in at a
     // time; re-decoding all of them for each took a 2 GiB staging buffer and stalled the GPU.
     if constexpr (requires { &Runtime::AccelerateImageUploadLayers; }) {
@@ -3843,11 +3849,36 @@ bool TextureCache<P>::UploadsByLayer(const ImageBase& image) const noexcept {
         if (True(image.flags & ImageFlagBits::CompactLayers)) {
             return False(image.flags & ImageFlagBits::NonContiguous);
         }
-        return True(image.flags & ImageFlagBits::AcceleratedUpload) &&
-               image.info.type == ImageType::e2D && image.info.resources.layers > 1 &&
-               image.guest_size_bytes >= LayerUploadMinSize &&
-               False(image.flags & (ImageFlagBits::Unbacked | ImageFlagBits::Sparse |
-                                    ImageFlagBits::Remapped));
+        if (image.info.type != ImageType::e2D || image.info.resources.layers <= 1 ||
+            True(image.flags &
+                 (ImageFlagBits::Unbacked | ImageFlagBits::Sparse | ImageFlagBits::Remapped))) {
+            return false;
+        }
+        if (True(image.flags & ImageFlagBits::AcceleratedUpload)) {
+            return image.guest_size_bytes >= LayerUploadMinSize;
+        }
+        static const u64 plain_min_bytes = []() -> u64 {
+            const char* const value = std::getenv("EDEN_NX2_LAYER_UPLOAD_MIB");
+            if (value == nullptr) {
+                return 0;
+            }
+            const std::string_view text{value};
+            u64 mib{};
+            const auto [end, error] = std::from_chars(text.data(), text.data() + text.size(), mib);
+            if (error != std::errc{} || end != text.data() + text.size() ||
+                mib > std::numeric_limits<u64>::max() / 1_MiB) {
+                return 0;
+            }
+            return mib * 1_MiB;
+        }();
+        constexpr ImageFlagBits excluded = ImageFlagBits::Converted | ImageFlagBits::TrimmedLevels |
+                                           ImageFlagBits::AsynchronousDecode |
+                                           ImageFlagBits::NonContiguous | ImageFlagBits::Rescaled;
+        return plain_min_bytes != 0 && image.guest_size_bytes >= plain_min_bytes &&
+               False(image.flags & excluded) && !image.info.is_sparse &&
+               image.info.num_samples == 1 && image.info.size.depth == 1 &&
+               GetFormatType(image.info.format) == SurfaceType::ColorTexture &&
+               image.info.layer_stride == CalculateLayerStride(image.info);
     } else {
         return false;
     }
@@ -3950,6 +3981,10 @@ bool TextureCache<P>::BackSparseTilesWhole(Image& image) {
 template <class P>
 bool TextureCache<P>::UploadWrittenLayers(Image& image) {
     if constexpr (requires { &Runtime::AccelerateImageUploadLayers; }) {
+        const bool accelerated = True(image.flags & ImageFlagBits::AcceleratedUpload);
+        if (!accelerated && !UploadsByLayer(image)) {
+            return false;
+        }
         const u32 num_layers = static_cast<u32>(image.info.resources.layers);
         std::vector<u32> layers;
         for (u32 layer = 0; layer < num_layers; ++layer) {
@@ -3961,7 +3996,20 @@ bool TextureCache<P>::UploadWrittenLayers(Image& image) {
         if (layers.empty() || layers.size() == num_layers) {
             return false;
         }
+        using TraceClock = std::chrono::steady_clock;
+        const bool tc_trace = !accelerated && TextureCacheTrace();
+        const auto trace_begin = tc_trace ? TraceClock::now() : TraceClock::time_point{};
         UploadLayers(image, layers);
+        if (tc_trace) {
+            using Ms = std::chrono::duration<double, std::milli>;
+            LOG_WARNING(HW_GPU,
+                        "TCTRACE layer-upload gpu={:#x} fmt={} {}x{} lv={} ly={}/{} guest={}KiB "
+                        "ms={:.2f} frame={}",
+                        image.gpu_addr, static_cast<u32>(image.info.format), image.info.size.width,
+                        image.info.size.height, image.info.resources.levels, layers.size(),
+                        num_layers, image.guest_size_bytes / 1024,
+                        Ms(TraceClock::now() - trace_begin).count(), frame_tick);
+        }
         return true;
     } else {
         return false;

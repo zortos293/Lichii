@@ -2,9 +2,11 @@
 
 #include <algorithm>
 #include <array>
+#include <cstdlib>
 #include <cstring>
 #include <memory>
 #include <optional>
+#include <string>
 #include <utility>
 #include <vector>
 #include <catch2/catch_test_macros.hpp>
@@ -137,6 +139,13 @@ struct Policy {
     static constexpr bool HAS_MSAA_DOWNLOADS = false;
 };
 
+template <bool Enabled>
+struct LayerUploadPolicy : Policy {
+    struct Runtime : TestRuntime {
+        void AccelerateImageUploadLayers();
+    };
+};
+
 using Cache = VideoCommon::TextureCache<Policy>;
 
 VideoCommon::ImageInfo MakeInfo() {
@@ -155,6 +164,10 @@ VideoCommon::ImageInfo MakeInfo() {
 namespace VideoCommon {
 
 struct TextureCacheTestAccess {
+    template <class P>
+    static bool UploadsByLayer(const ImageBase& image) {
+        return TextureCache<P>::UploadsByLayer(image);
+    }
     template <class C, class F>
     static void ForEachSparseSegment(C& cache, ImageBase& image, F&& func) {
         cache.ForEachSparseSegment(image, std::forward<F>(func));
@@ -300,6 +313,49 @@ struct Fixture {
 };
 
 } // namespace
+
+TEST_CASE("Plain texture array layer uploads are opt-in",
+          "[video_core][texture_cache][layer_upload]") {
+    using namespace VideoCommon;
+    using Flags = ImageFlagBits;
+    const auto set_threshold = [](const char* value) {
+#ifdef _WIN32
+        return _putenv_s("EDEN_NX2_LAYER_UPLOAD_MIB", value ? value : "");
+#else
+        return value ? setenv("EDEN_NX2_LAYER_UPLOAD_MIB", value, 1)
+                     : unsetenv("EDEN_NX2_LAYER_UPLOAD_MIB");
+#endif
+    };
+    const char* previous = std::getenv("EDEN_NX2_LAYER_UPLOAD_MIB");
+    const auto saved = previous ? std::optional<std::string>{previous} : std::nullopt;
+    SCOPE_EXIT { set_threshold(saved ? saved->c_str() : nullptr); };
+
+    auto info = MakeInfo();
+    info.format = VideoCore::Surface::PixelFormat::BC7_UNORM;
+    info.size = {512, 512, 1};
+    info.resources = {10, 128};
+    info.layer_stride = CalculateLayerStride(info);
+    ImageBase image{NullImageParams{}};
+    image.info = info;
+    image.guest_size_bytes = CalculateGuestSizeInBytes(info);
+    REQUIRE(set_threshold(nullptr) == 0);
+    CHECK_FALSE(Access::UploadsByLayer<LayerUploadPolicy<false>>(image));
+
+    REQUIRE(set_threshold("32") == 0);
+    const auto uploads_by_layer = Access::UploadsByLayer<LayerUploadPolicy<true>>;
+    CHECK(uploads_by_layer(image));
+    CHECK_FALSE(Access::UploadsByLayer<Policy>(image));
+    for (Flags excluded : {Flags::Converted, Flags::TrimmedLevels, Flags::NonContiguous,
+                           Flags::Rescaled, Flags::Remapped}) {
+        image.flags = excluded;
+        CHECK_FALSE(uploads_by_layer(image));
+    }
+    image.flags = Flags::AcceleratedUpload | Flags::Converted;
+    CHECK_FALSE(uploads_by_layer(image));
+    image.guest_size_bytes = 64 * 1024 * 1024;
+    CHECK(uploads_by_layer(image));
+    CHECK(Access::UploadsByLayer<LayerUploadPolicy<false>>(image));
+}
 
 TEST_CASE("Async image downloads and the delete tick both hold the image alive",
           "[video_core][texture_cache][image_lifetime]") {
