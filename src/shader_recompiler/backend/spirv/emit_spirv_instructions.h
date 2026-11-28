@@ -661,5 +661,8 @@ bool UsesCooperativeHmma(const Profile& profile, const IR::Program& program);
 /// Appends the shared memory of the 16x16x16 HMMA path to a program that runs it, and returns the
 /// word where it starts.
 std::optional<u32> ReserveCooperativeHmmaScratch(const Profile& profile, IR::Program& program);
+std::optional<u32> ReserveSoftwareHmmaScratch(const Profile& profile, IR::Program& program);
+/// Gives the program back the shared memory an HMMA path reserved, if any.
+void ReleaseHmmaScratch(IR::Program& program);
 
 } // namespace Shader::Backend::SPIRV
