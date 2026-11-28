@@ -78,10 +78,8 @@ public:
 private:
     /// Backend Cubeb context
     cubeb* ctx{};
-    /// Cubeb id of the actual hardware output device
-    cubeb_devid output_device{};
-    /// Cubeb id of the actual hardware input device
-    cubeb_devid input_device{};
+    /// Friendly name of the configured device, empty for the defaults
+    std::string device_name;
     /// Vector of streams managed by this sink
     std::vector<SinkStreamPtr> sink_streams{};
 
