@@ -6,6 +6,7 @@
 
 #pragma once
 
+#include <chrono>
 #include <cstddef>
 #include <filesystem>
 #include <functional>
@@ -44,13 +45,29 @@ using Contents = std::map<std::string, std::vector<u8>>;
 // Splatoon 3's must hold all four regions' Splatfest files. Throws std::runtime_error otherwise.
 Contents ReadPackage(std::span<const u8> zip, u64 title_id);
 
+// How long recovery and installs wait for another Lichii process installing the same title. The
+// services recover on their own thread, so theirs is short. Update waits less when its deadline
+// comes first.
+constexpr std::chrono::milliseconds RecoverLockWait{2000};
+constexpr std::chrono::milliseconds InstallLockWait{10000};
+
 // Puts back the cache an install moved aside when it was cut off between its two renames, unless
-// target already holds directories. Runs whether or not Nextendo is on.
-void RecoverInterrupted(const std::filesystem::path& target);
+// target already holds directories. Runs whether or not Nextendo is on. Leaves the backup alone
+// while another process holds the title's install lock (target + ".nextendo-lock"), and then
+// returns false if target holds no cache: that process is between its renames, and creating target
+// to read it would serve an empty cache and make its swap fail on Windows.
+bool RecoverInterrupted(const std::filesystem::path& target,
+                        std::chrono::milliseconds lock_wait = RecoverLockWait);
 
 // Writes contents as the cache folder target with the package hash, in a folder beside it that
-// replaces target only once every file is written. On failure the previous cache stays.
-void Install(const Contents& contents, const std::filesystem::path& target, std::string_view hash);
+// replaces target only once every file is written. On failure the previous cache stays. Holds the
+// title's install lock against other Lichii processes throughout, and throws when another one
+// keeps it past lock_wait. Once it holds the lock, it writes nothing and returns false when target
+// already holds this package, or a package other than previous_hash (the one target held when the
+// caller fetched): another process installed it in the meantime.
+bool Install(const Contents& contents, const std::filesystem::path& target, std::string_view hash,
+             std::chrono::milliseconds lock_wait = InstallLockWait,
+             std::optional<std::string_view> previous_hash = std::nullopt);
 
 struct Response {
     int status{};
@@ -71,8 +88,11 @@ enum class Outcome {
 };
 
 // The update check before boot: installs the package into target when its SHA-256 differs from
-// the installed one or target holds no directories. Only a valid 200 package changes target.
-Outcome Update(u64 title_id, const std::filesystem::path& target, const Fetch& fetch);
+// the installed one or target holds no directories. Only a valid 200 package changes target. Waits
+// for another process's install of the title no later than deadline.
+Outcome Update(u64 title_id, const std::filesystem::path& target, const Fetch& fetch,
+               std::chrono::steady_clock::time_point deadline =
+                   std::chrono::steady_clock::time_point::max());
 
 // <nand>/system/save/bcat/<TITLE ID>, the folder the bcat services read for title_id.
 std::filesystem::path CacheDirectory(u64 title_id);

@@ -42,7 +42,14 @@ IServiceCreator::IServiceCreator(Core::System& system_, const char* name_)
 IServiceCreator::~IServiceCreator() = default;
 
 FileSys::VirtualDir IServiceCreator::OpenCache(u64 title_id) {
-    Nextendo::RecoverInterrupted(Nextendo::CacheDirectory(title_id));
+    if (!Nextendo::RecoverInterrupted(Nextendo::CacheDirectory(title_id))) {
+        // GetBCATDirectory would create the folder another Lichii is about to rename its new
+        // cache to.
+        LOG_WARNING(Service_BCAT,
+                    "Another Lichii is replacing the delivery cache of {:016X}, serving none",
+                    title_id);
+        return std::make_shared<FileSys::VectorVfsDirectory>();
+    }
     if (auto root = fsc.GetBCATDirectory(title_id)) {
         return root;
     }
