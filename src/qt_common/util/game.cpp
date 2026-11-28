@@ -10,6 +10,7 @@
 #include "core/file_sys/savedata_factory.h"
 #include "core/hle/service/am/am_types.h"
 #include "frontend_common/content_manager.h"
+#include "frontend_common/steam_shortcuts.h"
 #include "qt_common/abstract/frontend.h"
 #include "qt_common/config/uisettings.h"
 #include "qt_common/qt_common.h"
@@ -440,16 +441,77 @@ inline constexpr bool CreateShortcutMessagesGUI(ShortcutMessages imsg, const QSt
     }
 }
 
+namespace {
+
+void AddToSteam(const std::filesystem::path& command, const std::filesystem::path& icon_path,
+                const std::string& arguments, const std::string& title) {
+    const QString qtitle = QString::fromStdString(title);
+    std::error_code error;
+    const Steam::Shortcut shortcut{
+        .app_name = title,
+        // Steam reads these as UTF-8; string() would use the Windows code page.
+        .exe = Common::FS::PathToUTF8String(command),
+        .start_dir = Common::FS::PathToUTF8String(command.parent_path()),
+        .icon = std::filesystem::is_regular_file(icon_path, error)
+                    ? Common::FS::PathToUTF8String(icon_path)
+                    : std::string{},
+        .launch_options = arguments,
+    };
+    using Steam::AddResult;
+    switch (Steam::AddShortcut(shortcut)) {
+    case AddResult::Added:
+        QtCommon::Frontend::Information(
+            tr("Added to Steam"),
+            tr("%1 is now in your Steam library. Start Steam to see it.").arg(qtitle));
+        return;
+    case AddResult::Updated:
+        QtCommon::Frontend::Information(
+            tr("Added to Steam"),
+            tr("%1 was already in your Steam library. Its shortcut has been updated.").arg(qtitle));
+        return;
+    case AddResult::SteamRunning:
+        QtCommon::Frontend::Warning(
+            tr("Close Steam First"),
+            tr("Steam is running. Exit Steam completely, then add %1 again.").arg(qtitle));
+        return;
+    case AddResult::SteamNotFound:
+        QtCommon::Frontend::Critical(tr("Steam Not Found"),
+                                     tr("Lichii couldn't find a Steam installation."));
+        return;
+    case AddResult::AccountNotFound:
+        QtCommon::Frontend::Critical(
+            tr("No Steam Account"),
+            tr("Lichii couldn't find a Steam account. Sign in to Steam once, then try again."));
+        return;
+    case AddResult::UnreadableFile:
+    case AddResult::WriteFailed:
+        QtCommon::Frontend::Critical(tr("Failed to Add to Steam"),
+                                     tr("Failed to add %1 to Steam.").arg(qtitle));
+        return;
+    }
+}
+
+} // Anonymous namespace
+
 void CreateShortcut(const std::string& game_path, const u64 program_id,
                     const std::string& game_title_, const ShortcutTarget& target,
                     std::string arguments_, const bool needs_title) {
     // Get path to Eden executable
     std::filesystem::path command = GetEdenCommand();
 
-    // Shortcut path
-    std::filesystem::path shortcut_path = GetShortcutPath(target);
+    const bool to_steam = target == ShortcutTarget::Steam;
+    if (to_steam && Steam::IsSteamRunning()) {
+        QtCommon::Frontend::Warning(
+            tr("Close Steam First"),
+            tr("Steam is running. Exit Steam completely, then add the game again."));
+        return;
+    }
 
-    if (!std::filesystem::exists(shortcut_path)) {
+    // Shortcut path
+    std::filesystem::path shortcut_path =
+        to_steam ? std::filesystem::path{} : std::filesystem::path{GetShortcutPath(target)};
+
+    if (!to_steam && !std::filesystem::exists(shortcut_path)) {
         CreateShortcutMessagesGUI(ShortcutMessages::Failed,
                                   QString::fromStdString(shortcut_path.generic_string()));
         LOG_ERROR(Frontend, "Invalid shortcut target {}", shortcut_path.generic_string());
@@ -464,18 +526,33 @@ void CreateShortcut(const std::string& game_path, const u64 program_id,
 
     std::string game_title{game_title_};
 
-    // Delete illegal characters from title
     if (needs_title) {
-        game_title = fmt::format("{:016X}", program_id);
-        if (control.first != nullptr) {
+        // The name the user gave the game in Properties wins, as in the library. Homebrew all
+        // shares program id 0, so a name saved for it isn't this file's.
+        if (program_id != 0) {
+            game_title = ReadCustomTitle(program_id);
+        }
+        if (game_title.empty() && control.first != nullptr) {
             game_title = control.first->GetApplicationName();
-        } else if (loader != nullptr) {
+        }
+        if (game_title.empty() && loader != nullptr) {
             loader->ReadTitle(game_title);
-        } else {
+        }
+        if (game_title.empty()) {
+            // Homebrew without metadata: the file name, as the game list shows it.
+            game_title = Common::FS::PathToUTF8String(
+                std::filesystem::path{Common::FS::ToU8String(game_path)}.stem());
+        }
+        if (game_title.empty()) {
             LOG_WARNING(Frontend, "Could not load game title from {:s}", game_path);
+            game_title = fmt::format("{:016X}", program_id);
         }
     }
 
+    // Delete illegal characters from title
+
+    // Steam shows the name as is; only file names need the characters below removed.
+    const std::string steam_title = game_title;
     const std::string illegal_chars = "<>:\"/\\|?*.";
     for (auto it = game_title.rbegin(); it != game_title.rend(); ++it) {
         if (illegal_chars.find(*it) != std::string::npos) {
@@ -523,6 +600,10 @@ void CreateShortcut(const std::string& game_path, const u64 program_id,
     std::string arguments{arguments_};
     if (CreateShortcutMessagesGUI(ShortcutMessages::Fullscreen, qgame_title)) {
         arguments = "-f " + arguments;
+    }
+    if (to_steam) {
+        AddToSteam(command, out_icon_path, arguments, steam_title);
+        return;
     }
     const std::string comment = fmt::format("Start {:s} with the Eden Emulator", game_title);
     const std::string categories = "Game;Emulator;Qt;";

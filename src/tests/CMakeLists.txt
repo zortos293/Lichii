@@ -247,6 +247,7 @@ add_executable(tests
     common/fs_iterate.cpp
     frontend_common/install_keys.cpp
     frontend_common/play_time.cpp
+    frontend_common/steam_shortcuts.cpp
     common/game_presets.cpp
     common/host_memory.cpp
     common/host_memory_failure.cpp

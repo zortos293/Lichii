@@ -28,6 +28,7 @@ enum class GameListRemoveTarget {
 enum class ShortcutTarget {
     Desktop,
     Applications,
+    Steam,
 };
 
 enum class ShortcutMessages { Fullscreen = 0, Success = 1, Volatile = 2, Failed = 3 };

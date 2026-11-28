@@ -873,6 +873,7 @@ void GameList::AddGamePopup(QMenu& context_menu, u64 program_id, const std::stri
     QAction* create_desktop_shortcut = shortcut_menu->addAction(tr("Add to Desktop"));
     QAction* create_applications_menu_shortcut =
         shortcut_menu->addAction(tr("Add to Applications Menu"));
+    QAction* create_steam_shortcut = shortcut_menu->addAction(tr("Add to Steam"));
 #endif
     context_menu.addSeparator();
     QAction* edit_nup = nullptr;
@@ -1032,6 +1033,9 @@ void GameList::AddGamePopup(QMenu& context_menu, u64 program_id, const std::stri
             [this, program_id, path]() {
                 emit CreateShortcut(program_id, path, QtCommon::Game::ShortcutTarget::Applications);
             });
+    connect(create_steam_shortcut, &QAction::triggered, this, [this, program_id, path]() {
+        emit CreateShortcut(program_id, path, QtCommon::Game::ShortcutTarget::Steam);
+    });
 #endif
     connect(properties, &QAction::triggered, this,
             [this, program_id, path]() { emit OpenPerGameGeneralRequested(program_id, path); });

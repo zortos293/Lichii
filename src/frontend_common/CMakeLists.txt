@@ -19,7 +19,8 @@ add_library(frontend_common STATIC
     settings_generator.h settings_generator.cpp
     update_installer.h update_installer.cpp
     mod_manager.h mod_manager.cpp
-    nx_archive.h nx_archive.cpp)
+    nx_archive.h nx_archive.cpp
+    steam_shortcuts.h steam_shortcuts.cpp)
 
 if (ENABLE_UPDATE_CHECKER)
     target_link_libraries(frontend_common PRIVATE httplib::httplib)
