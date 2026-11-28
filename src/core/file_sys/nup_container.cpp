@@ -773,7 +773,11 @@ bool NupContainer::Parse() {
         FileRecord record{};
         std::memcpy(&record, base + pos, sizeof(record));
         pos += FileRecordSize;
+        // A raw file is stored as is: its extent is exactly its size (the writer aligns where an
+        // extent starts, not its length). OpenFile would otherwise expose the extent's length,
+        // not the size the file records.
         if (record.codec > CodecZstd || record.codec_flags != 0 ||
+            (record.codec == CodecRaw && record.size != record.extent_size) ||
             (record.size == 0 && (record.extent_offset != 0 || record.extent_size != 0)) ||
             (record.size != 0 &&
              (record.extent_size == 0 || record.extent_offset < blob_offset ||
