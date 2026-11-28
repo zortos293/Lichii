@@ -466,6 +466,7 @@ public:
 
 #define FN_MAX_LIMIT_LIST \
     FN_MAX_LIMIT_ELEM(ComputeSharedMemorySize) \
+    FN_MAX_LIMIT_ELEM(ComputeWorkGroupInvocations) \
     FN_MAX_LIMIT_ELEM(PerStageDescriptorSampledImages) \
     FN_MAX_LIMIT_ELEM(PerStageDescriptorStorageBuffers) \
     FN_MAX_LIMIT_ELEM(PerStageResources) \
@@ -611,6 +612,11 @@ FN_MAX_LIMIT_LIST
 
     VkShaderStageFlags GetSubgroupSupportedStages() const {
         return properties.subgroup_properties.supportedStages;
+    }
+
+    /// The smallest subgroup size compute may run with, or 0 where the device does not say.
+    u32 GetMinSubgroupSize() const {
+        return properties.subgroup_size_control.minSubgroupSize;
     }
 
     u32 GetMaxSubgroupSize() const {
@@ -887,6 +893,62 @@ FN_MAX_LIMIT_LIST
     /// Returns true if the device supports VK_EXT_subgroup_size_control.
     bool IsExtSubgroupSizeControlSupported() const {
         return extensions.subgroup_size_control;
+    }
+
+    /// Whether a pipeline can require a subgroup size (the subgroupSizeControl feature).
+    bool IsSubgroupSizeControlSupported() const {
+        return extensions.subgroup_size_control &&
+               features.subgroup_size_control.subgroupSizeControl;
+    }
+
+    /// Whether a compute pipeline can be given the guest's 32-lane warp as its subgroup size
+    /// (VkPipelineShaderStageRequiredSubgroupSizeCreateInfo).
+    bool CanRequireComputeGuestWarpSize() const {
+        return IsSubgroupSizeControlSupported() &&
+               IsGuestWarpSizeSupported(VK_SHADER_STAGE_COMPUTE_BIT);
+    }
+
+    /// Whether compute subgroups are the guest's 32-lane warps: required so, the only size the
+    /// device has, or an Apple GPU through MoltenVK, which runs compute in 32-wide SIMD groups
+    /// though MoltenVK reports a minimum subgroup size of 4 and no required size. Measured on an M6
+    /// (threadExecutionWidth 32, threads_per_simdgroup 32 and simdgroup_index_in_threadgroup
+    /// tid / 32 for threadgroups of 32 to 1024) and assumed for other Apple GPUs. That assumption
+    /// is probed at startup (ProbeComputeSubgroupsAreGuestWarps), and only the shader profile keeps
+    /// the verdict: this still returns the assumption.
+    bool AreComputeSubgroupsGuestWarps() const {
+        return CanRequireComputeGuestWarpSize() ||
+               (GetMinSubgroupSize() == GuestWarpSize && GetMaxSubgroupSize() == GuestWarpSize) ||
+               AssumesAppleComputeSubgroupsAreGuestWarps();
+    }
+
+    /// The largest compute workgroup in each dimension.
+    std::array<u32, 3> GetMaxComputeWorkGroupSize() const {
+        const auto& size = properties.properties.limits.maxComputeWorkGroupSize;
+        return {size[0], size[1], size[2]};
+    }
+
+    /// An Apple GPU through MoltenVK (PCI vendor ID 0x106B, not Intel or AMD GPUs in a Mac).
+    bool IsAppleGpu() const {
+        return IsMoltenVK() && GetVendorID() == 0x106B;
+    }
+
+    /// AreComputeSubgroupsGuestWarps holds only by the Apple GPU assumption, which nothing in
+    /// Vulkan guarantees: ProbeComputeSubgroupsAreGuestWarps checks it on the device.
+    bool AssumesAppleComputeSubgroupsAreGuestWarps() const {
+        return IsAppleGpu() && GetMaxSubgroupSize() == GuestWarpSize &&
+               !CanRequireComputeGuestWarpSize() &&
+               !(GetMinSubgroupSize() == GuestWarpSize && GetMaxSubgroupSize() == GuestWarpSize);
+    }
+
+    /// Returns true if shaders can ask for maximal reconvergence (VK_KHR_shader_maximal_reconvergence).
+    bool IsKhrShaderMaximalReconvergenceSupported() const {
+        return extensions.shader_maximal_reconvergence;
+    }
+
+    /// Whether a compute pipeline can require full subgroups (REQUIRE_FULL_SUBGROUPS).
+    bool IsComputeFullSubgroupsSupported() const {
+        return extensions.subgroup_size_control &&
+               features.subgroup_size_control.computeFullSubgroups;
     }
 
     /// Returns true if vkResetQueryPool (host-side query reset) is supported.

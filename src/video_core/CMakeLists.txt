@@ -254,6 +254,8 @@ add_library(video_core STATIC
     renderer_vulkan/vk_ocarina_camera_motion.h
     renderer_vulkan/vk_compute_pipeline.cpp
     renderer_vulkan/vk_compute_pipeline.h
+    renderer_vulkan/vk_compute_probe.cpp
+    renderer_vulkan/vk_compute_probe.h
     renderer_vulkan/vk_cooperative_hmma_test.cpp
     renderer_vulkan/vk_cooperative_hmma_test.h
     renderer_vulkan/vk_descriptor_buffer.cpp
@@ -303,6 +305,8 @@ add_library(video_core STATIC
     renderer_vulkan/vk_stream_ring.h
     renderer_vulkan/vk_state_tracker.cpp
     renderer_vulkan/vk_state_tracker.h
+    renderer_vulkan/vk_subgroup_probe.cpp
+    renderer_vulkan/vk_subgroup_probe.h
     renderer_vulkan/vk_swapchain.cpp
     renderer_vulkan/vk_swapchain.h
     renderer_vulkan/vk_texture_cache.cpp

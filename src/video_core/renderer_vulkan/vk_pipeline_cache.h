@@ -365,6 +365,8 @@ private:
     std::vector<std::shared_ptr<ShaderPools>> spare_pools;
 
     Shader::Profile profile;
+    /// Whether the compute subgroup probe passed, where it ran (ProbeComputeSubgroupsAreGuestWarps)
+    std::optional<bool> subgroup_probe_passed;
     Shader::HostTranslateInfo host_info;
 
     std::filesystem::path pipeline_cache_filename;

@@ -5,6 +5,8 @@
 
 #pragma once
 
+#include <algorithm>
+#include <array>
 #include <vector>
 
 #include "common/common_types.h"
@@ -33,6 +35,13 @@ constexpr u32 RESCALING_LAYOUT_DOWN_FACTOR_OFFSET = offsetof(RescalingLayout, do
 constexpr u32 RENDERAREA_LAYOUT_OFFSET = offsetof(RenderAreaLayout, render_area);
 
 [[nodiscard]] std::vector<u32> EmitSPIRV(const Profile& profile, const RuntimeInfo& runtime_info, IR::Program& program, Bindings& bindings);
+
+/// Chooses how the program's HMMA runs, reserves the shared memory that needs, and sets the
+/// pipeline requirements in its info (uses_cooperative_matrix, requires_full_guest_warps). A
+/// pipeline that copies the info before its SPIR-V is emitted (a deferred compute build) calls
+/// it first; EmitSPIRV then makes the same plan and throws if it disagrees. Without it, EmitSPIRV
+/// sets the requirements itself.
+void PrepareHmma(const Profile& profile, IR::Program& program);
 [[nodiscard]] inline std::vector<u32> EmitSPIRV(const Profile& profile, IR::Program& program) {
     Bindings binding;
     return EmitSPIRV(profile, {}, program, binding);
@@ -45,6 +54,40 @@ constexpr u32 COOPERATIVE_HMMA_TEST_LANE_WORDS = 10;
 /// A compute shader of one warp running the HMMA.16816.F16 lowering on the registers in its storage
 /// buffer (set 0, binding 0), to check at startup that the driver's matrix layout is the expected.
 [[nodiscard]] std::vector<u32> EmitCooperativeHmmaTest(u32 spirv_version);
+
+/// A compute shader of one workgroup of x * y * z invocations in which each writes, at its
+/// LocalInvocationIndex in a storage buffer at set 0 binding 0, SUBGROUP_PROBE_VALID | SubgroupSize
+/// | SubgroupId << 8 | SubgroupLocalInvocationId << 16: how the device lays its subgroups out.
+/// Needs SPIR-V 1.3 (the subgroup built-ins).
+[[nodiscard]] std::vector<u32> EmitSubgroupLayoutProbe(u32 spirv_version, u32 x, u32 y, u32 z);
+constexpr u32 SUBGROUP_PROBE_VALID = 1U << 31;
+
+/// The workgroups with y or z above 1 that the subgroup layout probe runs.
+inline constexpr std::array<std::array<u32, 3>, 3> SUBGROUP_PROBE_PLANAR_SHAPES{{
+    {32, 4, 1},
+    {64, 2, 2},
+    {32, 8, 4},
+}};
+
+/// Whether the subgroup layout probe runs a workgroup of this size on a device with these limits:
+/// x a multiple of 32 up to 1024 invocations with y = z = 1, or SUBGROUP_PROBE_PLANAR_SHAPES, that
+/// the device can run. A probed layout (Profile::compute_subgroup_layout_probed) holds only for
+/// these; the probe and the staged HMMA both decide with this.
+[[nodiscard]] constexpr bool IsSubgroupProbeShape(u32 x, u32 y, u32 z,
+                                                  const std::array<u32, 3>& max_size,
+                                                  u32 max_invocations) {
+    const u64 invocations = u64{x} * y * z;
+    if (x == 0 || x % 32 != 0 || invocations > 1024 || invocations > max_invocations ||
+        x > max_size[0] || y > max_size[1] || z > max_size[2]) {
+        return false;
+    }
+    if (y == 1 && z == 1) {
+        return true;
+    }
+    return std::ranges::any_of(SUBGROUP_PROBE_PLANAR_SHAPES, [&](const std::array<u32, 3>& shape) {
+        return shape[0] == x && shape[1] == y && shape[2] == z;
+    });
+}
 
 /// Index the emulation writes for the vertices of a point or line past the primitive count. The
 /// vertex shader moves such a vertex outside the clip volume. (Triangles get 0 0 0 instead, a

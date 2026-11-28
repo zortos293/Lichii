@@ -2,6 +2,7 @@
 
 #include <algorithm>
 #include <array>
+#include <tuple>
 #include <cstdlib>
 #include <filesystem>
 #include <fstream>
@@ -13,6 +14,7 @@
 #include <catch2/catch_test_macros.hpp>
 
 #include "shader_recompiler/backend/spirv/emit_spirv.h"
+#include "shader_recompiler/backend/spirv/emit_spirv_instructions.h"
 #include "shader_recompiler/exception.h"
 #include "shader_recompiler/frontend/ampere/lower_to_maxwell.h"
 #include "shader_recompiler/frontend/ir/ir_emitter.h"
@@ -68,6 +70,7 @@ struct TensorProgram {
         profile.supported_spirv = 0x00010500;
         profile.supported_subgroup_stages = 1U << static_cast<u32>(Stage::Compute);
         profile.max_subgroup_size = 32;
+        profile.support_float16 = true;
         IR::IREmitter ir{block};
         if (count == 0) {
             return;
@@ -846,4 +849,515 @@ TEST_CASE("Native matrix lowering selects compact software helpers without legac
     code[0].words[3] = 0;
     code[0].words[0] += 1U << 24;
     REQUIRE_FALSE(static_cast<bool>(Ampere::LowerToMaxwell(code, false, true)));
+}
+
+namespace {
+constexpr u32 OpGroupNonUniformShuffle = 345;
+constexpr u32 OpDecorate = 71;
+constexpr u32 OpControlBarrier = 224;
+constexpr u32 OpExecutionMode = 16;
+constexpr u32 OpFConvert = 115;
+constexpr u32 DecorationBuiltIn = 11;
+constexpr u32 BuiltInSubgroupId = 40;
+constexpr u32 ExecutionModeDenormPreserve = 4459;
+constexpr u32 ExecutionModeRoundingModeRTE = 4462;
+/// Words a 64-invocation workgroup's two warps exchange through: six a lane.
+constexpr u32 StagedBytes = 2 * 32 * 6 * 4;
+
+/// The profile an Apple GPU gets through MoltenVK (vk_pipeline_cache.cpp).
+void SlowShuffles(TensorProgram& fixture) {
+    fixture.profile.has_slow_dynamic_shuffle = true;
+    fixture.profile.support_compute_full_subgroups = true;
+    fixture.profile.compute_subgroups_are_guest_warps = true;
+}
+
+bool Shuffles(const std::vector<u32>& code) {
+    return !Instructions(code, OpGroupNonUniformShuffle).empty();
+}
+
+bool HasExecutionMode(const std::vector<u32>& code, u32 mode, u32 width) {
+    return std::ranges::any_of(Instructions(code, OpExecutionMode), [&](const auto& words) {
+        return words.size() == 3 && words[1] == mode && words[2] == width;
+    });
+}
+} // Anonymous namespace
+
+TEST_CASE("Software HMMA exchanges fragments through shared memory where shuffles are slow",
+          "[video_core][tensor][ampere]") {
+    for (const u32 depth : {8U, 16U}) {
+        TensorProgram shuffled{1, depth};
+        const auto reference = shuffled.Emit();
+        REQUIRE(Shuffles(reference));
+        REQUIRE_FALSE(shuffled.program.info.requires_full_guest_warps);
+
+        TensorProgram staged{1, depth};
+        SlowShuffles(staged);
+        const auto code = staged.Emit(depth == 8 ? "software-staged-k8" : "software-staged-k16");
+        REQUIRE(staged.program.shared_memory_size == StagedBytes);
+        REQUIRE_FALSE(Shuffles(code));
+        // SubgroupId names the warp: the pipeline has to run full 32-lane subgroups.
+        REQUIRE(staged.program.info.requires_full_guest_warps);
+        REQUIRE(std::ranges::any_of(Instructions(code, OpDecorate), [](const auto& words) {
+            return words.size() == 3 && words[1] == DecorationBuiltIn &&
+                   words[2] == BuiltInSubgroupId;
+        }));
+        // One barrier after the warp writes its words, one before the next HMMA writes again.
+        REQUIRE(Instructions(code, OpControlBarrier).size() == 2);
+    }
+}
+
+TEST_CASE("Software HMMA keeps its shuffles where subgroups may not be whole warps",
+          "[video_core][tensor][ampere]") {
+    const auto require_shuffles = [](TensorProgram& fixture) {
+        REQUIRE(Shuffles(fixture.Emit()));
+        REQUIRE(fixture.program.shared_memory_size == 0);
+        REQUIRE_FALSE(fixture.program.info.requires_full_guest_warps);
+    };
+    SECTION("A workgroup that is not whole warps") {
+        TensorProgram fixture{1, 16};
+        SlowShuffles(fixture);
+        fixture.program.workgroup_size = {48, 1, 1};
+        require_shuffles(fixture);
+    }
+    SECTION("Subgroups that are not 32 lanes, or can't be made so") {
+        TensorProgram fixture{1, 16};
+        SlowShuffles(fixture);
+        fixture.profile.compute_subgroups_are_guest_warps = false;
+        require_shuffles(fixture);
+    }
+    SECTION("Subgroups wider than a warp") {
+        TensorProgram fixture{1, 16};
+        SlowShuffles(fixture);
+        fixture.profile.max_subgroup_size = 64;
+        require_shuffles(fixture);
+    }
+    SECTION("No full subgroups") {
+        TensorProgram fixture{1, 16};
+        SlowShuffles(fixture);
+        fixture.profile.support_compute_full_subgroups = false;
+        require_shuffles(fixture);
+    }
+    SECTION("The exchange does not fit the device's shared memory") {
+        TensorProgram fixture{1, 16};
+        SlowShuffles(fixture);
+        fixture.program.shared_memory_size = 31500; // 31504 aligned, + 1536 past 32768
+        fixture.profile.max_compute_shared_memory_size = 32768;
+        REQUIRE(Shuffles(fixture.Emit()));
+        REQUIRE(fixture.program.shared_memory_size == 31500);
+        REQUIRE_FALSE(fixture.program.info.requires_full_guest_warps);
+    }
+}
+
+TEST_CASE("Software HMMA takes only probed workgroups where the layout was probed",
+          "[video_core][tensor][ampere]") {
+    const auto emit = [](bool probed, std::array<u32, 3> workgroup) {
+        TensorProgram fixture{1, 16};
+        SlowShuffles(fixture);
+        fixture.profile.compute_subgroup_layout_probed = probed;
+        fixture.profile.max_compute_workgroup_size = {1024, 1024, 1024};
+        fixture.profile.max_compute_workgroup_invocations = 1024;
+        fixture.program.workgroup_size = workgroup;
+        auto code = fixture.Emit();
+        return std::make_tuple(std::move(code), fixture.program.info.requires_full_guest_warps,
+                               fixture.program.shared_memory_size);
+    };
+    // 32x2x1 was never probed: shuffles where the layout was probed...
+    const auto [unprobed, unprobed_full, unprobed_shared] = emit(true, {32, 2, 1});
+    REQUIRE(Shuffles(unprobed));
+    REQUIRE_FALSE(unprobed_full);
+    REQUIRE(unprobed_shared == 0);
+    // ...and what it always emitted where the layout is assumed: the staged exchange.
+    const auto [assumed, assumed_full, assumed_shared] = emit(false, {32, 2, 1});
+    REQUIRE_FALSE(Shuffles(assumed));
+    REQUIRE(assumed_full);
+    REQUIRE(assumed_shared == StagedBytes);
+    // A probed shape stages either way, with the same code.
+    const auto [probed, probed_full, probed_shared] = emit(true, {64, 1, 1});
+    const auto [unchecked, unchecked_full, unchecked_shared] = emit(false, {64, 1, 1});
+    REQUIRE(probed_full);
+    REQUIRE(probed == unchecked);
+    REQUIRE(probed_shared == unchecked_shared);
+}
+
+TEST_CASE("Software HMMA's exchange goes after the program's own shared memory",
+          "[video_core][tensor][ampere]") {
+    TensorProgram fixture{1, 16};
+    SlowShuffles(fixture);
+    fixture.program.shared_memory_size = 1000;
+    fixture.profile.max_compute_shared_memory_size = 32768;
+    const auto code = fixture.Emit();
+    REQUIRE_FALSE(Shuffles(code));
+    // 1000 bytes rounded up to 16, then the exchange: no word of the program's is reused.
+    REQUIRE(fixture.program.hmma_program_shared_bytes == 1000U);
+    REQUIRE(fixture.program.shared_memory_size == 1008 + StagedBytes);
+}
+
+TEST_CASE("Emitting an HMMA program twice reserves its shared memory once",
+          "[video_core][tensor][ampere]") {
+    SECTION("Software exchange") {
+        TensorProgram fixture{1, 16};
+        SlowShuffles(fixture);
+        const auto first = fixture.Emit();
+        const u32 size = fixture.program.shared_memory_size;
+        REQUIRE(fixture.Emit() == first);
+        REQUIRE(fixture.program.shared_memory_size == size);
+    }
+    SECTION("16x16x16 cooperative matrices") {
+        TensorProgram fixture{3, 16};
+        fixture.profile.support_cooperative_hmma_16x16x16 = true;
+        const auto first = fixture.Emit();
+        const u32 size = fixture.program.shared_memory_size;
+        REQUIRE(size > 0);
+        REQUIRE(fixture.Emit() == first);
+        REQUIRE(fixture.program.shared_memory_size == size);
+    }
+}
+
+TEST_CASE("Software HMMA's native rounding declares no mode the device lacks",
+          "[video_core][tensor][ampere]") {
+    // MoltenVK on an Apple GPU: float controls, but neither fp16 RTE nor denorm preservation.
+    TensorProgram apple{1, 16};
+    SlowShuffles(apple);
+    apple.profile.support_float_controls = true;
+    apple.profile.fp16_conversion_rounds_rte_with_denorms = true;
+    const auto code = apple.Emit("software-native-rounding-implicit");
+    REQUIRE_FALSE(Instructions(code, OpFConvert).empty());
+    for (const u32 width : {16U, 64U}) {
+        REQUIRE_FALSE(HasExecutionMode(code, ExecutionModeDenormPreserve, width));
+        REQUIRE_FALSE(HasExecutionMode(code, ExecutionModeRoundingModeRTE, width));
+    }
+    // A device that supports the modes still gets them for its native rounding.
+    TensorProgram supported{1, 16};
+    supported.profile.support_float_controls = true;
+    supported.profile.support_fp16_rounding_rte = true;
+    supported.profile.support_fp16_denorm_preserve = true;
+    supported.profile.fp16_float_controls_independent_of_fp32 = true;
+    supported.profile.support_separate_denorm_behavior = true;
+    supported.profile.support_separate_rounding_mode = true;
+    const auto with_modes = supported.Emit();
+    REQUIRE_FALSE(Instructions(with_modes, OpFConvert).empty());
+    REQUIRE(HasExecutionMode(with_modes, ExecutionModeDenormPreserve, 16));
+    REQUIRE(HasExecutionMode(with_modes, ExecutionModeRoundingModeRTE, 16));
+    // A shader that flushes fp16 denormals keeps the software rounding.
+    TensorProgram flushing{1, 16};
+    flushing.profile.support_float_controls = true;
+    flushing.profile.fp16_conversion_rounds_rte_with_denorms = true;
+    flushing.program.info.uses_fp16_denorms_flush = true;
+    REQUIRE(Instructions(flushing.Emit(), OpFConvert).empty());
+}
+
+TEST_CASE("HMMA's pipeline requirements are known before its SPIR-V is emitted",
+          "[video_core][tensor][ampere]") {
+    // A deferred compute pipeline copies the info, then emits: the flags must be there already.
+    SECTION("Software exchange") {
+        TensorProgram fixture{1, 16};
+        SlowShuffles(fixture);
+        Backend::SPIRV::PrepareHmma(fixture.profile, fixture.program);
+        REQUIRE(fixture.program.info.requires_full_guest_warps);
+        REQUIRE_FALSE(fixture.program.info.uses_cooperative_matrix);
+        REQUIRE(fixture.program.shared_memory_size == StagedBytes);
+        const auto code = fixture.Emit();
+        REQUIRE_FALSE(Shuffles(code));
+        REQUIRE(fixture.program.info.requires_full_guest_warps);
+        REQUIRE(fixture.program.shared_memory_size == StagedBytes);
+    }
+    SECTION("16x16x16 cooperative matrices") {
+        TensorProgram fixture{1, 16};
+        fixture.profile.support_cooperative_hmma_16x16x16 = true;
+        Backend::SPIRV::PrepareHmma(fixture.profile, fixture.program);
+        REQUIRE(fixture.program.info.uses_cooperative_matrix);
+        REQUIRE_FALSE(fixture.program.info.requires_full_guest_warps);
+        fixture.Emit();
+        REQUIRE(fixture.program.info.uses_cooperative_matrix);
+    }
+    SECTION("Shuffles need neither") {
+        TensorProgram fixture{1, 16};
+        Backend::SPIRV::PrepareHmma(fixture.profile, fixture.program);
+        REQUIRE_FALSE(fixture.program.info.uses_cooperative_matrix);
+        REQUIRE_FALSE(fixture.program.info.requires_full_guest_warps);
+    }
+}
+
+TEST_CASE("Software HMMA's exchange needs a known 32-lane subgroup size",
+          "[video_core][tensor][ampere]") {
+    TensorProgram fixture{1, 16};
+    SlowShuffles(fixture);
+    fixture.profile.max_subgroup_size = 0;
+    REQUIRE(Shuffles(fixture.Emit()));
+    REQUIRE(fixture.program.shared_memory_size == 0);
+}
+
+TEST_CASE("An HMMA reservation of another kind gives the program its memory back",
+          "[video_core][tensor][ampere]") {
+    TensorProgram fixture{1, 16};
+    fixture.program.shared_memory_size = 64;
+    fixture.profile.support_cooperative_hmma_16x16x16 = true;
+    fixture.Emit();
+    REQUIRE(fixture.program.shared_memory_size == 64 + 2 * 384 * 4);
+    fixture.profile.support_cooperative_hmma_16x16x16 = false;
+    SlowShuffles(fixture);
+    const auto code = fixture.Emit();
+    REQUIRE_FALSE(Shuffles(code));
+    REQUIRE(fixture.program.shared_memory_size == 64 + StagedBytes);
+    REQUIRE(fixture.program.hmma_program_shared_bytes == 64U);
+}
+
+TEST_CASE("Software HMMA rounds in software without a conversion that rounds by itself",
+          "[video_core][tensor][ampere]") {
+    // Float controls, but neither the fp16 modes nor a conversion that keeps fp16 subnormals.
+    TensorProgram fixture{1, 16};
+    fixture.profile.support_float_controls = true;
+    const auto code = fixture.Emit();
+    REQUIRE(Instructions(code, OpFConvert).empty());
+    REQUIRE_FALSE(HasCapability(code, 9)); // Float16
+}
+
+TEST_CASE("An HMMA reservation no path uses any more is given back",
+          "[video_core][tensor][ampere]") {
+    TensorProgram fixture{1, 16};
+    fixture.program.shared_memory_size = 64;
+    SlowShuffles(fixture);
+    fixture.Emit();
+    REQUIRE(fixture.program.shared_memory_size == 64 + StagedBytes);
+    fixture.profile.has_slow_dynamic_shuffle = false;
+    REQUIRE(Shuffles(fixture.Emit()));
+    REQUIRE(fixture.program.shared_memory_size == 64);
+    REQUIRE_FALSE(fixture.program.hmma_program_shared_bytes.has_value());
+    REQUIRE_FALSE(fixture.program.info.requires_full_guest_warps);
+}
+
+TEST_CASE("Software HMMA keeps its shuffles where a warp may run it diverged",
+          "[video_core][tensor][ampere]") {
+    using Node = IR::AbstractSyntaxNode;
+    const auto reserves = [](TensorProgram& fixture) {
+        return Backend::SPIRV::ReserveSoftwareHmmaScratch(fixture.profile, fixture.program)
+            .has_value();
+    };
+    {
+        TensorProgram fixture{1, 16};
+        SlowShuffles(fixture);
+        REQUIRE(reserves(fixture));
+    }
+    SECTION("Inside an if") {
+        TensorProgram fixture{1, 16};
+        SlowShuffles(fixture);
+        fixture.program.syntax_list = {{{}, Node::Type::If},
+                                       {{.block = &fixture.block}, Node::Type::Block},
+                                       {{}, Node::Type::EndIf},
+                                       {{}, Node::Type::Return}};
+        REQUIRE_FALSE(reserves(fixture));
+        REQUIRE(fixture.program.shared_memory_size == 0);
+    }
+    SECTION("After lanes returned early") {
+        TensorProgram fixture{1, 16};
+        SlowShuffles(fixture);
+        fixture.program.syntax_list = {{{}, Node::Type::If},
+                                       {{}, Node::Type::Return},
+                                       {{}, Node::Type::EndIf},
+                                       {{.block = &fixture.block}, Node::Type::Block},
+                                       {{}, Node::Type::Return}};
+        REQUIRE_FALSE(reserves(fixture));
+    }
+    SECTION("Inside a loop, whose breaks or repeat may differ between lanes") {
+        TensorProgram fixture{1, 16};
+        SlowShuffles(fixture);
+        fixture.program.syntax_list = {{{}, Node::Type::Loop},
+                                       {{.block = &fixture.block}, Node::Type::Block},
+                                       {{}, Node::Type::Repeat},
+                                       {{}, Node::Type::Return}};
+        REQUIRE_FALSE(reserves(fixture));
+    }
+    SECTION("After lanes returned inside a loop") {
+        TensorProgram fixture{1, 16};
+        SlowShuffles(fixture);
+        fixture.program.syntax_list = {{{}, Node::Type::Loop},
+                                       {{}, Node::Type::Break},
+                                       {{}, Node::Type::Return},
+                                       {{}, Node::Type::Repeat},
+                                       {{.block = &fixture.block}, Node::Type::Block},
+                                       {{}, Node::Type::Return}};
+        REQUIRE_FALSE(reserves(fixture));
+    }
+    SECTION("After an if that closed, where lanes meet again only with maximal reconvergence") {
+        for (const bool reconvergence : {false, true}) {
+            TensorProgram fixture{1, 16};
+            SlowShuffles(fixture);
+            fixture.profile.support_maximal_reconvergence = reconvergence;
+            fixture.program.syntax_list = {{{}, Node::Type::If},
+                                           {{}, Node::Type::EndIf},
+                                           {{.block = &fixture.block}, Node::Type::Block},
+                                           {{}, Node::Type::Return}};
+            REQUIRE(reserves(fixture) == reconvergence);
+        }
+    }
+    SECTION("After a loop that closed, likewise") {
+        for (const bool reconvergence : {false, true}) {
+            TensorProgram fixture{1, 16};
+            SlowShuffles(fixture);
+            fixture.profile.support_maximal_reconvergence = reconvergence;
+            fixture.program.syntax_list = {{{}, Node::Type::Loop},
+                                           {{}, Node::Type::Repeat},
+                                           {{.block = &fixture.block}, Node::Type::Block},
+                                           {{}, Node::Type::Return}};
+            REQUIRE(reserves(fixture) == reconvergence);
+        }
+    }
+    SECTION("Before any if, with or without maximal reconvergence") {
+        for (const bool reconvergence : {false, true}) {
+            TensorProgram fixture{1, 16};
+            SlowShuffles(fixture);
+            fixture.profile.support_maximal_reconvergence = reconvergence;
+            fixture.program.syntax_list = {{{.block = &fixture.block}, Node::Type::Block},
+                                           {{}, Node::Type::If},
+                                           {{}, Node::Type::EndIf},
+                                           {{}, Node::Type::Return}};
+            REQUIRE(reserves(fixture));
+        }
+    }
+}
+
+TEST_CASE("An HMMA reservation is checked against the limit of the profile it is emitted with",
+          "[video_core][tensor][ampere]") {
+    TensorProgram fixture{1, 16};
+    SlowShuffles(fixture);
+    fixture.program.shared_memory_size = 31500;
+    fixture.Emit();
+    REQUIRE(fixture.program.shared_memory_size == 31504 + StagedBytes);
+    fixture.profile.max_compute_shared_memory_size = 32768;
+    REQUIRE(Shuffles(fixture.Emit()));
+    REQUIRE(fixture.program.shared_memory_size == 31500);
+}
+
+TEST_CASE("Software HMMA's exchange stays within the workgroups measured as warps",
+          "[video_core][tensor][ampere]") {
+    // An M6 forms 32-wide SIMD groups, numbered tid / 32, for threadgroups of 32 to 1024.
+    TensorProgram fixture{1, 16};
+    SlowShuffles(fixture);
+    fixture.program.workgroup_size = {32, 64, 1};
+    REQUIRE(Shuffles(fixture.Emit()));
+    REQUIRE(fixture.program.shared_memory_size == 0);
+}
+
+TEST_CASE("Software HMMA clamps its warp index to its area", "[video_core][tensor][ampere]") {
+    constexpr u32 OpExtInst = 12;
+    constexpr u32 OpConstant = 43;
+    constexpr u32 GlslUMin = 38;
+    // 160 invocations: five warps, the last one 4, a constant nothing else in the program uses.
+    TensorProgram fixture{1, 16};
+    SlowShuffles(fixture);
+    fixture.program.workgroup_size = {160, 1, 1};
+    const auto code = fixture.Emit();
+    const auto constants = Instructions(code, OpConstant);
+    const auto is_four = [&](u32 id) {
+        return std::ranges::any_of(constants, [&](const auto& words) {
+            return words.size() == 3 && words[1] == id && words[2] == 4;
+        });
+    };
+    REQUIRE(std::ranges::any_of(Instructions(code, OpExtInst), [&](const auto& words) {
+        return words.size() == 6 && words[3] == GlslUMin && is_four(words[5]);
+    }));
+}
+
+TEST_CASE("Software HMMA's exchange asks for maximal reconvergence where it can",
+          "[video_core][tensor][ampere]") {
+    constexpr u32 ExecutionModeMaximallyReconverges = 6023;
+    const auto reconverges = [](const std::vector<u32>& code) {
+        return std::ranges::any_of(Instructions(code, OpExecutionMode), [](const auto& words) {
+            return words.size() == 2 && words[1] == ExecutionModeMaximallyReconverges;
+        });
+    };
+    TensorProgram supported{1, 16};
+    SlowShuffles(supported);
+    supported.profile.support_maximal_reconvergence = true;
+    REQUIRE(reconverges(supported.Emit()));
+    TensorProgram unsupported{1, 16};
+    SlowShuffles(unsupported);
+    REQUIRE_FALSE(reconverges(unsupported.Emit()));
+    // Shuffles need no barrier, so no mode.
+    TensorProgram shuffled{1, 16};
+    shuffled.profile.support_maximal_reconvergence = true;
+    REQUIRE_FALSE(reconverges(shuffled.Emit()));
+}
+
+TEST_CASE("Software HMMA's exchange needs a workgroup of whole warps in every dimension",
+          "[video_core][tensor][ampere]") {
+    // A dimension of 0 makes no warp at all: no area, and no clamp that wraps.
+    TensorProgram fixture{1, 16};
+    SlowShuffles(fixture);
+    fixture.program.workgroup_size = {32, 0, 1};
+    REQUIRE(Shuffles(fixture.Emit()));
+    REQUIRE(fixture.program.shared_memory_size == 0);
+    REQUIRE_FALSE(fixture.program.info.requires_full_guest_warps);
+}
+
+TEST_CASE("Software HMMA's native rounding needs 16-bit floats",
+          "[video_core][tensor][ampere]") {
+    // Both ways of rounding natively, but no shaderFloat16: no f16 type at all.
+    TensorProgram fixture{1, 16};
+    fixture.profile.support_float16 = false;
+    fixture.profile.support_float_controls = true;
+    fixture.profile.fp16_conversion_rounds_rte_with_denorms = true;
+    fixture.profile.support_fp16_rounding_rte = true;
+    fixture.profile.support_fp16_denorm_preserve = true;
+    fixture.profile.fp16_float_controls_independent_of_fp32 = true;
+    fixture.profile.support_separate_denorm_behavior = true;
+    fixture.profile.support_separate_rounding_mode = true;
+    const auto code = fixture.Emit();
+    REQUIRE(Instructions(code, OpFConvert).empty());
+    REQUIRE_FALSE(HasCapability(code, 9)); // Float16
+}
+
+TEST_CASE("The subgroup layout probe covers the workgroups it names", "[video_core][tensor]") {
+    constexpr std::array<u32, 3> M6Size{1024, 1024, 1024};
+    const auto probed = [&](u32 x, u32 y, u32 z) {
+        return Backend::SPIRV::IsSubgroupProbeShape(x, y, z, M6Size, 1024);
+    };
+    for (u32 x = 32; x <= 1024; x += 32) {
+        REQUIRE(probed(x, 1, 1));
+    }
+    REQUIRE(probed(32, 4, 1));
+    REQUIRE(probed(64, 2, 2));
+    REQUIRE(probed(32, 8, 4));
+    // Never run, so the staged HMMA does not take them on a probed device.
+    REQUIRE_FALSE(probed(32, 2, 1));
+    REQUIRE_FALSE(probed(32, 1, 8));
+    REQUIRE_FALSE(probed(96, 2, 1));
+    REQUIRE_FALSE(probed(1056, 1, 1));
+    REQUIRE_FALSE(probed(48, 1, 1));
+    REQUIRE_FALSE(probed(0, 1, 1));
+    REQUIRE_FALSE(probed(64, 4, 8));
+    // Nor what the device's limits leave out.
+    REQUIRE_FALSE(Backend::SPIRV::IsSubgroupProbeShape(512, 1, 1, {256, 1024, 64}, 1024));
+    REQUIRE_FALSE(Backend::SPIRV::IsSubgroupProbeShape(512, 1, 1, M6Size, 256));
+    REQUIRE_FALSE(Backend::SPIRV::IsSubgroupProbeShape(32, 8, 4, {1024, 1024, 2}, 1024));
+    REQUIRE(Backend::SPIRV::IsSubgroupProbeShape(256, 1, 1, {256, 1024, 64}, 256));
+}
+
+TEST_CASE("The subgroup layout probe writes each invocation's subgroup", "[video_core][tensor]") {
+    constexpr u32 BuiltInLocalInvocationIndex = 29;
+    constexpr u32 BuiltInSubgroupSize = 36;
+    constexpr u32 BuiltInSubgroupLocalInvocationId = 41;
+    constexpr u32 ExecutionModeLocalSize = 17;
+    for (const u32 invocations : {32U, 1024U}) {
+        const auto code = Backend::SPIRV::EmitSubgroupLayoutProbe(0x00010500U, invocations, 1, 1);
+        if (const char* directory = std::getenv("EDEN_TENSOR_TEST_OUTPUT")) {
+            std::filesystem::create_directories(directory);
+            std::ofstream file{std::filesystem::path{directory} /
+                                   ("subgroup-probe-" + std::to_string(invocations) + ".spv"),
+                               std::ios::binary};
+            file.write(reinterpret_cast<const char*>(code.data()),
+                       static_cast<std::streamsize>(code.size() * sizeof(u32)));
+        }
+        const auto decorations = Instructions(code, OpDecorate);
+        for (const u32 builtin : {BuiltInLocalInvocationIndex, BuiltInSubgroupSize,
+                                  BuiltInSubgroupId, BuiltInSubgroupLocalInvocationId}) {
+            REQUIRE(std::ranges::any_of(decorations, [&](const auto& words) {
+                return words.size() == 3 && words[1] == DecorationBuiltIn && words[2] == builtin;
+            }));
+        }
+        REQUIRE(std::ranges::any_of(Instructions(code, OpExecutionMode), [&](const auto& words) {
+            return words.size() == 5 && words[1] == ExecutionModeLocalSize &&
+                   words[2] == invocations && words[3] == 1 && words[4] == 1;
+        }));
+    }
 }
