@@ -9,6 +9,7 @@
 
 #include "common/alignment.h"
 #include "common/assert.h"
+#include "common/logging.h"
 #include "video_core/host1x/codecs/vp9.h"
 #include "video_core/host1x/host1x.h"
 #include "video_core/memory_manager.h"
@@ -435,10 +436,20 @@ Vp9FrameContainer VP9::GetCurrentFrame() {
     {
         // gpu.SyncGuestHost(); epic, why?
         current_frame.info = GetVp9PictureInfo();
-        current_frame.bit_stream.resize(current_frame.info.bitstream_size);
-        host1x.gmmu_manager.ReadBlock(regs.frame_bitstream_offset.Address(), current_frame.bit_stream.data(), current_frame.info.bitstream_size);
+        if (!host1x.gmmu_manager.IsRangeWithinGPUAddressSpace(regs.frame_bitstream_offset.Address(),
+                                                              current_frame.info.bitstream_size)) {
+            // The size is the guest's: past the address space the read would serve zeros.
+            // Rotate the submission through the queue with an empty payload rather than
+            // returning early, so the pending frame keeps its pairing with this
+            // submission's registers; the empty slot is dropped when it comes due.
+            LOG_ERROR(HW_GPU, "VP9 bitstream of {} bytes at {:#x} is outside the GPU address space",
+                      current_frame.info.bitstream_size, regs.frame_bitstream_offset.Address());
+        } else {
+            current_frame.bit_stream.resize(current_frame.info.bitstream_size);
+            host1x.gmmu_manager.ReadBlock(regs.frame_bitstream_offset.Address(), current_frame.bit_stream.data(), current_frame.info.bitstream_size);
+        }
     }
-    if (!next_frame.bit_stream.empty()) {
+    if (next_frame_occupied) {
         Vp9FrameContainer temp{
             .info = current_frame.info,
             .bit_stream = std::move(current_frame.bit_stream),
@@ -450,6 +461,9 @@ Vp9FrameContainer VP9::GetCurrentFrame() {
     } else {
         next_frame.info = current_frame.info;
         next_frame.bit_stream = current_frame.bit_stream;
+        // A rejected submission occupies a slot too: without this, the next valid
+        // frame would take the first-call branch again and be emitted twice.
+        next_frame_occupied = true;
     }
     return current_frame;
 }
@@ -847,6 +861,9 @@ std::span<const u8> VP9::ComposeFrame() {
         current_frame_info = curr_frame.info;
         SetFrameDimensions(current_frame_info.frame_size.width, current_frame_info.frame_size.height);
         bitstream = std::move(curr_frame.bit_stream);
+    }
+    if (bitstream.empty()) {
+        return {};
     }
     // The uncompressed header routine sets PrevProb parameters needed for the compressed header
     auto uncomp_writer = ComposeUncompressedHeader();

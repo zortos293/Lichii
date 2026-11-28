@@ -33,6 +33,11 @@ void Decoder::Decode() {
     }
 
     const auto packet_data = ComposeFrame();
+    if (packet_data.empty()) {
+        // The codecs drop frames whose guest sizes do not check out; a zero-length packet
+        // would flush the decoder.
+        return;
+    }
     FFmpeg::FrameOffsets offsets{};
     offsets.hidden = vp9_hidden_frame;
     offsets.interlaced = IsInterlaced();

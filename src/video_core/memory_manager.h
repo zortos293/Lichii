@@ -217,6 +217,13 @@ public:
         return gpu_addr < address_space_size;
     }
 
+    /// True when `size` bytes starting at `gpu_addr` lie inside the GPU address space. Block
+    /// reads past it serve zeros, so callers sizing a buffer by a guest value can refuse the
+    /// read instead of allocating for data that cannot exist.
+    bool IsRangeWithinGPUAddressSpace(GPUVAddr gpu_addr, std::size_t size) const {
+        return IsWithinGPUAddressRange(gpu_addr) && size <= address_space_size - gpu_addr;
+    }
+
     PTEKind GetPageKind(GPUVAddr gpu_addr) const;
 
     size_t GetMemoryLayoutSize(GPUVAddr gpu_addr,

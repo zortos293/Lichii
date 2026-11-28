@@ -71,6 +71,15 @@ bool H264::IsInterlaced() {
 
 std::span<const u8> H264::ComposeFrame() {
     host1x.gmmu_manager.ReadBlock(regs.picture_info_offset.Address(), &current_context, sizeof(H264DecoderContext));
+
+    if (!host1x.gmmu_manager.IsRangeWithinGPUAddressSpace(regs.frame_bitstream_offset.Address(),
+                                                          current_context.stream_len)) {
+        // The length is the guest's: past the address space the read would serve zeros.
+        LOG_ERROR(HW_GPU, "H264 bitstream of {} bytes at {:#x} is outside the GPU address space",
+                  current_context.stream_len, regs.frame_bitstream_offset.Address());
+        return {};
+    }
+
     const auto& params = current_context.h264_parameter_set;
     SetFrameDimensions(static_cast<s32>(params.pic_width_in_mbs) * 16,
                        static_cast<s32>(params.frame_height_in_mbs) * 16);

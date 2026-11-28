@@ -198,6 +198,9 @@ private:
 
     Common::ScratchBuffer<u8> frame_scratch;
     Vp9FrameContainer next_frame{};
+    // A queued submission occupies its lookahead slot even when its payload was
+    // rejected and left empty; the first-call branch keys on this, not on the payload.
+    bool next_frame_occupied{};
     std::array<Vp9EntropyProbs, 4> frame_ctxs{};
     bool swap_ref_indices{};
 

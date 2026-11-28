@@ -5,6 +5,7 @@
 
 #include <vector>
 
+#include "common/logging.h"
 #include "video_core/host1x/codecs/vp8.h"
 #include "video_core/host1x/host1x.h"
 #include "video_core/memory_manager.h"
@@ -39,6 +40,13 @@ std::span<const u8> VP8::ComposeFrame() {
     const bool is_key_frame = current_context.key_frame == 1u;
     const auto bitstream_size = size_t(current_context.vld_buffer_size);
     const size_t header_size = is_key_frame ? 10u : 3u;
+    const u64 bitstream_offset = regs.frame_bitstream_offset.Address();
+    if (!host1x.gmmu_manager.IsRangeWithinGPUAddressSpace(bitstream_offset, bitstream_size)) {
+        // The size is the guest's: past the address space the read would serve zeros.
+        LOG_ERROR(HW_GPU, "VP8 bitstream of {} bytes at {:#x} is outside the GPU address space",
+                  bitstream_size, bitstream_offset);
+        return {};
+    }
     frame_scratch.resize(header_size + bitstream_size);
 
     // Based on page 30 of the VP8 specification.
@@ -65,7 +73,6 @@ std::span<const u8> VP8::ComposeFrame() {
         frame_scratch[9] = u8(((current_context.frame_height >> 8) & 0x3f));
     }
 
-    const u64 bitstream_offset = regs.frame_bitstream_offset.Address();
     host1x.gmmu_manager.ReadBlock(bitstream_offset, frame_scratch.data() + header_size, bitstream_size);
     return frame_scratch;
 }
