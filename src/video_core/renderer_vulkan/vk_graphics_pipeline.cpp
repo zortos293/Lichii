@@ -1755,6 +1755,10 @@ bool GraphicsPipeline::ConfigureDraw(const RescalingPushConstant& rescaling,
     if (guest_descriptor_queue.HasRejectedTexelBuffer()) {
         return false;
     }
+    if (const Framebuffer* const framebuffer = texture_cache.GetFramebuffer();
+        framebuffer && framebuffer->MissesAttachment()) {
+        return false;
+    }
     if (guest_descriptor_queue.UpdateCount() != num_descriptor_entries) {
         LOG_CRITICAL(Render_Vulkan, "Graphics descriptor count mismatch: expected {}, got {}",
                      num_descriptor_entries, guest_descriptor_queue.UpdateCount());

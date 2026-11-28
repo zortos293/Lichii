@@ -672,6 +672,9 @@ private:
     /// Remove framebuffers using the given image views from the cache
     void RemoveFramebuffers(std::span<const ImageViewId> removed_views);
 
+    /// Makes the next UpdateRenderTargets look every render target up again.
+    void MarkRenderTargetsDirty();
+
     /// Mark an image as modified from the GPU
     void MarkModification(ImageBase& image) noexcept;
 

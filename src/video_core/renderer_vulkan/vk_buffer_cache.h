@@ -12,6 +12,7 @@
 
 #include "video_core/buffer_cache/buffer_cache_base.h"
 #include "video_core/buffer_cache/memory_tracker_base.h"
+#include "video_core/buffer_cache/texel_view_cache.h"
 #include "video_core/buffer_cache/usage_tracker.h"
 #include "video_core/engines/maxwell_3d.h"
 #include "video_core/gpu_split.h"
@@ -87,17 +88,10 @@ public:
     }
 
 private:
-    struct BufferView {
-        VkDeviceSize offset;
-        VkDeviceSize size;
-        VkFormat format;
-        vk::BufferView handle;
-    };
-
     const Device* device{};
     const BufferArena* arena{};
     vk::Buffer buffer;
-    std::vector<BufferView> views;
+    VideoCommon::TexelViewCache<vk::BufferView> views;
     VideoCommon::UsageTracker tracker;
     VkDeviceAddress device_address{};
     u64 last_usage_tick{};

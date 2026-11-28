@@ -4743,7 +4743,28 @@ ImageView::ImageView(TextureCacheRuntime& runtime, const VideoCommon::ImageViewI
         if (num_layers) {
             ci.subresourceRange.layerCount = *num_layers;
         }
-        vk::ImageView handle = device->GetLogical().CreateImageView(ci);
+        vk::ImageView handle;
+        try {
+            handle = device->GetLogical().CreateImageView(ci);
+        } catch (const vk::Exception& exception) {
+            static std::atomic<u32> logged{};
+            const VkResult result = exception.GetResult();
+            if (logged.fetch_add(1, std::memory_order_relaxed) < 32 ||
+                result == VK_ERROR_DEVICE_LOST) {
+                LOG_ERROR(Render_Vulkan,
+                          "vkCreateImageView failed: VkResult={} image={:#x} format={} type={} "
+                          "size={}x{}x{} levels={}+{} layers={}+{}",
+                          static_cast<s32>(result), image.gpu_addr, static_cast<s32>(ci.format),
+                          static_cast<s32>(ci.viewType), size.width, size.height, size.depth,
+                          ci.subresourceRange.baseMipLevel, ci.subresourceRange.levelCount,
+                          ci.subresourceRange.baseArrayLayer, ci.subresourceRange.layerCount);
+            }
+            if (result == VK_ERROR_DEVICE_LOST) {
+                device->ReportLoss();
+            }
+            flags |= VideoCommon::ImageViewFlagBits::CreationFailed;
+            return;
+        }
         if (device->HasDebuggingToolAttached()) {
             handle.SetObjectNameEXT(VideoCommon::Name(*this, gpu_addr).c_str());
         }
@@ -5346,13 +5367,15 @@ void Framebuffer::CreateFramebuffer(TextureCacheRuntime& runtime,
     s32 num_layers = (std::numeric_limits<s32>::max)();
 
     is_rescaled = is_rescaled_;
+    misses_attachment = false;
     const auto& resolution = runtime.resolution;
 
     u32 width = (std::numeric_limits<u32>::max)();
     u32 height = (std::numeric_limits<u32>::max)();
     for (size_t index = 0; index < NUM_RT; ++index) {
         const ImageView* const color_buffer = color_buffers[index];
-        if (!color_buffer) {
+        if (!color_buffer || !color_buffer->RenderTarget()) {
+            misses_attachment |= color_buffer != nullptr;
             renderpass_key.color_formats[index] = PixelFormat::Invalid;
             continue;
         }
@@ -5372,7 +5395,7 @@ void Framebuffer::CreateFramebuffer(TextureCacheRuntime& runtime,
     const size_t num_colors = attachments.size();
     VkImage depth_image = VK_NULL_HANDLE;
     VkImageAspectFlags depth_aspect_mask = 0;
-    if (depth_buffer) {
+    if (depth_buffer && depth_buffer->RenderTarget()) {
         width = (std::min)(width, is_rescaled ? resolution.ScaleUp(depth_buffer->size.width)
                                             : depth_buffer->size.width);
         height = (std::min)(height, is_rescaled ? resolution.ScaleUp(depth_buffer->size.height)
@@ -5390,6 +5413,7 @@ void Framebuffer::CreateFramebuffer(TextureCacheRuntime& runtime,
         depth_image = depth_buffer->ImageHandle();
         depth_aspect_mask = subresource_range.aspectMask;
     } else {
+        misses_attachment |= depth_buffer != nullptr;
         renderpass_key.depth_format = PixelFormat::Invalid;
     }
     if (num_layers == (std::numeric_limits<s32>::max)()) {

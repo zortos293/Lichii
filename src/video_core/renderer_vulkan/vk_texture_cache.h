@@ -481,6 +481,12 @@ public:
         return is_rescaled;
     }
 
+    /// A bound target whose view creation failed was left out, so the render pass no longer
+    /// matches what pipelines were built for.
+    [[nodiscard]] bool MissesAttachment() const noexcept {
+        return misses_attachment;
+    }
+
     [[nodiscard]] bool DiscardsMsaaColor() const noexcept {
         return discard_msaa_color;
     }
@@ -509,6 +515,7 @@ private:
     bool has_depth{};
     bool has_stencil{};
     bool is_rescaled{};
+    bool misses_attachment{};
     std::array<VkImage, 9> resolve_shadow_images{};
     u32 num_resolve_shadows = 0;
     TextureCacheRuntime* runtime_ptr{nullptr};

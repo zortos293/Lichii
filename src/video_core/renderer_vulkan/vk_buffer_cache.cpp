@@ -156,11 +156,10 @@ void Buffer::MarkUsage(u64 offset, u64 size) noexcept {
 }
 
 VkBufferView Buffer::View(VkDeviceSize offset, VkDeviceSize size, VkFormat format) {
-    const auto it{std::ranges::find_if(views, [offset, size, format](const BufferView& view) {
-        return offset == view.offset && size == view.size && format == view.format;
-    })};
-    if (it != views.end()) {
-        return *it->handle;
+    const u64 stamp = arena->Now();
+    if (const vk::BufferView* const view =
+            views.Find(offset, size, static_cast<u32>(format), stamp)) {
+        return **view;
     }
     try {
         auto view = device->GetLogical().CreateBufferView({
@@ -172,16 +171,17 @@ VkBufferView Buffer::View(VkDeviceSize offset, VkDeviceSize size, VkFormat forma
             .offset = offset,
             .range = size,
         });
-        views.push_back({offset, size, format, std::move(view)});
-        return *views.back().handle;
+        return *views.Insert(offset, size, static_cast<u32>(format), stamp, std::move(view),
+                             [this](u64 last_use) { return arena->IsFree(last_use); });
     } catch (const vk::Exception& exception) {
         static std::atomic<u32> logged{};
         const auto result = exception.GetResult();
         if (logged.fetch_add(1, std::memory_order_relaxed) < 32 || result == VK_ERROR_DEVICE_LOST) {
             LOG_ERROR(Render_Vulkan,
-                      "vkCreateBufferView failed: VkResult={} buffer={:#x} format={} offset={} range={}",
-                      static_cast<s32>(result), reinterpret_cast<u64>(*buffer), format,
-                      offset, size);
+                      "vkCreateBufferView failed: VkResult={} buffer={:#x} format={} offset={} "
+                      "range={} views on the buffer={}",
+                      static_cast<s32>(result), reinterpret_cast<u64>(*buffer), format, offset,
+                      size, views.Size());
         }
         if (result == VK_ERROR_DEVICE_LOST) {
             device->ReportLoss();
