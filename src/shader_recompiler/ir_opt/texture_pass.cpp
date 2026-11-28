@@ -614,6 +614,15 @@ bool ReachesOutsideLoads(const IR::Value& value, const IR::Inst* target, const I
     return false;
 }
 
+bool ReadsCbufAtDynamicOffset(const IR::Value& value) {
+    const IR::Value resolved{value.Resolve()};
+    if (resolved.IsImmediate()) {
+        return false;
+    }
+    const IR::Inst* const inst{resolved.InstRecursive()};
+    return inst->GetOpcode() == IR::Opcode::GetCbufU32 && !inst->Arg(1).Resolve().IsImmediate();
+}
+
 std::optional<ConstBufferAddr> Track(const IR::Value& value, Environment& env, const HostTranslateInfo& host_info, const IR::Block* block) {
     // A value loaded from memory is not a constant buffer word, whatever its address is built
     // from: the search does not look into a load's operands (a handle read from a storage
@@ -631,6 +640,11 @@ std::optional<ConstBufferAddr> Track(const IR::Value& value, Environment& env, c
         queue.pop();
         if (const std::optional result = TryGetConstBuffer(inst, env, host_info, block)) {
             return result;
+        }
+        // table[dynamic] | word: the word alone is not the handle.
+        if (inst->GetOpcode() == IR::Opcode::BitwiseOr32 &&
+            (ReadsCbufAtDynamicOffset(inst->Arg(0)) || ReadsCbufAtDynamicOffset(inst->Arg(1)))) {
+            return std::nullopt;
         }
         if (IsMemoryLoad(inst->GetOpcode())) {
             continue;
@@ -685,6 +699,7 @@ thread_local int g_handle_scaled{};
 
 bool BuildHandleNode(const IR::Value& value, std::vector<u32>& code, int& budget,
                      const IR::Block* block);
+std::optional<IR::Value> SpilledWord(const IR::Inst& load);
 
 bool BuildHandleProgram(const IR::Value& value, std::vector<u32>& code, int& budget,
                         const IR::Block* block) {
@@ -1044,6 +1059,14 @@ bool BuildHandleNode(const IR::Value& value, std::vector<u32>& code, int& budget
         if (!build(0) || !build(1) || !build(2)) return false;
         emit(Op::Select);
         return true;
+    case IR::Opcode::LoadSharedU32:
+        if (g_handle_load_depth > 0) {
+            if (const std::optional word{SpilledWord(*inst)}) {
+                return BuildHandleProgram(*word, code, budget, block);
+            }
+        }
+        g_handle_failure = inst->GetOpcode();
+        return false;
     default:
         g_handle_failure = inst->GetOpcode();
         return false;
@@ -1087,6 +1110,8 @@ void TrimTrailingTees(std::vector<u32>& code) {
 // Elements of the descriptor array of a handle read from a table at an index word (see
 // g_handle_index_allowed): the table entries a draw binds, larger indices taking the last one.
 constexpr u32 HANDLE_TABLE_SIZE = 64;
+// A dispatch's table can reach past that: Kirby Air Riders' light bake indexes over 400 entries.
+constexpr u32 COMPUTE_HANDLE_TABLE_SIZE = 512;
 
 // The block of each instruction and the immediate dominator of each block of the program the
 // pass on this thread runs on, built when a handle program first needs them (Cooper, Harvey and
@@ -1169,6 +1194,112 @@ private:
 
 thread_local const IR::Program* g_program{};
 thread_local std::optional<Dominance> g_dominance;
+
+// The one value a web of Phis carries (a stack pointer through loops), else the value itself.
+IR::Value ThroughPhis(const IR::Value& value) {
+    const IR::Value start{value.Resolve()};
+    std::optional<IR::Value> leaf;
+    std::unordered_set<const IR::Inst*> visited;
+    std::vector<IR::Value> pending{start};
+    while (!pending.empty()) {
+        const IR::Value current{pending.back().Resolve()};
+        pending.pop_back();
+        if (!current.IsImmediate() && current.InstRecursive()->GetOpcode() == IR::Opcode::Phi) {
+            const IR::Inst* const phi{current.InstRecursive()};
+            if (visited.insert(phi).second) {
+                for (size_t arg = 0; arg < phi->NumArgs(); ++arg) {
+                    pending.push_back(phi->Arg(arg));
+                }
+            }
+            continue;
+        }
+        if (leaf && !(*leaf == current)) {
+            return start;
+        }
+        leaf = current;
+    }
+    return leaf ? *leaf : start;
+}
+
+std::pair<const IR::Inst*, u32> SharedAddress(const IR::Value& address) {
+    const IR::Value value{ThroughPhis(address)};
+    if (value.IsImmediate()) {
+        return {nullptr, value.U32()};
+    }
+    const IR::Inst* const inst{value.InstRecursive()};
+    if (inst->GetOpcode() == IR::Opcode::IAdd32) {
+        const IR::Value lhs{ThroughPhis(inst->Arg(0))};
+        const IR::Value rhs{ThroughPhis(inst->Arg(1))};
+        if (rhs.IsImmediate() && !lhs.IsImmediate()) {
+            return {lhs.InstRecursive(), rhs.U32()};
+        }
+        if (lhs.IsImmediate() && !rhs.IsImmediate()) {
+            return {rhs.InstRecursive(), lhs.U32()};
+        }
+    }
+    return {inst, 0};
+}
+
+// The value of the only store a shared memory load can read: one 32-bit store to its address
+// that runs before it, with every other shared memory write provably elsewhere.
+std::optional<IR::Value> SpilledWord(const IR::Inst& load) {
+    if (g_program == nullptr) {
+        return std::nullopt;
+    }
+    const auto [base, offset]{SharedAddress(load.Arg(0))};
+    const IR::Inst* store{};
+    for (const IR::Block* const block : g_program->post_order_blocks) {
+        for (const IR::Inst& inst : block->Instructions()) {
+            switch (inst.GetOpcode()) {
+            case IR::Opcode::WriteSharedU32: {
+                const auto [write_base, write_offset]{SharedAddress(inst.Arg(0))};
+                if (write_base != base) {
+                    return std::nullopt;
+                }
+                if (write_offset == offset) {
+                    if (store != nullptr) {
+                        return std::nullopt;
+                    }
+                    store = &inst;
+                } else if (write_offset - offset + 3 < 7) {
+                    return std::nullopt; // a partial overlap
+                }
+                break;
+            }
+            case IR::Opcode::WriteSharedU8:
+            case IR::Opcode::WriteSharedU16:
+            case IR::Opcode::WriteSharedU64:
+            case IR::Opcode::WriteSharedU128:
+            case IR::Opcode::SharedAtomicIAdd32:
+            case IR::Opcode::SharedAtomicSMin32:
+            case IR::Opcode::SharedAtomicUMin32:
+            case IR::Opcode::SharedAtomicSMax32:
+            case IR::Opcode::SharedAtomicUMax32:
+            case IR::Opcode::SharedAtomicInc32:
+            case IR::Opcode::SharedAtomicDec32:
+            case IR::Opcode::SharedAtomicAnd32:
+            case IR::Opcode::SharedAtomicOr32:
+            case IR::Opcode::SharedAtomicXor32:
+            case IR::Opcode::SharedAtomicExchange32:
+            case IR::Opcode::SharedAtomicExchange64:
+            case IR::Opcode::SharedAtomicExchange32x2:
+                return std::nullopt;
+            default:
+                break;
+            }
+        }
+    }
+    if (store == nullptr) {
+        return std::nullopt;
+    }
+    if (!g_dominance) {
+        g_dominance.emplace(*g_program);
+    }
+    if (!g_dominance->Dominates(store, &load)) {
+        return std::nullopt;
+    }
+    return store->Arg(1);
+}
 
 std::optional<u32> TryGetConstant(IR::Value& value, Environment& env) {
     const IR::Inst* inst = value.InstRecursive();
@@ -1400,7 +1531,8 @@ TextureInst MakeInst(Environment& env, IR::Block* block, IR::Inst& inst, const H
                     g_dominance.emplace(*g_program);
                 }
                 if (g_dominance->Dominates(index.InstRecursive(), &inst)) {
-                    count = HANDLE_TABLE_SIZE;
+                    count = env.ShaderStage() == Stage::Compute ? COMPUTE_HANDLE_TABLE_SIZE
+                                                                : HANDLE_TABLE_SIZE;
                 }
             }
             addr = ConstBufferAddr{
