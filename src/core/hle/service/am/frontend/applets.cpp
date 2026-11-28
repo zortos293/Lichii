@@ -46,7 +46,9 @@ void FrontendApplet::Initialize() {
     const auto common_data = common->GetData();
 
     ASSERT(common_data.size() >= sizeof(CommonArguments));
-    std::memcpy(&common_args, common_data.data(), sizeof(CommonArguments));
+    // A soft assert only logs: read no more than the storage holds.
+    std::memcpy(&common_args, common_data.data(),
+                (std::min)(common_data.size(), sizeof(CommonArguments)));
 
     initialized = true;
 }
