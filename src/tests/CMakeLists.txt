@@ -209,6 +209,7 @@ add_executable(tests
     video_core/shader_cache_v2_driver.cpp
     video_core/vulkan_pipeline_binaries.cpp
     video_core/vulkan_buffer_oom.cpp
+    video_core/vulkan_instance_extensions.cpp
     video_core/pipeline_layout_cache.cpp
     video_core/shader_precache.cpp
     video_core/shader_object_pool.cpp
@@ -533,6 +534,9 @@ if (NOT ANDROID)
         ../frontend_common/recommended_settings.cpp)
     target_link_libraries(config_tests PRIVATE common SimpleIni::SimpleIni Catch2::Catch2WithMain
         ${PLATFORM_LIBRARIES})
+    # Tests::InitializeTestLog, the same folder as the tests target's.
+    target_compile_definitions(config_tests PRIVATE
+        LICHII_TESTS_LOG_DIR="${CMAKE_CURRENT_BINARY_DIR}/test-log")
     add_test(NAME config_tests COMMAND config_tests)
 
     add_executable(profile_import_tests

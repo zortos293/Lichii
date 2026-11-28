@@ -466,8 +466,13 @@ void Config::ReadDataStorageValues() {
 
     using namespace Common::FS;
 
+    // An unset path setting (a new configuration has none) keeps the current path, without
+    // SetEdenPath's error for a path that is not a folder.
     const auto setPath = [this](const EdenPath& path, const char* setting) {
-        SetEdenPath(path, ReadStringSetting(std::string(setting)));
+        const auto value = ReadStringSetting(std::string(setting));
+        if (!value.empty()) {
+            SetEdenPath(path, value);
+        }
     };
 
     setPath(EdenPath::NANDDir, "nand_directory");
@@ -572,8 +577,10 @@ void Config::ReadScreenshotValues() {
     BeginGroup(Settings::TranslateCategory(Settings::Category::Screenshots));
 
     ReadCategory(Settings::Category::Screenshots);
-    FS::SetEdenPath(FS::EdenPath::ScreenshotsDir,
-                    ReadStringSetting(std::string("screenshot_path")));
+    const auto screenshot_path = ReadStringSetting(std::string("screenshot_path"));
+    if (!screenshot_path.empty()) {
+        FS::SetEdenPath(FS::EdenPath::ScreenshotsDir, screenshot_path);
+    }
 
     EndGroup();
 }

@@ -29,12 +29,18 @@
 namespace Vulkan {
 namespace {
 
-[[nodiscard]] bool AreExtensionsSupported(const vk::InstanceDispatch& dld, std::vector<VkExtensionProperties> const& properties, std::span<const char* const> extensions) {
+/// Whether the driver lists an extension. Silent: an optional extension may be missing.
+[[nodiscard]] bool HasExtension(std::vector<VkExtensionProperties> const& properties,
+                                const char* extension) {
+    return std::ranges::any_of(properties, [extension](const VkExtensionProperties& property) {
+        return std::strcmp(extension, property.extensionName) == 0;
+    });
+}
+
+[[nodiscard]] bool AreExtensionsSupported(std::vector<VkExtensionProperties> const& properties,
+                                          std::span<const char* const> extensions) {
     for (const char* extension : extensions) {
-        const auto it = std::ranges::find_if(properties, [extension](const auto& prop) {
-            return std::strcmp(extension, prop.extensionName) == 0;
-        });
-        if (it == properties.end()) {
+        if (!HasExtension(properties, extension)) {
             LOG_ERROR(Render_Vulkan, "Required instance extension {} is not available", extension);
             return false;
         }
@@ -42,15 +48,17 @@ namespace {
     return true;
 }
 
-[[nodiscard]] std::vector<const char*> RequiredExtensions(
-    const vk::InstanceDispatch& dld, std::vector<VkExtensionProperties> const& properties,
-    Core::Frontend::WindowSystemType window_type, bool enable_validation) {
+} // Anonymous namespace
+
+std::vector<const char*> RequiredExtensions(std::vector<VkExtensionProperties> const& properties,
+                                            Core::Frontend::WindowSystemType window_type,
+                                            bool enable_validation) {
     std::vector<const char*> extensions;
     extensions.reserve(7);
     // Headless presents to VK_EXT_headless_surface where the driver has it (GPU trace replay).
     const bool headless_surface =
         window_type == Core::Frontend::WindowSystemType::Headless &&
-        AreExtensionsSupported(dld, properties, std::array{VK_EXT_HEADLESS_SURFACE_EXTENSION_NAME});
+        HasExtension(properties, VK_EXT_HEADLESS_SURFACE_EXTENSION_NAME);
     switch (window_type) {
     case Core::Frontend::WindowSystemType::Headless:
         if (headless_surface) {
@@ -87,28 +95,22 @@ namespace {
     }
     if (window_type != Core::Frontend::WindowSystemType::Headless || headless_surface) {
         extensions.push_back(VK_KHR_SURFACE_EXTENSION_NAME);
-        if (std::ranges::any_of(properties, [](const VkExtensionProperties& property) {
-                return std::strcmp(property.extensionName,
-                                   VK_EXT_SWAPCHAIN_COLOR_SPACE_EXTENSION_NAME) == 0;
-            })) {
+        if (HasExtension(properties, VK_EXT_SWAPCHAIN_COLOR_SPACE_EXTENSION_NAME)) {
             extensions.push_back(VK_EXT_SWAPCHAIN_COLOR_SPACE_EXTENSION_NAME);
         }
         // Surface queries for present ids and present waits (VK_KHR_present_id2/wait2).
-        if (std::ranges::any_of(properties, [](const VkExtensionProperties& property) {
-                return std::strcmp(property.extensionName,
-                                   VK_KHR_GET_SURFACE_CAPABILITIES_2_EXTENSION_NAME) == 0;
-            })) {
+        if (HasExtension(properties, VK_KHR_GET_SURFACE_CAPABILITIES_2_EXTENSION_NAME)) {
             extensions.push_back(VK_KHR_GET_SURFACE_CAPABILITIES_2_EXTENSION_NAME);
         }
     }
     // Probe optional extensions against the same snapshot the caller verifies against, so the
     // check here and the verification in CreateInstance can never disagree (see TOCTOU note below).
 #ifdef __APPLE__
-    if (AreExtensionsSupported(dld, properties, std::array{VK_KHR_PORTABILITY_ENUMERATION_EXTENSION_NAME}))
+    if (HasExtension(properties, VK_KHR_PORTABILITY_ENUMERATION_EXTENSION_NAME))
         extensions.push_back(VK_KHR_PORTABILITY_ENUMERATION_EXTENSION_NAME);
 #endif
     if ((enable_validation || Vulkan::AddressMap::Wanted()) &&
-        AreExtensionsSupported(dld, properties, std::array{VK_EXT_DEBUG_UTILS_EXTENSION_NAME}))
+        HasExtension(properties, VK_EXT_DEBUG_UTILS_EXTENSION_NAME))
         extensions.push_back(VK_EXT_DEBUG_UTILS_EXTENSION_NAME);
 #ifdef EGLANTINE_STREAMLINE
     // What NVIDIA's DLSS asks for through Streamline, where available. Static: the returned
@@ -116,9 +118,7 @@ namespace {
     static std::vector<std::string> streamline;
     streamline = Streamline::InstanceExtensions();
     for (const std::string& name : streamline) {
-        const bool available = std::ranges::any_of(properties, [&](const VkExtensionProperties& p) {
-            return name == p.extensionName;
-        });
+        const bool available = HasExtension(properties, name.c_str());
         const bool listed = std::ranges::any_of(extensions, [&](const char* e) { return name == e; });
         if (available && !listed) {
             extensions.push_back(name.c_str());
@@ -127,6 +127,8 @@ namespace {
 #endif
     return extensions;
 }
+
+namespace {
 
 [[nodiscard]] std::vector<const char*> Layers(bool enable_validation) {
     std::vector<const char*> layers;
@@ -182,8 +184,8 @@ vk::Instance CreateInstance(const Common::DynamicLibrary& library, vk::InstanceD
         throw vk::Exception(VK_ERROR_EXTENSION_NOT_PRESENT);
     }
     std::vector<const char*> const extensions =
-        RequiredExtensions(dld, *properties, window_type, enable_validation);
-    if (!AreExtensionsSupported(dld, *properties, extensions))
+        RequiredExtensions(*properties, window_type, enable_validation);
+    if (!AreExtensionsSupported(*properties, extensions))
         throw vk::Exception(VK_ERROR_EXTENSION_NOT_PRESENT);
     std::vector<const char*> layers = Layers(enable_validation);
     RemoveUnavailableLayers(dld, layers);
