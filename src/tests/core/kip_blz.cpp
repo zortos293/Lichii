@@ -37,12 +37,17 @@ std::vector<u8> MakeBlz() {
     return blz;
 }
 
-// A KIP whose text section is `blz`, decompressing to 32 bytes.
+// A KIP whose text section is `blz`, flagged compressed, decompressing to 32 bytes.
 VirtualFile MakeKip(const std::vector<u8>& blz) {
     std::vector<u8> bytes(0x100);
     Put32(bytes, 0, Common::MakeMagic('K', 'I', 'P', '1'));
+    bytes[0x1F] = 0x1;
     Put32(bytes, 0x24, 32);
     Put32(bytes, 0x28, static_cast<u32>(blz.size()));
+    // A layout the kernel accepts: .rodata, .data and .bss each on a page after .text.
+    Put32(bytes, 0x30, 0x1000);
+    Put32(bytes, 0x40, 0x2000);
+    Put32(bytes, 0x50, 0x3000);
     bytes.insert(bytes.end(), blz.begin(), blz.end());
     return std::make_shared<VectorVfsFile>(std::move(bytes), "test.kip");
 }

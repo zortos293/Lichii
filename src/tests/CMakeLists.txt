@@ -81,6 +81,7 @@ add_executable(tests
     core/nso_loader.cpp
     core/nsp_loader.cpp
     core/memory_acquire.cpp
+    core/kip_load.cpp
     core/kip_sections.cpp
     core/memory_span.cpp
     core/kip_blz.cpp

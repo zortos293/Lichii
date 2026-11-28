@@ -29,6 +29,10 @@ std::vector<u8> MakeKip(std::string_view name, std::string_view text) {
     std::memcpy(bytes.data() + 4, name.data(), name.size());
     Put32(bytes, 0x24, static_cast<u32>(text.size()));
     Put32(bytes, 0x28, static_cast<u32>(text.size()));
+    // A layout the kernel accepts: .rodata, .data and .bss each on a page after .text.
+    Put32(bytes, 0x30, 0x1000);
+    Put32(bytes, 0x40, 0x2000);
+    Put32(bytes, 0x50, 0x3000);
     bytes.insert(bytes.end(), text.begin(), text.end());
     return bytes;
 }
@@ -69,4 +73,18 @@ TEST_CASE("INI1 stops at the end of the file when it counts more KIPs", "[core][
     const INI ini{std::make_shared<VectorVfsFile>(std::move(bytes), "ini1.bin")};
     REQUIRE(ini.GetKIPs().size() == 1);
     CHECK(ini.GetKIPs()[0].GetName() == "FS");
+}
+
+TEST_CASE("INI1 steps over a whole KIP it rejects and reads the ones after it", "[core][file_sys]") {
+    // A layout the kernel would refuse (.rodata off a page), with its header and text intact.
+    auto rejected = MakeKip("bad", "rejected");
+    Put32(rejected, 0x30, 0x1004);
+    const INI ini{MakeIni({rejected, MakeKip("FS", "fs text"), MakeKip("spl", "spl text")})};
+    REQUIRE(ini.GetStatus() == Loader::ResultStatus::Success);
+    const auto& kips = ini.GetKIPs();
+    // The walk used to stop at the rejected one, losing FS and spl.
+    REQUIRE(kips.size() == 2);
+    CHECK(kips[0].GetName() == "FS");
+    CHECK(Text(kips[0]) == "fs text");
+    CHECK(kips[1].GetName() == "spl");
 }

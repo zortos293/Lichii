@@ -27,6 +27,10 @@ KIP MakeKip(u32 declared) {
     Put32(bytes, 0, Common::MakeMagic('K', 'I', 'P', '1'));
     Put32(bytes, 0x24, declared);
     Put32(bytes, 0x28, declared);
+    // A layout the kernel accepts: .rodata, .data and .bss each on a page after .text.
+    Put32(bytes, 0x30, 0x1000);
+    Put32(bytes, 0x40, 0x2000);
+    Put32(bytes, 0x50, 0x3000);
     bytes.resize(0x110, 0x5A);
     return KIP{std::make_shared<VectorVfsFile>(std::move(bytes), "test.kip")};
 }
