@@ -90,6 +90,19 @@ NvResult nvhost_nvdec_common::Submit(IoctlSubmit& params, std::span<u8> data, De
         return NvResult::BadParameter;
     }
 
+    // Each count sizes a vector below, and the vectors are sliced from the variable input in
+    // order. A count past what the input holds allocates that much memory before the slices
+    // fall short, so refuse the submit before the counts size anything.
+    const u64 bytes_needed = u64{params.cmd_buffer_count} * sizeof(CommandBuffer) +
+                             u64{params.relocation_count} * (sizeof(Reloc) + sizeof(u32)) +
+                             u64{params.syncpoint_count} * sizeof(SyncptIncr) +
+                             u64{params.fence_count} * sizeof(u32);
+    if (static_cast<u64>(data.size()) < bytes_needed) {
+        LOG_ERROR(Service_NVDRV, "Submit refused: counts need {} bytes, input holds {}",
+                  bytes_needed, data.size());
+        return NvResult::BadParameter;
+    }
+
     // Instantiate param buffers
     std::vector<CommandBuffer> command_buffers(params.cmd_buffer_count);
     std::vector<Reloc> relocs(params.relocation_count);
