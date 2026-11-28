@@ -190,35 +190,40 @@ void SoftwareKeyboard::InitializeForeground() {
     const auto& swkbd_config_data = swkbd_config_storage->GetData();
     ASSERT(swkbd_config_data.size() >= sizeof(SwkbdConfigCommon));
 
-    std::memcpy(&swkbd_config_common, swkbd_config_data.data(), sizeof(SwkbdConfigCommon));
+    // A soft assert only logs: each part reads no more than the storage holds past its end.
+    const std::size_t swkbd_common_len =
+        (std::min)(swkbd_config_data.size(), sizeof(SwkbdConfigCommon));
+    std::memcpy(&swkbd_config_common, swkbd_config_data.data(), swkbd_common_len);
+    const u8* const swkbd_config_rest = swkbd_config_data.data() + swkbd_common_len;
+    const std::size_t swkbd_config_rest_size = swkbd_config_data.size() - swkbd_common_len;
 
     switch (swkbd_applet_version) {
     case SwkbdAppletVersion::Version5:
     case SwkbdAppletVersion::Version65542:
         ASSERT(swkbd_config_data.size() == sizeof(SwkbdConfigCommon) + sizeof(SwkbdConfigOld));
-        std::memcpy(&swkbd_config_old, swkbd_config_data.data() + sizeof(SwkbdConfigCommon),
-                    sizeof(SwkbdConfigOld));
+        std::memcpy(&swkbd_config_old, swkbd_config_rest,
+                    (std::min)(sizeof(SwkbdConfigOld), swkbd_config_rest_size));
         break;
     case SwkbdAppletVersion::Version196615:
     case SwkbdAppletVersion::Version262152:
     case SwkbdAppletVersion::Version327689:
         ASSERT(swkbd_config_data.size() == sizeof(SwkbdConfigCommon) + sizeof(SwkbdConfigOld2));
-        std::memcpy(&swkbd_config_old2, swkbd_config_data.data() + sizeof(SwkbdConfigCommon),
-                    sizeof(SwkbdConfigOld2));
+        std::memcpy(&swkbd_config_old2, swkbd_config_rest,
+                    (std::min)(sizeof(SwkbdConfigOld2), swkbd_config_rest_size));
         break;
     case SwkbdAppletVersion::Version393227:
     case SwkbdAppletVersion::Version524301:
         ASSERT(swkbd_config_data.size() == sizeof(SwkbdConfigCommon) + sizeof(SwkbdConfigNew));
-        std::memcpy(&swkbd_config_new, swkbd_config_data.data() + sizeof(SwkbdConfigCommon),
-                    sizeof(SwkbdConfigNew));
+        std::memcpy(&swkbd_config_new, swkbd_config_rest,
+                    (std::min)(sizeof(SwkbdConfigNew), swkbd_config_rest_size));
         break;
     case SwkbdAppletVersion::Version1310736:
         // The common and 8.0.0 parts keep their layout; the 0x68 bytes after them are unknown.
         // This revision exchanges UTF-8 text: the game's text check replies are UTF-8, and a
         // UTF-16 result reached it as its first character only.
         ASSERT(swkbd_config_data.size() >= sizeof(SwkbdConfigCommon) + sizeof(SwkbdConfigNew));
-        std::memcpy(&swkbd_config_new, swkbd_config_data.data() + sizeof(SwkbdConfigCommon),
-                    sizeof(SwkbdConfigNew));
+        std::memcpy(&swkbd_config_new, swkbd_config_rest,
+                    (std::min)(sizeof(SwkbdConfigNew), swkbd_config_rest_size));
         swkbd_config_common.use_utf8 = true;
         break;
     case SwkbdAppletVersion::Version1441810: {
@@ -233,8 +238,8 @@ void SoftwareKeyboard::InitializeForeground() {
         UNIMPLEMENTED_MSG("Unknown SwkbdConfig revision={} with size={}", swkbd_applet_version,
                           swkbd_config_data.size());
         ASSERT(swkbd_config_data.size() >= sizeof(SwkbdConfigCommon) + sizeof(SwkbdConfigNew));
-        std::memcpy(&swkbd_config_new, swkbd_config_data.data() + sizeof(SwkbdConfigCommon),
-                    sizeof(SwkbdConfigNew));
+        std::memcpy(&swkbd_config_new, swkbd_config_rest,
+                    (std::min)(sizeof(SwkbdConfigNew), swkbd_config_rest_size));
         break;
     }
 
@@ -248,11 +253,19 @@ void SoftwareKeyboard::InitializeForeground() {
 
     const auto& work_buffer = work_buffer_storage->GetData();
 
-    std::vector<char16_t> initial_string(swkbd_config_common.initial_string_length);
+    // The offset and length come from the guest's config: take no more than the work buffer
+    // holds past the offset, instead of allocating and reading past it.
+    const std::size_t initial_string_offset = (std::min)(std::size_t{
+                                                             swkbd_config_common.initial_string_offset},
+                                                         work_buffer.size());
+    const std::size_t initial_string_chars =
+        (std::min)(std::size_t{swkbd_config_common.initial_string_length},
+                   (work_buffer.size() - initial_string_offset) / sizeof(char16_t));
 
-    std::memcpy(initial_string.data(),
-                work_buffer.data() + swkbd_config_common.initial_string_offset,
-                swkbd_config_common.initial_string_length * sizeof(char16_t));
+    std::vector<char16_t> initial_string(initial_string_chars);
+
+    std::memcpy(initial_string.data(), work_buffer.data() + initial_string_offset,
+                initial_string_chars * sizeof(char16_t));
 
     initial_text = Common::UTF16StringFromFixedZeroTerminatedBuffer(initial_string.data(),
                                                                     initial_string.size());
@@ -273,8 +286,9 @@ void SoftwareKeyboard::InitializePartialForeground(LibraryAppletMode library_app
     const auto& swkbd_inline_initialize_arg = swkbd_inline_initialize_arg_storage->GetData();
     ASSERT(swkbd_inline_initialize_arg.size() == sizeof(SwkbdInitializeArg));
 
+    // A soft assert only logs: copy no more than the argument holds.
     std::memcpy(&swkbd_initialize_arg, swkbd_inline_initialize_arg.data(),
-                swkbd_inline_initialize_arg.size());
+                (std::min)(swkbd_inline_initialize_arg.size(), sizeof(swkbd_initialize_arg)));
 
     if (swkbd_initialize_arg.library_applet_mode_flag) {
         ASSERT(library_applet_mode == LibraryAppletMode::PartialForeground);
@@ -292,7 +306,9 @@ void SoftwareKeyboard::ProcessTextCheck() {
 
     SwkbdTextCheck swkbd_text_check;
 
-    std::memcpy(&swkbd_text_check, text_check_data.data(), sizeof(SwkbdTextCheck));
+    // A soft assert only logs: read no more than the storage holds.
+    std::memcpy(&swkbd_text_check, text_check_data.data(),
+                (std::min)(text_check_data.size(), sizeof(SwkbdTextCheck)));
 
     std::u16string text_check_message = [this, &swkbd_text_check]() -> std::u16string {
         if (swkbd_text_check.text_check_result == SwkbdTextCheckResult::Failure ||
@@ -339,7 +355,9 @@ void SoftwareKeyboard::ProcessInlineKeyboardRequest() {
 
     SwkbdRequestCommand request_command;
 
-    std::memcpy(&request_command, request_data.data(), sizeof(SwkbdRequestCommand));
+    // A soft assert only logs: read no more than the storage holds.
+    std::memcpy(&request_command, request_data.data(),
+                (std::min)(request_data.size(), sizeof(SwkbdRequestCommand)));
 
     switch (request_command) {
     case SwkbdRequestCommand::Finalize:
@@ -817,33 +835,39 @@ void SoftwareKeyboard::RequestCalc(std::span<const u8> request_data) {
 
     ASSERT(request_data.size() >= sizeof(SwkbdRequestCommand) + sizeof(SwkbdCalcArgCommon));
 
-    std::memcpy(&swkbd_calc_arg_common, request_data.data() + sizeof(SwkbdRequestCommand),
-                sizeof(SwkbdCalcArgCommon));
+    // A soft assert only logs: each part reads no more than the request holds past its end.
+    const std::size_t calc_command_len =
+        (std::min)(request_data.size(), sizeof(SwkbdRequestCommand));
+    const u8* const calc_rest = request_data.data() + calc_command_len;
+    const std::size_t calc_rest_size = request_data.size() - calc_command_len;
+
+    std::memcpy(&swkbd_calc_arg_common, calc_rest,
+                (std::min)(sizeof(SwkbdCalcArgCommon), calc_rest_size));
 
     switch (swkbd_calc_arg_common.calc_arg_size) {
     case sizeof(SwkbdCalcArgCommon) + sizeof(SwkbdCalcArgOld):
         ASSERT(request_data.size() ==
                sizeof(SwkbdRequestCommand) + sizeof(SwkbdCalcArgCommon) + sizeof(SwkbdCalcArgOld));
-        std::memcpy(&swkbd_calc_arg_old,
-                    request_data.data() + sizeof(SwkbdRequestCommand) + sizeof(SwkbdCalcArgCommon),
-                    sizeof(SwkbdCalcArgOld));
+        std::memcpy(&swkbd_calc_arg_old, calc_rest + (std::min)(sizeof(SwkbdCalcArgCommon), calc_rest_size),
+                    (std::min)(sizeof(SwkbdCalcArgOld),
+                               calc_rest_size - (std::min)(sizeof(SwkbdCalcArgCommon), calc_rest_size)));
         RequestCalcOld();
         break;
     case sizeof(SwkbdCalcArgCommon) + sizeof(SwkbdCalcArgNew):
         ASSERT(request_data.size() ==
                sizeof(SwkbdRequestCommand) + sizeof(SwkbdCalcArgCommon) + sizeof(SwkbdCalcArgNew));
-        std::memcpy(&swkbd_calc_arg_new,
-                    request_data.data() + sizeof(SwkbdRequestCommand) + sizeof(SwkbdCalcArgCommon),
-                    sizeof(SwkbdCalcArgNew));
+        std::memcpy(&swkbd_calc_arg_new, calc_rest + (std::min)(sizeof(SwkbdCalcArgCommon), calc_rest_size),
+                    (std::min)(sizeof(SwkbdCalcArgNew),
+                               calc_rest_size - (std::min)(sizeof(SwkbdCalcArgCommon), calc_rest_size)));
         RequestCalcNew();
         break;
     default:
         UNIMPLEMENTED_MSG("Unknown SwkbdCalcArg size={}", swkbd_calc_arg_common.calc_arg_size);
         ASSERT(request_data.size() >=
                sizeof(SwkbdRequestCommand) + sizeof(SwkbdCalcArgCommon) + sizeof(SwkbdCalcArgNew));
-        std::memcpy(&swkbd_calc_arg_new,
-                    request_data.data() + sizeof(SwkbdRequestCommand) + sizeof(SwkbdCalcArgCommon),
-                    sizeof(SwkbdCalcArgNew));
+        std::memcpy(&swkbd_calc_arg_new, calc_rest + (std::min)(sizeof(SwkbdCalcArgCommon), calc_rest_size),
+                    (std::min)(sizeof(SwkbdCalcArgNew),
+                               calc_rest_size - (std::min)(sizeof(SwkbdCalcArgCommon), calc_rest_size)));
         RequestCalcNew();
         break;
     }
@@ -964,7 +988,10 @@ void SoftwareKeyboard::RequestSetChangedStringV2Flag(std::span<const u8> request
 
     ASSERT(request_data.size() == sizeof(SwkbdRequestCommand) + 1);
 
-    std::memcpy(&use_changed_string_v2, request_data.data() + sizeof(SwkbdRequestCommand), 1);
+    // A soft assert only logs: read the flag only if the request holds it.
+    if (request_data.size() > sizeof(SwkbdRequestCommand)) {
+        std::memcpy(&use_changed_string_v2, request_data.data() + sizeof(SwkbdRequestCommand), 1);
+    }
 }
 
 void SoftwareKeyboard::RequestSetMovedCursorV2Flag(std::span<const u8> request_data) {
@@ -972,7 +999,10 @@ void SoftwareKeyboard::RequestSetMovedCursorV2Flag(std::span<const u8> request_d
 
     ASSERT(request_data.size() == sizeof(SwkbdRequestCommand) + 1);
 
-    std::memcpy(&use_moved_cursor_v2, request_data.data() + sizeof(SwkbdRequestCommand), 1);
+    // A soft assert only logs: read the flag only if the request holds it.
+    if (request_data.size() > sizeof(SwkbdRequestCommand)) {
+        std::memcpy(&use_moved_cursor_v2, request_data.data() + sizeof(SwkbdRequestCommand), 1);
+    }
 }
 
 // Inline Software Keyboard Replies
