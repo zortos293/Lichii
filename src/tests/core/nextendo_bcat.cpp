@@ -212,8 +212,12 @@ TEST_CASE("Nextendo BCAT installs, keeps and replaces a title's cache", "[core][
     REQUIRE(ReadText(target / "vsdata" / "VSSetting_0.byaml") == "new");
     REQUIRE_FALSE(fs::exists(target / "vsdata" / "VSSetting_1.byaml"));
     REQUIRE_FALSE(fs::exists(target / "coopdata"));
+    // The install lock file stays next to the cache it guards.
+    auto lock = target;
+    lock += ".nextendo-install.lock";
+    REQUIRE(fs::exists(lock));
     REQUIRE(std::distance(fs::directory_iterator{target.parent_path()},
-                          fs::directory_iterator{}) == 1);
+                          fs::directory_iterator{}) == 2);
 }
 
 TEST_CASE("Nextendo BCAT reinstalls over a hash marker it can't read", "[core][bcat]") {
