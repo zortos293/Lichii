@@ -884,9 +884,9 @@ VirtualFile MakeText(std::string_view text) {
     return MakeFile(std::vector<u8>(text.begin(), text.end()));
 }
 
-// Applies an IPSwitch text patch to `size` zero bytes.
-std::vector<u8> ApplyIPSwitch(const IPSwitchCompiler& compiler, size_t size) {
-    return compiler.Apply(MakeFile(std::vector<u8>(size)))->ReadAllBytes();
+// Applies an IPSwitch text patch to `size` bytes of `fill`.
+std::vector<u8> ApplyIPSwitch(const IPSwitchCompiler& compiler, size_t size, u8 fill = 0) {
+    return compiler.Apply(MakeFile(std::vector<u8>(size, fill)))->ReadAllBytes();
 }
 
 TEST_CASE("IPSwitch applies a record after an offset shift", "[core][file_sys]") {
@@ -910,6 +910,41 @@ TEST_CASE("IPSwitch offset shift without a value does not read the next lines",
     const auto out = ApplyIPSwitch(compiler, 0x40);
     REQUIRE(out[0] == 0xAB);
     REQUIRE(out[0x20] == 0);
+}
+
+TEST_CASE("IPSwitch hex value of one digit is an empty record", "[core][file_sys]") {
+    // Found by fuzz_ips: "4" converts to no bytes, and parsing copied them with memcpy from an
+    // empty vector, a null pointer (undefined behaviour, reported by UBSan only). This pins what
+    // such a line does: an empty record at its offset, which writes nothing and replaces a record
+    // read before it at the same offset.
+    const IPSwitchCompiler compiler{
+        MakeText("@enabled\n00000004 AB\n00000004 4\n0000000a 4\n00000008 CD\n")};
+    // Over 0xFF, so a record that wrote zeros would show.
+    const auto out = ApplyIPSwitch(compiler, 0x10, 0xFF);
+    REQUIRE(out.size() == 0x10);
+    CHECK(out[4] == 0xFF);
+    CHECK(out[0xa] == 0xFF);
+    CHECK(out[8] == 0xCD);
+}
+
+TEST_CASE("IPSwitch empty string replacement leaves the bytes alone", "[core][file_sys]") {
+    // Found by fuzz_ips: applying a record with no bytes called memcpy with its null data()
+    // (undefined behaviour, reported by UBSan only). The test documents what applying it does.
+    const IPSwitchCompiler compiler{MakeText("@enabled\n00000008 ''\n0000000C CD\n")};
+    const auto out = ApplyIPSwitch(compiler, 0x10, 0xFF);
+    REQUIRE(out.size() == 0x10);
+    CHECK(std::all_of(out.begin(), out.begin() + 0xC, [](u8 byte) { return byte == 0xFF; }));
+    CHECK(out[0xC] == 0xCD);
+    CHECK(std::all_of(out.begin() + 0xD, out.end(), [](u8 byte) { return byte == 0xFF; }));
+}
+
+TEST_CASE("IPSwitch empty record past the end of the file changes nothing", "[core][file_sys]") {
+    // Out of range records are only logged; an empty one there must not reach the copy either.
+    const IPSwitchCompiler compiler{MakeText("@enabled\n00000040 ''\n00000044 4\n00000000 CD\n")};
+    const auto out = ApplyIPSwitch(compiler, 0x10, 0xFF);
+    REQUIRE(out.size() == 0x10);
+    CHECK(out[0] == 0xCD);
+    CHECK(std::all_of(out.begin() + 1, out.end(), [](u8 byte) { return byte == 0xFF; }));
 }
 
 
