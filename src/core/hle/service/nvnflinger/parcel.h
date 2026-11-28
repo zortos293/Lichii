@@ -35,7 +35,15 @@ public:
     template <typename T>
     void Read(T& val) {
         static_assert(std::is_trivially_copyable_v<T>, "T must be trivially copyable.");
-        ASSERT(read_index + sizeof(T) <= read_buffer.size());
+
+        // A soft assert only logs: zero-fill instead of reading past the parcel.
+        // (T{} rather than {}: QueueBufferInput's default constructor is explicit.)
+        if (read_index + sizeof(T) > read_buffer.size()) [[unlikely]] {
+            ASSERT(read_index + sizeof(T) <= read_buffer.size());
+            val = T{};
+            read_index = read_buffer.size();
+            return;
+        }
 
         std::memcpy(&val, read_buffer.data() + read_index, sizeof(T));
         read_index += sizeof(T);
@@ -66,7 +74,13 @@ public:
     template <typename T>
     T ReadUnaligned() {
         static_assert(std::is_trivially_copyable_v<T>, "T must be trivially copyable.");
-        ASSERT(read_index + sizeof(T) <= read_buffer.size());
+
+        // A soft assert only logs: zero-fill instead of reading past the parcel.
+        if (read_index + sizeof(T) > read_buffer.size()) [[unlikely]] {
+            ASSERT(read_index + sizeof(T) <= read_buffer.size());
+            read_index = read_buffer.size();
+            return T{};
+        }
 
         T val;
         std::memcpy(&val, read_buffer.data() + read_index, sizeof(T));
@@ -91,7 +105,11 @@ public:
 
     std::u16string ReadInterfaceToken() {
         [[maybe_unused]] const u32 unknown = Read<u32>();
-        const u32 length = Read<u32>();
+        // The token is discarded; a guest length past the parcel only sized the reserve and
+        // the reads below, so take no more than the parcel could still hold.
+        const u32 length =
+            (std::min)(Read<u32>(), static_cast<u32>((read_buffer.size() - read_index) /
+                                                      sizeof(char16_t)));
 
         std::u16string token;
         token.reserve(length + 1);
@@ -106,12 +124,18 @@ public:
     }
 
     void DeserializeHeader() {
-        ASSERT(read_buffer.size() > sizeof(ParcelHeader));
+        // A soft assert only logs: leave the index at the end so every read zero-fills.
+        if (read_buffer.size() <= sizeof(ParcelHeader)) [[unlikely]] {
+            ASSERT(read_buffer.size() > sizeof(ParcelHeader));
+            read_index = read_buffer.size();
+            return;
+        }
 
         ParcelHeader header{};
         std::memcpy(&header, read_buffer.data(), sizeof(ParcelHeader));
 
-        read_index = header.data_offset;
+        // data_offset comes from the parcel; a value past the parcel is clamped, not trusted.
+        read_index = (std::min)(std::size_t{header.data_offset}, read_buffer.size());
     }
 
 private:
