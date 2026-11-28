@@ -87,6 +87,7 @@ add_executable(tests
     core/builtin_patches.cpp
     core/cheat_parser.cpp
     core/builtin_font_glyphs.cpp
+    core/parser_regressions.cpp
     core/system_test_context.cpp
     core/system_test_context.h
     video_core/ampere_branch_modifiers.cpp
