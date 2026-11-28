@@ -2583,6 +2583,10 @@ void PipelineCache::TickFrame() {
     ++frame_count;
     native_wait_budget_us =
         static_cast<s64>(Settings::values.native_pipeline_wait_ms.GetValue()) * 1000;
+    if (native_wait_used_us != 0 ||
+        std::ranges::any_of(native_waits, [](u32 waits) { return waits != 0; })) {
+        LogBoundedWaits();
+    }
     while (!evicted_pipelines.empty() && scheduler.IsFree(evicted_pipelines.front().first)) {
         evicted_pipelines.pop_front();
     }
@@ -2722,10 +2726,17 @@ void PipelineCache::LogBoundedWaits() {
         return;
     }
     LOG_INFO(Render_Vulkan,
-             "Bounded pipeline wait: {:.1f} ms spent in the last 10 s (budget {} ms per frame)",
+             "Bounded pipeline wait: {:.1f} ms spent in the last 10 s (budget {} ms per frame); "
+             "draws that waited for the whole build: {} mesh writing storage, {} without a depth "
+             "test, {} writing no color, {} into render targets new this frame",
              static_cast<double>(native_wait_used_us) / 1000.0,
-             Settings::values.native_pipeline_wait_ms.GetValue());
+             Settings::values.native_pipeline_wait_ms.GetValue(),
+             native_waits[static_cast<size_t>(NativeWaitReason::MeshStorage)],
+             native_waits[static_cast<size_t>(NativeWaitReason::NoDepthTest)],
+             native_waits[static_cast<size_t>(NativeWaitReason::NoColorWrite)],
+             native_waits[static_cast<size_t>(NativeWaitReason::NewTarget)]);
     native_wait_used_us = 0;
+    native_waits.fill(0);
     window = std::chrono::steady_clock::now();
 }
 
@@ -2751,7 +2762,17 @@ GraphicsPipeline* PipelineCache::BuiltPipeline(GraphicsPipeline* pipeline) noexc
     // A native draw counts as depth-tested only when every render target it writes color into
     // was first written in an earlier frame, which the title redraws every frame: Mario Kart World
     // bakes terrain once with depth-tested draws (b7980efd7), and a bound depth buffer alone
-    // doesn't test (Eglantine #874). Mesh draws wait unless the mesh skip setting is on.
+    // doesn't test (Eglantine #874). Mesh draws follow the same rules unless a stage writes
+    // storage: a new task/mesh pipeline can take the driver seconds to
+    // build, and waiting for it froze Ocarina of Time for 3.3 s on an RTX 4090 when it entered a
+    // new area.
+    const bool skip_mesh = SkipPendingMeshDraw();
+    if (skip_mesh) {
+        LogSkippedPipelineLookup(true);
+        return nullptr;
+    }
+    const bool mesh = regs.IsMeshEnabled();
+    const bool stages_allow_skip = NativeStagesAllowSkip(mesh, pipeline->WritesStorage());
     const auto writes_color = [&regs](u32 rt_index) {
         return rt_index < Maxwell::NumRenderTargets &&
                regs.rt[rt_index].format != Tegra::RenderTargetFormat::NONE &&
@@ -2760,7 +2781,7 @@ GraphicsPipeline* PipelineCache::BuiltPipeline(GraphicsPipeline* pipeline) noexc
     const bool depth_tested =
         native
             ? mode != NativePendingMode::Wait && regs.zeta_enable != 0 &&
-                  regs.depth_test_enable != 0 && !regs.IsMeshEnabled() &&
+                  regs.depth_test_enable != 0 && stages_allow_skip &&
                   ColorWritesHaveHistory(
                       std::min<u32>(regs.rt_control.count,
                                     static_cast<u32>(Maxwell::NumRenderTargets)),
@@ -2787,6 +2808,21 @@ GraphicsPipeline* PipelineCache::BuiltPipeline(GraphicsPipeline* pipeline) noexc
     if (native) {
         switch (DecideNativePending(mode, can_discard, native_wait_budget_us)) {
         case NativeDrawAction::Wait:
+            // With the split lending draws, the back's unlend lookup comes before the lent one
+            // that runs the draw: count only the latter.
+            if (mode != NativePendingMode::Wait && (!VideoCommon::GpuSplit::LendsToRender() ||
+                                                    VideoCommon::GpuSplit::InLentCall())) {
+                const bool depth_test = regs.zeta_enable != 0 && regs.depth_test_enable != 0;
+                const u32 count = std::min<u32>(regs.rt_control.count,
+                                                static_cast<u32>(Maxwell::NumRenderTargets));
+                bool any_color = false;
+                for (u32 i = 0; i < count && !any_color; ++i) {
+                    any_color = writes_color(regs.rt_control.Map(i));
+                }
+                ++native_waits[static_cast<size_t>(
+                    ClassifyNativeWait(!stages_allow_skip, depth_test, any_color))];
+                LogBoundedWaits();
+            }
             discard = false;
             break;
         case NativeDrawAction::Skip:
@@ -2807,9 +2843,8 @@ GraphicsPipeline* PipelineCache::BuiltPipeline(GraphicsPipeline* pipeline) noexc
         }
         }
     }
-    const bool skip_mesh = SkipPendingMeshDraw();
-    if (discard || skip_mesh) {
-        LogSkippedPipelineLookup(skip_mesh);
+    if (discard) {
+        LogSkippedPipelineLookup(false);
         return nullptr;
     }
     return pipeline;

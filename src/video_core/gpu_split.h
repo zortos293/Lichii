@@ -202,6 +202,10 @@ public:
     [[nodiscard]] static bool OnBackThread() {
         return on_back_thread || render_lent;
     }
+    /// Whether the calling thread is GPURender running a call the back lent it.
+    [[nodiscard]] static bool InLentCall() {
+        return render_lent;
+    }
     /// Marks the calling thread as the GPU thread (the front, or the only one without the split).
     static void MarkGpuThread() {
         on_gpu_thread = true;
