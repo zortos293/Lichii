@@ -3184,6 +3184,9 @@ void TextureCacheRuntime::ReleaseMsaaScratchImage(VkImage image) {
 }
 
 void TextureCacheRuntime::TickFrame() {
+    if (astc_decoder_pass) {
+        astc_decoder_pass->FlushPending();
+    }
     // Descriptor allocation/capture can submit between the copy and the draw. Retire at the
     // frame boundary, after all consuming draws, rather than using the copy's submission tick.
     for (auto& snapshot : color_feedback_snapshots) {

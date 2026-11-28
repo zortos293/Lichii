@@ -2253,6 +2253,15 @@ bool TextureCache<P>::RescaleRenderTargets() {
             BindRenderTarget(&render_targets.depth_buffer_id, FindDepthBuffer());
         }
         check_rescale(render_targets.depth_buffer_id, tmp_depth_image);
+        // A square depth target with no color target is a shadow map. Scaling it does not sharpen
+        // the picture: it multiplies the map by the square of the resolution, and the sun map
+        // (12288x12288) then samples as if it still had the guest size, so its edge sits at the
+        // middle of the screen. A full-screen depth prepass is not square, so it still scales.
+        if (can_rescale && tmp_depth_image != CORRUPT_ID &&
+            std::ranges::all_of(tmp_color_images, [](ImageId id) { return id == CORRUPT_ID; })) {
+            const Extent3D& size = slot_images[tmp_depth_image].info.size;
+            can_rescale = size.width != size.height;
+        }
 
         if (can_rescale) {
             rescaled = any_rescaled || scale_rating >= 2;

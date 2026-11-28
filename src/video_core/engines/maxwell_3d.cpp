@@ -350,7 +350,35 @@ void Maxwell3D::ConsumeSinkImpl(Core::System& system) {
     method_sink.clear();
 }
 
+// register_count is stored and dirtied. Nothing a draw resolves reads it.
+// reserved[0] and reserved[1] are the shader id and still end the chain.
+bool IsShaderRegisterCount(u32 method) {
+    constexpr u32 base = MAXWELL3D_REG_INDEX(pipelines);
+    constexpr u32 words = sizeof(Maxwell3D::Regs::Pipeline) / sizeof(u32);
+    constexpr u32 register_count_word =
+        offsetof(Maxwell3D::Regs::Pipeline, register_count) / sizeof(u32);
+    static_assert(register_count_word == 3);
+    if (method < base) {
+        return false;
+    }
+    const u32 delta = method - base;
+    if (delta >= Maxwell3D::Regs::MaxShaderProgram * words) {
+        return false;
+    }
+    return delta % words == register_count_word;
+}
+
+// Nothing a draw resolves reads these words. The value is still stored.
+bool IsConstantColorRendering(u32 method) {
+    constexpr u32 base = MAXWELL3D_REG_INDEX(const_color_rendering);
+    constexpr u32 words = sizeof(Maxwell3D::Regs::ConstantColorRendering) / sizeof(u32);
+    return method >= base && method < base + words;
+}
+
 bool Maxwell3D::IsFastDrawParameter(u32 method) {
+    if (IsShaderRegisterCount(method) || IsConstantColorRendering(method)) {
+        return true;
+    }
     switch (method) {
     case MAXWELL3D_REG_INDEX(const_buffer.size):
     case MAXWELL3D_REG_INDEX(const_buffer.address_high):
