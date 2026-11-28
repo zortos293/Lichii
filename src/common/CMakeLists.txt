@@ -143,6 +143,7 @@ add_library(
     adpf.cpp
     adpf.h
     thread_queue_list.h
+    thread_reservation.h
     thread_worker.h
     threadsafe_queue.h
     time_zone.cpp

@@ -396,8 +396,12 @@ std::unique_ptr<TranslationMap> InitializeTranslations(QObject* parent) {
     INSERT(Settings, pin_gpu_threads, tr("Pin GPU threads to their own cores"),
            tr("Pins the emulator's GPU threads to dedicated physical CPU cores and keeps the "
               "emulated CPU cores off them.\n"
-              "Can hurt performance on CPUs with few cores. Skipped on CPUs with fewer than 6 "
-              "physical performance cores.\n"
+              "Can hurt performance on CPUs with few cores. On Linux, a CPU of 4 cores with "
+              "8 threads, such as the Steam Deck's, gives only the back GPU thread a core of its "
+              "own. Skipped on other CPUs with fewer than 6 physical performance cores.\n"
+              "On Linux, when GameMode 1.8 or later is in use it undoes this within seconds: "
+              "turn off GameMode in the emulator's settings, or set both pin_cores=no and "
+              "park_cores=no under [cpu] in gamemode.ini.\n"
               "Windows and Linux only. Takes effect when a game starts."));
 
     INSERT(Settings, use_vulkan_driver_pipeline_cache, tr("Use Vulkan pipeline cache"),

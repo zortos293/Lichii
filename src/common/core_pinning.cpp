@@ -24,6 +24,30 @@ GpuThreadPinning PlanGpuThreadPinning(std::span<const LogicalProcessor> processo
     std::ranges::sort(cores);
     cores.erase(std::unique(cores.begin(), cores.end()), cores.end());
     plan.performance_cores = cores.size();
+    if (cores.size() == CoresForGpuBackCorePinning) {
+        // Only on a CPU of one class whose every core has two SMT siblings: the back's speed comes
+        // from its sibling staying idle, which a 4-thread CPU cannot afford.
+        const bool uniform = std::ranges::all_of(processors, [fastest](const auto& processor) {
+            return processor.efficiency_class == fastest;
+        });
+        const bool smt = std::ranges::all_of(cores, [&processors](u32 core) {
+            return std::ranges::count(processors, core, &LogicalProcessor::core) == 2;
+        });
+        if (!uniform || !smt) {
+            return plan;
+        }
+        const u32 back_core = cores[1];
+        for (const LogicalProcessor& processor : processors) {
+            if (processor.core == back_core) {
+                plan.back.push_back(processor.id);
+            } else {
+                plan.front.push_back(processor.id);
+                plan.guest.push_back(processor.id);
+            }
+        }
+        plan.back_core_reserved = true;
+        return plan;
+    }
     if (cores.size() < MinCoresForGpuThreadPinning) {
         return plan;
     }

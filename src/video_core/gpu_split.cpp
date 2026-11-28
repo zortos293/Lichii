@@ -26,6 +26,7 @@
 #include "common/assert.h"
 #include "common/dkb_cpu_trace.h"
 #include "common/logging.h"
+#include "common/scope_exit.h"
 #include "common/settings.h"
 #include "common/thread.h"
 #include "core/core.h"
@@ -38,6 +39,7 @@
 #include "video_core/nx2_fast_draw.h"
 #include "video_core/nx2_list_indirect.h"
 #include "video_core/nx2_profile.h"
+#include "video_core/textures/workers.h"
 
 namespace VideoCommon {
 
@@ -1694,9 +1696,28 @@ void GpuSplit::BackLoop(std::stop_token stop_token) {
     back_running.store(true, std::memory_order_release);
     Common::SetCurrentThreadPriority(Common::ThreadPriority::Critical);
     Common::SetCurrentThreadToPerformanceCores();
-    if (Settings::values.pin_gpu_threads.GetValue()) {
-        Common::PinCurrentThread(Common::PinnedRole::GpuBack);
+    // Whether a back thread exists is known only here (a Switch 2 GPU on Vulkan, the split not
+    // turned off), so the four-core plan reserves the back's core here and gives it back when
+    // the back stops: a title without a back never has a core sitting idle.
+    const bool pinned = Settings::values.pin_gpu_threads.GetValue();
+    if (pinned) {
+        // The transcode pool lives for the process and is created on first use, often from here:
+        // created after the pin, its threads would start on the back's reserved core. Created
+        // now, they start with the back's old mask.
+        if (Common::ReservesGpuBackCore()) {
+            Tegra::Texture::GetThreadWorkers();
+        }
+        // Pinned only if nothing has to be reserved or the reservation was made: pinned to a core
+        // nobody was moved off, the threads it creates would stay there for good.
+        if (Common::ReserveGpuBackCore()) {
+            Common::PinCurrentThread(Common::PinnedRole::GpuBack);
+        }
     }
+    SCOPE_EXIT {
+        if (pinned) {
+            Common::ReleaseGpuBackCore();
+        }
+    };
     system->RegisterHostThread();
     u64 read_position = 0;
     const bool idle_trace = BackIdleTrace::Enabled();

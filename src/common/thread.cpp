@@ -14,12 +14,14 @@
 #include <vector>
 
 #include "common/adpf.h"
+#include "common/assert.h"
 #include "common/core_pinning.h"
 #include "common/error.h"
 #include "common/event_wait.h"
 #include "common/logging.h"
-#include "common/assert.h"
+#include "common/scope_exit.h"
 #include "common/thread.h"
+#include "common/thread_reservation.h"
 #ifdef __APPLE__
 #include <mach/mach.h>
 #elif defined(__HAIKU__)
@@ -47,8 +49,13 @@
 #endif
 
 #ifdef __linux__
-#include <sys/resource.h>
 #include <algorithm>
+#include <cerrno>
+#include <charconv>
+#include <mutex>
+#include <dirent.h>
+#include <sys/resource.h>
+#include <sys/syscall.h>
 
 namespace {
 constexpr int NICE_AUDIO = -16;
@@ -621,6 +628,162 @@ void SetCurrentThreadAffinity(const std::vector<u32>& cpus) {
         LOG_WARNING(Common, "pthread_setaffinity_np failed: {}", std::strerror(error));
     }
 }
+
+const Common::GpuThreadPinning& LinuxPinningPlan() {
+    static const Common::GpuThreadPinning plan = [] {
+        Common::GpuThreadPinning result = Common::PlanGpuThreadPinning(LinuxProcessors());
+        if (result.back_core_reserved) {
+            LOG_INFO(Common,
+                     "GPU thread pinning: {} cores with SMT; while a GPU back thread runs, it "
+                     "gets a physical core of its own and every other thread the other {} "
+                     "logical processors",
+                     result.performance_cores, result.guest.size());
+        } else if (result.front.empty()) {
+            LOG_WARNING(Common,
+                        "GPU thread pinning skipped: {} physical performance cores, needs {}",
+                        result.performance_cores, Common::MinCoresForGpuThreadPinning);
+        } else {
+            LOG_INFO(Common,
+                     "GPU thread pinning: front and back on a physical core each, guest cores on "
+                     "the other {} performance cores ({} logical processors)",
+                     result.performance_cores - 2, result.guest.size());
+        }
+        return result;
+    }();
+    return plan;
+}
+
+// Why this thread's last failed listing failed (an errno, saved by ForEachProcessThread), or 0 if
+// the lister gave no reason (a test's). ListOnce clears it before each listing, and the walk that
+// gives up logs it once.
+thread_local int t_list_errno = 0;
+
+// Calls `visit(context, tid)` with the id of every thread of the process. A thread created
+// meanwhile can be missed, and one that exits meanwhile still visited. False if the listing failed,
+// with the reason in t_list_errno.
+// It makes no C++ allocation (opendir allocates with malloc and reports failure by its result),
+// so an allocation failure is a failed listing, not an exception: std::filesystem's directory
+// iterator ends in std::terminate inside the library when an allocation in it fails.
+bool ForEachProcessThread(void (*visit)(void*, int), void* context) {
+    DIR* const dir = opendir("/proc/self/task");
+    if (dir == nullptr) {
+        t_list_errno = errno;
+        return false;
+    }
+    // `visit` may throw (the first walk's vector, before anything is changed).
+    SCOPE_EXIT {
+        closedir(dir);
+    };
+    bool ok = true;
+    for (;;) {
+        errno = 0;
+        const dirent* const entry = readdir(dir);
+        if (entry == nullptr) {
+            t_list_errno = errno;
+            ok = errno == 0;
+            break;
+        }
+        const char* const name = entry->d_name;
+        const char* const end = name + std::strlen(name);
+        pid_t tid{};
+        if (const auto [ptr, ec] = std::from_chars(name, end, tid);
+            ec == std::errc{} && ptr == end) {
+            visit(context, tid);
+        }
+    }
+    return ok;
+}
+
+// A warning from code that must not throw (the reservation and its undo): formatting a log line
+// can allocate.
+#define LOG_WARNING_NOTHROW(...)                                                                   \
+    do {                                                                                           \
+        try {                                                                                      \
+            LOG_WARNING(__VA_ARGS__);                                                              \
+        } catch (...) {                                                                            \
+        }                                                                                          \
+    } while (0)
+
+enum class SetResult { Set, Exited, Failed };
+
+// A thread that has exited (ESRCH) is not warned about. Failed: a live thread kept its mask (for
+// example EINVAL, its allowed set no longer holding any CPU of the new mask).
+SetResult SetThreadAffinity(pid_t tid, const cpu_set_t& mask) noexcept {
+    if (sched_setaffinity(tid, sizeof(mask), &mask) == 0) {
+        return SetResult::Set;
+    }
+    if (errno == ESRCH) {
+        return SetResult::Exited;
+    }
+    LOG_WARNING_NOTHROW(Common, "Could not set the affinity of thread {}: {}", tid,
+                        std::strerror(errno));
+    return SetResult::Failed;
+}
+
+// The reason for a failed listing, for its log line.
+const char* ListFailure() noexcept {
+    return t_list_errno != 0 ? std::strerror(t_list_errno) : "the lister gave no reason";
+}
+
+// Whether `tid` is still a thread of this process. An id from an earlier listing can have been
+// given to a thread of another process since its thread exited.
+bool IsOwnThread(pid_t tid) noexcept {
+    return syscall(SYS_tgkill, getpid(), tid, 0) == 0;
+}
+
+enum class Narrowed {
+    Changed,
+    /// Nothing to change, or the thread exited before it was set (which the count would otherwise
+    /// include).
+    Unchanged,
+    /// A live thread that needed narrowing could not be moved: it would keep running on the
+    /// reserved CPUs, so the reservation fails.
+    Failed,
+};
+
+// Takes the reserved CPUs out of a thread's own mask. A thread whose mask has only reserved CPUs
+// is left as it is.
+Narrowed NarrowThread(pid_t tid, const cpu_set_t& mask, const cpu_set_t& reserved) noexcept {
+    cpu_set_t narrowed;
+    CPU_ZERO(&narrowed);
+    for (int cpu = 0; cpu < CPU_SETSIZE; ++cpu) {
+        if (CPU_ISSET(cpu, &mask) && !CPU_ISSET(cpu, &reserved)) {
+            CPU_SET(cpu, &narrowed);
+        }
+    }
+    if (CPU_COUNT(&narrowed) == 0 || CPU_EQUAL(&narrowed, &mask)) {
+        return Narrowed::Unchanged;
+    }
+    switch (SetThreadAffinity(tid, narrowed)) {
+    case SetResult::Set:
+        return Narrowed::Changed;
+    case SetResult::Exited:
+        return Narrowed::Unchanged;
+    case SetResult::Failed:
+        break;
+    }
+    return Narrowed::Failed;
+}
+
+struct SavedAffinity {
+    pid_t tid;
+    cpu_set_t mask;
+};
+
+struct CpuReservation {
+    std::mutex mutex;
+    bool active{};
+    cpu_set_t reserved{};
+    /// The caller's mask from before the reservation.
+    cpu_set_t caller{};
+    /// Every thread's own mask from before the reservation, by thread id.
+    std::vector<SavedAffinity> saved;
+};
+
+CpuReservation& Reservation() {
+    static CpuReservation reservation;
+    return reservation;
+}
 } // Anonymous namespace
 #endif
 
@@ -737,6 +900,13 @@ void PinCurrentThread(PinnedRole role) {
     };
     static const PinnedCpuSets pinned = [] {
         const GpuThreadPinning plan = PlanGpuThreadPinning(CpuSets().processors);
+        if (plan.back_core_reserved) {
+            // Its gain comes from keeping every other thread off the back's core, which
+            // ReserveGpuBackCore does only on Linux.
+            LOG_INFO(Common, "GPU thread pinning skipped: the {}-core plan is Linux only",
+                     plan.performance_cores);
+            return PinnedCpuSets{};
+        }
         if (plan.front.empty()) {
             LOG_WARNING(Common,
                         "GPU thread pinning skipped: {} physical performance cores, needs {}",
@@ -758,20 +928,12 @@ void PinCurrentThread(PinnedRole role) {
         SelectCurrentThreadCpuSets(ids);
     }
 #elif defined(__linux__) && !defined(__ANDROID__)
-    static const GpuThreadPinning plan = [] {
-        GpuThreadPinning result = PlanGpuThreadPinning(LinuxProcessors());
-        if (result.front.empty()) {
-            LOG_WARNING(Common,
-                        "GPU thread pinning skipped: {} physical performance cores, needs {}",
-                        result.performance_cores, MinCoresForGpuThreadPinning);
-        } else {
-            LOG_INFO(Common,
-                     "GPU thread pinning: front and back on a physical core each, guest cores on "
-                     "the other {} performance cores ({} logical processors)",
-                     result.performance_cores - 2, result.guest.size());
-        }
-        return result;
-    }();
+    const GpuThreadPinning& plan = LinuxPinningPlan();
+    if (plan.back_core_reserved && role != PinnedRole::GpuBack) {
+        // The four-core plan pins only the back, after ReserveGpuBackCore moved every other
+        // thread off its core: a title without a back keeps every CPU.
+        return;
+    }
     const std::vector<u32>& cpus = role == PinnedRole::GpuFront  ? plan.front
                                    : role == PinnedRole::GpuBack ? plan.back
                                                                  : plan.guest;
@@ -784,6 +946,374 @@ void PinCurrentThread(PinnedRole role) {
         LOG_INFO(Common, "GPU thread pinning is only supported on Windows and Linux");
         return true;
     }();
+#endif
+}
+
+#if defined(__linux__) && !defined(__ANDROID__)
+namespace {
+
+/// A listing that fails is tried this many times (each walk's visit can run again harmlessly:
+/// narrowing a narrowed thread changes nothing).
+constexpr int ListAttempts = 3;
+
+/// One listing through `access`, calling `visit(tid)`: no std::function, so nothing allocates.
+template <typename Visit>
+bool ListOnce(const detail::ThreadAccess& access, const Visit& visit) {
+    t_list_errno = 0;
+    return access.list(
+        access.context, [](void* p, int tid) { (*static_cast<const Visit*>(p))(tid); },
+        const_cast<void*>(static_cast<const void*>(&visit)));
+}
+
+detail::AffinityRead ReadMask(const detail::ThreadAccess& access, pid_t tid, cpu_set_t& mask) {
+    return access.read(access.context, tid, &mask, sizeof(mask));
+}
+
+/// Undoes a reservation: every saved mask goes back to an id that is still a thread of this
+/// process, then every thread listed that has no saved mask (created during the reservation)
+/// gets the reserved CPUs back, or the caller's mask from before if its mask has only reserved
+/// CPUs (one the pinned caller created). Release and a failed reservation both use it. False,
+/// with a warning, if it is not a clean restore: the listing failed (the saved masks are back,
+/// the threads created since may not be), or a live thread created since was skipped because its
+/// mask could not be read.
+bool RestoreReservation(CpuReservation& reservation, const detail::ThreadAccess& access) noexcept {
+    // Nothing here allocates or throws: the saved masks go back whatever the listing does.
+    for (const SavedAffinity& entry : reservation.saved) {
+        if (IsOwnThread(entry.tid)) {
+            (void)SetThreadAffinity(entry.tid, entry.mask);
+        }
+    }
+    // A test's lister or reader can throw: a restore cut short by an exception is not clean, and is
+    // not retried.
+    try {
+        size_t unreadable = 0;
+        const auto visit = [&](int tid) {
+            if (std::ranges::binary_search(reservation.saved, tid, {}, &SavedAffinity::tid)) {
+                return;
+            }
+            // An id from the listing may have been given to another process's thread since. Still
+            // possible between this check and the write below.
+            if (!IsOwnThread(tid)) {
+                return;
+            }
+            cpu_set_t mask;
+            switch (ReadMask(access, tid, mask)) {
+            case detail::AffinityRead::Read:
+                break;
+            case detail::AffinityRead::Exited:
+                return;
+            case detail::AffinityRead::Failed:
+                ++unreadable;
+                return;
+            }
+            cpu_set_t inside;
+            CPU_AND(&inside, &mask, &reservation.reserved);
+            if (CPU_EQUAL(&inside, &mask)) {
+                (void)SetThreadAffinity(tid, reservation.caller);
+                return;
+            }
+            cpu_set_t widened;
+            CPU_OR(&widened, &mask, &reservation.reserved);
+            if (!CPU_EQUAL(&widened, &mask)) {
+                (void)SetThreadAffinity(tid, widened);
+            }
+        };
+        // An unreadable mask counts for the attempt it happened in.
+        bool listed = false;
+        for (int attempt = 0; attempt < ListAttempts && !listed; ++attempt) {
+            unreadable = 0;
+            listed = ListOnce(access, visit);
+        }
+        if (!listed) {
+            LOG_WARNING_NOTHROW(Common,
+                                "Could not list the threads to restore the reserved CPUs ({}): "
+                                "threads created during the reservation may keep a narrowed "
+                                "mask",
+                                ListFailure());
+            return false;
+        }
+        if (unreadable != 0) {
+            LOG_WARNING_NOTHROW(Common,
+                                "Could not read the mask of {} thread(s) created during the "
+                                "CPU reservation: they may keep a narrowed mask",
+                                unreadable);
+            return false;
+        }
+        return true;
+    } catch (...) {
+        LOG_WARNING_NOTHROW(Common, "Restoring the reserved CPUs was cut short by an exception: "
+                                    "threads created during the reservation may keep a narrowed "
+                                    "mask");
+        return false;
+    }
+}
+
+} // Anonymous namespace
+
+namespace detail {
+
+ThreadAccess ProcessThreadAccess() noexcept {
+    return ThreadAccess{
+        .list = [](void*, void (*visit)(void*, int),
+                   void* visit_context) { return ForEachProcessThread(visit, visit_context); },
+        .read =
+            [](void*, int tid, void* mask, std::size_t size) {
+                if (sched_getaffinity(tid, size, static_cast<cpu_set_t*>(mask)) == 0) {
+                    return AffinityRead::Read;
+                }
+                if (errno == ESRCH) {
+                    return AffinityRead::Exited;
+                }
+                LOG_WARNING_NOTHROW(Common, "Could not read the affinity of thread {}: {}", tid,
+                                    std::strerror(errno));
+                return AffinityRead::Failed;
+            },
+        .context = nullptr,
+    };
+}
+
+namespace {
+
+/// The reservation under its lock. It may throw (an allocation, or a test's lister); `mutated`
+/// says whether any thread had been narrowed by then.
+std::optional<size_t> ReserveLocked(CpuReservation& reservation, std::span<const u32> cpus,
+                                    const ThreadAccess& access, bool& mutated) {
+    if (reservation.active || cpus.empty()) {
+        return std::nullopt;
+    }
+    CPU_ZERO(&reservation.reserved);
+    for (const u32 cpu : cpus) {
+        if (cpu < CPU_SETSIZE) {
+            CPU_SET(cpu, &reservation.reserved);
+        }
+    }
+    if (sched_getaffinity(0, sizeof(reservation.caller), &reservation.caller) != 0) {
+        return std::nullopt;
+    }
+    const pid_t self = gettid();
+    // First every thread's mask, changing nothing: if the threads can't all be listed, or a live
+    // thread's mask can't be read, nothing has been changed and nothing is reserved.
+    bool listed = false;
+    bool read_failed = false;
+    for (int attempt = 0; attempt < ListAttempts && !listed; ++attempt) {
+        reservation.saved.clear();
+        read_failed = false;
+        const auto visit = [&](int tid) {
+            // As in the later walks: an id that is no longer a thread of this process (given to
+            // another process's thread since the listing) is skipped like one that exited.
+            if (!IsOwnThread(tid)) {
+                return;
+            }
+            SavedAffinity entry{tid, {}};
+            switch (ReadMask(access, tid, entry.mask)) {
+            case AffinityRead::Read:
+                reservation.saved.push_back(entry);
+                break;
+            case AffinityRead::Exited:
+                break;
+            case AffinityRead::Failed:
+                read_failed = true;
+                break;
+            }
+        };
+        listed = ListOnce(access, visit);
+    }
+    if (!listed) {
+        LOG_WARNING_NOTHROW(Common, "Could not list the threads of the process: {}", ListFailure());
+    }
+    if (!listed || read_failed) {
+        reservation.saved.clear();
+        return std::nullopt;
+    }
+    std::ranges::sort(reservation.saved, {}, &SavedAffinity::tid);
+    size_t count = 0;
+    mutated = true;
+    // A live thread that could not be moved fails the reservation: the undo below, nothing
+    // reserved, and the caller left unpinned.
+    bool narrow_failed = false;
+    for (const SavedAffinity& entry : reservation.saved) {
+        if (entry.tid == self || !IsOwnThread(entry.tid)) {
+            continue;
+        }
+        const Narrowed narrowed = NarrowThread(entry.tid, entry.mask, reservation.reserved);
+        if (narrowed == Narrowed::Failed) {
+            narrow_failed = true;
+            break;
+        }
+        count += narrowed == Narrowed::Changed ? 1 : 0;
+    }
+    // Again for a thread created since the list, which started with its creator's mask from
+    // before or after the narrowing. Like every thread created during the reservation it has no
+    // saved mask, and Release gives it the reserved CPUs back.
+    // A read failure counts for the attempt it happened in: one that fails is tried again, and
+    // narrowing a narrowed thread again changes nothing (nor the count).
+    bool relisted = false;
+    bool relist_read_failed = false;
+    for (int attempt = 0; attempt < ListAttempts && !relisted && !narrow_failed; ++attempt) {
+        relist_read_failed = false;
+        const auto visit = [&](int tid) {
+            if (narrow_failed ||
+                std::ranges::binary_search(reservation.saved, tid, {}, &SavedAffinity::tid)) {
+                return;
+            }
+            // An id from the listing may have been given to another process's thread since. Still
+            // possible between this check and the write in NarrowThread.
+            if (!IsOwnThread(tid)) {
+                return;
+            }
+            cpu_set_t mask;
+            switch (ReadMask(access, tid, mask)) {
+            case AffinityRead::Read:
+                switch (NarrowThread(tid, mask, reservation.reserved)) {
+                case Narrowed::Changed:
+                    ++count;
+                    break;
+                case Narrowed::Unchanged:
+                    break;
+                case Narrowed::Failed:
+                    narrow_failed = true;
+                    break;
+                }
+                break;
+            case AffinityRead::Exited:
+                break;
+            case AffinityRead::Failed:
+                relist_read_failed = true;
+                break;
+            }
+        };
+        relisted = ListOnce(access, visit);
+    }
+    if (narrow_failed) {
+        LOG_WARNING_NOTHROW(Common, "A thread could not be moved off the CPUs to reserve: nothing "
+                                    "is reserved");
+    } else if (!relisted) {
+        LOG_WARNING_NOTHROW(Common, "Could not list the threads of the process again: {}",
+                            ListFailure());
+    }
+    if (narrow_failed || !relisted || relist_read_failed) {
+        // Undo everything as Release would, and reserve nothing, so that the caller does not pin
+        // itself. RestoreReservation warns if the undo is not clean.
+        (void)RestoreReservation(reservation, access);
+        reservation.saved.clear();
+        return std::nullopt;
+    }
+    reservation.active = true;
+    return count;
+}
+
+} // Anonymous namespace
+
+std::optional<size_t> ReserveCpusForCurrentThread(std::span<const u32> cpus,
+                                                  const ThreadAccess& access) noexcept {
+    try {
+        CpuReservation& reservation = Reservation();
+        std::scoped_lock lock{reservation.mutex};
+        bool mutated = false;
+        try {
+            return ReserveLocked(reservation, cpus, access, mutated);
+        } catch (...) {
+            // From the first narrowing on, an exception takes the same undo as a failed listing;
+            // nothing is reserved, so the caller stays unpinned.
+            if (mutated) {
+                (void)RestoreReservation(reservation, access);
+            }
+            reservation.saved.clear();
+            reservation.active = false;
+            LOG_WARNING_NOTHROW(Common, "CPU reservation failed with an exception: nothing "
+                                        "reserved");
+            return std::nullopt;
+        }
+    } catch (...) {
+        // The lock itself failed: nothing was changed.
+        LOG_WARNING_NOTHROW(Common, "CPU reservation not made: its lock could not be taken");
+        return std::nullopt;
+    }
+}
+
+void ReleaseReservedCpus(const ThreadAccess& access) noexcept {
+    try {
+        CpuReservation& reservation = Reservation();
+        std::scoped_lock lock{reservation.mutex};
+        if (!reservation.active) {
+            return;
+        }
+        // The saved masks first, from the list itself, so they are restored even if the listing
+        // fails; only to ids that are still threads of this process. It warns if not clean.
+        (void)RestoreReservation(reservation, access);
+        reservation.saved.clear();
+        reservation.active = false;
+    } catch (...) {
+        // The lock itself failed: the reservation is left as it is.
+        LOG_WARNING_NOTHROW(Common, "Reserved CPUs not released: the reservation's lock could not "
+                                    "be taken, so it stays active");
+    }
+}
+
+} // namespace detail
+#endif
+
+std::optional<size_t> ReserveCpusForCurrentThread(std::span<const u32> cpus) noexcept {
+#if defined(__linux__) && !defined(__ANDROID__)
+    return detail::ReserveCpusForCurrentThread(cpus, detail::ProcessThreadAccess());
+#else
+    (void)cpus;
+    return std::nullopt;
+#endif
+}
+
+void ReleaseReservedCpus() noexcept {
+#if defined(__linux__) && !defined(__ANDROID__)
+    detail::ReleaseReservedCpus(detail::ProcessThreadAccess());
+#endif
+}
+
+bool ReserveGpuBackCore() noexcept {
+#if defined(__linux__) && !defined(__ANDROID__)
+    // The plan is built before the back starts (ReservesGpuBackCore); a failure to build it here
+    // still leaves the back unpinned rather than throwing.
+    const GpuThreadPinning* plan = nullptr;
+    try {
+        plan = &LinuxPinningPlan();
+    } catch (...) {
+        LOG_WARNING_NOTHROW(Common, "GPU back core not reserved: the pinning plan could not be "
+                                    "read, so the GPU back thread is left unpinned");
+        return false;
+    }
+    if (!plan->back_core_reserved) {
+        return true;
+    }
+    if (const auto count = ReserveCpusForCurrentThread(plan->back)) {
+        try {
+            LOG_INFO(Common, "GPU back core reserved: {} other threads moved off it", *count);
+        } catch (...) {
+        }
+        return true;
+    }
+    LOG_WARNING_NOTHROW(Common, "GPU back core not reserved: the GPU back thread is left unpinned");
+    return false;
+#else
+    return true;
+#endif
+}
+
+void ReleaseGpuBackCore() noexcept {
+    ReleaseReservedCpus();
+}
+
+bool ReservesGpuBackCore() {
+#if defined(__linux__) && !defined(__ANDROID__)
+    return LinuxPinningPlan().back_core_reserved;
+#else
+    return false;
+#endif
+}
+
+bool PlansGpuThreadPinning() {
+#if defined(__linux__) && !defined(__ANDROID__)
+    return !LinuxPinningPlan().back.empty();
+#else
+    return false;
 #endif
 }
 

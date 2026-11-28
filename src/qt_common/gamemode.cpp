@@ -9,6 +9,8 @@
 #include <gamemode_client.h>
 #endif
 #include "common/logging.h"
+#include "common/settings.h"
+#include "common/thread.h"
 #include "qt_common/config/uisettings.h"
 #include "qt_common/gamemode.h"
 
@@ -26,6 +28,22 @@ void Start() noexcept {
 #endif
         } else {
             LOG_INFO(Frontend, "Done");
+#ifdef __linux__
+            // Once: Start runs again each time a paused game resumes.
+            static bool warned = false;
+            if (Settings::values.pin_gpu_threads.GetValue() && Common::PlansGpuThreadPinning() &&
+                !warned) {
+                warned = true;
+                LOG_WARNING(Frontend,
+                            "GameMode 1.8 and later sets every thread of a game to a CPU mask it "
+                            "chooses when the game registers and again every reaper_freq seconds "
+                            "(5 by default), every online CPU on a CPU it finds uniform, which "
+                            "undoes GPU thread pinning. Setting both pin_cores=no and "
+                            "park_cores=no under [cpu] in gamemode.ini stops it (on hybrid CPUs "
+                            "that also turns off GameMode's own pinning), as does turning off "
+                            "the emulator's GameMode setting (enable_gamemode)");
+            }
+#endif
         }
 #endif
     }
