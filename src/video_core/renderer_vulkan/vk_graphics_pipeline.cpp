@@ -876,6 +876,7 @@ bool GraphicsPipeline::ConfigureRender(const BackHalf& half,
         Profile::Scope scope{Profile::Zone::FillImageViews};
         texture_cache.FillImageViews(std::span(views.data(), views.size()), false, unlend_images);
     }
+    const u64 bound_view_serial = texture_cache.ImageViewRemovalSerial();
     {
         Profile::Scope scope{Profile::Zone::DescriptorAcquire};
         guest_descriptor_queue.Acquire(scheduler, num_descriptor_entries, uses_descriptor_buffer);
@@ -913,7 +914,7 @@ bool GraphicsPipeline::ConfigureRender(const BackHalf& half,
         Profile::Scope scope{Profile::Zone::RenderTargets};
         texture_cache.UpdateRenderTargets(false);
         const std::span<const VideoCommon::ImageViewInOut> view_span{views.data(), views.size()};
-        texture_cache.CheckFeedbackLoop(view_span);
+        texture_cache.CheckFeedbackLoop(view_span, bound_view_serial);
         CheckColorFeedbackLoop(view_span, stages_present, fragment_entry);
         if (scheduler.HasFragmentBarrier() &&
             (scheduler.RenderPassHasStores() || texture_cache.SamplesRenderTarget(view_span))) {
@@ -1258,6 +1259,7 @@ bool GraphicsPipeline::ConfigureImpl(bool is_indexed, std::optional<PreparedBind
         }
         ReportTextureMemo();
     }
+    const u64 bound_view_serial = texture_cache.ImageViewRemovalSerial();
     if (RecordingSampledTextures() || DrawReuseProbeEnabled()) {
         sampled_images.clear();
         size_t view_index{};
@@ -1478,7 +1480,7 @@ bool GraphicsPipeline::ConfigureImpl(bool is_indexed, std::optional<PreparedBind
         Profile::Scope scope{Profile::Zone::RenderTargets};
         texture_cache.UpdateRenderTargets(false);
         const std::span<const VideoCommon::ImageViewInOut> view_span{views.data(), views.size()};
-        texture_cache.CheckFeedbackLoop(view_span);
+        texture_cache.CheckFeedbackLoop(view_span, bound_view_serial);
         CheckColorFeedbackLoop(view_span, Spec::enabled_stages, fragment_entry);
         if (scheduler.HasFragmentBarrier() &&
             (scheduler.RenderPassHasStores() || texture_cache.SamplesRenderTarget(view_span))) {
@@ -1544,6 +1546,7 @@ bool GraphicsPipeline::ComputedHandlesChanged() const {
 
 bool GraphicsPipeline::ConfigureDelta(bool is_indexed, std::optional<PreparedBinding>* deferred) {
     namespace Profile = VideoCommon::Nx2Profile;
+    const u64 bound_view_serial = texture_cache.ImageViewRemovalSerial();
     // ConfigureImpl without reading handles and resolving image views, samplers and texture
     // buffers: the buffers are resolved, synchronized and bound as it does.
     buffer_cache.SetUniformBuffersState(enabled_uniform_buffer_masks, &uniform_buffer_sizes);
@@ -1664,7 +1667,7 @@ bool GraphicsPipeline::ConfigureDelta(bool is_indexed, std::optional<PreparedBin
         Profile::Scope scope{Profile::Zone::RenderTargets};
         texture_cache.UpdateRenderTargets(false);
         const std::span<const VideoCommon::ImageViewInOut> view_span{delta_views};
-        texture_cache.CheckFeedbackLoop(view_span);
+        texture_cache.CheckFeedbackLoop(view_span, bound_view_serial);
         CheckColorFeedbackLoop(view_span, configured_stages, fragment_entry);
         if (scheduler.HasFragmentBarrier() &&
             (scheduler.RenderPassHasStores() || texture_cache.SamplesRenderTarget(view_span))) {
