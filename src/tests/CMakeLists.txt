@@ -363,7 +363,7 @@ add_test(NAME ncz_tests COMMAND ncz_tests)
 
 if (TARGET dynarmic::dynarmic)
     target_sources(tests PRIVATE core/jit_codegen_options.cpp core/jit_ordered_loads.cpp
-        core/jit_vector_round_int16.cpp core/window_trace.cpp)
+        core/jit_round_int.cpp core/jit_vector_round_int16.cpp core/window_trace.cpp)
     target_link_libraries(tests PRIVATE dynarmic::dynarmic)
 endif()
 
