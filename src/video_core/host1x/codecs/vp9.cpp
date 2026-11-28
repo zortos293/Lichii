@@ -449,7 +449,7 @@ Vp9FrameContainer VP9::GetCurrentFrame() {
             host1x.gmmu_manager.ReadBlock(regs.frame_bitstream_offset.Address(), current_frame.bit_stream.data(), current_frame.info.bitstream_size);
         }
     }
-    if (!next_frame.bit_stream.empty()) {
+    if (next_frame_occupied) {
         Vp9FrameContainer temp{
             .info = current_frame.info,
             .bit_stream = std::move(current_frame.bit_stream),
@@ -461,6 +461,9 @@ Vp9FrameContainer VP9::GetCurrentFrame() {
     } else {
         next_frame.info = current_frame.info;
         next_frame.bit_stream = current_frame.bit_stream;
+        // A rejected submission occupies a slot too: without this, the next valid
+        // frame would take the first-call branch again and be emitted twice.
+        next_frame_occupied = true;
     }
     return current_frame;
 }
