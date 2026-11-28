@@ -129,6 +129,8 @@ private:
         bool fail_fallback;
         size_t fastmem_attempts{};
         size_t fallback_attempts{};
+        bool fail_posix_backing_resize{};
+        size_t posix_backing_resize_attempts{};
     };
     static thread_local AllocationTestControl* allocation_test_control;
 

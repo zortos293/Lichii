@@ -714,37 +714,27 @@ public:
 #else
         fd = memfd_create("HostMemory", 0);
 #endif
-        bool use_anon = false;
-#ifdef HAS_NCE
+        // Fastmem aliases must share a valid, sized backing object. A private anonymous
+        // backing cannot be mirrored through Map(). Let HostMemory use its non-fastmem
+        // fallback instead, and leave the descriptor owned by Release() on failure.
         if (fd < 0) {
-#else
-        if (fd <= 0) {
-#endif
             LOG_WARNING(Common_Memory, "memfd_create: {}", strerror(errno));
-            use_anon = true;
-        }
-        if (!use_anon) {
-            // Defined to extend the file with zeros
-            int ret = ftruncate(fd, backing_size);
-            if (ret != 0) {
-                LOG_WARNING(Common_Memory, "ftruncate: {} (likely out-of-emory)", strerror(errno));
-                use_anon = true;
-            }
-        }
-        if (use_anon) {
-#ifdef HAS_NCE
             return false;
-#else
-            LOG_WARNING(Common_Memory, "Using private mappings instead of shared ones");
-            backing_base = static_cast<u8*>(mmap(nullptr, backing_size, PROT_READ | PROT_WRITE, MAP_ANONYMOUS | MAP_PRIVATE | MAP_NOCORE, -1, 0));
-            if (fd > 0) {
-                fd = -1;
-                close(fd);
-            }
-#endif
-        } else {
-            backing_base = static_cast<u8*>(mmap(nullptr, backing_size, PROT_READ | PROT_WRITE, MAP_SHARED | MAP_NOCORE, fd, 0));
         }
+        // Defined to extend the file with zeros.
+        off_t requested_size = static_cast<off_t>(backing_size);
+        if (allocation_test_control) {
+            ++allocation_test_control->posix_backing_resize_attempts;
+            if (allocation_test_control->fail_posix_backing_resize) {
+                requested_size = -1;
+            }
+        }
+        if (ftruncate(fd, requested_size) != 0) {
+            LOG_WARNING(Common_Memory, "ftruncate: {} (likely out-of-memory)", strerror(errno));
+            return false;
+        }
+        backing_base = static_cast<u8*>(mmap(nullptr, backing_size, PROT_READ | PROT_WRITE,
+                                             MAP_SHARED | MAP_NOCORE, fd, 0));
         if (backing_base == MAP_FAILED) {
             LOG_CRITICAL(HW_Memory, "mmap failed: {}", strerror(errno));
             return false;
@@ -829,8 +819,8 @@ public:
         if (True(perms & MemoryPermission::Execute))
             prot_flags |= PROT_EXEC;
 #endif
-        int flags = (fd >= 0 ? MAP_SHARED : MAP_PRIVATE) | MAP_FIXED;
-        void* ret = mmap(virtual_base + virtual_offset, length, prot_flags, flags, fd, host_offset);
+        void* ret = mmap(virtual_base + virtual_offset, length, prot_flags, MAP_SHARED | MAP_FIXED,
+                         fd, host_offset);
         ASSERT_MSG(ret != MAP_FAILED, "mmap: {} {}", strerror(errno), fd);
     }
 

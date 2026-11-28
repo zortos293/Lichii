@@ -29,6 +29,18 @@ public:
         control.fail_fallback = true;
     }
 
+    void AllowFastmem() {
+        control.fail_fastmem = false;
+    }
+
+    void FailPosixBackingResize() {
+        control.fail_posix_backing_resize = true;
+    }
+
+    size_t PosixBackingResizeAttempts() const {
+        return control.posix_backing_resize_attempts;
+    }
+
     size_t FastmemAttempts() const {
         return control.fastmem_attempts;
     }

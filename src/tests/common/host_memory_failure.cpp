@@ -55,6 +55,25 @@ TEST_CASE("Host memory allocation failure permits a successful retry", "[host_me
     CHECK(allocations.FallbackAttempts() == 2);
 }
 
+#if defined(__linux__) && !defined(__ANDROID__) && !defined(__managarm__)
+TEST_CASE("POSIX shared backing resize failure uses the non-fastmem fallback",
+          "[host_memory_failure]") {
+    Common::HostMemoryTestAccess allocations{false};
+    allocations.AllowFastmem();
+    allocations.FailPosixBackingResize();
+
+    Common::HostMemory memory{0x10000, 0x400000};
+    REQUIRE(allocations.PosixBackingResizeAttempts() == 1);
+    CHECK(allocations.FastmemAttempts() == 1);
+    CHECK(allocations.FallbackAttempts() == 1);
+    REQUIRE(memory.BackingBasePointer() != nullptr);
+    CHECK(memory.VirtualBasePointer() == nullptr);
+    memory.Map(0, 0, 0x1000, Common::MemoryPermission::ReadWrite, false);
+    memory.BackingBasePointer()[0] = 42;
+    CHECK(memory.BackingBasePointer()[0] == 42);
+}
+#endif
+
 #ifdef HAS_NCE
 TEST_CASE("Native and JIT fastmem reuse the same arena without sharing address mode",
           "[host_memory_failure]") {
