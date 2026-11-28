@@ -4614,7 +4614,7 @@ Binding BufferCache<P>::StorageBufferBinding(GPUVAddr ssbo_addr, u32 cbuf_index,
     }
 
     const bool reads_size_word =
-        !(table_pointer && !is_written) && (!native_pointer || sized || (compute && !is_written));
+        !(table_pointer && !is_written) && (!native_pointer || sized || compute);
     const u64 next_qword = reads_size_word ? gpu_memory->Read<u64>(ssbo_addr + 8) : 0;
     const u32 alignment = runtime.GetStorageBufferAlignment();
     struct CachedBinding {
@@ -4675,10 +4675,11 @@ Binding BufferCache<P>::StorageBufferBinding(GPUVAddr ssbo_addr, u32 cbuf_index,
                 }
                 // Mario Kart World's lighting passes read past 8 MiB from theirs, inside the size
                 // word after the pointer (Eglantine #609 reads it): capped at 8 MiB those reads
-                // came back zero and lit land and characters too dark. A read-only compute binding
-                // takes a larger size word. Binding to the end of the mapping instead spanned
-                // Ocarina of Time's ~1 GiB heap and backed it with a 1 GiB buffer.
-                if (compute && !is_written && next_qword_is_size && packed_size > bare) {
+                // came back zero and lit land and characters too dark. Kirby Air Riders writes a
+                // 64 MiB page pool through one (#1693). A compute binding takes a larger size word.
+                // Binding to the end of the mapping instead spanned Ocarina of Time's ~1 GiB heap
+                // and backed it with a 1 GiB buffer.
+                if (compute && next_qword_is_size && packed_size > bare) {
                     return (std::min)(packed_size, limit);
                 }
                 return bare;
