@@ -6,7 +6,9 @@
 
 #include <algorithm>
 #include <array>
+#include <atomic>
 #include <cstddef>
+#include <cstdlib>
 #include <cstring>
 #include <limits>
 #include <queue>
@@ -198,6 +200,19 @@ std::vector<u64> RequestedIds(HLERequestContext& ctx) {
     }
     return ids;
 }
+
+/// EDEN_NX2_CHAT_ROOM_FAIL: whether chat:u 11 fails for a user in no chat room instead of writing
+/// an empty room. Unset, it fails for Star Fox alone; 0 keeps the empty room there too, and any
+/// other value fails for every title.
+bool ChatRoomFails(u64 program_id) {
+    constexpr u64 StarFoxProgramId = 0x0400E88025B1A000ULL;
+    static const char* const value = std::getenv("EDEN_NX2_CHAT_ROOM_FAIL");
+    return value != nullptr ? value[0] != '0' : program_id == StarFoxProgramId;
+}
+
+/// The result of chat:u 11 outside a room. The service's own is not known: this is the generic
+/// failure seedds/nxnative answers nn::chat::GetRoomInfo with, which Star Fox reads as no room.
+constexpr Result ResultNoChatRoom{0x2A2};
 
 } // namespace
 
@@ -990,9 +1005,20 @@ private:
 
     // 11: the nn::chat::RoomInfo (0xF0 bytes) of the room the user chats in. Nobody is ever in a
     // room here, so it is all zeroes, ChattingUid (0x18) included. The auto stub left the title's
-    // buffer as it was.
+    // buffer as it was. A success may read as being in a room, so Star Fox gets a failure and its
+    // buffer untouched (ChatRoomFails).
     void GetRoomInfo(HLERequestContext& ctx) {
         LOG_DEBUG(Service_Friend, "called");
+        if (ChatRoomFails(system.GetApplicationProcessProgramID())) {
+            static std::atomic_flag logged;
+            if (!logged.test_and_set()) {
+                LOG_INFO(Service_Friend, "chat:u 11 fails: no chat room "
+                                         "(EDEN_NX2_CHAT_ROOM_FAIL=0 writes an empty room)");
+            }
+            IPC::ResponseBuilder rb{ctx, 2};
+            rb.Push(ResultNoChatRoom);
+            return;
+        }
         constexpr std::array<u8, 0xF0> room_info{};
         ctx.WriteBuffer(room_info);
         IPC::ResponseBuilder rb{ctx, 2};

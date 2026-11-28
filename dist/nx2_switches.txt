@@ -36,6 +36,10 @@ EDEN_NX2_FENCE_BATCH=1
 # Drop reactive-flushing read traps on Switch 2 programs (opt-in; can reduce FPS from 29 to 24 in MKW).
 #EDEN_NX2_NO_REACTIVE=1
 
+# GameChat room query (chat:u 11) outside a room. Unset: it fails for Star Fox and writes an empty
+# room for other titles. 0 = an empty room for Star Fox too; any other value = it fails for every title.
+#EDEN_NX2_CHAT_ROOM_FAIL=0
+
 #EDEN_NX2_MME_JIT=0
 #EDEN_NX2_PBFLUSH=0
 #EDEN_NX2_SKIP_SAME=0
