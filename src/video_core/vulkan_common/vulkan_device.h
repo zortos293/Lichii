@@ -234,6 +234,30 @@ enum class FormatType { Linear, Optimal, Buffer };
 /// Subgroup size of the guest emulated hardware (Nvidia has 32 threads per subgroup).
 const u32 GuestWarpSize = 32;
 
+/// The most push descriptors Lichii puts in one set on MoltenVK.
+///
+/// MoltenVK reports maxPushDescriptors as maxPerStageResources (287 on Apple GPUs: 31 buffers and
+/// 256 textures), but it binds a push descriptor set one Metal slot per descriptor, and a stage has
+/// 31 buffer slots. MoltenVK takes slot 0 for push constants, and slots from the top for itself: 4
+/// implicit buffers in compute (27 to 30); in graphics, vertex buffers from slot 30 down and up to 8
+/// implicit buffers below them. A set within the reported limit can then need slots that do not
+/// exist, and its pipeline fails ("goes above the limit 31", KhronosGroup/MoltenVK#2908).
+///
+/// The limit counts every descriptor and only buffers take buffer slots, so 16 holds a push set to
+/// 16 buffer slots: a compute stage keeps 10 slots spare, and a graphics stage fits 6 vertex buffers
+/// with all 8 implicit buffers in use (1 + 16 + 6 + 8 = 31). One limit covers both kinds of pipeline,
+/// and a larger one would fit compute but take the slots graphics needs for vertex buffers.
+/// Ryujinx's MoltenVK fork reported the same 16 (a MoltenVK patch, lost in later versions).
+constexpr u32 MoltenVKMaxPushDescriptors = 16;
+
+/// The maxPushDescriptors Lichii uses for a driver that reports `reported`.
+[[nodiscard]] constexpr u32 UsableMaxPushDescriptors(VkDriverId driver_id, u32 reported) noexcept {
+    if (driver_id == VK_DRIVER_ID_MOLTENVK && reported > MoltenVKMaxPushDescriptors) {
+        return MoltenVKMaxPushDescriptors;
+    }
+    return reported;
+}
+
 enum class NvidiaArchitecture {
     Arch_KeplerOrOlder,
     Arch_Maxwell,

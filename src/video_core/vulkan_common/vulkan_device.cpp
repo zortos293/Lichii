@@ -1881,6 +1881,17 @@ bool Device::GetSuitability(bool requires_swapchain) {
     // Store base properties
     properties.properties = properties2.properties;
 
+    if (extensions.push_descriptor) {
+        const u32 reported = properties.push_descriptor.maxPushDescriptors;
+        properties.push_descriptor.maxPushDescriptors =
+            UsableMaxPushDescriptors(properties.driver.driverID, reported);
+        if (properties.push_descriptor.maxPushDescriptors != reported) {
+            LOG_INFO(Render_Vulkan,
+                     "Push descriptor sets limited to {} descriptors (the driver reports {})",
+                     properties.push_descriptor.maxPushDescriptors, reported);
+        }
+    }
+
     // Unload extensions if feature support is insufficient.
     RemoveUnsuitableExtensions();
 
