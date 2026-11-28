@@ -20,6 +20,7 @@
 #include "core/hle/service/ipc_helpers.h"
 #include "core/hle/service/nifm/nifm.h"
 #include "core/hle/service/server_manager.h"
+#include "core/internal_network/local_redirect.h"
 #include "tests/audio_core/sysmix_test_context.h"
 
 namespace {
@@ -33,6 +34,9 @@ constexpr u32 GetResult = 1;
 constexpr u32 GetSystemEventReadableHandles = 2;
 constexpr u32 Submit = 4;
 constexpr u32 CreateRequest = 4;
+constexpr u32 IsWirelessCommunicationEnabled = 17;
+constexpr u32 IsEthernetCommunicationEnabled = 20;
+constexpr u32 IsAnyInternetRequestAccepted = 21;
 
 } // Anonymous namespace
 
@@ -43,6 +47,8 @@ TEST_CASE("nifm requests follow the network with Nextendo online play", "[nifm][
     SCOPE_EXIT {
         Settings::values.nextendo_enabled.SetValue(previous_nextendo);
         Settings::values.airplane_mode.SetValue(previous_airplane);
+        Settings::values.block_game_network.SetValue(false);
+        Network::LocalRedirect::Configure();
     };
     auto& kernel = context.system.Kernel();
     REQUIRE(context.process->GetHandleTable().Initialize(kernel, 16).IsSuccess());
@@ -153,6 +159,22 @@ TEST_CASE("nifm requests follow the network with Nextendo online play", "[nifm][
         CHECK(state(*request) == StateInvalid);
         CHECK(signaled(event1));
         CHECK(signaled(event2));
+    }
+    SECTION("blocked game network access refuses requests and reports no network") {
+        Settings::values.nextendo_enabled.SetValue(true);
+        Settings::values.airplane_mode.SetValue(false);
+        Settings::values.block_game_network.SetValue(true);
+        Network::LocalRedirect::Configure();
+        // Online play is off for the game, so the request waits as it does without Nextendo.
+        const auto request = create();
+        REQUIRE(result(call(*request, Submit)) == ResultSuccess.raw);
+        CHECK(state(*request) == StateOnHold);
+        for (const u32 command : {IsWirelessCommunicationEnabled, IsEthernetCommunicationEnabled,
+                                  IsAnyInternetRequestAccepted}) {
+            const auto reply = call(general, command);
+            REQUIRE(result(reply) == ResultSuccess.raw);
+            CHECK((payload(reply)[4] & 0xFF) == 0);
+        }
     }
     SECTION("with Nextendo a submitted request follows a network change by itself") {
         Settings::values.nextendo_enabled.SetValue(true);

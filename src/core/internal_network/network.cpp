@@ -8,6 +8,8 @@
 #include <atomic>
 #include <cstring>
 #include <limits>
+#include <mutex>
+#include <optional>
 #include <string>
 #include <utility>
 #include <vector>
@@ -763,6 +765,34 @@ PollEvents TranslatePollRevents(short revents) {
     return result;
 }
 
+/// The loopback address of `family`; the IPv4-mapped one for an INET6 socket when `mapped`.
+SockAddrIn LoopbackAddress(Domain family, bool mapped) {
+    SockAddrIn address{.family = family};
+    if (family != Domain::INET6) {
+        address.ip = {127, 0, 0, 1};
+    } else if (mapped) {
+        address.ip6 = {0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0xff, 0xff, 127, 0, 0, 1};
+    } else {
+        address.ip6[15] = 1;
+    }
+    return address;
+}
+
+/// Where a bind to `address` goes under loopback only, the only interface the guest then has:
+/// the wildcard address names loopback, and any other address names nothing (nullopt).
+std::optional<SockAddrIn> LoopbackOnlyBindAddress(const SockAddrIn& address) {
+    if (!LocalRedirect::LoopbackOnly() || LocalRedirect::IsLoopback(address)) {
+        return address;
+    }
+    const bool inet6 = address.family == Domain::INET6;
+    if (inet6 ? address.ip6 != IPv6Address{} : address.ip != IPv4Address{}) {
+        return std::nullopt;
+    }
+    SockAddrIn loopback = LoopbackAddress(address.family, false);
+    loopback.portno = address.portno;
+    return loopback;
+}
+
 } // Anonymous namespace
 
 NetworkInstance::NetworkInstance() {
@@ -1146,7 +1176,14 @@ std::pair<SockAddrIn, Errno> Socket::GetSockName() {
 }
 
 Errno Socket::Bind(SockAddrIn addr) {
-    const HostSockAddr addr_in = TranslateFromSockAddrIn(addr);
+    const auto bind_addr = LoopbackOnlyBindAddress(addr);
+    if (!bind_addr) {
+        LOG_DEBUG(Network, "Host redirect: bind to {} refused (loopback only)",
+                  SockAddrToString(addr));
+        // Not through ForDomain: its OTHER would reach an IPv4 guest as success.
+        return Errno::ADDRNOTAVAIL;
+    }
+    const HostSockAddr addr_in = TranslateFromSockAddrIn(*bind_addr);
     if (bind(fd, addr_in.Get(), addr_in.len) != SOCKET_ERROR) {
         return Errno::SUCCESS;
     }
@@ -1154,7 +1191,28 @@ Errno Socket::Bind(SockAddrIn addr) {
     return ForDomain(socket_domain, GetAndLogLastError());
 }
 
+Errno Socket::BindLoopbackIfUnbound(const SockAddrIn* peer) {
+    if (!LocalRedirect::LoopbackOnly()) {
+        return Errno::SUCCESS;
+    }
+    // Two sends on one socket from different threads must not both see it unbound.
+    std::scoped_lock lock{loopback_bind_mutex};
+    // An unbound socket has no name on Windows, and port 0 elsewhere.
+    sockaddr_storage name{};
+    socklen_t name_len = sizeof(name);
+    if (getsockname(fd, reinterpret_cast<sockaddr*>(&name), &name_len) != SOCKET_ERROR &&
+        TranslateToSockAddrIn(name).portno != 0) {
+        return Errno::SUCCESS;
+    }
+    const bool mapped = peer != nullptr && peer->family == Domain::INET6 && peer->ip6[10] == 0xff &&
+                        peer->ip6[11] == 0xff;
+    return Bind(LoopbackAddress(socket_domain, mapped));
+}
+
 Errno Socket::Listen(s32 backlog) {
+    if (const Errno bind_errno = BindLoopbackIfUnbound(nullptr); bind_errno != Errno::SUCCESS) {
+        return bind_errno;
+    }
     if (listen(fd, backlog) != SOCKET_ERROR) {
         return Errno::SUCCESS;
     }
@@ -1364,7 +1422,11 @@ std::pair<s32, Errno> Socket::SendTo(u32 flags, std::span<const u8> message,
 
     if (addr) {
         if (!LocalRedirect::Allowed(*addr)) {
-            return {-1, ForDomain(socket_domain, Errno::NETUNREACH)};
+            // Not through ForDomain: its OTHER would reach an IPv4 guest as success.
+            return {-1, Errno::NETUNREACH};
+        }
+        if (const Errno bind_errno = BindLoopbackIfUnbound(addr); bind_errno != Errno::SUCCESS) {
+            return {-1, bind_errno};
         }
         host_addr_in = TranslateFromSockAddrIn(*addr);
         to = host_addr_in.Get();

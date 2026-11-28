@@ -26,6 +26,7 @@
 #include "core/hle/service/kernel_helpers.h"
 #include "core/hle/service/nx2_stub_interface.h"
 #include "core/hle/service/server_manager.h"
+#include "core/internal_network/local_redirect.h"
 
 namespace Service::Friend {
 
@@ -130,7 +131,7 @@ constexpr std::array<u8, 667> DefaultFriendIcon{
 // The friend list of the game's profile while Nextendo online play is on, read from the cache
 // the frontend refreshes.
 std::vector<Common::Nextendo::Friend> Friends(const Core::System& system) {
-    if (!Common::Nextendo::OnlinePlayActive()) {
+    if (!Network::LocalRedirect::OnlinePlayAllowed()) {
         return {};
     }
     return Common::Nextendo::CachedFriends(Account::Nextendo::CurrentProfile(system)).friends;
@@ -568,7 +569,7 @@ private:
     // Keeps the game's presence data, which the frontend sends to Nextendo with the presence.
     void UpdateUserPresence(HLERequestContext& ctx) {
         LOG_DEBUG(Service_Friend, "called");
-        if (Common::Nextendo::OnlinePlayActive() &&
+        if (Network::LocalRedirect::OnlinePlayAllowed() &&
             ctx.GetReadBufferSize() >= sizeof(UserPresenceImpl)) {
             UserPresenceImpl presence{};
             std::memcpy(&presence, ctx.ReadBuffer().data(), sizeof(presence));

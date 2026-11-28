@@ -212,10 +212,10 @@ public:
         // NSD host names carry "%" for the environment, and some titles pass the redirected
         // address itself; Nextendo needs the real name for SNI (citron-nextendo).
         std::string host = hostname_in;
-        if (Common::Nextendo::OnlinePlayActive()) {
+        if (Network::LocalRedirect::OnlinePlayAllowed()) {
             host = Sockets::Nextendo::ResolveFqdn(std::move(host));
         }
-        if (Common::Nextendo::OnlinePlayActive() && socket) {
+        if (Network::LocalRedirect::OnlinePlayAllowed() && socket) {
             const auto [peer, err] = socket->GetPeerName();
             if (err == Network::Errno::SUCCESS) {
                 const std::string ip = Network::IPv4AddressToString(peer.ip);

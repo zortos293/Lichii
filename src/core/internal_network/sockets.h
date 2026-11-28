@@ -231,6 +231,11 @@ public:
     std::optional<PollEvents> EmulatedPoll(PollEvents events) override;
 
 private:
+    /// Under loopback only, binds a socket the host hasn't bound yet to loopback, so a send or
+    /// listen doesn't bind it to the wildcard address and open it to other hosts. `peer`, when
+    /// given, picks the IPv4-mapped loopback for an INET6 socket that sends to one.
+    Errno BindLoopbackIfUnbound(const SockAddrIn* peer);
+
     /// Runs operation, a host receive or send given the host flags to add to its own: those that
     /// keep it from waiting if flags holds FLAG_MSG_DONTWAIT, none otherwise.
     template <typename Operation>
@@ -273,6 +278,10 @@ private:
 
     /// The mode SetNonBlock gave the socket.
     std::atomic_bool is_non_blocking{false};
+
+    /// Held by BindLoopbackIfUnbound from its unbound check to its bind; no other lock is taken
+    /// while it is held.
+    std::mutex loopback_bind_mutex;
     /// The type Initialize gave the socket (Unspecified for an accepted one).
     Type socket_type = Type::Unspecified;
     /// The domain Initialize gave the socket, or the listening socket's for an accepted one.

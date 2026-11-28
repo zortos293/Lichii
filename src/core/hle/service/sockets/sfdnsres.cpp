@@ -218,7 +218,7 @@ static std::pair<u32, GetAddrInfoError> GetHostByNameRequestImpl(HLERequestConte
     std::string host = Common::StringFromBuffer(host_buffer);
     // Nextendo needs the names NSD gives even when a title asks for plain DNS (its /integration
     // page: the system rewrites the Nintendo Account names before DNS).
-    if (parameters.use_nsd_resolve || Common::Nextendo::OnlinePlayActive()) {
+    if (parameters.use_nsd_resolve || Network::LocalRedirect::OnlinePlayAllowed()) {
         host = Nextendo::ResolveFqdn(std::move(host));
     }
     // For now, ignore options, which are in input buffer 1 for GetHostByNameRequestWithOptions.
@@ -404,7 +404,7 @@ static std::pair<u32, GetAddrInfoError> GetAddrInfoRequestImpl(HLERequestContext
 
     const auto host_buffer = ctx.ReadBuffer(0);
     std::string host = Common::StringFromBuffer(host_buffer);
-    if (parameters.use_nsd_resolve || Common::Nextendo::OnlinePlayActive()) {
+    if (parameters.use_nsd_resolve || Network::LocalRedirect::OnlinePlayAllowed()) {
         host = Nextendo::ResolveFqdn(std::move(host));
     }
 
@@ -418,7 +418,7 @@ static std::pair<u32, GetAddrInfoError> GetAddrInfoRequestImpl(HLERequestContext
         ctx.CanReadBuffer(2) ? ctx.ReadBuffer(2) : std::span<const u8>{};
     const Network::Domain family = HintsFamily(hints);
 
-    if (Common::Nextendo::OnlinePlayActive() && family != Network::Domain::INET6) {
+    if (Network::LocalRedirect::OnlinePlayAllowed() && family != Network::Domain::INET6) {
         if (const auto literal = LiteralAddrInfo(host, service, hints)) {
             const std::vector<u8> data = SerializeAddrInfo({*literal}, host);
             ctx.WriteBuffer(data, 0);

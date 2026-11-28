@@ -26,6 +26,9 @@
 /// names: titles that verify with the system store's lists can't be told apart by host name.
 /// Loopback only covers the guest's host sockets (BSD sockets, direct LAN play), not the traffic a
 /// multiplayer room relays.
+/// Settings::values.block_game_network turns loopback only on and drops the redirect's server, and
+/// also keeps games out of rooms, local wireless and the online services Lichii runs for them
+/// (Isolated).
 namespace Network::LocalRedirect {
 
 /// Reads the settings (and the CA file) for the game that is starting, and logs the mapping when
@@ -47,6 +50,9 @@ void Configure();
 /// Where a TCP connection to `address` goes: the configured server for 127.0.0.1:443.
 [[nodiscard]] SockAddrIn ConnectTarget(const SockAddrIn& address);
 
+/// Whether `address` is on the loopback interface (127.0.0.0/8, ::1 or a v4-mapped 127.x).
+[[nodiscard]] bool IsLoopback(const SockAddrIn& address);
+
 /// Whether the guest may reach `address` (always, unless loopback only is on). Checked before
 /// ConnectTarget, so the configured server stays reachable.
 [[nodiscard]] bool Allowed(const SockAddrIn& address);
@@ -54,6 +60,14 @@ void Configure();
 /// Whether the redirect is on with loopback only. Games then get an id token Lichii makes for the
 /// profile instead of their Nextendo one, since it can reach only the user's server.
 [[nodiscard]] bool LoopbackOnly();
+
+/// Whether game network access is blocked: loopback only, and no rooms, local wireless or online
+/// services for the game.
+[[nodiscard]] bool Isolated();
+
+/// Whether the online services Lichii runs for a game (Nextendo sign-in, friends, BCAT, its DNS and
+/// TLS routing) may run: online play is on and game network access isn't blocked.
+[[nodiscard]] bool OnlinePlayAllowed();
 
 /// The extra CA certificate (DER), empty when unset or unreadable.
 [[nodiscard]] std::vector<u8> TestCa();

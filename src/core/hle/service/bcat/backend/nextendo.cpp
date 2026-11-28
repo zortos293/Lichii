@@ -27,6 +27,7 @@
 #include "common/scm_rev.h"
 #include "common/settings.h"
 #include "core/hle/service/bcat/backend/nextendo.h"
+#include "core/internal_network/local_redirect.h"
 
 namespace Service::BCAT::Nextendo {
 
@@ -459,7 +460,7 @@ fs::path CacheDirectory(u64 title_id) {
 }
 
 void PrepareForGame(u64 title_id) {
-    if (!Common::Nextendo::OnlinePlayActive() || title_id <= LastSystemTitle) {
+    if (!Network::LocalRedirect::OnlinePlayAllowed() || title_id <= LastSystemTitle) {
         return;
     }
     const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds{15};

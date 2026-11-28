@@ -6,6 +6,7 @@
 #include "core/hle/service/bcat/news/builtin_news.h"
 #include "core/hle/service/bcat/news/msgpack.h"
 #include "core/hle/service/bcat/news/news_storage.h"
+#include "core/internal_network/local_redirect.h"
 
 #include "common/fs/file.h"
 #include "common/fs/path_util.h"
@@ -79,6 +80,9 @@ std::vector<u8> TryLoadFromDisk(const std::filesystem::path& path) {
 
 // TODO(crueter): Migrate to use Common::Net
 std::vector<u8> DownloadImage(const std::string& url_path, const std::filesystem::path& cache_path) {
+    if (Network::LocalRedirect::Isolated()) {
+        return {};
+    }
     LOG_DEBUG(Service_BCAT, "Downloading image: https://eden-emu.dev{}", url_path);
     try {
         httplib::Client cli("https://eden-emu.dev");

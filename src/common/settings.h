@@ -1111,6 +1111,11 @@ struct Values {
     Setting<std::string> network_interface{linkage, std::string(), "network_interface",
                                            Category::Network};
     SwitchableSetting<bool> airplane_mode{linkage, true, "airplane_mode", Category::Network};
+    // Keeps games off every network but loopback: no DNS, datagrams, rooms, local wireless or
+    // online services, which airplane_mode still lets through. Lichii's own connections are
+    // unaffected. Read when a game starts (core/internal_network/local_redirect.h).
+    SwitchableSetting<bool> block_game_network{linkage, false, "block_game_network",
+                                               Category::Network};
     Setting<bool> lan_play{linkage, false, "lan_play", Category::Network};
     Setting<bool> nextendo_enabled{linkage, false, "nextendo_enabled", Category::Network};
     // Replaces the current user's nickname and icon with the Nextendo account's.

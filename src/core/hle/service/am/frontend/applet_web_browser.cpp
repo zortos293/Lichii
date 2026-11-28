@@ -27,6 +27,7 @@
 #include "core/hle/service/am/service/storage.h"
 #include "core/hle/service/filesystem/filesystem.h"
 #include "core/hle/service/ns/platform_service_manager.h"
+#include "core/internal_network/local_redirect.h"
 #include "core/loader/loader.h"
 
 namespace Service::AM::Frontend {
@@ -596,6 +597,12 @@ void WebBrowser::ExecuteShare() {
 }
 
 void WebBrowser::ExecuteWeb() {
+    if (Network::LocalRedirect::Isolated()) {
+        // Opening the page in the host's browser would take the game's URL onto the network.
+        LOG_INFO(Service_AM, "Not opening {}: game network access is blocked", external_url);
+        WebBrowserExit(WebExitReason::WindowClosed);
+        return;
+    }
     LOG_INFO(Service_AM, "Opening external URL at {}", external_url);
     frontend.OpenExternalWebPage(external_url, [this](WebExitReason exit_reason, std::string last_url) {
         // Offline and web applets must be explicitly exited from because they respect exit state

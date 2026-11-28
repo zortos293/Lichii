@@ -13,6 +13,7 @@
 #include "core/hle/service/ldn/ldn_types.h"
 #include "core/hle/service/ldn/user_local_communication_service.h"
 #include "core/hle/service/server_manager.h"
+#include "core/internal_network/local_redirect.h"
 #include "core/internal_network/network.h"
 #include "core/internal_network/network_interface.h"
 #include "network/network.h"
@@ -290,6 +291,8 @@ Result IUserLocalCommunicationService::Disconnect() {
 Result IUserLocalCommunicationService::Initialize(ClientProcessId aruid) {
     LOG_INFO(Service_LDN, "called, process_id={}", aruid.pid);
 
+    // Blocked game network access leaves no local wireless, through LAN play or a room.
+    R_UNLESS(!Network::LocalRedirect::Isolated(), ResultAirplaneModeEnabled);
     const auto network_interface = Network::GetSelectedNetworkInterface();
     R_UNLESS(network_interface, ResultAirplaneModeEnabled);
 

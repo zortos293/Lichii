@@ -15,6 +15,7 @@
 #include "core/hle/service/nifm/nifm.h"
 #include "core/hle/service/server_manager.h"
 #include "core/internal_network/emu_net_state.h"
+#include "core/internal_network/local_redirect.h"
 #include "core/internal_network/network.h"
 #include "core/internal_network/network_interface.h"
 #include "core/internal_network/wifi_scanner.h"
@@ -75,6 +76,10 @@ static u128 MakeUuidFromName(std::string_view name) {
 // A joined room is the emulated network, even in airplane mode. Its sockets only reach room
 // members, and LAN games (e.g. Mario Kart World LAN Play) need their connection request accepted.
 static bool IsNetworkAvailable() {
+    // With game network access blocked there is no network at all, not even a room's.
+    if (Network::LocalRedirect::Isolated()) {
+        return false;
+    }
     if (Network::GetRoomIPv4Address()) {
         return true;
     }
@@ -414,7 +419,7 @@ private:
         LOG_DEBUG(Service_NIFM, "called");
 
         std::scoped_lock lk{state_lock};
-        if (Common::Nextendo::OnlinePlayActive()) {
+        if (Network::LocalRedirect::OnlinePlayAllowed()) {
             UpdateState(NetworkRequestState());
             if (!state_poll_event) {
                 state_poll_event = Core::Timing::CreateEvent(
@@ -422,7 +427,7 @@ private:
                     [this](s64,
                            std::chrono::nanoseconds) -> std::optional<std::chrono::nanoseconds> {
                         std::scoped_lock poll_lk{state_lock};
-                        if (!Common::Nextendo::OnlinePlayActive()) {
+                        if (!Network::LocalRedirect::OnlinePlayAllowed()) {
                             return std::nullopt;
                         }
                         if (const auto new_state = NetworkRequestState(); new_state != state) {
@@ -545,7 +550,7 @@ private:
         state = new_state;
         event1->Signal(system.Kernel());
         // What the second event means is unknown. Splatoon 3 waits on it for the request state.
-        if (Common::Nextendo::OnlinePlayActive()) {
+        if (Network::LocalRedirect::OnlinePlayAllowed()) {
             event2->Signal(system.Kernel());
         }
     }
@@ -996,7 +1001,8 @@ void IGeneralService::SetWirelessCommunicationEnabled(HLERequestContext& ctx) {
 }
 
 void IGeneralService::IsWirelessCommunicationEnabled(HLERequestContext& ctx) {
-    const bool en = !Settings::values.airplane_mode.GetValue();
+    const bool en =
+        !Settings::values.airplane_mode.GetValue() && !Network::LocalRedirect::Isolated();
     IPC::ResponseBuilder rb{ctx, 3};
     rb.Push(ResultSuccess);
     rb.Push<u8>(en);
@@ -1043,7 +1049,8 @@ void IGeneralService::IsEthernetCommunicationEnabled(HLERequestContext& ctx) {
 
     IPC::ResponseBuilder rb{ctx, 3};
     rb.Push(ResultSuccess);
-    if (Network::GetHostIPv4Address().has_value() && !Settings::values.airplane_mode.GetValue()) {
+    if (Network::GetHostIPv4Address().has_value() && !Settings::values.airplane_mode.GetValue() &&
+        !Network::LocalRedirect::Isolated()) {
         rb.Push<u8>(1);
     } else {
         rb.Push<u8>(0);
@@ -1063,7 +1070,7 @@ void IGeneralService::IsAnyInternetRequestAccepted(HLERequestContext& ctx) {
 }
 
 void IGeneralService::IsAnyForegroundRequestAccepted(HLERequestContext& ctx) {
-    const bool is_accepted = Common::Nextendo::OnlinePlayActive() && IsNetworkAvailable();
+    const bool is_accepted = Network::LocalRedirect::OnlinePlayAllowed() && IsNetworkAvailable();
 
     LOG_DEBUG(Service_NIFM, "called, is_accepted={}", is_accepted);
 

@@ -20,6 +20,7 @@
 #include "common/settings.h"
 #include "common/string_util.h"
 #include "core/hle/service/sockets/nextendo_redirect.h"
+#include "core/internal_network/local_redirect.h"
 
 namespace Service::Sockets::Nextendo {
 
@@ -204,7 +205,7 @@ std::optional<Target> Classify(std::string_view host, u64 program_id) {
 }
 
 std::optional<std::string> RedirectAddress(std::string_view host, u64 program_id) {
-    if (!Common::Nextendo::OnlinePlayActive() || ParseIPv4(host)) {
+    if (!Network::LocalRedirect::OnlinePlayAllowed() || ParseIPv4(host)) {
         return std::nullopt;
     }
     const std::string name = Common::ToLower(host);
@@ -230,7 +231,7 @@ std::optional<std::string> RedirectAddress(std::string_view host, u64 program_id
 }
 
 std::string ResolveFqdn(std::string host) {
-    if (Common::Nextendo::OnlinePlayActive() &&
+    if (Network::LocalRedirect::OnlinePlayAllowed() &&
         (host == "accounts.nintendo.com" || host == "api.accounts.nintendo.com")) {
         return "e0d67c509fb203858ebcb2fe3f88c2aa.baas.nintendo.com";
     }
@@ -271,7 +272,7 @@ std::string HostForAddress(const std::string& address) {
 std::vector<u8> AlpnProtocols(std::string_view host_in, std::span<const u8> requested) {
     std::vector<u8> wire;
     const std::string host = Common::ToLower(std::string{host_in});
-    if (!Common::Nextendo::OnlinePlayActive() ||
+    if (!Network::LocalRedirect::OnlinePlayAllowed() ||
         (host.find("npln") == std::string::npos && !IsDomainOrSubdomain(host, "gs.nintendo.net"))) {
         return wire;
     }
@@ -294,7 +295,7 @@ std::optional<Network::SockAddrIn> RouteGamesync(u64 program_id, Network::SockAd
     constexpr u16 NextendoGamesyncPort = 8463;
     constexpr std::array PokemonScarletViolet{0x0100A3D008C5C000ULL, 0x01008F6008C5E000ULL};
     // An IPv6 address keeps `ip` zero, which the check below reads as "any": only IPv4 is routed.
-    if (!Common::Nextendo::OnlinePlayActive() || address.family != Network::Domain::INET ||
+    if (!Network::LocalRedirect::OnlinePlayAllowed() || address.family != Network::Domain::INET ||
         address.portno != GamesyncPort ||
         std::ranges::find(PokemonScarletViolet, program_id) == PokemonScarletViolet.end()) {
         return std::nullopt;

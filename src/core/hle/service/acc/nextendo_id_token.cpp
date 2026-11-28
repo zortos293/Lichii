@@ -27,6 +27,7 @@
 #include "core/hle/service/acc/nextendo_id_token.h"
 #include "core/hle/service/acc/profile_manager.h"
 #include "core/hle/service/hle_ipc.h"
+#include "core/internal_network/local_redirect.h"
 
 namespace Service::Account::Nextendo {
 
@@ -156,7 +157,7 @@ Common::UUID CurrentProfile(const Core::System& system) {
 }
 
 std::optional<Common::Nextendo::Account> LinkedAccount(const Common::UUID& profile) {
-    if (!Common::Nextendo::OnlinePlayActive()) {
+    if (!Network::LocalRedirect::OnlinePlayAllowed()) {
         return std::nullopt;
     }
     return Common::Nextendo::LoadAccount(profile);

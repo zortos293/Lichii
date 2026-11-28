@@ -43,6 +43,16 @@
          </widget>
         </item>
         <item row="3" column="0" colspan="2">
+         <widget class="QCheckBox" name="block_game_network">
+          <property name="toolTip">
+           <string>Keeps games off the network: they can reach only this PC's loopback address. Host name lookups, connections and datagrams to anywhere else, multiplayer rooms, local wireless, LAN play, Nextendo online play and web pages a game opens are all blocked, and games see no network connection. Lichii's own connections, such as updates and signing in, are unaffected. Takes effect when a game starts.</string>
+          </property>
+          <property name="text">
+           <string>Block game network access</string>
+          </property>
+         </widget>
+        </item>
+        <item row="4" column="0" colspan="2">
          <widget class="QCheckBox" name="lan_play">
           <property name="toolTip">
            <string>Plays local wireless games with other Lichii instances or ldn_mitm consoles on the same network, without a room. If you are in a room when a game starts local play, the room is used instead.</string>

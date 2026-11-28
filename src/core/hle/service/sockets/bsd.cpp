@@ -34,6 +34,7 @@
 #include "core/hle/service/sockets/bsd.h"
 #include "core/hle/service/sockets/nextendo_redirect.h"
 #include "core/hle/service/sockets/sockets_translate.h"
+#include "core/internal_network/local_redirect.h"
 #include "core/internal_network/network.h"
 #include "core/internal_network/socket_proxy.h"
 #include "core/internal_network/sockets.h"
@@ -1416,7 +1417,9 @@ std::pair<s32, Errno> BSD_USA::SocketImpl(Domain domain, Type type, Protocol pro
 
     std::shared_ptr<Network::SocketBase> socket;
     auto room_member = Network::GetRoomMember().lock();
-    if (room_member && room_member->IsConnected() && !Network::IsDirectLanActive()) {
+    // Blocked game network access keeps the guest's sockets on the host's loopback, out of rooms.
+    if (!Network::LocalRedirect::Isolated() && room_member && room_member->IsConnected() &&
+        !Network::IsDirectLanActive()) {
         // A room carries IPv4 alone.
         if (domain != Domain::INET) {
             LOG_INFO(Service, "Refusing non-IPv4 socket domain={} in a room",
