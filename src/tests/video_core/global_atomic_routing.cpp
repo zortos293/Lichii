@@ -203,7 +203,7 @@ TEST_CASE("Global memory helpers branch per buffer and return only from their la
     }
 }
 
-TEST_CASE("Global memory helpers with variable pointers select the buffer and branch only for writes",
+TEST_CASE("Global memory helpers on the NVIDIA path dispatch with OpSwitch without variable pointers",
           "[shader_recompiler][global_memory]") {
     constexpr u32 OpCapability = 17;
     constexpr u32 OpTypePointer = 32;
@@ -211,8 +211,8 @@ TEST_CASE("Global memory helpers with variable pointers select the buffer and br
     constexpr u32 OpFunction = 54;
     constexpr u32 OpFunctionEnd = 56;
     constexpr u32 OpFunctionCall = 57;
+    constexpr u32 OpLoad = 61;
     constexpr u32 OpStore = 62;
-    constexpr u32 OpDecorate = 71;
     constexpr u32 OpSelect = 169;
     constexpr u32 OpAtomicExchange = 229;
     constexpr u32 OpAtomicXor = 242;
@@ -222,8 +222,7 @@ TEST_CASE("Global memory helpers with variable pointers select the buffer and br
     constexpr u32 OpReturn = 253;
     constexpr u32 OpReturnValue = 254;
     constexpr u32 VariablePointersStorageBuffer = 4441;
-    constexpr u32 ShaderNonUniform = 5301;
-    constexpr u32 NonUniform = 5300;
+    constexpr u32 VariablePointers = 4442;
     for (const bool native : {true, false}) {
         for (const u32 alignment : {16U, 4U}) {
             CAPTURE(native, alignment);
@@ -233,41 +232,28 @@ TEST_CASE("Global memory helpers with variable pointers select the buffer and br
                 return std::ranges::any_of(Instructions(code, OpCapability),
                                            [&](const auto& ops) { return ops[0] == capability; });
             };
-            CHECK(has_capability(VariablePointersStorageBuffer));
-            CHECK(has_capability(ShaderNonUniform));
-            CHECK(Instructions(code, OpSwitch).empty());
+            CHECK_FALSE(has_capability(VariablePointersStorageBuffer));
+            CHECK_FALSE(has_capability(VariablePointers));
+            CHECK_FALSE(Instructions(code, OpSwitch).empty());
 
             std::vector<u32> pointer_types;
             for (const auto& ops : Instructions(code, OpTypePointer)) {
                 pointer_types.push_back(ops[0]);
             }
-            std::vector<u32> non_uniform;
-            for (const auto& ops : Instructions(code, OpDecorate)) {
-                if (ops[1] == NonUniform) {
-                    non_uniform.push_back(ops[0]);
-                }
-            }
-            const auto is_non_uniform = [&](u32 id) {
-                return std::ranges::find(non_uniform, id) != non_uniform.end();
-            };
-            size_t selected_pointers{};
             for (const auto& ops : Instructions(code, OpSelect)) {
-                if (std::ranges::find(pointer_types, ops[0]) != pointer_types.end()) {
-                    ++selected_pointers;
-                }
+                CHECK(std::ranges::find(pointer_types, ops[0]) == pointer_types.end());
             }
-            CHECK(selected_pointers > 0);
 
             const u32 main_id = Instructions(code, OpEntryPoint)[0][1];
             size_t loads{};
             size_t writes{};
             u32 function_id{};
             u32 branches{};
+            u32 switches{};
             u32 merges{};
             u32 returns{};
-            u32 last_select{};
             u32 search_id{};
-            bool writes_before_branch{};
+            bool accesses_before_switch{};
             bool writes_memory{};
             for (size_t i = 5; i < code.size();) {
                 const u32 count = code[i] >> 16;
@@ -275,14 +261,12 @@ TEST_CASE("Global memory helpers with variable pointers select the buffer and br
                 REQUIRE(count > 0);
                 if (opcode == OpFunction) {
                     function_id = code[i + 2];
-                    branches = merges = returns = 0;
-                    last_select = 0;
-                    writes_before_branch = writes_memory = false;
-                } else if (opcode == OpSelect &&
-                           std::ranges::find(pointer_types, code[i + 1]) != pointer_types.end()) {
-                    last_select = code[i + 2];
+                    branches = switches = merges = returns = 0;
+                    accesses_before_switch = writes_memory = false;
                 } else if (opcode == OpBranchConditional) {
                     ++branches;
+                } else if (opcode == OpSwitch) {
+                    ++switches;
                 } else if (opcode == OpSelectionMerge) {
                     ++merges;
                 } else if (opcode == OpReturn || opcode == OpReturnValue) {
@@ -291,24 +275,24 @@ TEST_CASE("Global memory helpers with variable pointers select the buffer and br
                            (opcode == OpFunctionCall && code[i + 3] != search_id) ||
                            (opcode >= OpAtomicExchange && opcode <= OpAtomicXor)) {
                     writes_memory = true;
-                    writes_before_branch |= branches == 0;
-                } else if (opcode == OpFunctionEnd && function_id != main_id && last_select == 0 &&
+                    accesses_before_switch |= switches == 0;
+                } else if (opcode == OpLoad && switches == 0 && search_id != 0) {
+                    accesses_before_switch = true;
+                } else if (opcode == OpFunctionEnd && function_id != main_id && switches == 0 &&
                            !writes_memory && search_id == 0) {
-                    // The buffer search the helpers call: no access, so no pointer select.
+                    // The buffer search the helpers call: no access, so no switch.
                     search_id = function_id;
                 } else if (opcode == OpFunctionEnd && function_id != main_id) {
                     CAPTURE(function_id);
                     CHECK(returns == 1);
-                    CHECK(merges == branches);
-                    CHECK(last_select != 0);
-                    CHECK(is_non_uniform(last_select));
+                    CHECK(switches == 1);
+                    CHECK(merges == 1);
+                    CHECK(branches == 0);
+                    CHECK_FALSE(accesses_before_switch);
                     if (writes_memory) {
                         ++writes;
-                        CHECK(branches == 1);
-                        CHECK_FALSE(writes_before_branch);
                     } else {
                         ++loads;
-                        CHECK(branches == 0);
                     }
                 }
                 i += count;

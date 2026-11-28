@@ -1232,10 +1232,10 @@ void EmitContext::DefineGlobalMemoryFunctions(const IR::Program& program) {
     Id search_function{};
     bool selects_all_buffers{};
     const auto define_body{[&](DefPtr ssbo_member, Id addr, const StorageTypeDefinition& type_def,
-                               u32 shift, Id result_type, Id fallback, Routing routing,
-                               auto&& callback) -> Id {
+                               u32 shift, Id result_type, Id fallback,
+                               [[maybe_unused]] Routing routing, auto&& callback) -> Id {
         const Id header_label{AddLabel()};
-        const bool select{routing != Routing::PerBuffer && selects_all_buffers};
+        const bool select{selects_all_buffers};
         Route found_route;
         if (select && ValidId(search_function)) {
             for (const u32 index : buffers) {
@@ -1257,37 +1257,41 @@ void EmitContext::DefineGlobalMemoryFunctions(const IR::Program& program) {
             if (candidates.empty()) {
                 return fallback;
             }
-            AddCapability(spv::Capability::VariablePointersStorageBuffer);
-            Id ssbo_id{ssbos[candidates[0]].*ssbo_member};
-            for (size_t i = 0; i < candidates.size(); ++i) {
-                const Id routed{OpIEqual(U1, route, Const(candidates[i]))};
-                ssbo_id = OpSelect(type_def.array, routed, ssbos[candidates[i]].*ssbo_member,
-                                   ssbo_id);
-            }
-            Decorate(ssbo_id, spv::Decoration::NonUniform);
-            non_uniform_ids.insert(ssbo_id.value);
-            const Id found{OpINotEqual(U1, route, Const(~0U))};
-            // The offset is the same for every candidate: route_base is the routed buffer's base.
+            // Dispatch through a single OpSwitch instead of OpSelect on variable storage buffer
+            // pointers. Declaring VariablePointersStorageBuffer hangs NVIDIA's driver on large
+            // compute shaders, even without variable pointer instructions.
             const Id offset{OpUConvert(U32[1], OpISub(U64, addr, route_base))};
-            const Id ssbo_index{
-                OpSelect(U32[1], found, OpShiftRightLogical(U32[1], offset, Const(shift)), zero)};
-            if (routing == Routing::Load) {
-                // An address no buffer holds reads element 0 of the first one and returns fallback.
+            const Id ssbo_index{OpShiftRightLogical(U32[1], offset, Const(shift))};
+            const Id merge_label{OpLabel()};
+            std::vector<Sirit::Literal> literals;
+            std::vector<Id> labels;
+            literals.reserve(candidates.size());
+            labels.reserve(candidates.size());
+            for (const u32 candidate : candidates) {
+                literals.push_back(Sirit::Literal{candidate});
+                labels.push_back(OpLabel());
+            }
+            OpSelectionMerge(merge_label, spv::SelectionControlMask::MaskNone);
+            OpSwitch(route, merge_label, literals, labels);
+            std::vector<Id> phi_operands;
+            if (has_value) {
+                phi_operands.reserve((candidates.size() + 1) * 2);
+                phi_operands.push_back(fallback);
+                phi_operands.push_back(header_label);
+            }
+            for (size_t i = 0; i < candidates.size(); ++i) {
+                AddLabel(labels[i]);
+                const Id ssbo_id{ssbos[candidates[i]].*ssbo_member};
                 const Id result{
                     callback(element(type_def.element, ssbo_id, ssbo_index), ssbo_id, ssbo_index)};
-                return OpSelect(result_type, found, result, fallback);
+                OpBranch(merge_label);
+                if (has_value) {
+                    phi_operands.push_back(result);
+                    phi_operands.push_back(labels[i]);
+                }
             }
-            const Id then_label{OpLabel()};
-            const Id merge_label{OpLabel()};
-            OpSelectionMerge(merge_label, spv::SelectionControlMask::MaskNone);
-            OpBranchConditional(found, then_label, merge_label);
-            AddLabel(then_label);
-            const Id result{
-                callback(element(type_def.element, ssbo_id, ssbo_index), ssbo_id, ssbo_index)};
-            OpBranch(merge_label);
             AddLabel(merge_label);
-            return has_value ? OpPhi(result_type, result, then_label, fallback, header_label)
-                             : Id{};
+            return has_value ? OpPhi(result_type, std::span<const Id>(phi_operands)) : Id{};
         }
         Id value{fallback};
         Id predecessor{header_label};
