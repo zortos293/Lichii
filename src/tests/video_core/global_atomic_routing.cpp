@@ -54,6 +54,25 @@ std::vector<std::vector<u32>> Instructions(const std::vector<u32>& code, u32 opc
     return result;
 }
 
+// Whether the module selects a pointer (OpSelect with a pointer result type) and whether it
+// declares VariablePointers, which a pointer selected among different buffers needs.
+std::pair<bool, bool> PointerSelectAndCapability(const std::vector<u32>& code) {
+    constexpr u32 OpCapability = 17;
+    constexpr u32 OpTypePointer = 32;
+    constexpr u32 OpSelect = 169;
+    constexpr u32 VariablePointers = 4442;
+    std::vector<u32> pointer_types;
+    for (const auto& ops : Instructions(code, OpTypePointer)) {
+        pointer_types.push_back(ops[0]);
+    }
+    const bool selects = std::ranges::any_of(Instructions(code, OpSelect), [&](const auto& ops) {
+        return std::ranges::find(pointer_types, ops[0]) != pointer_types.end();
+    });
+    const bool declared = std::ranges::any_of(Instructions(code, OpCapability),
+                                              [](const auto& ops) { return ops[0] == VariablePointers; });
+    return {selects, declared};
+}
+
 // A compute program whose atomic address comes from global memory, so the storage buffer pass
 // tracks the load but not the atomic.
 std::vector<u32> EmitUntrackedAtomic(IR::Opcode opcode, bool select) {
@@ -222,6 +241,7 @@ TEST_CASE("Global memory helpers with variable pointers select the buffer and br
     constexpr u32 OpReturn = 253;
     constexpr u32 OpReturnValue = 254;
     constexpr u32 VariablePointersStorageBuffer = 4441;
+    constexpr u32 VariablePointers = 4442;
     constexpr u32 ShaderNonUniform = 5301;
     constexpr u32 NonUniform = 5300;
     for (const bool native : {true, false}) {
@@ -234,6 +254,9 @@ TEST_CASE("Global memory helpers with variable pointers select the buffer and br
                                            [&](const auto& ops) { return ops[0] == capability; });
             };
             CHECK(has_capability(VariablePointersStorageBuffer));
+            // The access selects among different buffers: VariablePointersStorageBuffer alone
+            // keeps a variable pointer within one (spirv-val's "same structure" error).
+            CHECK(has_capability(VariablePointers));
             CHECK(has_capability(ShaderNonUniform));
             CHECK(Instructions(code, OpSwitch).empty());
 
@@ -346,6 +369,8 @@ TEST_CASE("Untracked 32-bit global atomics route to their storage buffer",
             REQUIRE_NOTHROW(code = EmitUntrackedAtomic(opcode, select));
             CHECK_FALSE(Instructions(code, atomic).empty());
             CHECK_FALSE(Instructions(code, OpFunctionCall).empty());
+            const auto [selects, declared] = PointerSelectAndCapability(code);
+            CHECK((!selects || declared));
         }
     }
 }
