@@ -8,6 +8,7 @@
 #include <vector>
 #include <QComboBox>
 #include <QPushButton>
+#include <QSignalBlocker>
 
 #include "audio_core/sink/sink.h"
 #include "audio_core/sink/sink_details.h"
@@ -211,6 +212,10 @@ void ConfigureAudio::SetOutputSinkFromSinkID() {
 }
 
 void ConfigureAudio::SetOutputDevicesFromDeviceID() {
+    // Selecting the configured device is not a user edit: without this block the
+    // currentIndexChanged handler pins the shown device as a per-game value.
+    const QSignalBlocker blocker(output_device_combo_box);
+
     int new_device_index = 0;
 
     const QString output_device_id =
@@ -230,6 +235,11 @@ void ConfigureAudio::SetInputDevicesFromDeviceID() {
     if (!input_device_combo_box) {
         return;
     }
+
+    // Same guard as SetOutputDevicesFromDeviceID(): restoring the configured
+    // device must not pin it as a per-game value.
+    const QSignalBlocker blocker(input_device_combo_box);
+
     int new_device_index = 0;
     const QString input_device_id =
         QString::fromStdString(Settings::values.audio_input_device_id.GetValue());
