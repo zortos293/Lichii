@@ -1323,11 +1323,8 @@ bool KeplerCompute::BypassOotNetwork(u64 program_id, u64 native_key) {
         bypass->input_height.store(input->Height(), std::memory_order_relaxed);
         bypass->output_address.store(output->Address(), std::memory_order_relaxed);
     }
-    // The base game can run its tonemap at a lower resolution than the output.
     if (!images_valid || tonemapped.Address() == 0 || tonemapped.Address() == output->Address() ||
-        (base_output ? tonemapped.width > output->Width() || tonemapped.height > output->Height()
-                     : tonemapped.width != output->Width() ||
-                           tonemapped.height != output->Height())) {
+        tonemapped.width > output->Width() || tonemapped.height > output->Height()) {
         bypass->output_replaced.store(false, std::memory_order_relaxed);
         static bool warned = false;
         if ((learned || !images_valid) && !std::exchange(warned, true)) {
@@ -1365,9 +1362,10 @@ bool KeplerCompute::BypassOotNetwork(u64 program_id, u64 native_key) {
     source.addr_lower = tonemapped.address_low;
     const s32 width = static_cast<s32>(output->Width());
     const s32 height = static_cast<s32>(output->Height());
+    const bool scaled = source.width != destination.width || source.height != destination.height;
     const Fermi2D::Config config{
         .operation = Fermi2D::Operation::SrcCopy,
-        .filter = base_output ? Fermi2D::Filter::Bilinear : Fermi2D::Filter::Point,
+        .filter = (base_output || scaled) ? Fermi2D::Filter::Bilinear : Fermi2D::Filter::Point,
         .must_accelerate = true,
         .dst_x0 = 0,
         .dst_y0 = 0,

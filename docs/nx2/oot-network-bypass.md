@@ -33,8 +33,10 @@ output shaders use the same constant-buffer handle offsets as the update.
 ## What No sharpening does
 
 - On 1.1.1, `ShaderCache::ComputeShader` calls `KeplerCompute::BypassOotNetwork`. The output
-  pass uses a same-size point copy. The prepass and network are skipped while the replacement works.
-  The known intermediate program is also skipped between a skipped prepass and the output copy.
+  pass uses a point copy when the sizes match and a bilinear copy when the tonemap is smaller,
+  including 1440x810 into 1920x1080 in handheld. The prepass and network are skipped while the
+  replacement works. The known intermediate program is also skipped between a skipped prepass
+  and the output copy.
 - On 1.0.0, `KeplerCompute::BypassOotBaseNetwork` recognizes the known output programs from
   `DispatchNativeCompute` before translation, which can reject their per-tap gathers. The game
   selects different programs as the internal resolution changes. Match the full native key for
@@ -59,8 +61,8 @@ docs/native-dlss-replacement.md). A frame that ends in one of them would read th
 network's stale result, so a skipped prepass that no replacement followed brings the network back
 from the next frame. The log names the first program after the network the first time that
 happens. The replacement requires two
-B10G11R11 block-linear images, and the tonemapped image must fit the output dimensions (an exact
-match on 1.1.1). If no tonemapped image was drawn or the copy fails, dispatch falls back to the
+B10G11R11 block-linear images, and the tonemapped image must fit the output dimensions.
+If no tonemapped image was drawn or the copy fails, dispatch falls back to the
 game's shader. The state lives in the rasterizer (`OotNetwork::BypassState`) because the tonemap
 pass draws on the 3D engine and the network's passes do not all run on the same compute engine.
 
