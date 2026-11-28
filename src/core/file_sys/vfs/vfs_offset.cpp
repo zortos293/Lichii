@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 
 #include <algorithm>
+#include <limits>
 #include <utility>
 
 #include "core/file_sys/vfs/vfs_offset.h"
@@ -19,6 +20,13 @@ std::string OffsetVfsFile::GetName() const {
 
 std::size_t OffsetVfsFile::GetSize() const {
     return size;
+}
+
+std::size_t OffsetVfsFile::GetHeldSizeInRange(std::size_t range_offset, std::size_t length) const {
+    if (range_offset >= size || range_offset > std::numeric_limits<std::size_t>::max() - offset) {
+        return 0;
+    }
+    return file->GetHeldSizeInRange(offset + range_offset, std::min(length, size - range_offset));
 }
 
 bool OffsetVfsFile::Resize(std::size_t new_size) {

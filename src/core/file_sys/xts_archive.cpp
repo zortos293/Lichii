@@ -102,7 +102,8 @@ Loader::ResultStatus NAX::Parse(std::string_view path) {
     if (header->magic != Common::MakeMagic('N', 'A', 'X', '0')) {
         return Loader::ResultStatus::ErrorBadNAXHeader;
     }
-    if (file->GetSize() < NAX_HEADER_PADDING_SIZE + header->file_size) {
+    if (file->GetHeldSize() < NAX_HEADER_PADDING_SIZE ||
+        header->file_size > file->GetHeldSize() - NAX_HEADER_PADDING_SIZE) {
         return Loader::ResultStatus::ErrorIncorrectNAXFileSize;
     }
 

@@ -17,6 +17,7 @@ public:
 
     std::string GetName() const override;
     std::size_t GetSize() const override;
+    std::size_t GetHeldSizeInRange(std::size_t offset, std::size_t length) const override;
     bool Resize(std::size_t new_size) override;
     std::shared_ptr<FileSys::VfsDirectory> GetContainingDirectory() const override;
     bool IsWritable() const override;

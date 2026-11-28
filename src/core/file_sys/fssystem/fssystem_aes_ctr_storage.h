@@ -31,6 +31,7 @@ public:
     virtual size_t Read(u8* buffer, size_t size, size_t offset) const override;
     virtual size_t Write(const u8* buffer, size_t size, size_t offset) override;
     virtual size_t GetSize() const override;
+    virtual size_t GetHeldSizeInRange(size_t offset, size_t length) const override;
 
 private:
     VirtualFile m_base_storage;

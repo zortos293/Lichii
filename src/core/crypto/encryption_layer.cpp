@@ -14,6 +14,10 @@ std::size_t EncryptionLayer::GetSize() const {
     return base->GetSize();
 }
 
+std::size_t EncryptionLayer::GetHeldSizeInRange(std::size_t offset, std::size_t length) const {
+    return base->GetHeldSizeInRange(offset, length);
+}
+
 bool EncryptionLayer::Resize(std::size_t new_size) {
     return false;
 }

@@ -20,6 +20,7 @@ public:
 
     std::string GetName() const override;
     std::size_t GetSize() const override;
+    std::size_t GetHeldSizeInRange(std::size_t range_offset, std::size_t length) const override;
     bool Resize(std::size_t new_size) override;
     VirtualDir GetContainingDirectory() const override;
     bool IsWritable() const override;

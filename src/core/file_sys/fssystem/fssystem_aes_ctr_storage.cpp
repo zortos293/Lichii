@@ -113,4 +113,8 @@ size_t AesCtrStorage::GetSize() const {
     return m_base_storage->GetSize();
 }
 
+size_t AesCtrStorage::GetHeldSizeInRange(size_t offset, size_t length) const {
+    return m_base_storage->GetHeldSizeInRange(offset, length);
+}
+
 } // namespace FileSys

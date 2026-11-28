@@ -103,6 +103,15 @@ public:
     virtual std::string GetExtension() const;
     // Retrieves the size of the file.
     virtual std::size_t GetSize() const = 0;
+    // Retrieves how many of the file's bytes come from stored data. A file that is a range of
+    // another, as an entry of a container is, can claim more than its base holds, and bytes a
+    // file makes up, such as zero filling, hold nothing; code about to allocate by a size that a
+    // file's contents give bounds it by this.
+    std::size_t GetHeldSize() const;
+    // The same for the bytes [offset, offset + length) of the file. Stored bytes need not lie at
+    // a file's start (a concatenation can begin with filler), so a range of a file asks its base
+    // about exactly the bytes it covers. Defaults to the part of the range inside GetSize().
+    virtual std::size_t GetHeldSizeInRange(std::size_t offset, std::size_t length) const;
     // Resizes the file to new_size. Returns whether or not the operation was successful.
     virtual bool Resize(std::size_t new_size) = 0;
     // Gets a pointer to the directory containing this file, returning nullptr if there is none.

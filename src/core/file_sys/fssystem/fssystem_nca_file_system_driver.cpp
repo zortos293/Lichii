@@ -44,6 +44,12 @@ s64 GetBodySize(const std::shared_ptr<NcaReader>& reader) {
     return reader != nullptr ? static_cast<s64>(reader->GetSharedBodyStorage()->GetSize()) : 0;
 }
 
+// A table read into memory whole lies in the NCA's own file, so it cannot be larger than the bytes
+// that file holds, whatever size the file's container claims and whatever layers lie between.
+s64 GetBodyHeldSize(const std::shared_ptr<NcaReader>& reader) {
+    return reader != nullptr ? static_cast<s64>(reader->GetSharedBodyStorage()->GetHeldSize()) : 0;
+}
+
 class SharedNcaBodyStorage : public IReadOnlyStorage {
     LICHII_NON_COPYABLE(SharedNcaBodyStorage);
     LICHII_NON_MOVEABLE(SharedNcaBodyStorage);
@@ -545,6 +551,7 @@ Result NcaFileSystemDriver::CreateSparseStorageMetaStorage(VirtualFile* out,
     R_UNLESS(offset >= 0 && meta_offset >= 0 && meta_size >= 0 && meta_size <= base_size &&
                  meta_offset - offset <= base_size - meta_size,
              ResultNcaBaseStorageOutOfRangeB);
+    R_UNLESS(meta_size <= GetBodyHeldSize(m_reader), ResultNcaBaseStorageOutOfRangeB);
 
     // Create the encrypted storage.
     auto enc_storage =
@@ -871,7 +878,7 @@ Result NcaFileSystemDriver::CreateAesCtrExStorageMetaStorage(
         Common::AlignUp(static_cast<s64>(patch_info.aes_ctr_ex_size), NcaHeader::XtsBlockSize);
     R_UNLESS(IsRangeWithin(meta_offset, meta_size, base_size), ResultNcaBaseStorageOutOfRangeB);
 
-    R_UNLESS(meta_size <= GetBodySize(m_reader), ResultNcaBaseStorageOutOfRangeB);
+    R_UNLESS(meta_size <= GetBodyHeldSize(m_reader), ResultNcaBaseStorageOutOfRangeB);
 
     // Create the encrypted storage.
     auto enc_storage =
@@ -1010,7 +1017,8 @@ Result NcaFileSystemDriver::CreateIndirectStorageMetaStorage(VirtualFile* out,
     R_UNLESS(IsRangeWithin(patch_info.indirect_offset, patch_info.indirect_size, base_size),
              ResultNcaBaseStorageOutOfRangeE);
 
-    R_UNLESS(patch_info.indirect_size <= GetBodySize(m_reader), ResultNcaBaseStorageOutOfRangeE);
+    R_UNLESS(patch_info.indirect_size <= GetBodyHeldSize(m_reader),
+             ResultNcaBaseStorageOutOfRangeE);
 
     // Create the meta storage.
     auto meta_storage = std::make_shared<OffsetVfsFile>(base_storage, patch_info.indirect_size,
