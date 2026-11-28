@@ -76,7 +76,9 @@ void Controller::Initialize() {
     const auto& private_arg = private_arg_storage->GetData();
     ASSERT(private_arg.size() == sizeof(ControllerSupportArgPrivate));
 
-    std::memcpy(&controller_private_arg, private_arg.data(), private_arg.size());
+    // A soft assert only logs: copy no more than the argument holds.
+    std::memcpy(&controller_private_arg, private_arg.data(),
+                (std::min)(private_arg.size(), sizeof(controller_private_arg)));
     ASSERT_MSG(controller_private_arg.arg_private_size == sizeof(ControllerSupportArgPrivate),
                "Unknown ControllerSupportArgPrivate revision={} with size={}",
                controller_applet_version, controller_private_arg.arg_private_size);
@@ -129,13 +131,15 @@ void Controller::Initialize() {
         case ControllerAppletVersion::Version4:
         case ControllerAppletVersion::Version5:
             ASSERT(user_arg.size() == sizeof(ControllerSupportArgOld));
-            std::memcpy(&controller_user_arg_old, user_arg.data(), user_arg.size());
+            std::memcpy(&controller_user_arg_old, user_arg.data(),
+                        (std::min)(user_arg.size(), sizeof(controller_user_arg_old)));
             break;
         case ControllerAppletVersion::Version7:
         case ControllerAppletVersion::Version8:
         case ControllerAppletVersion::Version9:
             ASSERT(user_arg.size() == sizeof(ControllerSupportArgNew));
-            std::memcpy(&controller_user_arg_new, user_arg.data(), user_arg.size());
+            std::memcpy(&controller_user_arg_new, user_arg.data(),
+                        (std::min)(user_arg.size(), sizeof(controller_user_arg_new)));
             break;
         default:
             UNIMPLEMENTED_MSG("Unknown ControllerSupportArg revision={} with size={}",
@@ -153,7 +157,8 @@ void Controller::Initialize() {
         const auto& update_arg = update_arg_storage->GetData();
         ASSERT(update_arg.size() == sizeof(ControllerUpdateFirmwareArg));
 
-        std::memcpy(&controller_update_arg, update_arg.data(), update_arg.size());
+        std::memcpy(&controller_update_arg, update_arg.data(),
+                    (std::min)(update_arg.size(), sizeof(controller_update_arg)));
         break;
     }
     case ControllerSupportMode::ShowControllerKeyRemappingForSystem: {
@@ -163,7 +168,8 @@ void Controller::Initialize() {
         const auto& remapping_arg = remapping_arg_storage->GetData();
         ASSERT(remapping_arg.size() == sizeof(ControllerKeyRemappingArg));
 
-        std::memcpy(&controller_key_remapping_arg, remapping_arg.data(), remapping_arg.size());
+        std::memcpy(&controller_key_remapping_arg, remapping_arg.data(),
+                    (std::min)(remapping_arg.size(), sizeof(controller_key_remapping_arg)));
         break;
     }
     default: {

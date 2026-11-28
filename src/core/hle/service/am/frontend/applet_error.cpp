@@ -97,7 +97,8 @@ namespace {
 template <typename T>
 void CopyArgumentData(std::span<const u8> data, T& variable) {
     ASSERT(data.size() >= sizeof(T));
-    std::memcpy(&variable, data.data(), sizeof(T));
+    // A soft assert only logs: read no more than the storage holds.
+    std::memcpy(&variable, data.data(), (std::min)(data.size(), sizeof(T)));
 }
 
 Result Decode64BitError(u64 error) {
@@ -122,7 +123,7 @@ void Error::Initialize() {
     const auto data = storage->GetData();
 
     ASSERT(!data.empty());
-    std::memcpy(&mode, data.data(), sizeof(ErrorAppletMode));
+    std::memcpy(&mode, data.data(), (std::min)(data.size(), sizeof(ErrorAppletMode)));
 
     switch (mode) {
     case ErrorAppletMode::ShowError:

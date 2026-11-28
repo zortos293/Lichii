@@ -41,12 +41,14 @@ void ProfileSelect::Initialize() {
     switch (profile_select_version) {
     case ProfileSelectAppletVersion::Version1:
         ASSERT(user_config.size() == sizeof(UiSettingsV1));
-        std::memcpy(&config_old, user_config.data(), sizeof(UiSettingsV1));
+        // A soft assert only logs: read no more than the storage holds.
+        std::memcpy(&config_old, user_config.data(),
+                    (std::min)(user_config.size(), sizeof(UiSettingsV1)));
         break;
     case ProfileSelectAppletVersion::Version2:
     case ProfileSelectAppletVersion::Version3:
         ASSERT(user_config.size() == sizeof(UiSettings));
-        std::memcpy(&config, user_config.data(), sizeof(UiSettings));
+        std::memcpy(&config, user_config.data(), (std::min)(user_config.size(), sizeof(UiSettings)));
         break;
     default:
         UNIMPLEMENTED_MSG("Unknown profile_select_version = {}", profile_select_version);
