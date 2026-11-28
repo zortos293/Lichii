@@ -90,6 +90,7 @@ add_executable(tests
     core/system_test_context.cpp
     core/system_test_context.h
     video_core/ampere_branch_modifiers.cpp
+    video_core/ampere_capture_end.cpp
     video_core/ampere_fast_fusion_logged.cpp
     video_core/fast_fusion_surface_store.cpp
     video_core/fast_fusion_byte_store.cpp

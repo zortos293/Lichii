@@ -9,8 +9,15 @@
 #include <string_view>
 #include <vector>
 #include <catch2/catch_test_macros.hpp>
+#include "common/scope_exit.h"
+#include "core/core.h"
 #include "core/device_memory.h"
+#include "core/hle/kernel/k_process.h"
+#include "tests/core/system_test_context.h"
+#include "video_core/gpu.h"
+#include "video_core/memory_manager.h"
 #include "video_core/nx2_debug_control.h"
+#include "video_core/renderer_null/null_rasterizer.h"
 #include "video_core/shader_cache.h"
 
 namespace VideoCommon {
@@ -35,20 +42,42 @@ struct ShaderCacheTestAccess {
         cache.Register(std::move(data), address, 0x100);
     }
     static void Reject(ShaderCache& cache, VAddr address) {
-        cache.rejected_native.emplace(address, std::make_exception_ptr(std::runtime_error{"rejected"}));
+        RememberRejection(cache, address, address, "rejected");
     }
     static bool IsRejected(ShaderCache& cache, VAddr address) {
-        return cache.IsRejected(address);
+        return IsRejected(cache, address, address);
     }
     static void Rethrow(ShaderCache& cache, VAddr address) {
-        cache.RethrowIfRejected(address);
+        if (const auto error = cache.LookupRejection(address, address, 0)) {
+            std::rethrow_exception(error);
+        }
     }
     static void RememberRejection(ShaderCache& cache, VAddr address) {
+        RememberRejection(cache, address, address, "lowering failed");
+    }
+    static void RememberRejection(ShaderCache& cache, VAddr address, GPUVAddr gpu_addr,
+                                  const char* message) {
         try {
-            throw std::runtime_error{"lowering failed"};
+            throw std::runtime_error{message};
         } catch (...) {
-            cache.RememberRejection(address);
+            const u64 serial = cache.gpu_memory ? cache.gpu_memory->HostPointerSerial() : 0;
+            cache.RememberRejection(address, gpu_addr, serial);
         }
+    }
+    static bool IsRejected(ShaderCache& cache, VAddr address, GPUVAddr gpu_addr) {
+        const u64 serial = cache.gpu_memory ? cache.gpu_memory->HostPointerSerial() : 0;
+        return bool(cache.LookupRejection(address, gpu_addr, serial));
+    }
+    static void SetMemory(ShaderCache& cache, Tegra::MemoryManager& memory) {
+        cache.gpu_memory = &memory;
+        cache.current_address_space = memory.GetID();
+    }
+    static u64 Serial(const ShaderCache& cache) {
+        return cache.removal_serial.load();
+    }
+    static size_t PageRefs(const ShaderCache& cache, VAddr page) {
+        const auto it = cache.rejected_page_refs.find(page);
+        return it == cache.rejected_page_refs.end() ? 0 : it->second.refs;
     }
 };
 } // namespace VideoCommon
@@ -195,6 +224,105 @@ TEST_CASE("Remembering a rejection twice keeps the first error",
     } catch (const std::runtime_error& error) {
         CHECK(std::string_view{error.what()} == "rejected");
     }
+}
+
+TEST_CASE("Shader header-page writes invalidate remembered verdicts", "[shader_invalidation]") {
+    Core::DeviceMemory memory;
+    Tegra::MaxwellDeviceMemoryManager device_memory{memory};
+    auto cache = ShaderCacheTestAccess::Create(device_memory);
+    using Access = ShaderCacheTestAccess;
+    constexpr VAddr page = 0x6f92000;
+    constexpr VAddr first = page + 0xb00;
+    constexpr VAddr second = page + 0xc00;
+    Access::Reject(*cache, first);
+    Access::Reject(*cache, first);
+    Access::Reject(*cache, second);
+    REQUIRE(Access::PageRefs(*cache, page) == 2);
+    const u64 serial = Access::Serial(*cache);
+    cache->InvalidateRegion(page - 0x1000, 0x1000);
+    cache->InvalidateRegion(page + 0x1000, 0x1000);
+    cache->InvalidateRegion(first, 0);
+    CHECK(Access::Serial(*cache) == serial);
+    CHECK(Access::IsRejected(*cache, first));
+
+    cache->InvalidateRegion(first + 0x40, 4);
+    CHECK_FALSE(Access::IsRejected(*cache, first));
+    CHECK_FALSE(Access::IsRejected(*cache, second));
+    CHECK(Access::Serial(*cache) > serial);
+    CHECK(Access::PageRefs(*cache, page) == 0);
+}
+
+TEST_CASE("A rejected shader watches both GPU mappings of its header and code",
+          "[shader_invalidation]") {
+    ScopedSystemTestContext context;
+    Core::System system;
+    Core::DeviceMemory physical;
+    Tegra::MaxwellDeviceMemoryManager device{physical};
+    Tegra::GPU gpu{system, false, false};
+    Null::RasterizerNull rasterizer{gpu};
+    Tegra::MemoryManager memory{system, device, 32, 1ULL << 31, 16};
+    memory.BindRasterizer(&rasterizer);
+    using Access = ShaderCacheTestAccess;
+
+    constexpr GPUVAddr gpu_page = 0x100000;
+    constexpr DAddr first_page = 0x200000;
+    constexpr DAddr second_page = 0x300000;
+    constexpr GPUVAddr gpu_addr = gpu_page + 0xf80;
+    constexpr DAddr device_addr = first_page + 0xf80;
+    system.Initialize();
+    Kernel::KProcess process{system.Kernel()};
+    auto& table = process.GetPageTable().GetImpl();
+    table.Resize(24, 12);
+    const u8* const backing = physical.GetPointerFromRaw<u8>(0x10000);
+    for (u64 page = 0x10; page < 0x12; ++page) {
+        table.entries.GetAndFault(page).Store(
+            false, Common::PageType::Memory, 1, reinterpret_cast<uintptr_t>(backing) - 0x10000);
+    }
+    process.GetMemory().SetCurrentPageTable(process);
+    device.BindInterface(&rasterizer);
+    const Core::Asid asid = device.RegisterProcess(&process.GetMemory());
+    device.Map(first_page, 0x10000, 0x1000, asid);
+    SCOPE_EXIT {
+        device.Unmap(first_page, 0x1000);
+        device.Unmap(second_page, 0x1000);
+        device.UnregisterProcess(asid);
+        system.Kernel().UnregisterKernelObject(&process);
+    };
+    auto cache = Access::Create(device);
+    Access::SetMemory(*cache, memory);
+    memory.Map(gpu_page, first_page, 0x1000, Tegra::PTEKind::PITCH, false);
+    memory.Map(gpu_page + 0x1000, second_page, 0x1000, Tegra::PTEKind::PITCH, false);
+    Access::RememberRejection(*cache, device_addr, gpu_addr, "rejected");
+    CHECK(cache->page_filter.Any(first_page, 0x1000));
+    CHECK(cache->page_filter.Any(second_page, 0x1000));
+    CHECK_FALSE(cache->page_filter.Any(first_page + 0x1000, 0x1000));
+    CHECK(device.IsRangeCached(first_page, 0x1000));
+    CHECK_FALSE(device.IsRangeCached(second_page, 0x1000));
+    REQUIRE(Access::IsRejected(*cache, device_addr, gpu_addr));
+
+    device.Map(second_page, 0x11000, 0x1000, asid);
+    Access::RememberRejection(*cache, device_addr + 0x10, gpu_addr + 0x10, "rejected later");
+    CHECK(Access::PageRefs(*cache, second_page) == 2);
+    CHECK(device.IsRangeCached(second_page, 0x1000));
+    REQUIRE(Access::IsRejected(*cache, device_addr + 0x10, gpu_addr + 0x10));
+    cache->OnCacheInvalidation(second_page + 0x10, 4);
+    CHECK_FALSE(Access::IsRejected(*cache, device_addr, gpu_addr));
+    CHECK_FALSE(Access::IsRejected(*cache, device_addr + 0x10, gpu_addr + 0x10));
+    CHECK_FALSE(device.IsRangeCached(second_page, 0x1000));
+
+    Access::RememberRejection(*cache, device_addr, gpu_addr, "rejected");
+    memory.Map(gpu_page + 0x1000, second_page + 0x1000, 0x1000, Tegra::PTEKind::PITCH, false);
+    CHECK_FALSE(Access::IsRejected(*cache, device_addr, gpu_addr));
+    Access::RememberRejection(*cache, device_addr, gpu_addr, "rejected");
+    memory.Unmap(gpu_page + 0x1000, 0x1000);
+    CHECK_FALSE(Access::IsRejected(*cache, device_addr, gpu_addr));
+    Access::RememberRejection(*cache, device_addr, gpu_addr, "unmapped");
+    memory.Map(gpu_page + 0x1000, second_page, 0x1000, Tegra::PTEKind::PITCH, false);
+    CHECK_FALSE(Access::IsRejected(*cache, device_addr, gpu_addr));
+    CHECK(Access::PageRefs(*cache, first_page) == 0);
+    CHECK(Access::PageRefs(*cache, second_page) == 0);
+    CHECK_FALSE(device.IsRangeCached(first_page, 0x1000));
+    CHECK_FALSE(device.IsRangeCached(second_page, 0x1000));
 }
 
 TEST_CASE("Shader invalidation CPU benchmark", "[.][cache_bench]") {

@@ -34,6 +34,7 @@
 #include "common/scope_exit.h"
 #include "common/settings.h"
 #include "shader_recompiler/frontend/ampere/lower_to_maxwell.h"
+#include "shader_recompiler/frontend/ampere/program_override.h"
 #include "shader_recompiler/program_header.h"
 #include "video_core/native_lowering.h"
 #include "video_core/pipeline_cache_files.h"
@@ -951,6 +952,47 @@ TEST_CASE("Shader cache v2: a program of this build's lowering keeps its code",
     V2::ProgramRecord migrated = program;
     migrated.native.clear();
     REQUIRE_FALSE(V2::RelowerProgramRecord(migrated).has_value());
+}
+
+TEST_CASE("Shader cache v2: carried native captures move to their live Program keys",
+          "[video_core][shader_cache_v2]") {
+    const std::array old_capture{
+        Instruction{{0x7947, 0x22, 0x03800000, 0}},
+        EXIT,
+        Instruction{{0x7918, 0, 0, 0}},
+        EXIT,
+    };
+    V2::ProgramRecord old = LowerTestProgram(old_capture, false, 0);
+    old.lowering_stamp ^= 1;
+    const auto live = LowerTestProgram(std::span{old_capture}.first(2), false, 0);
+    const auto old_key = V2::ProgramKey(old);
+    const auto live_key = V2::ProgramKey(live);
+    REQUIRE(old_key != live_key);
+    CHECK(Shader::Ampere::NativeProgramKey(old.native) !=
+          Shader::Ampere::NativeProgramKey(live.native));
+    REQUIRE(old.unique_hash == live.unique_hash);
+
+    const auto revalidated = Vulkan::RevalidateProgramRecords({old});
+    REQUIRE(revalidated.superseded_program_keys == std::vector{old_key});
+    REQUIRE(revalidated.relinked.empty());
+    REQUIRE(revalidated.unchanged.size() == 1);
+    const auto& moved = revalidated.unchanged.front();
+    CHECK(moved.lowering_stamp == V2::LoweringStamp());
+    CHECK(moved.native.size() == live.native.size());
+    CHECK(moved.lowered_code == live.lowered_code);
+    CHECK(moved.unique_hash == live.unique_hash);
+    CHECK(V2::ProgramKey(moved) == live_key);
+    auto stale_payload = V2::EncodeProgram(old);
+    auto moved_payload = V2::EncodeProgram(moved);
+    const std::array records{
+        V2::LogRecord{.kind = V2::RecordKind::Program, .key = old_key, .payload = stale_payload},
+        V2::LogRecord{.kind = V2::RecordKind::Program, .key = live_key, .payload = moved_payload},
+    };
+    TempDir temp;
+    V2::Cache cache{temp.path / "cache.bin"};
+    cache.LoadPrograms(records);
+    CHECK(cache.FindProgram(V2::ProgramKeyInputsOf(old)).lookup == V2::ProgramLookup::Stale);
+    CHECK(cache.FindProgram(V2::ProgramKeyInputsOf(live)).lookup == V2::ProgramLookup::Hit);
 }
 
 TEST_CASE("Shader cache v2: pipeline records move to the code a program lowers to now",

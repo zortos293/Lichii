@@ -80,6 +80,8 @@ class ShaderCache : public VideoCommon::ChannelSetupCaches<VideoCommon::ChannelI
     };
 
 public:
+    ~ShaderCache() override;
+
     /// Device pages this cache ever registered objects on (InnerInvalidation skips the rest).
     VideoCommon::PageFilter page_filter;
 
@@ -196,12 +198,9 @@ private:
     /// @brief Create a new shader entry and register it
     const ShaderInfo* MakeShaderInfo(GenericEnvironment& env, VAddr cpu_addr);
 
-    /// Rethrows the error a native program at this address was rejected with, if any.
-    void RethrowIfRejected(VAddr addr);
-    /// Whether a native program at this address was rejected.
-    bool IsRejected(VAddr addr);
-    /// Remembers the exception being handled as this address's rejection.
-    void RememberRejection(VAddr addr);
+    std::exception_ptr LookupRejection(VAddr addr, GPUVAddr gpu_addr, u64 map_serial);
+    void RememberRejection(VAddr addr, GPUVAddr gpu_addr, u64 map_serial);
+    void ClearRejections();
     /// Hash of the state task and mesh programs are translated with.
     u64 MeshStateHash() const;
 
@@ -215,17 +214,30 @@ private:
     std::vector<std::unique_ptr<ShaderInfo>> storage;
     std::vector<Entry*> marked_for_removal;
 
-    /// Native programs the lowering rejected, by address, so each draw or dispatch rethrows the
-    /// first error instead of lowering again; dropped when guest memory there is written.
+    struct Rejection {
+        std::exception_ptr error;
+        VAddr first_page;
+        std::optional<VAddr> second_page;
+        GPUVAddr gpu_addr;
+        size_t address_space;
+        u64 map_serial;
+    };
+    struct RejectionPage {
+        size_t refs;
+        bool cpu_watched;
+    };
+    void UnwatchRejection(const Rejection& rejection);
+
     std::mutex rejected_mutex;
-    ::Common::unordered_map<u64, std::exception_ptr> rejected_native;
-    /// Bounds of every address ever rejected (never shrinks): a quick test for invalidations.
+    ::Common::unordered_map<u64, Rejection> rejected_native;
+    ::Common::unordered_map<VAddr, RejectionPage> rejected_page_refs;
+    /// Bounds of the device pages watched so far, with an exclusive upper bound.
     std::atomic<VAddr> rejected_lowest{~VAddr{}};
     std::atomic<VAddr> rejected_highest{};
-    /// Removals that freed programs; RefreshStages looks the stages up again after each one, since
-    /// shader_infos may point at a freed program.
+    /// Removals of a shader or its rejection invalidate the last stage lookup.
     std::atomic<u64> removal_serial{};
     u64 seen_removal_serial{};
+    u64 seen_map_serial{};
 };
 
 } // namespace VideoCommon

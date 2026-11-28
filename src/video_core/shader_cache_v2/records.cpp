@@ -9,6 +9,7 @@
 #include <xxhash.h>
 
 #include "shader_recompiler/frontend/ampere/lower_to_maxwell.h"
+#include "shader_recompiler/frontend/ampere/program_capture.h"
 #include "shader_recompiler/frontend/ampere/program_override.h"
 #include "shader_recompiler/program_header.h"
 #include "shader_recompiler/stage.h"
@@ -110,11 +111,28 @@ std::optional<ProgramRecord> RelowerProgramRecord(const ProgramRecord& record) {
     if (record.native.empty()) {
         return std::nullopt;
     }
-    const auto lowered = RelowerProgram(record);
+    ProgramRecord relowered = record;
+    Shader::Ampere::ProgramCaptureState capture;
+    for (u32 index = 0; index < relowered.native.size(); ++index) {
+        const auto status = capture.Observe(relowered.native[index], index);
+        if (status == Shader::Ampere::ProgramCaptureState::Result::InvalidTarget) {
+            return std::nullopt;
+        }
+        if (status == Shader::Ampere::ProgramCaptureState::Result::Complete) {
+            relowered.native.resize(index + 1);
+            break;
+        }
+    }
+    if (relowered.native.size() != record.native.size()) {
+        relowered.verified_traps = NativeTrapOffsets(relowered.native);
+        if (!LoadsProgramCounter(relowered.native, relowered.geometry)) {
+            relowered.native_code_address = 0;
+        }
+    }
+    const auto lowered = RelowerProgram(relowered);
     if (!lowered) {
         return std::nullopt;
     }
-    ProgramRecord relowered = record;
     relowered.lowering_stamp = LoweringStamp();
     relowered.lowered_code = lowered->code;
     relowered.texture_bound = lowered->texture_bound;

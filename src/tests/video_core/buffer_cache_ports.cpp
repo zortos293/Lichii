@@ -699,9 +699,12 @@ VideoCommon::Nx2FastDraw::Delta Written(DAddr begin, DAddr end) {
 }
 
 /// Hands FinishRead to a buffer cache, as RasterizerVulkan does.
+template <typename C>
 class ReadRasterizer final : public VideoCore::RasterizerInterface {
 public:
-    explicit ReadRasterizer(Cache& cache_) : cache{cache_} {}
+    explicit ReadRasterizer(C& cache_) : cache{cache_} {}
+
+    std::function<void(DAddr, u64)> on_shader_invalidation;
 
     void FinishRead(DAddr addr, u64 size) override {
         cache.FinishReadDownloads(addr, size);
@@ -728,7 +731,11 @@ public:
     VideoCore::RasterizerDownloadArea GetFlushArea(DAddr addr, u64 size) override {
         return {addr, addr + size, true};
     }
-    void InvalidateRegion(DAddr, u64, VideoCommon::CacheType) override {}
+    void InvalidateRegion(DAddr addr, u64 size, VideoCommon::CacheType which) override {
+        if (on_shader_invalidation && which == VideoCommon::CacheType::ShaderCache) {
+            on_shader_invalidation(addr, size);
+        }
+    }
     void OnCacheInvalidation(DAddr, u64) override {}
     bool OnCPUWrite(DAddr, u64) override {
         return false;
@@ -748,7 +755,7 @@ public:
     void AccelerateInlineToMemory(GPUVAddr, size_t, std::span<const u8>) override {}
 
 private:
-    Cache& cache;
+    C& cache;
 };
 
 } // namespace
@@ -3267,7 +3274,18 @@ TEST_CASE("A DMA copy names the destination ranges whose GPU-written bytes guest
     // A source only the CPU wrote: the destination's guest memory has its bytes at once.
     std::memset(f.bytes + 0x5000, 7, 0x20);
     f.cache->WriteMemory(0x15000, 0x20);
+    ReadRasterizer reads{*f.cache};
+    bool invalidated{};
+    reads.on_shader_invalidation = [&](DAddr address, u64 size) {
+        CHECK(address == 0x17000);
+        CHECK(size == 0x20);
+        CHECK(std::all_of(f.bytes + 0x7000, f.bytes + 0x7020, [](u8 b) { return b == 7; }));
+        invalidated = true;
+    };
+    f.memory->BindRasterizer(&reads);
+    SCOPE_EXIT { f.memory->BindRasterizer(&f.rasterizer); };
     REQUIRE(f.cache->DMACopy(0x105000, 0x107000, 0x20, &gpu_written));
+    REQUIRE(invalidated);
     REQUIRE(gpu_written.empty());
     REQUIRE(std::all_of(f.bytes + 0x7000, f.bytes + 0x7020, [](u8 b) { return b == 7; }));
 }

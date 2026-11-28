@@ -10,6 +10,7 @@
 
 #include "shader_recompiler/frontend/ampere/geometry_exit.h"
 #include "shader_recompiler/frontend/ampere/lower_to_maxwell.h"
+#include "shader_recompiler/frontend/ampere/program_capture.h"
 
 namespace {
 using Shader::Ampere::AnalyzeGeometryExit;
@@ -83,6 +84,22 @@ TEST_CASE("Ampere geometry exit envelope requires the exact prologue and handler
             }
         }
     }
+}
+
+TEST_CASE("Ampere geometry exit capture does not follow BRA.DIV past the handler",
+          "[video_core][ampere][capture]") {
+    auto code = Program;
+    code[10] = Instruction{{0x7947, 0x72, 0x03800000, 0}};
+    Shader::Ampere::ProgramCaptureState capture;
+    using Result = Shader::Ampere::ProgramCaptureState::Result;
+    for (u32 index = 0; index < code.size(); ++index) {
+        CHECK(capture.Observe(code[index], index) ==
+              (index + 1 == code.size() ? Result::Complete : Result::Continue));
+    }
+    RequireAccepted(code);
+    const auto lowered = Shader::Ampere::LowerToMaxwell(code, {.geometry = true});
+    REQUIRE(static_cast<bool>(lowered));
+    CHECK(lowered.source_size == sizeof(code));
 }
 
 TEST_CASE("Ampere geometry exit envelope bounds the captured program", "[video_core][ampere]") {

@@ -1584,7 +1584,8 @@ void PipelineCache::LoadPipelinesV2(u64 title_id,
         }
         cache_v2->AddProgram(record.key, *stamp);
         if (*stamp != CacheV2::LoweringStamp()) {
-            if (auto program = CacheV2::DecodeProgram(record.payload)) {
+            if (auto program = CacheV2::DecodeProgram(record.payload);
+                program && CacheV2::ProgramKey(*program) == record.key) {
                 stale_programs.push_back(std::move(*program));
             }
         }
@@ -1630,6 +1631,10 @@ void PipelineCache::LoadPipelinesV2(u64 title_id,
             }
             for (const auto& [hash, relinked] : revalidated.relinked) {
                 cache_v2->RecordProgram(relinked.program);
+            }
+            for (const u64 key : revalidated.superseded_program_keys) {
+                cache_v2->Writer().Append(RecordKind::Tombstone, key,
+                                          CacheV2::TombstonePayload(RecordKind::Program));
             }
             LOG_INFO(Render_Vulkan,
                      "Shader cache v2: {} programs of another build lowered again, {} to other "

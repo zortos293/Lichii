@@ -65,6 +65,8 @@ inline LoweredProgram LowerToMaxwellWith(std::span<const Instruction> code, u32 
     std::vector<u32> call_targets;
     std::vector<u32> call_links;
     bool main_exited = false;
+    bool exit_seen = false;
+    s64 last_reconvergence_target = 0;
     bool computed_branch = false; // a jump table: the program ends at its self-branch, not an EXIT
     bool uses_uniform_bank = false;
     const bool uses_async_copy = std::any_of(code.begin(), code.end(), [](const auto& instruction) {
@@ -157,6 +159,7 @@ inline LoweredProgram LowerToMaxwellWith(std::span<const Instruction> code, u32 
     for (u32 index = 0; index < code.size(); ++index) {
         const auto& instruction = code[index];
         const u32 opcode = instruction.Bits(0, 12);
+        if (opcode == 0x947 && instruction.Bits(32, 2) == 2) continue;
         if (opcode == 0x944 || opcode == 0x945 || opcode == 0x947) {
             if (opcode == 0x944 && index == 0) bounded_control = false;
             const u32 mode = instruction.words[2] & ~0x3ffffU;
@@ -4022,7 +4025,12 @@ inline LoweredProgram LowerToMaxwellWith(std::span<const Instruction> code, u32 
             if (complete) return finish(index);
             break;
         }
-        case 0x945: case 0x941: case 0x942: case 0x948: // (+ WARPSYNC)
+        case 0x945:
+            last_reconvergence_target =
+                std::max(last_reconvergence_target,
+                         s64{index} * 16 + 16 + static_cast<s32>(insn.words[1]));
+            [[fallthrough]];
+        case 0x941: case 0x942: case 0x948: // (+ WARPSYNC)
             // BSSY / BSYNC / BREAK only manage warp reconvergence: BSYNC waits for the other
             // threads and falls through, BREAK drops the thread from that wait. Eden runs threads
             // independently, so all three are no-ops (a SYNC would wrongly jump, and a branch
@@ -4059,8 +4067,15 @@ inline LoweredProgram LowerToMaxwellWith(std::span<const Instruction> code, u32 
             if (target < 0 || target % 16) return fail(index, "native branch destination alignment");
             relocations.push_back({static_cast<u32>(result.instructions.size()), target / 16});
             emit(0xe24000000000000fULL | branch_predicate);
-            if (computed_branch && target == s64{index} * 16 && branch_predicate == (u64{7} << 16))
-                return finish(index); // the closing self-branch
+            if (target == s64{index} * 16 && native_predicate == 7 &&
+                branch_predicate == (u64{7} << 16) &&
+                (computed_branch ||
+                 (exit_seen && last_reconvergence_target <= target &&
+                  std::ranges::none_of(relocations, [index](const Relocation& relocation) {
+                      return relocation.target > index;
+                  })))) {
+                return finish(index);
+            }
             break;
         }
         case 0x34e: {
@@ -4145,6 +4160,7 @@ inline LoweredProgram LowerToMaxwellWith(std::span<const Instruction> code, u32 
             }
             result.instructions.push_back(0xe30000000000000fULL | predicate);
             if (insn.Bits(12, 4) != 7) break;
+            exit_seen = true;
             if (!barrier_tokens.empty()) return fail(index, "native unclosed reconvergence scope");
             if (call_targets.empty()) {
                 const bool pending_branch = std::any_of(relocations.begin(), relocations.end(),

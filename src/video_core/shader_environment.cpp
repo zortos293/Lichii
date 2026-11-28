@@ -651,10 +651,12 @@ std::shared_ptr<const LoweredNativeCode> GenericEnvironment::LowerNativeCode(
                     std::fclose(file);
                 }
             }
-            throw Shader::RuntimeError("Native shader branch outside capture bounds at {:#x} +{:#x} [{:08x} {:08x} {:08x} {:08x}]",
+            throw Shader::RuntimeError("Native shader branch outside capture bounds at {:#x} +{:#x} [{:08x} {:08x} {:08x} {:08x}] (no end found: farthest branch target {:#x}, call target {:#x}{})",
                                        program_base + native_header_size, index * 16,
                                        instruction.words[0], instruction.words[1],
-                                       instruction.words[2], instruction.words[3]);
+                                       instruction.words[2], instruction.words[3],
+                                       capture.LastForwardTarget() * 16, capture.LastCallTarget() * 16,
+                                       capture.ComputedBranch() ? ", computed branch" : "");
         }
         if (status == Shader::Ampere::ProgramCaptureState::Result::Complete) break;
     }

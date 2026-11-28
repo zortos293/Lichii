@@ -1658,9 +1658,12 @@ bool BufferCache<P>::DMACopy(
         }
     }
 
-    Tegra::Memory::DeviceGuestMemoryScoped<u8, Tegra::Memory::GuestMemoryFlags::UnsafeReadWrite>
-        tmp(device_memory, *cpu_src_address, amount, &tmp_buffer);
-    tmp.SetAddressAndSize(*cpu_dest_address, amount);
+    {
+        Tegra::Memory::DeviceGuestMemoryScoped<u8, Tegra::Memory::GuestMemoryFlags::UnsafeReadWrite>
+            tmp(device_memory, *cpu_src_address, amount, &tmp_buffer);
+        tmp.SetAddressAndSize(*cpu_dest_address, amount);
+    }
+    gpu_memory->InvalidateRegion(dest_address, amount, CacheType::ShaderCache);
     return true;
 }
 

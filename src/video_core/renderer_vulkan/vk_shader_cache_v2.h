@@ -71,10 +71,12 @@ using RelinkedPrograms = std::unordered_map<u64, RelinkedProgram>;
 
 /// Programs of another build's lowering, lowered by this one
 struct RevalidatedPrograms {
-    /// Same code and texture bound buffer: only the stamp is new
+    /// Same code and texture bound buffer, possibly with a shorter native capture
     std::vector<VideoCommon::ShaderCacheV2::ProgramRecord> unchanged;
     /// Other code or another texture bound buffer
     RelinkedPrograms relinked;
+    /// Raw Program keys replaced after recapture, even if their pipeline hashes did not move
+    std::vector<u64> superseded_program_keys;
 };
 
 /// Lowers `programs` again, through `for_each` when given. A program this build can't lower is

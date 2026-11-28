@@ -12,6 +12,7 @@ public:
 
     Result Observe(const Instruction& instruction, u32 index) {
         const u32 opcode = instruction.Bits(0, 12);
+        const bool unconditional = instruction.Bits(12, 4) == 7;
         if (index < exit_setup.size()) {
             exit_setup[index] = instruction;
             if (index + 1 == exit_setup.size() &&
@@ -46,30 +47,38 @@ public:
             const s64 target = s64{index} * 16 + 16 + relative;
             if (target < 0 || target % 16 || target >= MaximumInstructions * 16)
                 return Result::InvalidTarget;
+            const bool diverged_only = opcode == 0x947 && instruction.Bits(32, 2) == 2;
             // CALL.REL.NOINC (bit 86) pushes no return address, but its callee still returns
             // with RET.REL.NODEC through the link register set ahead of the call.
             if (opcode == 0x944) {
                 last_call_target = std::max(last_call_target, static_cast<u32>(target / 16));
-            } else {
+            } else if (!diverged_only) {
                 last_forward_target = std::max(last_forward_target, static_cast<u32>(target / 16));
             }
-            // The compiler ends every program with an unconditional branch to itself; with a jump
-            // table (whose targets live in a constant buffer) that is the only reliable end.
-            if (opcode == 0x947 && computed_branch && instruction.Bits(12, 4) == 7 &&
-                target == s64{index} * 16)
+            if (opcode == 0x947 && unconditional && !diverged_only &&
+                instruction.Bits(87, 4) == 7 && target == s64{index} * 16 &&
+                (computed_branch ||
+                 (exit_seen && index >= last_forward_target && index >= last_call_target)))
                 return Result::Complete;
         }
+        const bool unconditional_exit = opcode == 0x94d && unconditional &&
+                                        instruction.Bits(87, 4) == 7 && !instruction.Bits(84, 2);
+        exit_seen |= unconditional_exit;
         if (opcode == 0x949 || opcode == 0x958) computed_branch = true;
         if (computed_branch) return Result::Continue;
-        if (opcode == 0x94d && instruction.Bits(12, 4) == 7 && index >= last_forward_target) {
+        if (unconditional_exit && index >= last_forward_target) {
             if (index >= last_call_target) return Result::Complete;
             main_exited = true;
         }
-        if (opcode == 0x950 && instruction.Bits(12, 4) == 7 && main_exited &&
+        if (opcode == 0x950 && unconditional && main_exited &&
             index >= last_call_target && index >= last_forward_target)
             return Result::Complete;
         return Result::Continue;
     }
+
+    u32 LastForwardTarget() const { return last_forward_target; }
+    u32 LastCallTarget() const { return last_call_target; }
+    bool ComputedBranch() const { return computed_branch; }
 
 private:
     std::array<Instruction, 5> exit_setup{};
@@ -77,5 +86,6 @@ private:
     u32 last_forward_target{};
     bool main_exited{};
     bool computed_branch{};
+    bool exit_seen{};
 };
 } // namespace Shader::Ampere

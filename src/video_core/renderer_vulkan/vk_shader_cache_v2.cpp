@@ -316,15 +316,21 @@ RevalidatedPrograms RevalidateProgramRecords(std::vector<ShaderCacheV2::ProgramR
             continue;
         }
         const ShaderCacheV2::ProgramRecord& program = programs[index];
+        const bool shorter_capture = relowered[index]->native.size() != program.native.size();
         if (relowered[index]->unique_hash == program.unique_hash &&
             relowered[index]->texture_bound == program.texture_bound) {
             result.unchanged.push_back(std::move(*relowered[index]));
+        } else if (!result.relinked
+                        .emplace(program.unique_hash,
+                                 RelinkedProgram{.old_unique_hash = program.unique_hash,
+                                                 .old_texture_bound = program.texture_bound,
+                                                 .program = std::move(*relowered[index])})
+                        .second) {
             continue;
         }
-        result.relinked.emplace(program.unique_hash,
-                                RelinkedProgram{.old_unique_hash = program.unique_hash,
-                                                .old_texture_bound = program.texture_bound,
-                                                .program = std::move(*relowered[index])});
+        if (shorter_capture) {
+            result.superseded_program_keys.push_back(ShaderCacheV2::ProgramKey(program));
+        }
     }
     return result;
 }

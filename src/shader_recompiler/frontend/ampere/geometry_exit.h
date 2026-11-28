@@ -98,7 +98,10 @@ GeometryExitEnvelope AnalyzeGeometryExit(const Code& code) {
         const bool noinc_call = opcode == 0x944 && (words[2] & 0x400000) != 0;
         if (opcode != 0x945 && opcode != 0x947 && !noinc_call)
             return fail(index, "native control flow in exit envelope body");
-        const u64 raw = words[1] | (u64{words[2] & 0x3ffff} << 32);
+        if (opcode == 0x947 && bits(index, 32, 2) == 2)
+            continue;
+        const u64 raw = (words[1] & (opcode == 0x947 ? ~3U : ~0U)) |
+                        (u64{words[2] & 0x3ffff} << 32);
         const s64 relative = opcode == 0x945 ? s64{static_cast<s32>(words[1])}
                                              : static_cast<s64>(raw << 14) >> 14;
         const s64 destination = static_cast<s64>(index) * 16 + 16 + relative;
