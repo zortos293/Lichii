@@ -49,6 +49,7 @@
 #include "video_core/renderer_vulkan/vk_staging_buffer_pool.h"
 #include "video_core/surface.h"
 #include "video_core/texture_cache/formatter.h"
+#include "video_core/texture_cache/image_pool.h"
 #include "video_core/texture_cache/samples_helper.h"
 #include "video_core/texture_cache/util.h"
 #include "video_core/dlss_contract.h"
@@ -572,154 +573,13 @@ constexpr u64 MaxFreeTranscodeBytes = u64{256} << 20;
     return enabled;
 }
 
-struct ImagePool {
-    struct Entry {
-        ImagePoolKey key;
-        vk::Image image;
-        u64 bytes;
-        std::chrono::steady_clock::time_point at;
-    };
-    static constexpr auto MaxAge = std::chrono::seconds{5};
-    /// Images that left the pool (expired, over the cap, trimmed) are destroyed a few at a time by
-    /// the pool's later calls, outside its lock, instead of all at once where they left.
-    static constexpr size_t DestroysPerCall = 2;
-
-    std::mutex mutex;
-    std::deque<Entry> entries;
-    std::deque<Entry> doomed;
-    u64 bytes = 0;
-    u64 doomed_bytes = 0;
-    /// EDEN_NX2_IMAGE_POOL_MIB fixes the cap; else the texture cache sets it (SetImagePoolCap).
-    const u64 fixed_cap = [] {
-        const char* value = std::getenv("EDEN_NX2_IMAGE_POOL_MIB");
-        return value != nullptr ? std::strtoull(value, nullptr, 10) << 20 : 0ULL;
-    }();
-    u64 cap = fixed_cap != 0 ? fixed_cap : 256ULL << 20;
-    // Per window, for the log.
-    u64 hits = 0, misses = 0, puts = 0, expired = 0, trimmed = 0, destroyed = 0;
-    std::chrono::steady_clock::time_point last_log = std::chrono::steady_clock::now();
-
-    /// `mutex` held: the oldest entry leaves for `doomed`.
-    void Doom() {
-        bytes -= entries.front().bytes;
-        doomed_bytes += entries.front().bytes;
-        doomed.push_back(std::move(entries.front()));
-        entries.pop_front();
-    }
-
-    /// `mutex` held.
-    void DropOld(std::chrono::steady_clock::time_point now) {
-        while (!entries.empty() && (bytes > cap || now - entries.front().at > MaxAge)) {
-            ++expired;
-            Doom();
-        }
-    }
-
-    /// Destroys up to `count` doomed images, outside the lock, and more while the doomed ones
-    /// hold more than the cap: the pool's own bytes and those still to destroy stay within twice
-    /// the cap however the images that leave it are sized.
-    void DestroyDoomed(size_t count) {
-        boost::container::small_vector<vk::Image, DestroysPerCall> images;
-        {
-            std::scoped_lock lock{mutex};
-            while (!doomed.empty() && (images.size() < count || doomed_bytes > cap)) {
-                doomed_bytes -= doomed.front().bytes;
-                images.push_back(std::move(doomed.front().image));
-                doomed.pop_front();
-            }
-            destroyed += images.size();
-        }
-        // `images` destroys them here.
-    }
-
-    /// `mutex` held.
-    void MaybeLog(std::chrono::steady_clock::time_point now) {
-        if (now - last_log < std::chrono::seconds{10}) {
-            return;
-        }
-        const double s = std::chrono::duration<double>(now - last_log).count();
-        LOG_INFO(Render_Vulkan,
-                 "image pool {:.1f}s (per s): taken {:.1f}, made new {:.1f}, kept {:.1f}, expired "
-                 "{:.1f}, trimmed {}, destroyed {:.1f} | now {} images {} MiB, {} to destroy {} MiB",
-                 s, hits / s, misses / s, puts / s, expired / s, trimmed, destroyed / s,
-                 entries.size(), bytes >> 20, doomed.size(), doomed_bytes >> 20);
-        hits = misses = puts = expired = trimmed = destroyed = 0;
-        last_log = now;
-    }
-
-    vk::Image Take(const ImagePoolKey& key) {
-        vk::Image image;
-        {
-            std::scoped_lock lock{mutex};
-            const auto now = std::chrono::steady_clock::now();
-            DropOld(now);
-            MaybeLog(now);
-            for (auto it = entries.rbegin(); it != entries.rend(); ++it) {
-                if (it->key == key) {
-                    image = std::move(it->image);
-                    bytes -= it->bytes;
-                    entries.erase(std::next(it).base());
-                    ++hits;
-                    break;
-                }
-            }
-            if (!image) {
-                ++misses;
-            }
-        }
-        DestroyDoomed(DestroysPerCall);
-        return image;
-    }
-
-    void Put(const ImagePoolKey& key, vk::Image&& image) {
-        const u64 size = image.GetMemoryBlock().size;
-        {
-            std::scoped_lock lock{mutex};
-            if (size == 0 || size > cap) {
-                return; // Destroyed here, as without the pool
-            }
-            const auto now = std::chrono::steady_clock::now();
-            entries.push_back(Entry{key, std::move(image), size, now});
-            bytes += size;
-            ++puts;
-            DropOld(now);
-        }
-        DestroyDoomed(DestroysPerCall);
-    }
-
-    /// Once a frame: expires what is past MaxAge, then destroys a few that left, so the pool
-    /// lets go of its images also when no image is made or collected.
-    void Maintain() {
-        {
-            std::scoped_lock lock{mutex};
-            DropOld(std::chrono::steady_clock::now());
-        }
-        DestroyDoomed(DestroysPerCall);
-    }
-
-    /// Drops the oldest until at most target bytes are kept, those still to destroy included:
-    /// the texture cache asks when it needs the memory, so they are destroyed now (outside the
-    /// lock). With 0 (memory ran out, or the device goes) every image that left goes.
-    void Trim(u64 target) {
-        std::deque<Entry> now_destroyed;
-        {
-            std::scoped_lock lock{mutex};
-            while (!entries.empty() && bytes > target) {
-                ++trimmed;
-                Doom();
-            }
-            while (!doomed.empty() && bytes + doomed_bytes > target) {
-                doomed_bytes -= doomed.front().bytes;
-                now_destroyed.push_back(std::move(doomed.front()));
-                doomed.pop_front();
-            }
-            destroyed += now_destroyed.size();
-        }
-    }
-};
+using ImagePool = VideoCommon::ImagePool<vk::Image, ImagePoolKey>;
 
 [[nodiscard]] ImagePool& GetImagePool() {
-    static ImagePool pool;
+    static ImagePool pool{[] {
+        const char* value = std::getenv("EDEN_NX2_IMAGE_POOL_MIB");
+        return value != nullptr ? std::strtoull(value, nullptr, 10) << 20 : 0ULL;
+    }()};
     return pool;
 }
 
@@ -3596,7 +3456,8 @@ Image::~Image() {
     }
     if (pool_allowed && pool_key.valid && original_image && !original_image.IsUnbacked() &&
         ImagePoolEnabled()) {
-        GetImagePool().Put(pool_key, std::move(original_image));
+        const u64 size = original_image.GetMemoryBlock().size;
+        GetImagePool().Put(pool_key, std::move(original_image), size);
     }
 }
 

@@ -389,6 +389,7 @@ add_library(video_core STATIC
     texture_cache/host_mip_limits.h
     texture_cache/image_info.cpp
     texture_cache/image_info.h
+    texture_cache/image_pool.h
     texture_cache/image_view_base.cpp
     texture_cache/image_view_base.h
     texture_cache/image_view_info.cpp
