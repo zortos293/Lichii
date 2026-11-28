@@ -2,6 +2,7 @@
 
 #pragma once
 
+#include <algorithm>
 #include <array>
 #include <atomic>
 #include <deque>
@@ -9,6 +10,7 @@
 
 #include "common/assert.h"
 #include "common/common_types.h"
+#include "video_core/query_cache/stable_slots.h"
 
 namespace VideoCommon {
 
@@ -53,8 +55,10 @@ public:
         added.fetch_add(how_many, std::memory_order_relaxed);
     }
 
+    /// Release: the bank's results the dropping thread read come before a reuse that sees the
+    /// references gone (References, IsDead).
     void CloseReference(size_t how_many = 1) {
-        dropped.fetch_add(how_many, std::memory_order_relaxed);
+        dropped.fetch_add(how_many, std::memory_order_release);
     }
 
     /// The references taken and not dropped yet. Called where references are taken, so every
@@ -66,8 +70,14 @@ public:
         return added_now - dropped_now;
     }
 
+    /// Only the recording thread writes bank_size; the fencing thread reads it (Size) for flushes
+    /// handed over after the first close. A closed bank reserves no slot, so a later close (a
+    /// second report flushed over the same slots on tiler drivers) would store the same value
+    /// while a flush is read: it only reads the field.
     void Close() {
-        bank_size = current_slot;
+        if (bank_size != current_slot) {
+            bank_size = current_slot;
+        }
     }
 
     bool IsClosed() const {
@@ -82,7 +92,8 @@ public:
 template <typename BankType>
 class BankPool {
 private:
-    std::deque<BankType> bank_pool;
+    /// Read by index on the fencing thread while ReserveBank appends.
+    StableSlots<BankType> bank_pool;
     std::deque<size_t> bank_indices;
 
 public:
@@ -113,6 +124,31 @@ public:
     // Get the total number of banks in the pool
     size_t BankCount() const {
         return bank_pool.size();
+    }
+
+    /// Calls func(bank, first slot, slots) for each bank a query's slots are in, from its first
+    /// bank along the banks' next_bank (an index plus one). A bank's next_bank is read before
+    /// func runs, which may drop its last references (a free) and let the recording thread reset
+    /// and reuse it, and only when the query continues: the recording thread sets the last bank's
+    /// next_bank when it reserves the bank after it.
+    template <typename Query, typename Func>
+    void ForEachBankOf(const Query& query, Func&& func) {
+        size_t size_slots = query.size_slots;
+        if (size_slots == 0) {
+            return;
+        }
+        size_t bank_id = query.start_bank_id;
+        const size_t banks_set = query.size_banks;
+        size_t start_slot = query.start_slot;
+        for (size_t i = 0; i < banks_set; i++) {
+            auto& the_bank = GetBank(bank_id);
+            const size_t amount = (std::min)(the_bank.Size() - start_slot, size_slots);
+            const size_t next_id = i + 1 < banks_set ? the_bank.next_bank - 1 : 0;
+            func(&the_bank, start_slot, amount);
+            bank_id = next_id;
+            start_slot = 0;
+            size_slots -= amount;
+        }
     }
 };
 

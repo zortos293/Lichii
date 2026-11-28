@@ -5,7 +5,6 @@
 
 #pragma once
 
-#include <deque>
 #include <mutex>
 #include <optional>
 #include <span>
@@ -15,6 +14,7 @@
 #include "common/common_types.h"
 #include "video_core/query_cache/bank_base.h"
 #include "video_core/query_cache/query_base.h"
+#include "video_core/query_cache/stable_slots.h"
 
 namespace VideoCommon {
 
@@ -176,7 +176,8 @@ protected:
     }
 
     std::mutex guard;
-    std::deque<QueryType> slot_queries;
+    /// Read by id on the fencing thread while BuildQuery appends (PopUnsyncedQueries, frees).
+    StableSlots<QueryType> slot_queries;
     /// Free ids, oldest first, until BuildQuery takes them all: MSVC's deque of size_t allocated
     /// a block every two pushes, and a report per draw frees two queries.
     std::vector<size_t> old_queries;

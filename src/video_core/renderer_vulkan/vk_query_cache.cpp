@@ -529,21 +529,7 @@ public:
 private:
     template <typename Func>
     void ApplyBankOp(VideoCommon::HostQueryBase* query, Func&& func) {
-        size_t size_slots = query->size_slots;
-        if (size_slots == 0) {
-            return;
-        }
-        size_t bank_id = query->start_bank_id;
-        size_t banks_set = query->size_banks;
-        size_t start_slot = query->start_slot;
-        for (size_t i = 0; i < banks_set; i++) {
-            auto& the_bank = bank_pool.GetBank(bank_id);
-            size_t amount = (std::min)(the_bank.Size() - start_slot, size_slots);
-            func(&the_bank, start_slot, amount);
-            bank_id = the_bank.next_bank - 1;
-            start_slot = 0;
-            size_slots -= amount;
-        }
+        bank_pool.ForEachBankOf(*query, std::forward<Func>(func));
     }
     TextureCache& texture_cache;
     template <bool is_ordered, typename Func>
@@ -569,10 +555,8 @@ private:
     }
 
     void ReserveBank() {
-        current_bank_id =
-            bank_pool.ReserveBank([this](std::deque<SamplesQueryBank>& queue, size_t index) {
-                queue.emplace_back(device, scheduler, index);
-            });
+        current_bank_id = bank_pool.ReserveBank(
+            [this](auto& queue, size_t index) { queue.emplace_back(device, scheduler, index); });
         if (current_bank) {
             current_bank->next_bank = current_bank_id + 1;
         }
@@ -1156,10 +1140,9 @@ private:
 
     std::pair<size_t, size_t> ProduceCounterBuffer(size_t slot_index) {
         if (current_bank == nullptr || current_bank->IsClosed()) {
-            current_bank_id =
-                bank_pool.ReserveBank([this](std::deque<TFBQueryBank>& queue, size_t index) {
-                    queue.emplace_back(scheduler, memory_allocator, index);
-                });
+            current_bank_id = bank_pool.ReserveBank([this](auto& queue, size_t index) {
+                queue.emplace_back(scheduler, memory_allocator, index);
+            });
             current_bank = &bank_pool.GetBank(current_bank_id);
         }
         auto [dont_care, other] = current_bank->Reserve();
