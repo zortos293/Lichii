@@ -7,9 +7,12 @@
 #include <array>
 #include <atomic>
 #include <bit>
+#include <chrono>
 #include <cstdlib>
+#include <deque>
 #include <limits>
 #include <memory>
+#include <mutex>
 #include <numeric>
 #include <optional>
 #include <set>
@@ -46,6 +49,7 @@
 #include "video_core/renderer_vulkan/vk_staging_buffer_pool.h"
 #include "video_core/surface.h"
 #include "video_core/texture_cache/formatter.h"
+#include "video_core/texture_cache/image_pool.h"
 #include "video_core/texture_cache/samples_helper.h"
 #include "video_core/texture_cache/util.h"
 #include "video_core/dlss_contract.h"
@@ -555,11 +559,40 @@ constexpr u64 MaxFreeTranscodeBytes = u64{256} << 20;
     return image_ci;
 }
 
+// EDEN_NX2_IMAGE_POOL=1: the host images of destroyed cache images (the texture cache sentenced
+// them until the host GPU was done) are kept for a few seconds, and a new image with the same
+// create info takes one instead of a new VkImage and allocation. Ocarina of Time puts each frame's
+// render targets at shifting offsets of a transient heap: while the camera moves, about 80 a second
+// are made and collected again, with a handful of shapes. A taken image starts as a new one does:
+// undefined layout and contents. EDEN_NX2_IMAGE_POOL_MIB caps the bytes kept (default 256).
+[[nodiscard]] bool ImagePoolEnabled() {
+    static const bool enabled = [] {
+        const char* value = std::getenv("EDEN_NX2_IMAGE_POOL");
+        return value != nullptr && value[0] == '1';
+    }();
+    return enabled;
+}
+
+using ImagePool = VideoCommon::ImagePool<vk::Image, ImagePoolKey>;
+
+[[nodiscard]] ImagePool& GetImagePool() {
+    static ImagePool pool{[] {
+        const char* value = std::getenv("EDEN_NX2_IMAGE_POOL_MIB");
+        return value != nullptr ? std::strtoull(value, nullptr, 10) << 20 : 0ULL;
+    }()};
+    return pool;
+}
+
 [[nodiscard]] vk::Image MakeImage(const Device& device, const MemoryAllocator& allocator,
                                   const ImageInfo& info, std::span<const VkFormat> view_formats,
                                   std::optional<VkFormat> format_override = {},
                                   bool unbacked = false, bool aliased = false,
-                                  bool may_fail = false) {
+                                  bool may_fail = false, ImagePoolKey* pool_key = nullptr) {
+    if (pool_key != nullptr) {
+        // The caller may make several images in turn: a key left from an earlier one must not
+        // describe this one.
+        *pool_key = {};
+    }
     if (info.type == ImageType::Buffer) {
         return vk::Image{};
     }
@@ -602,6 +635,31 @@ constexpr u64 MaxFreeTranscodeBytes = u64{256} << 20;
     }
     if (unbacked) {
         if (vk::Image image = allocator.CreateUnbackedImage(image_ci, aliased)) {
+            return image;
+        }
+    }
+    if (pool_key != nullptr && ImagePoolEnabled()) {
+        u64 formats = view_formats.size();
+        for (const VkFormat format : view_formats) {
+            formats = formats * 1000003ULL ^ static_cast<u64>(format);
+        }
+        *pool_key = ImagePoolKey{
+            .valid = true,
+            .compression_disabled = image_ci.pNext == &compression_control,
+            .flags = image_ci.flags,
+            .type = image_ci.imageType,
+            .format = image_ci.format,
+            .width = image_ci.extent.width,
+            .height = image_ci.extent.height,
+            .depth = image_ci.extent.depth,
+            .levels = image_ci.mipLevels,
+            .layers = image_ci.arrayLayers,
+            .samples = image_ci.samples,
+            .tiling = image_ci.tiling,
+            .usage = image_ci.usage,
+            .view_formats = formats,
+        };
+        if (vk::Image image = GetImagePool().Take(*pool_key)) {
             return image;
         }
     }
@@ -3070,6 +3128,41 @@ u64 TextureCacheRuntime::GetDeviceLocalMemory() const {
     return device.GetDeviceLocalMemory();
 }
 
+TextureCacheRuntime::~TextureCacheRuntime() {
+    // The pool's images belong to this device: destroyed before it is. Trim neither allocates nor
+    // throws; only making the pool on its first use can (when no image was ever made), and then
+    // there is nothing to destroy.
+    try {
+        TrimImagePool(0);
+    } catch (...) {
+    }
+}
+
+u64 TextureCacheRuntime::PooledImageBytes() const {
+    if (!ImagePoolEnabled()) {
+        return 0;
+    }
+    auto& pool = GetImagePool();
+    std::scoped_lock lock{pool.mutex};
+    return pool.bytes + pool.doomed_bytes;
+}
+
+void TextureCacheRuntime::SetImagePoolCap(u64 cap_bytes) {
+    if (ImagePoolEnabled()) {
+        auto& pool = GetImagePool();
+        std::scoped_lock lock{pool.mutex};
+        if (pool.fixed_cap == 0) {
+            pool.cap = cap_bytes;
+        }
+    }
+}
+
+void TextureCacheRuntime::TrimImagePool(u64 target_bytes) {
+    if (ImagePoolEnabled()) {
+        GetImagePool().Trim(target_bytes);
+    }
+}
+
 u64 TextureCacheRuntime::GetDeviceMemoryUsage() const {
     return device.GetDeviceMemoryUsage();
 }
@@ -3184,6 +3277,9 @@ void TextureCacheRuntime::ReleaseMsaaScratchImage(VkImage image) {
 }
 
 void TextureCacheRuntime::TickFrame() {
+    if (ImagePoolEnabled()) {
+        GetImagePool().Maintain();
+    }
     // Descriptor allocation/capture can submit between the copy and the draw. Retire at the
     // frame boundary, after all consuming draws, rather than using the copy's submission tick.
     for (auto& snapshot : color_feedback_snapshots) {
@@ -3251,8 +3347,10 @@ Image::Image(TextureCacheRuntime& runtime_, const ImageInfo& info_, GPUVAddr gpu
                                   : runtime_.ViewFormats(info.format);
     const auto format_override = AstcHostFormat(device, info);
     const auto make = [&](const ImageInfo& host, bool sparse = false, bool aliased = false) {
+        // Each call leaves pool_key describing the image it returns, or invalid for an unbacked
+        // one, so the key always matches whichever of these ends up as original_image.
         return MakeImage(device, runtime_.memory_allocator, host, view_formats, format_override,
-                         sparse, aliased, true);
+                         sparse, aliased, true, &pool_key);
     };
     const ImageInfo host = TrimmedHostInfo(device, info, host_level_offset);
     original_image = make(host, layered || sparse_tiles || unwritten,
@@ -3360,6 +3458,13 @@ Image::~Image() {
         if (scaled_image) {
             runtime->EraseResolveShadow(*scaled_image);
         }
+    }
+    if (pool_allowed && pool_key.valid && original_image && !original_image.IsUnbacked() &&
+        ImagePoolEnabled()) {
+        // Put does not throw (an image it cannot keep is destroyed); the pool exists, since
+        // making this image took from it.
+        const u64 size = original_image.GetMemoryBlock().size;
+        GetImagePool().Put(pool_key, std::move(original_image), size);
     }
 }
 

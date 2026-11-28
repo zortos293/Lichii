@@ -11,6 +11,7 @@ add_executable(tests
     video_core/unswizzle_workers.cpp
     video_core/block_linear_swizzle.cpp
     video_core/aftermath_dump.cpp
+    video_core/image_pool.cpp
     video_core/cdma_pusher_teardown.cpp
     video_core/cdma_pusher_wait_stop.cpp
     video_core/host1x_test_process.h
