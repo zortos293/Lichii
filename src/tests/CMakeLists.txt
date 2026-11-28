@@ -183,6 +183,7 @@ add_executable(tests
     video_core/nx2_fast_draw_landing.cpp
     hid_core/emulated_controller_config.cpp
     hid_core/npad_assignment.cpp
+    hid_core/n64_vibration.cpp
     hid_core/sensor_info.cpp
     common/flat_allocator.cpp
     common/paged_scalar.cpp
