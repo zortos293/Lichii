@@ -32,6 +32,7 @@ add_executable(tests
     core/address_space.cpp
     core/nx2_streamplay.cpp
     core/nx2_gpu_only_regions.cpp
+    core/nx2_decoder_image_pool.cpp
     core/nx2_hdr_notifications.cpp
     core/nx2_video_ready.cpp
     core/general_channel.cpp
