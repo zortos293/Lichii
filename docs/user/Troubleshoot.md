@@ -42,6 +42,69 @@ is reached. Little of it is ever written to disk: what runs out is the limit, no
 On an RX 6750 GRE with 16 GB of RAM, a 31.9 GB commit limit failed 25 pipelines in Ocarina of
 Time's intro, and 53.9 GB failed none ([#462](https://github.com/zortos293/Lichii/issues/462)).
 
+## Linux / Steam Deck: crashes on loading screens
+
+*Platform(s) Affected*: **Linux**, especially the Steam Deck (SteamOS) and other
+16 GB handhelds.
+
+**Symptoms:** Lichii closes during a loading screen or when entering a new zone
+(in Ocarina of Time, a zone load). The process is gone rather than frozen, and
+the journal shows earlyoom sending SIGTERM/SIGKILL to `AppRun` (the Lichii
+AppImage) with swap essentially full, for example:
+
+```text
+earlyoom: mem avail:    59 of  2271 MiB ( 2.64%), swap free:    1 of 8422 MiB ( 0.01%)
+earlyoom: low memory! at or below SIGTERM limits: mem  2.70%, swap  4.75%
+earlyoom: sending SIGTERM to process ... uid 1000 "AppRun": ... VmRSS 5445 MiB, cmdline ".../lichii.AppImage"
+```
+
+**Cause:** A Switch 2 game can push Lichii's resident memory to around 5.5–6.5
+GiB during loads. On a Steam Deck, usable RAM is about 14.5 GiB, zram is about
+7.2 GB, and the stock `/home/swapfile` is only 1 GiB (8.2 GB of swap in total).
+When that swap fills, earlyoom kills Lichii.
+
+**Fix:** enlarge `/home/swapfile` to 16 GiB. Leave zram alone. Close Lichii
+first, and make sure `/home` has enough free space for a fully allocated 16 GiB
+file.
+
+```bash
+sudo swapoff /home/swapfile
+sudo rm /home/swapfile
+sudo fallocate -l 16G /home/swapfile
+# if fallocate isn't available:
+# sudo dd if=/dev/zero of=/home/swapfile bs=1M count=16384 status=progress
+sudo chmod 600 /home/swapfile
+sudo mkswap /home/swapfile
+sudo swapon /home/swapfile
+```
+
+Use `fallocate` or `dd` so the file has no holes. A sparse file will be
+deleted: SteamOS's `swapfile.service` runs
+`holo-create-swapfile /home/swapfile 1024M`, which only recreates the file when
+it is missing or sparse, so a dense 16 GiB file survives reboots. After
+`swapon`, the file should sit at a low priority (here, `-1`) so zram (priority
+100) is used first.
+
+To undo and return to the stock 1 GiB file without a reboot:
+
+```bash
+sudo swapoff /home/swapfile
+sudo rm /home/swapfile
+sudo fallocate -l 1G /home/swapfile
+# or: sudo dd if=/dev/zero of=/home/swapfile bs=1M count=1024 status=progress
+sudo chmod 600 /home/swapfile
+sudo mkswap /home/swapfile
+sudo swapon /home/swapfile
+```
+
+Do not change `vm.compaction_proactiveness`, `vm.page_lock_unfairness`, or
+`khugepaged` defrag. Setting those to 0, 1, and 0 caused heavy stutter on a
+Steam Deck; the SteamOS defaults (20, 5, and 1) should be left alone.
+
+On a Steam Deck with SteamOS 3.9.5 and Lichii nx2 build 386, growing
+`/home/swapfile` to 16 GiB stopped the loading-screen earlyoom kills, with zram
+left at 7.2 GB ([#2172](https://github.com/zortos293/Lichii/issues/2172)).
+
 ## This mod only works on an Emulator
 
 - Enable RNG seed
