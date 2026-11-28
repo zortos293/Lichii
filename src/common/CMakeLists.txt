@@ -274,6 +274,11 @@ else()
     target_link_libraries(common PUBLIC Boost::headers)
 endif()
 target_link_libraries(common PRIVATE OpenSSL::SSL OpenSSL::Crypto)
+if (APPLE)
+    # device_power_state.cpp reads the battery through IOKit's power sources. Builds without Qt
+    # or SDL, such as the fuzzers, do not get IOKit from anywhere else.
+    target_link_libraries(common PRIVATE "-framework IOKit" "-framework CoreFoundation")
+endif()
 target_link_libraries(common PUBLIC Boost::filesystem Boost::context httplib::httplib nlohmann_json::nlohmann_json)
 
 if (lz4_ADDED)
