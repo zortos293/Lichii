@@ -68,6 +68,7 @@
 #include "video_core/renderer_vulkan/vk_descriptor_pool.h"
 #include "video_core/renderer_vulkan/vk_pipeline_binaries.h"
 #include "video_core/renderer_vulkan/vk_pipeline_cache.h"
+#include "video_core/renderer_vulkan/vk_pipeline_cache_load.h"
 #include "video_core/renderer_vulkan/vk_pipeline_cache_records.h"
 #include "video_core/renderer_vulkan/vk_scheduler.h"
 #include "video_core/renderer_vulkan/vk_shader_cache_v2.h"
@@ -1379,12 +1380,30 @@ void PipelineCache::LoadDiskResources(u64 title_id, std::stop_token stop_loading
         }
         vulkan_pipeline_cache =
             LoadVulkanPipelineCache(vulkan_pipeline_cache_filename, CACHE_VERSION);
-        if (!vulkan_pipeline_cache_restored) {
-            // The precache progress names builds the lost cache held. Dropped before the empty
-            // cache is saved, which would make the progress readable again at the next boot.
+        // What the load came to (ActionsFor): the precache's progress goes whenever the cache
+        // was not restored, as it names builds the lost cache held, before the empty cache is
+        // saved, which would make it readable again at the next boot; its marker, only where the
+        // driver was given the data and kept none of it, or the file held none; the file, as
+        // each path says. The marks go before the file: the file is the evidence, and a crash
+        // between the two must not leave a marker for a cache that is gone.
+        const VulkanCacheLoadActions actions = ActionsFor(vulkan_pipeline_cache_load);
+        const auto warm_file = ShaderWarm::ComputeWarmPath(title_id);
+        const auto remove_mark = [](const std::filesystem::path& mark) {
             std::error_code ec;
-            std::filesystem::remove(
-                ShaderWarm::WarmProgressPath(ShaderWarm::ComputeWarmPath(title_id)), ec);
+            std::filesystem::remove(mark, ec);
+            if (ec) {
+                LOG_ERROR(Common_Filesystem, "Couldn't remove {}: {}",
+                          Common::FS::PathToUTF8String(mark), ec.message());
+            }
+        };
+        if (!actions.restored) {
+            remove_mark(ShaderWarm::WarmProgressPath(warm_file));
+        }
+        if (actions.drop_precache_marker) {
+            remove_mark(ShaderWarm::WarmMarkerPath(warm_file));
+        }
+        if (actions.remove_file) {
+            Common::FS::RemoveFile(vulkan_pipeline_cache_filename);
         }
     }
     if (boot_lock.Held() && !Common::FS::NewFile(boot_marker)) {
@@ -3924,89 +3943,136 @@ bool PipelineCache::SerializeVulkanPipelineCache(const std::filesystem::path& fi
     return true;
 }
 
+vk::PipelineCache PipelineCache::CreateDriverPipelineCache(size_t data_size,
+                                                           const void* data) const {
+    return device.GetLogical().CreatePipelineCache({
+        .sType = VK_STRUCTURE_TYPE_PIPELINE_CACHE_CREATE_INFO,
+        .pNext = nullptr,
+        .flags = 0,
+        .initialDataSize = data_size,
+        .pInitialData = data,
+    });
+}
+
 vk::PipelineCache PipelineCache::LoadVulkanPipelineCache(const std::filesystem::path& filename,
                                                          u32 expected_cache_version) {
-    const auto create_pipeline_cache = [this](size_t data_size, const void* data) {
-        VkPipelineCacheCreateInfo pipeline_cache_ci = {
-            .sType = VK_STRUCTURE_TYPE_PIPELINE_CACHE_CREATE_INFO,
-            .pNext = nullptr,
-            .flags = 0,
-            .initialDataSize = data_size,
-            .pInitialData = data};
-        return device.GetLogical().CreatePipelineCache(pipeline_cache_ci);
-    };
+    // Reset first, as nx2 reset its flag: a throw that escapes must not leave the previous
+    // title's values.
+    vulkan_pipeline_cache_load = VulkanCacheLoad::NoFile;
     vulkan_pipeline_cache_restored = false;
+    const std::string path = Common::FS::PathToUTF8String(filename);
+    // Every path ends in one VulkanCacheLoad, which ActionsFor turns into what the caller does:
+    // whether the cache counts as restored, whether the precache's marker goes, whether the file
+    // does.
+    VulkanCacheLoad load = VulkanCacheLoad::NoFile;
+    vk::PipelineCache restored;
     try {
         std::ifstream file(filename, std::ios::binary | std::ios::ate);
-        if (!file.is_open()) {
-            return create_pipeline_cache(0, nullptr);
-        }
-        file.exceptions(std::ifstream::failbit);
-        const auto end{file.tellg()};
-        file.seekg(0, std::ios::beg);
-
-        std::array<char, 8> magic_number;
-        u32 cache_version;
-        // A file cut short (the emulator stopped while writing it) would throw from the reads
-        // below, and macOS's libc++ throws an ios_base::failure the handler doesn't match.
-        if (static_cast<size_t>(end) < magic_number.size() + sizeof(cache_version)) {
-            file.close();
-            LOG_ERROR(Common_Filesystem, "Truncated Vulkan driver pipeline cache file, deleting it");
-            Common::FS::RemoveFile(filename);
-            return create_pipeline_cache(0, nullptr);
-        }
-        file.read(magic_number.data(), magic_number.size())
-            .read(reinterpret_cast<char*>(&cache_version), sizeof(cache_version));
-        if (magic_number != VULKAN_CACHE_MAGIC_NUMBER || cache_version != expected_cache_version) {
-            file.close();
-            if (Common::FS::RemoveFile(filename)) {
-                if (magic_number != VULKAN_CACHE_MAGIC_NUMBER) {
-                    LOG_ERROR(Common_Filesystem, "Invalid Vulkan driver pipeline cache file");
-                }
-                if (cache_version != expected_cache_version) {
-                    LOG_INFO(Common_Filesystem, "Deleting old Vulkan driver pipeline cache");
-                }
-            } else {
+        if (file.is_open()) {
+            file.exceptions(std::ifstream::failbit);
+            const auto end{file.tellg()};
+            file.seekg(0, std::ios::beg);
+            std::array<char, 8> magic_number;
+            u32 cache_version;
+            // A file cut short (the emulator stopped while writing it) would throw from the
+            // reads below, and macOS's libc++ throws an ios_base::failure the handler doesn't
+            // match.
+            if (static_cast<size_t>(end) < magic_number.size() + sizeof(cache_version)) {
                 LOG_ERROR(Common_Filesystem,
-                          "Invalid Vulkan pipeline cache file and failed to delete it in \"{}\"",
-                          Common::FS::PathToUTF8String(filename));
+                          "Truncated Vulkan driver pipeline cache file, deleting it");
+                load = VulkanCacheLoad::Damaged;
+            } else {
+                file.read(magic_number.data(), magic_number.size())
+                    .read(reinterpret_cast<char*>(&cache_version), sizeof(cache_version));
+                if (magic_number != VULKAN_CACHE_MAGIC_NUMBER) {
+                    LOG_ERROR(Common_Filesystem,
+                              "Invalid Vulkan driver pipeline cache file, deleting it");
+                    load = VulkanCacheLoad::Damaged;
+                } else if (cache_version != expected_cache_version) {
+                    LOG_INFO(Common_Filesystem, "Deleting old Vulkan driver pipeline cache");
+                    load = VulkanCacheLoad::OtherVersion;
+                } else {
+                    static constexpr size_t header_size =
+                        magic_number.size() + sizeof(cache_version);
+                    const size_t cache_size = static_cast<size_t>(end) - header_size;
+                    std::vector<char> cache_data(cache_size);
+                    file.read(cache_data.data(), cache_size);
+                    load = LoadDriverCacheData(cache_data, restored);
+                }
             }
-            return create_pipeline_cache(0, nullptr);
         }
-
-        static constexpr size_t header_size = magic_number.size() + sizeof(cache_version);
-        const size_t cache_size = static_cast<size_t>(end) - header_size;
-        std::vector<char> cache_data(cache_size);
-        file.read(cache_data.data(), cache_size);
-
-        LOG_INFO(Render_Vulkan,
-                 "Loaded Vulkan driver pipeline cache: {}", Common::FS::PathToUTF8String(filename));
-
-        try {
-            auto restored = create_pipeline_cache(cache_size, cache_data.data());
-            vulkan_pipeline_cache_restored = true;
-            return restored;
-        } catch (const vk::Exception& e) {
-            // The blob came from another driver or driver version (e.g. switching between
-            // MoltenVK and KosmicKrisp on macOS): the driver rejects it. Start empty instead of
-            // aborting, and drop the stale file so the next run doesn't retry it.
-            LOG_ERROR(Render_Vulkan,
-                      "Driver rejected the Vulkan pipeline cache file ({}), starting with an empty "
-                      "cache and deleting it",
-                      e.what());
-            Common::FS::RemoveFile(filename);
-            return create_pipeline_cache(0, nullptr);
-        }
-
     } catch (const std::ios_base::failure& e) {
-        LOG_ERROR(Common_Filesystem, "{}", e.what());
-        if (!Common::FS::RemoveFile(filename)) {
-            LOG_ERROR(Common_Filesystem, "Failed to delete Vulkan driver pipeline cache file {}",
-                      Common::FS::PathToUTF8String(filename));
-        }
-
-        return create_pipeline_cache(0, nullptr);
+        LOG_ERROR(Common_Filesystem, "{}, deleting the Vulkan driver pipeline cache file",
+                  e.what());
+        load = VulkanCacheLoad::Damaged;
     }
+    switch (load) {
+    case VulkanCacheLoad::Restored:
+        LOG_INFO(Render_Vulkan, "Loaded Vulkan driver pipeline cache: {}", path);
+        break;
+    case VulkanCacheLoad::NoData:
+        LOG_WARNING(Render_Vulkan, "Vulkan driver pipeline cache holds no driver data: {}", path);
+        break;
+    case VulkanCacheLoad::DriverKeptNothing:
+        LOG_WARNING(Render_Vulkan,
+                    "Vulkan driver pipeline cache discarded: made by another driver or device, "
+                    "deleting it: {}",
+                    path);
+        break;
+    case VulkanCacheLoad::NoFile:
+    case VulkanCacheLoad::Damaged:
+    case VulkanCacheLoad::OtherVersion:
+    case VulkanCacheLoad::Rejected:
+        break;
+    }
+    vulkan_pipeline_cache_load = load;
+    vulkan_pipeline_cache_restored = ActionsFor(load).restored;
+    return vulkan_pipeline_cache_restored && restored ? std::move(restored)
+                                                      : CreateDriverPipelineCache(0, nullptr);
+}
+
+VulkanCacheLoad PipelineCache::LoadDriverCacheData(const std::vector<char>& cache_data,
+                                                   vk::PipelineCache& restored) {
+    const PipelineCacheDataOrigin origin = PipelineCacheDataMadeBy(
+        cache_data, device.GetVendorID(), device.GetDeviceID(), device.GetPipelineCacheUUID());
+    const VulkanCacheLoad first =
+        DecideVulkanCacheLoad(cache_data.size(), std::nullopt, std::nullopt, origin);
+    if (first == VulkanCacheLoad::NoData) {
+        return first;
+    }
+    try {
+        restored = CreateDriverPipelineCache(cache_data.size(), cache_data.data());
+    } catch (const vk::Exception& e) {
+        // The blob came from another driver or driver version (e.g. switching between MoltenVK
+        // and KosmicKrisp on macOS): the driver rejects it. Start empty instead of aborting, and
+        // drop the stale file so the next run doesn't retry it.
+        LOG_ERROR(Render_Vulkan,
+                  "Driver rejected the Vulkan pipeline cache file ({}), starting with an empty "
+                  "cache and deleting it",
+                  e.what());
+        return VulkanCacheLoad::Rejected;
+    }
+    // Data the header says is this driver's is taken as kept, as it always was, without asking:
+    // that is every boot but the one after a driver or device change.
+    if (origin == PipelineCacheDataOrigin::ThisDriver) {
+        return first;
+    }
+    // Otherwise whether the driver kept any of it is asked of the driver: one given data made
+    // for another driver version (MoltenVK's pipelineCacheUUID changes with each build of it), or
+    // that drops it for a reason of its own, creates the cache all the same, empty. Its size
+    // against an empty cache's says so (MoltenVK: 8 ms for 128 MB, and the size is kept for the
+    // first save).
+    const auto held_bytes = [](const vk::PipelineCache& cache) -> std::optional<size_t> {
+        size_t size = 0;
+        return cache.Read(&size, nullptr) == VK_SUCCESS ? std::optional{size} : std::nullopt;
+    };
+    std::optional<size_t> empty_size;
+    try {
+        empty_size = held_bytes(CreateDriverPipelineCache(0, nullptr));
+    } catch (const vk::Exception&) {
+        // Nothing to compare with: the data is taken as kept.
+    }
+    return DecideVulkanCacheLoad(cache_data.size(), held_bytes(restored), empty_size, origin);
 }
 
 } // namespace Vulkan

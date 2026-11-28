@@ -272,6 +272,7 @@ add_library(video_core STATIC
     renderer_vulkan/vk_master_semaphore.h
     renderer_vulkan/vk_pipeline_cache.cpp
     renderer_vulkan/vk_pipeline_cache.h
+    renderer_vulkan/vk_pipeline_cache_load.h
     renderer_vulkan/vk_pipeline_cache_records.cpp
     renderer_vulkan/vk_pipeline_cache_records.h
     renderer_vulkan/vk_pipeline_binaries.cpp
