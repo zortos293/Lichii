@@ -1502,6 +1502,75 @@ TEST_CASE("RenoDX Compositor agrees with the standalone IPS at the same site",
     REQUIRE(WordAt(manager.PatchNSO(nso, "main"), SiteOffset) == MovRGBA16F);
 }
 
+TEST_CASE("Star Fox RenoDX Compositor is an opt-in patch of both format selections",
+          "[patch_manager]") {
+    constexpr u64 TitleId = 0x0400E88025B1A000;
+    constexpr std::string_view Name = "RenoDX Compositor (built-in)";
+    constexpr std::array<size_t, 2> Sites{sizeof(Loader::NSOHeader) + 0xB47B6D8,
+                                          sizeof(Loader::NSOHeader) + 0xB8E0124};
+    constexpr u32 Original = 0x52800F4A;    // mov w10, #122
+    constexpr u32 Replacement = 0x52800C2A; // mov w10, #97
+    PatchManagerTestContext context;
+    const auto manager = context.Manager(TitleId);
+    Settings::values.disabled_addons.erase(TitleId);
+    SCOPE_EXIT {
+        Settings::values.disabled_addons.erase(TitleId);
+    };
+
+    Loader::NSOHeader header{};
+    header.magic = Common::MakeMagic('N', 'S', 'O', '0');
+    header.build_id = {0xA7, 0x73, 0x0D, 0x0F, 0x74, 0xD1, 0x68, 0xD9, 0x04, 0x22,
+                       0x35, 0x4C, 0x83, 0x17, 0xF7, 0x6F, 0xF7, 0x8A, 0xD9, 0x38};
+    std::vector<u8> nso(Sites[1] + sizeof(u32));
+    std::memcpy(nso.data(), &header, sizeof(header));
+    for (const size_t site : Sites) {
+        std::memcpy(nso.data() + site, &Original, sizeof(Original));
+    }
+
+    SECTION("Listed unchecked with a description and not applied by default") {
+        const auto patches = manager.GetPatches();
+        const auto patch = std::ranges::find(patches, Name, &FileSys::Patch::name);
+        REQUIRE(patch != patches.end());
+        CHECK(patch->off_by_default);
+        CHECK_FALSE(patch->enabled);
+        CHECK_FALSE(patch->description.empty());
+        CHECK_FALSE(manager.HasNSOPatch(header.build_id, "main"));
+        REQUIRE(manager.PatchNSO(nso, "main") == nso);
+    }
+
+    SECTION("Checked in Add-Ons") {
+        Settings::values.disabled_addons[TitleId] = {FileSys::EnabledAddonKey(Name)};
+        SECTION("Both selections change and nothing else") {
+            CHECK(manager.HasNSOPatch(header.build_id, "main"));
+            auto expected = nso;
+            for (const size_t site : Sites) {
+                std::memcpy(expected.data() + site, &Replacement, sizeof(Replacement));
+            }
+            REQUIRE(manager.PatchNSO(nso, "main") == expected);
+        }
+        SECTION("Either site changed leaves both alone") {
+            for (const size_t site : Sites) {
+                auto changed = nso;
+                std::memcpy(changed.data() + site, &NopInstruction, sizeof(NopInstruction));
+                REQUIRE(manager.PatchNSO(changed, "main") == changed);
+            }
+        }
+        SECTION("Other build id skips") {
+            header.build_id.back() ^= 1;
+            std::memcpy(nso.data(), &header, sizeof(header));
+            REQUIRE(manager.PatchNSO(nso, "main") == nso);
+        }
+        SECTION("Other module skips") {
+            REQUIRE(manager.PatchNSO(nso, "sdk") == nso);
+        }
+        SECTION("Ocarina's compositor is not checked by Star Fox's") {
+            CHECK_FALSE(std::ranges::any_of(context.Manager().GetPatches(), [&](const auto& patch) {
+                return patch.name == Name && patch.enabled;
+            }));
+        }
+    }
+}
+
 TEST_CASE("FPS Unlock guards the OoT day/night clock carry", "[patch_manager][oot_carry]") {
     constexpr size_t Site = sizeof(Loader::NSOHeader) + 0x3CDFC0;
     constexpr size_t Entry = sizeof(Loader::NSOHeader) + 0x177DAE4;

@@ -749,6 +749,15 @@ constexpr std::array RENODX_COMPOSITOR_RECORDS{
     BuiltinPatchRecord{0x65234C, RENODX_COMPOSITOR_RGBA16F, RENODX_COMPOSITOR_ORIGINAL},
 };
 
+// The Star Fox counterpart: both of the game's float display-format selections pick format 97
+// instead of 122, for the Star Fox RenoDX add-on.
+constexpr std::array<u8, 4> STARFOX_COMPOSITOR_ORIGINAL{0x4A, 0x0F, 0x80, 0x52}; // mov w10, #122
+constexpr std::array<u8, 4> STARFOX_COMPOSITOR_FLOAT{0x2A, 0x0C, 0x80, 0x52};    // mov w10, #97
+constexpr std::array STARFOX_COMPOSITOR_RECORDS{
+    BuiltinPatchRecord{0xB47B6D8, STARFOX_COMPOSITOR_FLOAT, STARFOX_COMPOSITOR_ORIGINAL},
+    BuiltinPatchRecord{0xB8E0124, STARFOX_COMPOSITOR_FLOAT, STARFOX_COMPOSITOR_ORIGINAL},
+};
+
 constexpr std::array BUILTIN_PATCHES{
     // Ocarina of Time takes its "dynamic resolution disabled" path, so the 3D renders at full scale
     // instead of following the GPU-time controller down to its 480p floor.
@@ -890,6 +899,17 @@ constexpr std::array BUILTIN_PATCHES{
         .description = "ShortFuse's RenoDX Compositor patch, for use with the RenoDX add-on. "
                        "The game's float display buffer becomes RGBA16F instead of R11G11B10F, "
                        "which uses more GPU memory bandwidth. Restart the game to apply.",
+    },
+    BuiltinPatch{
+        .name = "RenoDX Compositor (built-in)",
+        .title_id = 0x0400E88025B1A000,
+        .module = "main",
+        .build_id = "A7730D0F74D168D90422354C8317F76FF78AD938",
+        .records = STARFOX_COMPOSITOR_RECORDS,
+        .off_by_default = true,
+        .description = "RenoDX Compositor patch, for use with the Star Fox RenoDX add-on. The "
+                       "game's float display buffers use a wider float format, which uses more "
+                       "GPU memory bandwidth. Restart the game to apply.",
     },
     BuiltinPatch{
         .name = "Full Scene Resolution with FXAA (built-in)",
