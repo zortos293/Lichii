@@ -1005,14 +1005,15 @@ void SoftwareKeyboard::ReplyChangedString() {
     SetReplyBase(reply, swkbd_state, SwkbdReplyType::ChangedString);
 
     const SwkbdChangedStringArg changed_string_arg{
-        .text_length{static_cast<u32>(current_text.size())},
+        .text_length{static_cast<u32>((std::min)(current_text.size(), REPLY_UTF16_SIZE / sizeof(char16_t)))},
         .dictionary_start_cursor_position{-1},
         .dictionary_end_cursor_position{-1},
         .cursor_position{current_cursor_position},
     };
 
+    // The reply reserves REPLY_UTF16_SIZE for the text: a longer string is cut, not spilled.
     std::memcpy(reply.data() + REPLY_BASE_SIZE, current_text.data(),
-                current_text.size() * sizeof(char16_t));
+                (std::min)(current_text.size() * sizeof(char16_t), REPLY_UTF16_SIZE));
     std::memcpy(reply.data() + REPLY_BASE_SIZE + REPLY_UTF16_SIZE, &changed_string_arg,
                 sizeof(SwkbdChangedStringArg));
 
@@ -1027,12 +1028,13 @@ void SoftwareKeyboard::ReplyMovedCursor() {
     SetReplyBase(reply, swkbd_state, SwkbdReplyType::MovedCursor);
 
     const SwkbdMovedCursorArg moved_cursor_arg{
-        .text_length{static_cast<u32>(current_text.size())},
+        .text_length{static_cast<u32>((std::min)(current_text.size(), REPLY_UTF16_SIZE / sizeof(char16_t)))},
         .cursor_position{current_cursor_position},
     };
 
+    // The reply reserves REPLY_UTF16_SIZE for the text: a longer string is cut, not spilled.
     std::memcpy(reply.data() + REPLY_BASE_SIZE, current_text.data(),
-                current_text.size() * sizeof(char16_t));
+                (std::min)(current_text.size() * sizeof(char16_t), REPLY_UTF16_SIZE));
     std::memcpy(reply.data() + REPLY_BASE_SIZE + REPLY_UTF16_SIZE, &moved_cursor_arg,
                 sizeof(SwkbdMovedCursorArg));
 
@@ -1047,12 +1049,13 @@ void SoftwareKeyboard::ReplyMovedTab() {
     SetReplyBase(reply, swkbd_state, SwkbdReplyType::MovedTab);
 
     const SwkbdMovedTabArg moved_tab_arg{
-        .text_length{static_cast<u32>(current_text.size())},
+        .text_length{static_cast<u32>((std::min)(current_text.size(), REPLY_UTF16_SIZE / sizeof(char16_t)))},
         .cursor_position{current_cursor_position},
     };
 
+    // The reply reserves REPLY_UTF16_SIZE for the text: a longer string is cut, not spilled.
     std::memcpy(reply.data() + REPLY_BASE_SIZE, current_text.data(),
-                current_text.size() * sizeof(char16_t));
+                (std::min)(current_text.size() * sizeof(char16_t), REPLY_UTF16_SIZE));
     std::memcpy(reply.data() + REPLY_BASE_SIZE + REPLY_UTF16_SIZE, &moved_tab_arg,
                 sizeof(SwkbdMovedTabArg));
 
@@ -1067,11 +1070,12 @@ void SoftwareKeyboard::ReplyDecidedEnter() {
     SetReplyBase(reply, swkbd_state, SwkbdReplyType::DecidedEnter);
 
     const SwkbdDecidedEnterArg decided_enter_arg{
-        .text_length{static_cast<u32>(current_text.size())},
+        .text_length{static_cast<u32>((std::min)(current_text.size(), REPLY_UTF16_SIZE / sizeof(char16_t)))},
     };
 
+    // The reply reserves REPLY_UTF16_SIZE for the text: a longer string is cut, not spilled.
     std::memcpy(reply.data() + REPLY_BASE_SIZE, current_text.data(),
-                current_text.size() * sizeof(char16_t));
+                (std::min)(current_text.size() * sizeof(char16_t), REPLY_UTF16_SIZE));
     std::memcpy(reply.data() + REPLY_BASE_SIZE + REPLY_UTF16_SIZE, &decided_enter_arg,
                 sizeof(SwkbdDecidedEnterArg));
 
@@ -1102,13 +1106,16 @@ void SoftwareKeyboard::ReplyChangedStringUtf8() {
     std::string utf8_current_text = Common::UTF16ToUTF8(current_text);
 
     const SwkbdChangedStringArg changed_string_arg{
-        .text_length{static_cast<u32>(current_text.size())},
+        .text_length{static_cast<u32>((std::min)(current_text.size(), REPLY_UTF8_SIZE))},
         .dictionary_start_cursor_position{-1},
         .dictionary_end_cursor_position{-1},
         .cursor_position{current_cursor_position},
     };
 
-    std::memcpy(reply.data() + REPLY_BASE_SIZE, utf8_current_text.data(), utf8_current_text.size());
+    // The reply reserves REPLY_UTF8_SIZE for the text: a longer string is cut at the byte
+    // budget (the old code wrote past the reply; the cut may split a final multi-byte char).
+    std::memcpy(reply.data() + REPLY_BASE_SIZE, utf8_current_text.data(),
+                (std::min)(utf8_current_text.size(), REPLY_UTF8_SIZE));
     std::memcpy(reply.data() + REPLY_BASE_SIZE + REPLY_UTF8_SIZE, &changed_string_arg,
                 sizeof(SwkbdChangedStringArg));
 
@@ -1125,11 +1132,14 @@ void SoftwareKeyboard::ReplyMovedCursorUtf8() {
     std::string utf8_current_text = Common::UTF16ToUTF8(current_text);
 
     const SwkbdMovedCursorArg moved_cursor_arg{
-        .text_length{static_cast<u32>(current_text.size())},
+        .text_length{static_cast<u32>((std::min)(current_text.size(), REPLY_UTF8_SIZE))},
         .cursor_position{current_cursor_position},
     };
 
-    std::memcpy(reply.data() + REPLY_BASE_SIZE, utf8_current_text.data(), utf8_current_text.size());
+    // The reply reserves REPLY_UTF8_SIZE for the text: a longer string is cut at the byte
+    // budget (the old code wrote past the reply; the cut may split a final multi-byte char).
+    std::memcpy(reply.data() + REPLY_BASE_SIZE, utf8_current_text.data(),
+                (std::min)(utf8_current_text.size(), REPLY_UTF8_SIZE));
     std::memcpy(reply.data() + REPLY_BASE_SIZE + REPLY_UTF8_SIZE, &moved_cursor_arg,
                 sizeof(SwkbdMovedCursorArg));
 
@@ -1146,10 +1156,13 @@ void SoftwareKeyboard::ReplyDecidedEnterUtf8() {
     std::string utf8_current_text = Common::UTF16ToUTF8(current_text);
 
     const SwkbdDecidedEnterArg decided_enter_arg{
-        .text_length{static_cast<u32>(current_text.size())},
+        .text_length{static_cast<u32>((std::min)(current_text.size(), REPLY_UTF8_SIZE))},
     };
 
-    std::memcpy(reply.data() + REPLY_BASE_SIZE, utf8_current_text.data(), utf8_current_text.size());
+    // The reply reserves REPLY_UTF8_SIZE for the text: a longer string is cut at the byte
+    // budget (the old code wrote past the reply; the cut may split a final multi-byte char).
+    std::memcpy(reply.data() + REPLY_BASE_SIZE, utf8_current_text.data(),
+                (std::min)(utf8_current_text.size(), REPLY_UTF8_SIZE));
     std::memcpy(reply.data() + REPLY_BASE_SIZE + REPLY_UTF8_SIZE, &decided_enter_arg,
                 sizeof(SwkbdDecidedEnterArg));
 
@@ -1196,7 +1209,7 @@ void SoftwareKeyboard::ReplyChangedStringV2() {
     SetReplyBase(reply, swkbd_state, SwkbdReplyType::ChangedStringV2);
 
     const SwkbdChangedStringArg changed_string_arg{
-        .text_length{static_cast<u32>(current_text.size())},
+        .text_length{static_cast<u32>((std::min)(current_text.size(), REPLY_UTF16_SIZE / sizeof(char16_t)))},
         .dictionary_start_cursor_position{-1},
         .dictionary_end_cursor_position{-1},
         .cursor_position{current_cursor_position},
@@ -1204,8 +1217,9 @@ void SoftwareKeyboard::ReplyChangedStringV2() {
 
     constexpr u8 flag = 0;
 
+    // The reply reserves REPLY_UTF16_SIZE for the text: a longer string is cut, not spilled.
     std::memcpy(reply.data() + REPLY_BASE_SIZE, current_text.data(),
-                current_text.size() * sizeof(char16_t));
+                (std::min)(current_text.size() * sizeof(char16_t), REPLY_UTF16_SIZE));
     std::memcpy(reply.data() + REPLY_BASE_SIZE + REPLY_UTF16_SIZE, &changed_string_arg,
                 sizeof(SwkbdChangedStringArg));
     std::memcpy(reply.data() + REPLY_BASE_SIZE + REPLY_UTF16_SIZE + sizeof(SwkbdChangedStringArg),
@@ -1222,14 +1236,15 @@ void SoftwareKeyboard::ReplyMovedCursorV2() {
     SetReplyBase(reply, swkbd_state, SwkbdReplyType::MovedCursorV2);
 
     const SwkbdMovedCursorArg moved_cursor_arg{
-        .text_length{static_cast<u32>(current_text.size())},
+        .text_length{static_cast<u32>((std::min)(current_text.size(), REPLY_UTF16_SIZE / sizeof(char16_t)))},
         .cursor_position{current_cursor_position},
     };
 
     constexpr u8 flag = 0;
 
+    // The reply reserves REPLY_UTF16_SIZE for the text: a longer string is cut, not spilled.
     std::memcpy(reply.data() + REPLY_BASE_SIZE, current_text.data(),
-                current_text.size() * sizeof(char16_t));
+                (std::min)(current_text.size() * sizeof(char16_t), REPLY_UTF16_SIZE));
     std::memcpy(reply.data() + REPLY_BASE_SIZE + REPLY_UTF16_SIZE, &moved_cursor_arg,
                 sizeof(SwkbdMovedCursorArg));
     std::memcpy(reply.data() + REPLY_BASE_SIZE + REPLY_UTF16_SIZE + sizeof(SwkbdMovedCursorArg),
@@ -1248,7 +1263,7 @@ void SoftwareKeyboard::ReplyChangedStringUtf8V2() {
     std::string utf8_current_text = Common::UTF16ToUTF8(current_text);
 
     const SwkbdChangedStringArg changed_string_arg{
-        .text_length{static_cast<u32>(current_text.size())},
+        .text_length{static_cast<u32>((std::min)(current_text.size(), REPLY_UTF8_SIZE))},
         .dictionary_start_cursor_position{-1},
         .dictionary_end_cursor_position{-1},
         .cursor_position{current_cursor_position},
@@ -1256,7 +1271,10 @@ void SoftwareKeyboard::ReplyChangedStringUtf8V2() {
 
     constexpr u8 flag = 0;
 
-    std::memcpy(reply.data() + REPLY_BASE_SIZE, utf8_current_text.data(), utf8_current_text.size());
+    // The reply reserves REPLY_UTF8_SIZE for the text: a longer string is cut at the byte
+    // budget (the old code wrote past the reply; the cut may split a final multi-byte char).
+    std::memcpy(reply.data() + REPLY_BASE_SIZE, utf8_current_text.data(),
+                (std::min)(utf8_current_text.size(), REPLY_UTF8_SIZE));
     std::memcpy(reply.data() + REPLY_BASE_SIZE + REPLY_UTF8_SIZE, &changed_string_arg,
                 sizeof(SwkbdChangedStringArg));
     std::memcpy(reply.data() + REPLY_BASE_SIZE + REPLY_UTF8_SIZE + sizeof(SwkbdChangedStringArg),
@@ -1275,13 +1293,16 @@ void SoftwareKeyboard::ReplyMovedCursorUtf8V2() {
     std::string utf8_current_text = Common::UTF16ToUTF8(current_text);
 
     const SwkbdMovedCursorArg moved_cursor_arg{
-        .text_length{static_cast<u32>(current_text.size())},
+        .text_length{static_cast<u32>((std::min)(current_text.size(), REPLY_UTF8_SIZE))},
         .cursor_position{current_cursor_position},
     };
 
     constexpr u8 flag = 0;
 
-    std::memcpy(reply.data() + REPLY_BASE_SIZE, utf8_current_text.data(), utf8_current_text.size());
+    // The reply reserves REPLY_UTF8_SIZE for the text: a longer string is cut at the byte
+    // budget (the old code wrote past the reply; the cut may split a final multi-byte char).
+    std::memcpy(reply.data() + REPLY_BASE_SIZE, utf8_current_text.data(),
+                (std::min)(utf8_current_text.size(), REPLY_UTF8_SIZE));
     std::memcpy(reply.data() + REPLY_BASE_SIZE + REPLY_UTF8_SIZE, &moved_cursor_arg,
                 sizeof(SwkbdMovedCursorArg));
     std::memcpy(reply.data() + REPLY_BASE_SIZE + REPLY_UTF8_SIZE + sizeof(SwkbdMovedCursorArg),
