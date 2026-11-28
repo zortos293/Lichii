@@ -9,10 +9,13 @@
 #include <condition_variable>
 #include <cstddef>
 #include <cstring>
+#include <limits>
 #include <list>
 #include <map>
 #include <memory>
 #include <mutex>
+#include <new>
+#include <optional>
 #include <random>
 #include <span>
 #include <string_view>
@@ -22,6 +25,7 @@
 #include <openssl/evp.h>
 #define ZSTD_STATIC_LINKING_ONLY
 #include <zstd.h>
+#include <zstd_errors.h>
 
 #ifdef _WIN32
 #ifndef NOMINMAX
@@ -291,7 +295,8 @@ struct NupMember {
 
 /// Members of one container, shared by all files opened from it. In-memory members are charged
 /// their full size, plus DecoderCharge while partly decoded, against `cap` and evicted least
-/// recently used first; spilled members last as long as the container.
+/// recently used first; spilled members last as long as the container. VerifyIntegrity builds a
+/// private one for a member it reads through the reader, so it evicts nothing the game cached.
 struct NupDecompressCache {
     struct Entry {
         std::size_t file_index;
@@ -378,7 +383,7 @@ struct NupDecompressCache {
 namespace {
 
 /// A member file whose extent is zstd-compressed, decoded from its start as reads need it and
-/// shared through the container's cache.
+/// shared through the container's cache, or through VerifyIntegrity's private one.
 class NupVfsFile final : public VfsFile {
 public:
     NupVfsFile(VirtualFile backing_, u64 extent_offset_, u64 extent_size_, u64 uncompressed_size_,
@@ -1330,37 +1335,226 @@ VirtualDir NupContainer::MergeShadowDirs(const VirtualDir& base, const VirtualDi
                                                 base->GetName());
 }
 
-std::vector<u8> NupContainer::ReadExtentRaw(const FileNode& node) const {
-    return file->ReadBytes(static_cast<std::size_t>(node.extent_size),
-                           static_cast<std::size_t>(node.extent_offset));
-}
-
 Loader::ResultStatus NupContainer::VerifyIntegrity(
     std::function<bool(std::size_t, std::size_t)> progress_callback) const {
-    const std::size_t total = files.size();
-    for (std::size_t i = 0; i < total; ++i) {
-        const FileNode& node = files[i];
-        std::vector<u8> content;
-        if (node.size == 0) {
-            content = ReadExtentRaw(node);
-        } else if (node.codec == CodecRaw) {
-            content = ReadExtentRaw(node);
-        } else {
-            NupVfsFile view(file, node.extent_offset, node.extent_size, node.size, node.name,
-                            cache, i);
-            content = view.ReadAllBytes();
+    // Each member is read from its extent in chunks and hashed as it goes: a compressed one is
+    // decoded on the way, as one zstd stream (the format has no dictionary or seek table), not
+    // through the game's decompression cache. Nothing is written to disk and nothing a running
+    // game cached is evicted. The stream decoder keeps zstd's default window limit (128 MiB) and
+    // sizes nothing by a record's size, which a damaged file can set to anything. A frame that
+    // asks for more is refused for a member the reader spills, as reading it is, and otherwise
+    // hashed through the reader with a cache of the verification's own, which holds the member
+    // whole (at most half the cache cap, whatever its record says) until it ends; so a member
+    // verifies exactly when it can be read and its hash matches. The stream decoder gets a
+    // compressed member's extent in the reader's pieces and output room: zstd decodes a frame with
+    // a known content size in one pass, without the window limit, when the whole frame is in the
+    // piece it is given, so both then accept and refuse the same frames.
+    constexpr std::size_t InputChunk = 1 << 20;
+    static_assert(DecodeInputChunk <= InputChunk);
+    constexpr std::size_t ReportStep = 4 << 20;
+    // Progress is in extent bytes, which the open checked against the file.
+    u64 total = 0;
+    for (const FileNode& node : files) {
+        total += node.extent_size;
+    }
+    const auto total_bytes = static_cast<std::size_t>(
+        std::min<u64>(total, std::numeric_limits<std::size_t>::max()));
+    std::size_t done_bytes = 0;
+    std::size_t reported_bytes = 0;
+    u64 unpolled_output = 0;
+    // Called when the extent position has moved by ReportStep and whenever a member has ended,
+    // an empty one too, as the verifier before it polled after every member; and at least once
+    // per ReportStep of decoded output. Those two may repeat a value. False is a cancel.
+    const auto report = [&](bool force) {
+        if (!progress_callback || total_bytes == 0) {
+            return true;
         }
-        if (content.size() != node.size) {
-            LOG_ERROR(Loader, "NUP integrity check failed for {}: short read", node.name);
+        if (!force && done_bytes - reported_bytes < ReportStep) {
+            return true;
+        }
+        reported_bytes = done_bytes;
+        unpolled_output = 0;
+        return progress_callback(done_bytes, total_bytes);
+    };
+    const auto poll_output = [&](std::size_t produced) {
+        unpolled_output += produced;
+        if (!progress_callback || total_bytes == 0 || unpolled_output < ReportStep) {
+            return true;
+        }
+        unpolled_output = 0;
+        reported_bytes = done_bytes;
+        return progress_callback(done_bytes, total_bytes);
+    };
+
+    std::unique_ptr<EVP_MD_CTX, decltype(&EVP_MD_CTX_free)> ctx{EVP_MD_CTX_new(),
+                                                                &EVP_MD_CTX_free};
+    std::unique_ptr<ZSTD_DCtx, decltype(&ZSTD_freeDCtx)> dctx{ZSTD_createDCtx(), &ZSTD_freeDCtx};
+    if (!ctx || !dctx) {
+        // Not ErrorNotInitialized: callers take every status but the failed one as verified.
+        LOG_ERROR(Loader, "NUP integrity check could not create a hash or a decoder");
+        return Loader::ResultStatus::ErrorIntegrityVerificationFailed;
+    }
+    // A failed allocation fails the check, as a missing hash or decoder does, rather than leaving
+    // the call (an archive of empty members needs neither buffer, but they are made up front).
+    std::vector<u8> input;
+    std::vector<u8> output;
+    try {
+        input.resize(InputChunk);
+        output.resize(ZSTD_DStreamOutSize());
+    } catch (const std::bad_alloc&) {
+        LOG_ERROR(Loader, "NUP integrity check could not allocate its buffers");
+        return Loader::ResultStatus::ErrorIntegrityVerificationFailed;
+    }
+
+    for (std::size_t i = 0; i < files.size(); ++i) {
+        const FileNode& node = files[i];
+        const auto fail = [&](std::string_view reason) {
+            LOG_ERROR(Loader, "NUP integrity check failed for {}: {}", node.name, reason);
             return Loader::ResultStatus::ErrorIntegrityVerificationFailed;
+        };
+        const auto cancelled = [] { return Loader::ResultStatus::ErrorIntegrityVerificationFailed; };
+        const bool compressed = node.size != 0 && node.codec != CodecRaw;
+        if (!compressed && node.extent_size != node.size) {
+            return fail("its extent's size does not match its size");
+        }
+        if (EVP_DigestInit_ex(ctx.get(), EVP_sha256(), nullptr) != 1) {
+            return fail("the hash could not be started");
+        }
+        if (compressed && !dctx) {
+            // Freed by a large-window member before this one.
+            dctx.reset(ZSTD_createDCtx());
+            if (!dctx) {
+                return fail("a decoder could not be created");
+            }
+        }
+        if (compressed && ZSTD_isError(ZSTD_DCtx_reset(dctx.get(), ZSTD_reset_session_only))) {
+            return fail("the decoder could not be reset");
+        }
+        const std::size_t member_start = done_bytes;
+        bool through_reader = false;
+        u64 produced = 0;
+        std::size_t last_result = 0;
+        const std::size_t step = compressed ? DecodeInputChunk : InputChunk;
+        for (u64 consumed = 0; consumed < node.extent_size && !through_reader;) {
+            const auto length =
+                static_cast<std::size_t>(std::min<u64>(step, node.extent_size - consumed));
+            if (file->Read(input.data(), length,
+                           static_cast<std::size_t>(node.extent_offset + consumed)) != length) {
+                return fail("short read");
+            }
+            consumed += length;
+            if (!compressed) {
+                if (EVP_DigestUpdate(ctx.get(), input.data(), length) != 1) {
+                    return fail("the hash could not be updated");
+                }
+            } else {
+                ZSTD_inBuffer in{input.data(), length, 0};
+                // Until the input is used and the decoder holds no more output for it.
+                for (;;) {
+                    ZSTD_outBuffer out{output.data(), output.size(), 0};
+                    last_result = ZSTD_decompressStream(dctx.get(), &out, &in);
+                    if (ZSTD_isError(last_result)) {
+                        // The buffered stream decoder allocates about a frame's window when the
+                        // frame has no content size. A reader that decodes the member in memory
+                        // needs no such buffer, so a failed allocation goes to it as a window
+                        // above the limit does; a spilled one is buffered too, and fails as here.
+                        const auto code = ZSTD_getErrorCode(last_result);
+                        if (code == ZSTD_error_frameParameter_windowTooLarge ||
+                            (code == ZSTD_error_memory_allocation && !cache->Spills(node.size))) {
+                            through_reader = true;
+                            break;
+                        }
+                        return fail(ZSTD_getErrorName(last_result));
+                    }
+                    if (out.pos > node.size - produced) {
+                        return fail("more data than its size");
+                    }
+                    produced += out.pos;
+                    if (EVP_DigestUpdate(ctx.get(), output.data(), out.pos) != 1) {
+                        return fail("the hash could not be updated");
+                    }
+                    if (!poll_output(out.pos)) {
+                        return cancelled();
+                    }
+                    if (in.pos == in.size && (last_result == 0 || out.pos < out.size)) {
+                        break;
+                    }
+                }
+            }
+            if (through_reader) {
+                break;
+            }
+            done_bytes = std::min(total_bytes, done_bytes + length);
+            if (!report(false)) {
+                return cancelled();
+            }
+        }
+        if (through_reader) {
+            // A frame wants a window above the stream decoder's limit, or one it could not
+            // allocate for a member the reader decodes in memory. A member the reader spills
+            // keeps that limit and is refused at the same frame, so it fails here as reading it
+            // does, with nothing decoded to disk. One it decodes in memory accepts the frame: hash
+            // what the reader reads, through a cache of its own with the container's cap, so
+            // nothing a running game cached is evicted. That costs the member's size (at most half
+            // the cap) and a decoder beside the game's cache until the member ends; the stream
+            // decoder's window is freed first, and an allocation that fails fails the check.
+            if (cache->Spills(node.size)) {
+                return fail(fmt::format("{} (a member this large is refused when read)",
+                                        ZSTD_getErrorName(last_result)));
+            }
+            dctx.reset();
+            if (EVP_DigestInit_ex(ctx.get(), EVP_sha256(), nullptr) != 1) {
+                return fail("the hash could not be started");
+            }
+            const auto out_of_memory = [&] { return fail("not enough memory to decode it"); };
+            std::optional<NupVfsFile> view;
+            try {
+                const auto own_cache = std::make_shared<NupDecompressCache>();
+                // No spill_dir: the Spills check above keeps this member in memory.
+                own_cache->cap = cache->cap;
+                view.emplace(file, node.extent_offset, node.extent_size, node.size, node.name,
+                             own_cache, i);
+            } catch (const std::bad_alloc&) {
+                return out_of_memory();
+            }
+            for (u64 offset = 0; offset < node.size;) {
+                const auto length =
+                    static_cast<std::size_t>(std::min<u64>(InputChunk, node.size - offset));
+                std::size_t read = 0;
+                try {
+                    read = view->Read(input.data(), length, static_cast<std::size_t>(offset));
+                } catch (const std::bad_alloc&) {
+                    return out_of_memory();
+                }
+                if (read != length) {
+                    return fail("the reader could not read it");
+                }
+                offset += length;
+                if (EVP_DigestUpdate(ctx.get(), input.data(), length) != 1) {
+                    return fail("the hash could not be updated");
+                }
+                if (!poll_output(length)) {
+                    return cancelled();
+                }
+            }
+            produced = node.size;
+            last_result = 0;
+            done_bytes = std::min(total_bytes,
+                                  member_start + static_cast<std::size_t>(node.extent_size));
+        }
+        if (compressed && (produced != node.size || last_result != 0)) {
+            return fail("the data does not end at its size");
         }
         std::array<u8, 0x20> hash{};
-        if (!Sha256(content.data(), content.size(), hash) || hash != node.sha256) {
-            LOG_ERROR(Loader, "NUP integrity check failed for {}: SHA-256 mismatch", node.name);
-            return Loader::ResultStatus::ErrorIntegrityVerificationFailed;
+        unsigned int length = 0;
+        if (EVP_DigestFinal_ex(ctx.get(), hash.data(), &length) != 1 || length != hash.size()) {
+            return fail("the hash could not be finished");
         }
-        if (progress_callback && !progress_callback(i + 1, total)) {
-            return Loader::ResultStatus::ErrorIntegrityVerificationFailed;
+        if (hash != node.sha256) {
+            return fail("SHA-256 mismatch");
+        }
+        if (!report(true)) {
+            return cancelled();
         }
     }
     return Loader::ResultStatus::Success;

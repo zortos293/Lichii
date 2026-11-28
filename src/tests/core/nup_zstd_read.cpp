@@ -2,11 +2,14 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 
 #include <algorithm>
+#include <array>
 #include <atomic>
 #include <chrono>
 #include <filesystem>
 #include <fstream>
+#include <memory>
 #include <random>
+#include <span>
 #include <string>
 #include <string_view>
 #include <thread>
@@ -14,6 +17,10 @@
 
 #include <catch2/catch_test_macros.hpp>
 #include <openssl/evp.h>
+#include <zstd.h>
+#ifdef __linux__
+#include <sys/stat.h>
+#endif
 
 #include "common/zstd_compression.h"
 #include "core/file_sys/nup_container.h"
@@ -25,9 +32,12 @@ namespace fs = std::filesystem;
 using FileSys::NupContainer;
 
 struct TempDir {
+    // The counter keeps two directories made within one clock tick apart.
+    inline static std::atomic<unsigned> made{};
     fs::path path = fs::temp_directory_path() /
                     ("nup-read-test-" +
-                     std::to_string(std::chrono::steady_clock::now().time_since_epoch().count()));
+                     std::to_string(std::chrono::steady_clock::now().time_since_epoch().count()) +
+                     "-" + std::to_string(made++));
     TempDir() {
         fs::create_directories(path);
     }
@@ -76,7 +86,15 @@ struct Member {
     u64 size;
     u8 codec;
     std::string name{};
+    std::array<u8, 0x20> sha256{};
 };
+
+std::array<u8, 0x20> Sha256(std::span<const u8> data) {
+    std::array<u8, 0x20> hash{};
+    unsigned int length{};
+    EVP_Digest(data.data(), data.size(), hash.data(), &length, EVP_sha256(), nullptr);
+    return hash;
+}
 
 Member ZstdMember(const std::vector<u8>& content) {
     return {Zstd(content), content.size(), 1};
@@ -98,7 +116,8 @@ std::vector<u8> BuildNup(const std::vector<Member>& members) {
     std::vector<u64> extent_offsets;
     for (const auto& member : members) {
         bytes.resize((bytes.size() + 15) & ~std::size_t{15});
-        extent_offsets.push_back(bytes.size());
+        // An empty member has no extent: its offset is zero, as the reader requires.
+        extent_offsets.push_back(member.extent.empty() && member.size == 0 ? 0 : bytes.size());
         bytes.insert(bytes.end(), member.extent.begin(), member.extent.end());
     }
 
@@ -128,6 +147,7 @@ std::vector<u8> BuildNup(const std::vector<Member>& members) {
         Put(bytes, record + 0x08, members[i].size, 8);
         Put(bytes, record + 0x10, extent_offsets[i], 8);
         Put(bytes, record + 0x18, members[i].extent.size(), 8);
+        std::copy(members[i].sha256.begin(), members[i].sha256.end(), bytes.begin() + record + 0x20);
         bytes[record + 0x40] = members[i].codec;
         Put(bytes, toc + children_at + i * 4, 1 + i, 4);
     }
@@ -177,6 +197,33 @@ std::size_t SpillBytes(const fs::path& dir) {
     }
 #endif
     return total;
+}
+#endif
+
+#if defined(_WIN32) || defined(__linux__)
+/// The container's spill files under `dir`, each as its identity and size: on Linux the unlinked
+/// ones still held open (their descriptor's target, which names the file and its inode is held),
+/// with any named ones; elsewhere the named ones.
+std::vector<std::pair<std::string, std::uintmax_t>> SpillFiles(const fs::path& dir) {
+    std::vector<std::pair<std::string, std::uintmax_t>> files;
+    std::error_code ec;
+    for (const auto& entry : fs::directory_iterator(dir, ec)) {
+        files.emplace_back(entry.path().filename().string(), entry.file_size(ec));
+    }
+#ifdef __linux__
+    const auto prefix = fs::canonical(dir, ec).string();
+    for (const auto& fd : fs::directory_iterator("/proc/self/fd", ec)) {
+        const auto target = fs::read_symlink(fd.path(), ec).string();
+        if (target.starts_with(prefix) && target.ends_with(" (deleted)")) {
+            struct stat st{};
+            const std::string inode =
+                stat(fd.path().c_str(), &st) == 0 ? std::to_string(st.st_ino) : target;
+            files.emplace_back("inode " + inode, fs::file_size(fd.path(), ec));
+        }
+    }
+#endif
+    std::ranges::sort(files);
+    return files;
 }
 #endif
 
@@ -429,4 +476,350 @@ TEST_CASE("NUP serves a sound sibling in place of a .zs member with no zstd head
     const auto package = nup.GetPackageDir(0);
     REQUIRE(package != nullptr);
     REQUIRE(package->GetFile("Rock_WaterTemple_Gate_M_01_Nrm.bntx.zs")->ReadAllBytes() == damaged);
+}
+
+TEST_CASE("Verifying a NUP hashes its members as it reads them", "[nup][nup-read]") {
+    // Stored and compressed members, one of exactly the 1 MiB input chunk and one of a chunk and
+    // a part, through the same verify whatever the cache size.
+    constexpr std::size_t Chunk = 1 << 20;
+    const auto exact = Content(Chunk, 11);
+    const auto longer = Content(Chunk * 5 + 12345, 12);
+    const std::vector<Member> members{
+        {exact, exact.size(), 0, {}, Sha256(exact)},
+        {longer, longer.size(), 0, {}, Sha256(longer)},
+        {Zstd(exact), exact.size(), 1, {}, Sha256(exact)},
+        {Zstd(longer), longer.size(), 1, {}, Sha256(longer)},
+    };
+    std::size_t total = 0;
+    for (const auto& member : members) {
+        total += member.extent.size();
+    }
+    TempDir t;
+    for (const std::size_t cap : {std::size_t{64} << 20, std::size_t{64} << 10}) {
+        CAPTURE(cap);
+        NupContainer nup{Backing(BuildNup(members)), cap, t.path};
+        REQUIRE(nup.GetStatus() == Loader::ResultStatus::Success);
+        std::vector<std::pair<std::size_t, std::size_t>> reports;
+        REQUIRE(nup.VerifyIntegrity([&](std::size_t done, std::size_t all) {
+            reports.emplace_back(done, all);
+            return true;
+        }) == Loader::ResultStatus::Success);
+        // In extent bytes, out of the extents' total, never going back, ending at the total: at
+        // least once at each member's end and inside the stored 5 MiB one.
+        REQUIRE(reports.size() >= members.size() + 1);
+        REQUIRE(std::ranges::is_sorted(reports));
+        REQUIRE(std::ranges::all_of(reports, [&](const auto& r) { return r.second == total; }));
+        REQUIRE(reports.back() == std::pair{total, total});
+
+        // A cancel stops it at the report it answered.
+        std::size_t calls{};
+        REQUIRE(nup.VerifyIntegrity([&](std::size_t, std::size_t) { return ++calls < 2; }) ==
+                Loader::ResultStatus::ErrorIntegrityVerificationFailed);
+        REQUIRE(calls == 2);
+    }
+
+    // A changed byte past the first chunk is found.
+    auto changed = members;
+    changed[1].extent[Chunk + 100] ^= 1;
+    NupContainer nup{Backing(BuildNup(changed)), std::size_t{64} << 20, t.path};
+    REQUIRE(nup.VerifyIntegrity({}) == Loader::ResultStatus::ErrorIntegrityVerificationFailed);
+}
+
+TEST_CASE("Verifying a NUP of empty members reports nothing with a total of zero",
+          "[nup][nup-read]") {
+    // The desktop frontend divides by the total it is given.
+    const Member empty{{}, 0, 0, {}, Sha256({})};
+    NupContainer nup{Backing(BuildNup({empty, empty}))};
+    REQUIRE(nup.GetStatus() == Loader::ResultStatus::Success);
+    bool zero_total{};
+    REQUIRE(nup.VerifyIntegrity([&](std::size_t, std::size_t total) {
+        zero_total |= total == 0;
+        return true;
+    }) == Loader::ResultStatus::Success);
+    REQUIRE_FALSE(zero_total);
+}
+
+TEST_CASE("Verifying a NUP polls after an empty member as after any other", "[nup][nup-read]") {
+    // One stored byte, then an empty member: the first poll comes at the byte's end, the second
+    // after the empty member, with the same value, and a cancel there is a cancel.
+    const std::vector<u8> one{42};
+    const Member stored{one, 1, 0, {}, Sha256(one)};
+    const Member empty{{}, 0, 0, {}, Sha256({})};
+    NupContainer nup{Backing(BuildNup({stored, empty}))};
+    REQUIRE(nup.GetStatus() == Loader::ResultStatus::Success);
+    std::vector<std::pair<std::size_t, std::size_t>> reports;
+    REQUIRE(nup.VerifyIntegrity([&](std::size_t done, std::size_t all) {
+        reports.emplace_back(done, all);
+        return reports.size() < 2;
+    }) == Loader::ResultStatus::ErrorIntegrityVerificationFailed);
+    REQUIRE(reports == std::vector<std::pair<std::size_t, std::size_t>>{{1, 1}, {1, 1}});
+}
+
+TEST_CASE("Verifying a NUP checks a compressed member's frames against its size",
+          "[nup][nup-read]") {
+    const auto first = Content(200 * 1024, 7);
+    const auto second = Content(300 * 1024, 8);
+    std::vector<u8> content = first;
+    content.insert(content.end(), second.begin(), second.end());
+    const auto head = Zstd(first);
+    const auto tail = Zstd(second);
+    Member member{head, content.size(), 1, {}, Sha256(content)};
+    member.extent.insert(member.extent.end(), tail.begin(), tail.end());
+    const auto verify = [](const Member& m) {
+        TempDir t;
+        NupContainer nup{Backing(BuildNup({m})), std::size_t{64} << 20, t.path};
+        REQUIRE(nup.GetStatus() == Loader::ResultStatus::Success);
+        return nup.VerifyIntegrity({});
+    };
+    // Concatenated frames are one stream.
+    CHECK(verify(member) == Loader::ResultStatus::Success);
+    // The second frame cut short: the data ends inside a frame.
+    Member truncated = member;
+    truncated.extent.resize(head.size() + tail.size() / 2);
+    CHECK(verify(truncated) == Loader::ResultStatus::ErrorIntegrityVerificationFailed);
+    // Bytes after the last frame are read as the next one, which is not a frame (the cache's
+    // reader fails on them too).
+    Member trailing = member;
+    trailing.extent.insert(trailing.extent.end(), {1, 2, 3, 4, 5, 6, 7, 8});
+    CHECK(verify(trailing) == Loader::ResultStatus::ErrorIntegrityVerificationFailed);
+    // A recorded size larger than the frames hold: the data ends short.
+    Member shorter = member;
+    shorter.size = content.size() + 1000;
+    CHECK(verify(shorter) == Loader::ResultStatus::ErrorIntegrityVerificationFailed);
+    // A recorded size smaller than the frames hold: the data runs past it.
+    Member longer = member;
+    longer.size = content.size() - 1000;
+    CHECK(verify(longer) == Loader::ResultStatus::ErrorIntegrityVerificationFailed);
+}
+
+TEST_CASE("Verifying a NUP accepts a frame with a large window exactly when reading does",
+          "[nup][nup-read]") {
+    // A frame declaring a 256 MiB window and no content size, made by hand: the stream decoder
+    // refuses it (zstd's default limit is 128 MiB), so verification hashes the member through the
+    // reader, which reads it when it decodes the member in memory and refuses it when it spills.
+    std::vector<u8> content(64 * 1024);
+    std::mt19937 rng{16};
+    std::ranges::generate(content, [&] { return static_cast<u8>(rng()); });
+    std::vector<u8> frame{0x28, 0xB5, 0x2F, 0xFD, // magic
+                          0x00,                   // no content size, not single segment
+                          18 << 3};               // window descriptor: 2^(10 + 18)
+    const u32 block = static_cast<u32>(content.size() << 3) | 1; // last block, raw
+    frame.insert(frame.end(), {static_cast<u8>(block), static_cast<u8>(block >> 8),
+                               static_cast<u8>(block >> 16)});
+    frame.insert(frame.end(), content.begin(), content.end());
+    REQUIRE(ZSTD_getFrameContentSize(frame.data(), frame.size()) == ZSTD_CONTENTSIZE_UNKNOWN);
+    {
+        // Refused at the frame header by a decoder at the default limit, before any window.
+        std::unique_ptr<ZSTD_DCtx, decltype(&ZSTD_freeDCtx)> dctx{ZSTD_createDCtx(),
+                                                                  &ZSTD_freeDCtx};
+        std::vector<u8> scratch(16);
+        ZSTD_outBuffer out{scratch.data(), scratch.size(), 0};
+        ZSTD_inBuffer in{frame.data(), frame.size(), 0};
+        REQUIRE(ZSTD_isError(ZSTD_decompressStream(dctx.get(), &out, &in)));
+    }
+    const Member sound{frame, content.size(), 1, {}, Sha256(content)};
+    Member flipped = sound;
+    flipped.extent[1000] ^= 1;
+    TempDir t;
+    // Decoded in memory: read, so verified, and a changed byte is found.
+    {
+        NupContainer nup{Backing(BuildNup({sound})), std::size_t{64} << 20, t.path};
+        REQUIRE(nup.GetStatus() == Loader::ResultStatus::Success);
+        REQUIRE(ReadMatches(nup.OpenFile(0), content, 0, content.size()));
+        REQUIRE(nup.VerifyIntegrity({}) == Loader::ResultStatus::Success);
+        NupContainer changed{Backing(BuildNup({flipped})), std::size_t{64} << 20, t.path};
+        REQUIRE(changed.VerifyIntegrity({}) ==
+                Loader::ResultStatus::ErrorIntegrityVerificationFailed);
+    }
+    // Spilled: the reader keeps the default limit and refuses it, and so does verification.
+    {
+        NupContainer nup{Backing(BuildNup({sound})), std::size_t{64} << 10, t.path};
+        REQUIRE(nup.GetStatus() == Loader::ResultStatus::Success);
+        REQUIRE(nup.OpenFile(0)->ReadAllBytes().empty());
+        REQUIRE(nup.VerifyIntegrity({}) == Loader::ResultStatus::ErrorIntegrityVerificationFailed);
+    }
+}
+
+TEST_CASE("Verifying a NUP through the reader leaves the game's cache as it was",
+          "[nup][nup-read]") {
+    // A backing file that counts its reads: a game member still cached is read without it.
+    struct CountingFile : FileSys::VectorVfsFile {
+        using VectorVfsFile::VectorVfsFile;
+        std::size_t Read(u8* out, std::size_t length, std::size_t offset) const override {
+            ++reads;
+            return VectorVfsFile::Read(out, length, offset);
+        }
+        mutable std::atomic<std::size_t> reads{};
+    };
+    // A frame declaring a 256 MiB window, in raw blocks of at most 128 KiB, which only the reader
+    // decodes, and only in memory.
+    const auto large_window = [](const std::vector<u8>& content) {
+        std::vector<u8> frame{0x28, 0xB5, 0x2F, 0xFD, 0x00, 18 << 3};
+        for (std::size_t at = 0; at < content.size();) {
+            const std::size_t size = std::min<std::size_t>(128 * 1024, content.size() - at);
+            const bool last = at + size == content.size();
+            const u32 block = static_cast<u32>(size << 3) | (last ? 1u : 0u);
+            frame.insert(frame.end(), {static_cast<u8>(block), static_cast<u8>(block >> 8),
+                                       static_cast<u8>(block >> 16)});
+            frame.insert(frame.end(), content.begin() + static_cast<std::ptrdiff_t>(at),
+                         content.begin() + static_cast<std::ptrdiff_t>(at + size));
+            at += size;
+        }
+        return frame;
+    };
+    const auto member_of = [](const std::vector<u8>& content) {
+        Member member = ZstdMember(content);
+        member.sha256 = Sha256(content);
+        return member;
+    };
+    SECTION("in memory") {
+        // 2 MiB holds the game's two 700 KiB members, but not those and a third 700 KiB one even
+        // with no decoder charged: read through the game's cache, the retry would evict one.
+        const auto first = Content(700 * 1024, 41);
+        const auto second = Content(700 * 1024, 43);
+        const auto wide = Content(700 * 1024, 42);
+        const Member wide_member{large_window(wide), wide.size(), 1, {}, Sha256(wide)};
+        // After the wide member, whose retry frees the stream decoder, a stored member and a
+        // compressed one, which verifies with the decoder made again.
+        const auto stored = Content(4096, 45);
+        const auto after = Content(300 * 1024, 46);
+        const Member stored_member{stored, stored.size(), 0, {}, Sha256(stored)};
+        const auto backing = std::make_shared<CountingFile>(BuildNup(
+            {member_of(first), member_of(second), wide_member, stored_member, member_of(after)}));
+        TempDir t;
+        NupContainer nup{backing, std::size_t{2} << 20, t.path};
+        REQUIRE(nup.GetStatus() == Loader::ResultStatus::Success);
+        const auto first_file = nup.OpenFile(0);
+        const auto second_file = nup.OpenFile(1);
+        REQUIRE(ReadMatches(first_file, first, 0, first.size()));
+        REQUIRE(ReadMatches(second_file, second, 0, second.size()));
+        REQUIRE(nup.VerifyIntegrity({}) == Loader::ResultStatus::Success);
+        backing->reads = 0;
+        REQUIRE(ReadMatches(first_file, first, 0, first.size()));
+        REQUIRE(ReadMatches(second_file, second, 0, second.size()));
+        REQUIRE(backing->reads == 0);
+        // The compressed member after the wide one is checked, not skipped.
+        Member broken = member_of(after);
+        broken.sha256[0] ^= 1;
+        NupContainer changed{Backing(BuildNup({wide_member, broken})), std::size_t{2} << 20,
+                             t.path};
+        REQUIRE(changed.GetStatus() == Loader::ResultStatus::Success);
+        REQUIRE(changed.VerifyIntegrity({}) ==
+                Loader::ResultStatus::ErrorIntegrityVerificationFailed);
+    }
+    SECTION("spilled") {
+        // 64 KiB spills both. The game has read the start of a normal member, which keeps its
+        // temporary file and decoder; the large window is refused as reading it is, without
+        // writing anything there, and the game's member reads on as if nothing had happened.
+        const auto game = Content(std::size_t{2} << 20, 44);
+        const auto wide = Content(700 * 1024, 42);
+        const Member wide_member{large_window(wide), wide.size(), 1, {}, Sha256(wide)};
+        const auto bytes = BuildNup({member_of(game), wide_member});
+        // The same reads on a container nobody verifies, for the backing reads they take.
+        const auto backing = std::make_shared<CountingFile>(bytes);
+        const auto control_backing = std::make_shared<CountingFile>(bytes);
+        TempDir t;
+        TempDir control_dir;
+        NupContainer nup{backing, std::size_t{64} << 10, t.path};
+        NupContainer control{control_backing, std::size_t{64} << 10, control_dir.path};
+        REQUIRE(nup.GetStatus() == Loader::ResultStatus::Success);
+        REQUIRE(control.GetStatus() == Loader::ResultStatus::Success);
+        const auto file = nup.OpenFile(0);
+        const auto control_file = control.OpenFile(0);
+        REQUIRE(ReadMatches(file, game, 0, 8 * 1024));
+        REQUIRE(ReadMatches(control_file, game, 0, 8 * 1024));
+#if defined(_WIN32) || defined(__linux__)
+        // The game's member holds one spill file (on POSIX unlinked since #2649, and seen through
+        // its descriptor). Verification opens none of its own, and leaves that one, its identity
+        // and its size, as they were.
+        const auto before = SpillFiles(t.path);
+        REQUIRE(before.size() == 1);
+#endif
+        REQUIRE(nup.VerifyIntegrity({}) == Loader::ResultStatus::ErrorIntegrityVerificationFailed);
+#if defined(_WIN32) || defined(__linux__)
+        REQUIRE(SpillFiles(t.path) == before);
+#endif
+        backing->reads = 0;
+        control_backing->reads = 0;
+        REQUIRE(ReadMatches(file, game, 8 * 1024, 64 * 1024));
+        REQUIRE(ReadMatches(control_file, game, 8 * 1024, 64 * 1024));
+        REQUIRE(backing->reads == control_backing->reads);
+        REQUIRE(ReadMatches(file, game, 0, game.size()));
+    }
+}
+
+TEST_CASE("Verifying a NUP refuses a small large-window frame wherever a read refuses it",
+          "[nup][nup-read]") {
+    // zstd decodes a frame with a known content size in one pass, without the window limit, when
+    // the whole frame is in the input it is given. A small frame declaring a 256 MiB window that
+    // starts 100 bytes before a 128 KiB boundary reaches a spilled reader in two pieces, which
+    // refuses it; the verifier must too.
+    const auto raw_block = [](std::vector<u8>& frame, std::span<const u8> data) {
+        const u32 block = static_cast<u32>(data.size() << 3) | 1; // last block, raw
+        frame.insert(frame.end(), {static_cast<u8>(block), static_cast<u8>(block >> 8),
+                                   static_cast<u8>(block >> 16)});
+        frame.insert(frame.end(), data.begin(), data.end());
+    };
+    const auto filler = Content(128 * 1024 - 9 - 100, 47);
+    const auto small = Content(4096, 48);
+    // No content size, a 128 KiB window: ends 100 bytes before the boundary.
+    std::vector<u8> extent{0x28, 0xB5, 0x2F, 0xFD, 0x00, 7 << 3};
+    raw_block(extent, filler);
+    REQUIRE(extent.size() == 128 * 1024 - 100);
+    // A 4-byte content size of 4096 and a 2^28 window.
+    extent.insert(extent.end(), {0x28, 0xB5, 0x2F, 0xFD, 0x80, 18 << 3, 0x00, 0x10, 0x00, 0x00});
+    raw_block(extent, small);
+    std::vector<u8> content = filler;
+    content.insert(content.end(), small.begin(), small.end());
+    const Member member{extent, content.size(), 1, {}, Sha256(content)};
+    TempDir t;
+    // 64 KiB spills the member.
+    NupContainer nup{Backing(BuildNup({member})), std::size_t{64} << 10, t.path};
+    REQUIRE(nup.GetStatus() == Loader::ResultStatus::Success);
+    REQUIRE(nup.VerifyIntegrity({}) == Loader::ResultStatus::ErrorIntegrityVerificationFailed);
+    // A read gets the first frame and fails at the second.
+    const auto file = nup.OpenFile(0);
+    REQUIRE(ReadMatches(file, content, 0, filler.size()));
+    std::vector<u8> buffer(small.size());
+    REQUIRE(file->Read(buffer.data(), buffer.size(), filler.size()) == 0);
+}
+
+TEST_CASE("Verifying a NUP polls its callback while a small extent decodes to much",
+          "[nup][nup-read]") {
+    // 64 MiB of zeros in a few KiB: one input chunk decodes to far more than the 4 MiB step, and
+    // the callback, which is also the cancel, is called while it does.
+    const std::vector<u8> zeros(64 << 20);
+    const Member member{Zstd(zeros), zeros.size(), 1, {}, Sha256(zeros)};
+    REQUIRE(member.extent.size() < (1 << 20));
+    TempDir t;
+    NupContainer nup{Backing(BuildNup({member})), std::size_t{64} << 20, t.path};
+    REQUIRE(nup.GetStatus() == Loader::ResultStatus::Success);
+    std::size_t calls{};
+    REQUIRE(nup.VerifyIntegrity([&](std::size_t, std::size_t) {
+        ++calls;
+        return true;
+    }) == Loader::ResultStatus::Success);
+    REQUIRE(calls >= (64 << 20) / (4 << 20));
+    // A cancel inside the member stops it there.
+    calls = 0;
+    REQUIRE(nup.VerifyIntegrity([&](std::size_t, std::size_t) { return ++calls < 3; }) ==
+            Loader::ResultStatus::ErrorIntegrityVerificationFailed);
+    REQUIRE(calls == 3);
+}
+
+TEST_CASE("Verifying a NUP with an impossible member size fails without reading it whole",
+          "[nup][nup-read]") {
+    // Found by fuzz_nup: a compressed member recorded 0x250000000200 bytes. Verification read each
+    // member whole, so this allocated that size up front and std::bad_alloc ended the emulator
+    // ("Verify integrity" on a damaged .nup).
+    const auto content = Content(64 * 1024, 15);
+    Member member = ZstdMember(content);
+    member.size = 0x250000000200;
+    member.sha256 = Sha256(content);
+    TempDir t;
+    NupContainer nup{Backing(BuildNup({member})), std::size_t{8} << 20, t.path};
+    REQUIRE(nup.GetStatus() == Loader::ResultStatus::Success);
+    Loader::ResultStatus status{};
+    REQUIRE_NOTHROW(status = nup.VerifyIntegrity({}));
+    REQUIRE(status == Loader::ResultStatus::ErrorIntegrityVerificationFailed);
 }
