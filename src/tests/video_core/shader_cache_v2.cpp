@@ -21,6 +21,7 @@
 
 #include <boost/crc.hpp>
 #include <catch2/catch_test_macros.hpp>
+#include <catch2/matchers/catch_matchers_string.hpp>
 
 #ifndef _WIN32
 #include <csignal>
@@ -347,6 +348,33 @@ TEST_CASE("Carried native records rebuild ambiguous header-offset classification
             }
         }
     }
+}
+
+TEST_CASE("A record's missing value is named by what translation asked for",
+          "[shader_cache_v2][texture_header_records]") {
+    const std::array<u64, 2> code{0x123456789abcdef0, 0xfedcba9876543210};
+    NativeTestEnvironment source{Shader::Stage::Fragment, std::span<const u64>{code}, 2};
+    source.SetTextureInfo(3, Shader::TextureType::Color2D, Shader::TexturePixelFormat::R16_FLOAT);
+    std::ostringstream serialized(std::ios::binary);
+    source.Serialize(serialized, ReadProperties);
+    const std::string bytes = serialized.str();
+    std::istringstream file(bytes, std::ios::binary);
+    VideoCommon::FileEnvironment env;
+    env.Deserialize(file, std::streampos{static_cast<std::streamoff>(bytes.size())});
+
+    using Catch::Matchers::ContainsSubstring;
+    // A constant buffer value used to be reported as a texture type.
+    REQUIRE_THROWS_WITH(static_cast<void>(env.ReadCbufValue(2, 0x1c0)),
+                        ContainsSubstring("cbuf 2 offset 0x1c0") &&
+                            !ContainsSubstring("texture"));
+    REQUIRE_THROWS_WITH(static_cast<void>(env.ReadTextureType(0x4380)),
+                        ContainsSubstring("texture type") && ContainsSubstring("0x4380"));
+    REQUIRE_THROWS_WITH(static_cast<void>(env.ReadTexturePixelFormat(0x4380)),
+                        ContainsSubstring("texture pixel format") && ContainsSubstring("0x4380"));
+    REQUIRE_THROWS_WITH(static_cast<void>(env.IsCbufStorageBufferPointer(3, 0x40)),
+                        ContainsSubstring("cbuf 3 offset 0x40"));
+    REQUIRE_THROWS_WITH(static_cast<void>(env.IsCbufIndirectStorageBufferPointer(3, 0x40, 0x8)),
+                        ContainsSubstring("cbuf 3 offset 0x40 entry 0x8"));
 }
 
 TEST_CASE("Shader cache v2: every kind of record reads back as written", "[video_core][shader_cache_v2]") {
