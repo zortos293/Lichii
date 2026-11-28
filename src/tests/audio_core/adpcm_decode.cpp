@@ -20,6 +20,7 @@
 #include "core/hle/kernel/k_process.h"
 #include "core/hle/kernel/kernel.h"
 #include "core/memory.h"
+#include "tests/common/committed_guest_memory.h"
 #include "tests/core/system_test_context.h"
 
 namespace {
@@ -108,6 +109,7 @@ TEST_CASE("ADPCM wave buffers decode to the reference decoder's samples", "[audi
     };
     auto& table = process.GetPageTable().GetImpl();
     table.Resize(20, 12);
+    Tests::CommitFixtureMemory(system.DeviceMemory());
     auto* page = system.DeviceMemory().buffer.BackingBasePointer() + 0x10000;
     std::memset(page, 0, 0x1000);
     table.entries.GetAndFault(Base >> 12)

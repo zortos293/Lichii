@@ -101,6 +101,7 @@ struct KernelCore::Impl {
         // Derive the initial memory layout from the emulated board
         Init::InitializeSlabResourceCounts(kernel);
         DeriveInitialMemoryLayout();
+        CommitKernelMemory();
         Init::InitializeSlabHeaps(system, *memory_layout);
 
         // Initialize kernel memory and resources.
@@ -773,6 +774,33 @@ struct KernelCore::Impl {
         // Cache all linear regions in their own trees for faster access, later.
         memory_layout->InitializeLinearMemoryRegionTrees(aligned_linear_phys_start,
                                                          linear_region_start);
+    }
+
+    /// The guest memory section only reserves its pages on Windows. The kernel writes its own
+    /// regions (code, slab heaps, page table heap, pool management) without allocating them from a
+    /// pool: commit everything outside the user pools now. The pools commit as they hand pages out.
+    void CommitKernelMemory() {
+        auto& buffer = system.DeviceMemory().buffer;
+        size_t committed = 0;
+        for (const auto& region : memory_layout->GetPhysicalMemoryRegionTree()) {
+            if (!region.IsDerivedFrom(KMemoryRegionType_Dram) ||
+                region.IsDerivedFrom(KMemoryRegionType_DramUserPool)) {
+                continue;
+            }
+            const u64 begin = region.GetAddress() - Core::DramMemoryMap::Base;
+            const u64 end = (std::min<u64>)(begin + region.GetSize(), buffer.BackingSize());
+            if (begin >= end) {
+                continue;
+            }
+            if (!buffer.CommitBacking(begin, end - begin)) {
+                LOG_CRITICAL(Kernel, "Failed to commit kernel memory region {:#x}+{:#x}",
+                             region.GetAddress(), region.GetSize());
+                continue;
+            }
+            committed += end - begin;
+        }
+        LOG_INFO(Kernel, "Committed {} MiB of kernel memory outside the user pools",
+                 committed >> 20);
     }
 
     void InitializeMemoryLayout() {

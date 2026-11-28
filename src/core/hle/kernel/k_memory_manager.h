@@ -335,7 +335,7 @@ private:
     };
 
 private:
-    void MarkUsed(KPhysicalAddress address, size_t num_pages);
+    [[nodiscard]] bool MarkUsed(KPhysicalAddress address, size_t num_pages);
     void MarkDirty(KPhysicalAddress address, size_t num_pages);
 
     Impl& GetManager(KPhysicalAddress address) {

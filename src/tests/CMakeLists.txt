@@ -38,6 +38,7 @@ add_executable(tests
     core/home_menu.cpp
     core/window_system.cpp
     core/native_home_bootstrap.cpp
+    core/guest_memory_commit.cpp
     core/kernel_finish_termination.cpp
     core/nx2_thread_stats.cpp
     core/nx2_debug_server.cpp
@@ -250,6 +251,7 @@ add_executable(tests
     common/game_presets.cpp
     common/host_memory.cpp
     common/host_memory_failure.cpp
+    common/committed_guest_memory.h
     common/host_memory_test_access.h
     core/host_memory_failure.cpp
     common/library_exceptions.cpp

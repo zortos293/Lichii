@@ -29,12 +29,36 @@ public:
         control.fail_fallback = true;
     }
 
+    void AllowFastmem() {
+        control.fail_fastmem = false;
+    }
+
+    /// Windows: the fault handler's registration fails, as when AddVectoredExceptionHandler
+    /// returns null.
+    void FailFaultHandler() {
+        control.fail_fault_handler = true;
+    }
+
+    size_t BackingSize() const {
+        return control.backing_size;
+    }
+
     size_t FastmemAttempts() const {
         return control.fastmem_attempts;
     }
 
     size_t FallbackAttempts() const {
         return control.fallback_attempts;
+    }
+
+    /// Makes every CommitBacking of the memory fail, as when Windows is out of commit.
+    static void FailCommits(HostMemory& memory, bool fail) {
+        memory.commits_left_for_test = fail ? 0 : HostMemory::NoCommitLimit;
+    }
+
+    /// Lets the next `count` CommitBacking calls of the memory succeed and fails the ones after.
+    static void FailCommitsAfter(HostMemory& memory, size_t count) {
+        memory.commits_left_for_test = count;
     }
 
 private:

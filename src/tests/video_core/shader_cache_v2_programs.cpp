@@ -29,6 +29,7 @@
 #include "shader_recompiler/frontend/ampere/trap_guards.h"
 #include "shader_recompiler/program_header.h"
 #include "shader_recompiler/stage.h"
+#include "tests/common/committed_guest_memory.h"
 #include "tests/core/system_test_context.h"
 #include "video_core/engines/kepler_compute.h"
 #include "video_core/gpu.h"
@@ -409,6 +410,7 @@ struct NativeComputeFixture {
 
     NativeComputeFixture() {
         system.Initialize();
+        Tests::CommitFixtureMemory(physical);
         process = std::make_unique<Kernel::KProcess>(system.Kernel());
         auto& table = process->GetPageTable().GetImpl();
         table.Resize(24, 12);

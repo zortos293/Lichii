@@ -360,6 +360,8 @@ TEST_CASE("HostMemory: Trim zero pages keeps contents", "[common]") {
     std::memset(view, 0, Page);
     std::memset(view + Page, 0x5a, Page);
     std::memset(view + 2 * Page, 0, 2 * Page);
+    // No view maps it: commit it (Windows reserves guest memory).
+    REQUIRE(mem.CommitBacking(0x400000, Page));
     std::memset(backing + 0x400000, 0, Page);
 
     const auto resident = [](const void* address) {
