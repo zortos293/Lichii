@@ -1560,7 +1560,13 @@ inline LoweredProgram LowerToMaxwellWith(std::span<const Instruction> code, u32 
             const u32 dimension = insn.Bits(61, 3); // Maxwell's dimension codes.
             const u32 reserved = uses_uniform_bank ? high_uniform_base : 246U;
             const u32 count = static_cast<u32>(std::popcount(channels));
-            if ((insn.words[2] & ~0xf00U) != 0x001e0000 || channels == 0 || dimension == 2 || dimension > 5 ||
+            // Bits 77-80 are the memory order (Mesa NAK, SM80+): 0 constant, 4 weak, 5/7/10
+            // strong CTA/GPU/system. Xenoblade DE's pixel shaders use .STRONG.SYS loads.
+            const u32 order = insn.Bits(77, 4);
+            const bool strong = order == 5 || order == 7 || order == 10;
+            const bool known_order = order == 0 || order == 4 || strong;
+            if ((insn.words[2] & ~0x1ef00U) != 0x001e0000 || !known_order || channels == 0 ||
+                dimension == 2 || dimension > 5 ||
                 binding >= 18 || offset > 0x1fff || insn.Bits(59, 2) || dest == 255 ||
                 coordinate > (dimension >= 4 ? 252U : dimension == 3 ? 253U : 254U) ||
                 (dimension < 2 && (coordinate >= reserved || dest + count > reserved ||
@@ -1569,8 +1575,10 @@ inline LoweredProgram LowerToMaxwellWith(std::span<const Instruction> code, u32 
             if (result.required_texture_buffer != ~0U && result.required_texture_buffer != binding)
                 return fail(index, "native surface descriptor buffer conflict");
             result.required_texture_buffer = binding;
+            if (strong) emit(0xef98000000000000ULL | predicate | (u64{1} << 8)); // MEMBAR.GL
             emit(base(0xeb00000000000000ULL) | (u64{coordinate} << 8) |
                 (u64{channels} << 20) | (u64{dimension} << 33) | (u64{offset} << 36) | (u64{1} << 51));
+            if (strong) emit(0xef98000000000000ULL | predicate | (u64{1} << 8));
             break;
         }
         case 0xb9d: {
@@ -1594,7 +1602,11 @@ inline LoweredProgram LowerToMaxwellWith(std::span<const Instruction> code, u32 
             const u32 mask = insn.Bits(72, 4);
             const u32 mode = insn.words[2] & ~0xf00U;
             const u32 reserved = uses_uniform_bank ? high_uniform_base : 246U;
-            const bool strong = mode == 0x0010a000; // Strong stores are fenced on both sides.
+            // Bits 77-80 are the memory order, as for SULD.P: 5/7/10 strong CTA/GPU/system.
+            // Strong stores are fenced on both sides.
+            const u32 order = insn.Bits(77, 4);
+            const bool strong = mode == 0x0010a000 ||
+                                ((mode & ~0x1e000U) == 0x00100000 && (order == 7 || order == 10));
             if (!mask || (mode != 0x00100000 && !strong) || dimension == 2 || dimension > 5 ||
                 binding >= 18 || offset > 0x1fff || insn.Bits(59, 2) || data > 252 ||
                 coordinate > (dimension >= 4 ? 252U : dimension == 3 ? 253U : 254U) ||

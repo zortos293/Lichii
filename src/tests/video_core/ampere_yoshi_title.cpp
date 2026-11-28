@@ -103,6 +103,43 @@ TEST_CASE("Yoshi global atomics preserve operations and signed address offsets",
     }
 }
 
+TEST_CASE("Strongly ordered SULD.P loads and SUST.P stores are fenced",
+          "[video_core][ampere][xenoblade]") {
+    constexpr u64 Fence = 0xef98000000070100ULL;
+    const auto lower = [](u32 opcode, u32 order) {
+        auto instruction = Surface(opcode, 1, (opcode == 0xb97 ? 0x001e0000U : 0x00100000U) |
+                                                  (order << 13));
+        Set(instruction, 72, 4, 1);
+        return LowerToMaxwell(std::array{instruction, Exit});
+    };
+    for (const u32 order : {0U, 4U, 5U, 7U, 10U}) {
+        const bool strong = order >= 5;
+        const auto lowered = lower(0xb97, order);
+        INFO(order << ": " << lowered.error);
+        REQUIRE(lowered);
+        REQUIRE(lowered.instructions[strong ? 1 : 0] ==
+                (0xeb00000000070008ULL | (u64{2} << 8) | (u64{1} << 20) | (u64{1} << 33) |
+                 (u64{0x10} << 36) | (u64{1} << 51)));
+        REQUIRE(std::count(lowered.instructions.begin(), lowered.instructions.end(), Fence) ==
+                (strong ? 2 : 0));
+    }
+    for (const u32 order : {1U, 2U, 3U, 6U, 8U, 9U, 15U}) {
+        REQUIRE_FALSE(lower(0xb97, order));
+    }
+    for (const u32 order : {7U, 10U}) {
+        const auto lowered = lower(0xb9b, order);
+        INFO(order << ": " << lowered.error);
+        REQUIRE(lowered);
+        REQUIRE(lowered.instructions[1] ==
+                (0xeb2000000007000cULL | (u64{2} << 8) | (u64{1} << 20) | (u64{1} << 33) |
+                 (u64{0x10} << 36) | (u64{1} << 51)));
+        REQUIRE(std::count(lowered.instructions.begin(), lowered.instructions.end(), Fence) == 2);
+    }
+    for (const u32 order : {4U, 6U, 9U}) {
+        REQUIRE_FALSE(lower(0xb9b, order));
+    }
+}
+
 TEST_CASE("Yoshi one-dimensional surfaces retain masks and strong stores",
           "[video_core][ampere][yoshi]") {
     for (const u32 dimension : {0U, 1U, 3U, 4U, 5U}) {
