@@ -25,8 +25,9 @@ namespace {
         // "SDL and cubeb backends previously resulted in different names for the output which
         // caused them be identified as different applications by the OS."
         //
+        // SDL 3.4 names audio clients from the app name and has no audio-specific hint for it.
         // Keep in sync with cubeb_sink.cpp name.
-        SDL_SetHint("SDL_AUDIO_DEVICE_APP_NAME", "Lichii Latency Getter");
+        SDL_SetHint(SDL_HINT_APP_NAME, "Lichii");
 #ifdef __ANDROID__
         SDL_SetHintWithPriority(SDL_HINT_AUDIO_DRIVER, "openslES", SDL_HINT_OVERRIDE);
         if (!SDL_InitSubSystem(SDL_INIT_AUDIO)) {
