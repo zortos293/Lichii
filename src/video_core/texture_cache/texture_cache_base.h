@@ -661,7 +661,7 @@ private:
 
     /// Remove image views references from the cache
     void RemoveImageViewReferences(std::span<const ImageViewId> removed_views);
-    void InvalidateXc2LutViews(ImageBase& image);
+    void InvalidateXenobladeLutViews(ImageBase& image);
 
     /// Per image view, the (channel, descriptor) entries of the channels' image_views maps that
     /// point to it. Deleting an image erased them by scanning every map (title 1: ~5,000 entries,

@@ -53,8 +53,11 @@
 
 namespace VideoCommon {
 
-inline constexpr u64 Xc2ProgramId = 0x0400E95004038001ULL;
 inline constexpr u64 DkbProgramId = 0x040074A01BF12000ULL;
+
+[[nodiscard]] inline bool UsesXenobladeLutLayout(u64 program_id) {
+    return program_id == 0x0400E95004038001ULL || program_id == 0x0400FF500E34A001ULL;
+}
 
 /// EDEN_NATIVE_DRAW_DIAGNOSTICS is read once: getenv scans the whole environment block on Windows.
 [[nodiscard]] inline bool NativeDrawDiagnostics() {
@@ -2540,7 +2543,7 @@ template <class P>
 void TextureCache<P>::MarkImageWritten(ImageId image_id, Image& image, DAddr cpu_addr,
                                        size_t size) {
     VideoCommon::Nx2FastDraw::Break(VideoCommon::Nx2FastDraw::Reason::Invalidation);
-    InvalidateXc2LutViews(image);
+    InvalidateXenobladeLutViews(image);
     if (image.info.native_tiling && True(image.flags & ImageFlagBits::GpuModified) &&
         HasGuestRange(image) && False(image.flags & ImageFlagBits::NonContiguous) &&
         cpu_addr <= image.cpu_addr && image.cpu_addr_end - cpu_addr <= size) {
@@ -4200,12 +4203,12 @@ ImageViewId TextureCache<P>::CreateImageView(const TICEntry& raw_config, bool& r
     const u64 layer_offset = u64{config.BaseLayer()} * info.layer_stride;
     const GPUVAddr image_gpu_addr = config.Address() - layer_offset;
     ImageId image_id{};
-    const bool xc2_lut =
+    const bool xenoblade_lut =
         native && info.type == ImageType::e3D && info.format == PixelFormat::A8B8G8R8_UNORM &&
         info.size == Extent3D{16, 16, 16} && info.resources.levels == 1 && info.num_samples == 1 &&
         config.IsBlockLinear() && config.load_store_hint != 0 && config.BaseLayer() == 0 &&
-        Settings::GetCurrentProgramID() == Xc2ProgramId;
-    if (xc2_lut) {
+        UsesXenobladeLutLayout(Settings::GetCurrentProgramID());
+    if (xenoblade_lut) {
         if (const ImageId native_id = FindImage(info, image_gpu_addr, RelaxedOptions{}); native_id) {
             const ImageBase& image = slot_images[native_id];
             if (image.first_written_frame != 0 && image.gpu_addr == image_gpu_addr &&
@@ -4244,7 +4247,7 @@ ImageViewId TextureCache<P>::CreateImageView(const TICEntry& raw_config, bool& r
     ImageViewBase& image_view = slot_image_views[image_view_id];
     image_view.flags |= ImageViewFlagBits::Strong;
     image.flags |= ImageFlagBits::Strong;
-    image.xc2_lut_view |= xc2_lut;
+    image.xenoblade_lut_view |= xenoblade_lut;
     return image_view_id;
 }
 
@@ -5982,11 +5985,11 @@ void TextureCache<P>::RemoveImageViewReferences(std::span<const ImageViewId> rem
 }
 
 template <class P>
-void TextureCache<P>::InvalidateXc2LutViews(ImageBase& image) {
-    if (!image.xc2_lut_view) {
+void TextureCache<P>::InvalidateXenobladeLutViews(ImageBase& image) {
+    if (!image.xenoblade_lut_view) {
         return;
     }
-    image.xc2_lut_view = false;
+    image.xenoblade_lut_view = false;
     RemoveImageViewReferences(image.image_view_ids);
     for (size_t channel : active_channel_ids) {
         auto& info = channel_storage[channel];
@@ -6022,13 +6025,14 @@ void TextureCache<P>::MarkModification(ImageBase& image) noexcept {
     image.flags |= ImageFlagBits::GpuModified;
     image.storage_written_levels = 0;
     SetModificationTick(slot_images, image, ++modification_tick);
-    if (image.overlapping_images.empty() || Settings::GetCurrentProgramID() != Xc2ProgramId) {
+    if (image.overlapping_images.empty() ||
+        !UsesXenobladeLutLayout(Settings::GetCurrentProgramID())) {
         return;
     }
     for (ImageId other_id : image.overlapping_images) {
         ImageBase& other = slot_images[other_id];
         if (image.info.native_tiling != other.info.native_tiling) {
-            InvalidateXc2LutViews(other);
+            InvalidateXenobladeLutViews(other);
         }
     }
 }

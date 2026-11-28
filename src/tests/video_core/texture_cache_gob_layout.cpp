@@ -8,6 +8,7 @@
 #include <utility>
 #include <vector>
 #include <catch2/catch_test_macros.hpp>
+#include <catch2/generators/catch_generators.hpp>
 
 #include "common/page_table.h"
 #include "common/scope_exit.h"
@@ -190,7 +191,7 @@ struct TextureCacheTestAccess {
         auto& channel = *cache.channel_state;
         auto& image = cache.slot_images[id];
         const auto view = cache.FindOrEmplaceImageView(id, ImageViewInfo{tic, 0});
-        image.xc2_lut_view = true;
+        image.xenoblade_lut_view = true;
         channel.image_views.emplace(tic, view);
         cache.image_view_descriptors[view].emplace_back(cache.current_channel_id, tic);
     }
@@ -542,7 +543,7 @@ TEST_CASE("Hinted BC7 lookup waits for GPU-written native overlap bytes",
     }
 }
 
-TEST_CASE("Cached XC2 LUT layout is invalidated by a conflicting write",
+TEST_CASE("Cached Xenoblade LUT layout is invalidated by a conflicting write",
           "[video_core][texture_cache][gob_layout]") {
     using namespace VideoCommon;
     using namespace Tegra::Texture;
@@ -550,7 +551,9 @@ TEST_CASE("Cached XC2 LUT layout is invalidated by a conflicting write",
     Fixture f;
     const u64 saved_program_id = Settings::GetCurrentProgramID();
     SCOPE_EXIT { Settings::SetCurrentProgramID(saved_program_id); };
-    Settings::SetCurrentProgramID(Xc2ProgramId);
+    const auto program_id = GENERATE(0x0400E95004038001ULL, 0x0400FF500E34A001ULL);
+    CAPTURE(program_id);
+    Settings::SetCurrentProgramID(program_id);
     constexpr GPUVAddr gpu_addr = 0x100000;
     constexpr DAddr cpu_addr = 0x10000;
     TICEntry tic{};

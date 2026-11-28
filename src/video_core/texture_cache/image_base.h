@@ -145,7 +145,7 @@ struct ImageBase {
     u64 load_tick = 0;
     /// frame_tick + 1 of the first frame a render pass other than a clear wrote it, or 0.
     u64 first_written_frame = 0;
-    bool xc2_lut_view = false;
+    bool xenoblade_lut_view = false;
     /// Levels whose every layer a shader last wrote through a storage view. Any other GPU write
     /// (render pass, clear, copy, alias copy) and an upload from guest memory clear them.
     u32 storage_written_levels = 0;
