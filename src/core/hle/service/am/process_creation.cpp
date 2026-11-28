@@ -95,22 +95,25 @@ std::unique_ptr<Process> CreateApplicationProcess(std::vector<u8>& out_control, 
             std::fill(out_control.begin(), out_control.end(), (u8) 0);
         }
 
-        auto& storage = system.GetContentProviderUnion();
-        Service::Glue::ApplicationLaunchProperty launch{};
-        launch.title_id = process->GetProgramId();
-
-        FileSys::PatchManager pm{launch.title_id, system.GetFileSystemController(), storage};
-        launch.version = pm.GetGameVersion().value_or(0);
-
-        // TODO(DarkLordZach): When FSController/Game Card Support is added, if
-        // current_process_game_card use correct StorageId
-        launch.base_game_storage_id = GetStorageIdForFrontendSlot(storage.GetSlotForEntry(launch.title_id, FileSys::ContentRecordType::Program));
-        launch.update_storage_id = GetStorageIdForFrontendSlot(storage.GetSlotForEntry(FileSys::GetUpdateTitleID(launch.title_id), FileSys::ContentRecordType::Program));
-
+        const auto launch = BuildApplicationLaunchProperty(system, process->GetProgramId());
         system.GetARPManager().Register(launch.title_id, launch, out_control);
         return process;
     }
     return nullptr;
+}
+
+Glue::ApplicationLaunchProperty BuildApplicationLaunchProperty(Core::System& system, u64 program_id) {
+    auto& storage = system.GetContentProviderUnion();
+    const auto base_slot = storage.GetSlotForEntry(program_id, FileSys::ContentRecordType::Program);
+    const auto update_slot = storage.GetSlotForEntry(FileSys::GetUpdateTitleID(program_id),
+                                                     FileSys::ContentRecordType::Program);
+    const FileSys::PatchManager pm{program_id, system.GetFileSystemController(), storage};
+    return {
+        .title_id = program_id,
+        .version = pm.GetGameVersion().value_or(0),
+        .base_game_storage_id = GetStorageIdForFrontendSlot(base_slot),
+        .update_storage_id = GetStorageIdForFrontendSlot(update_slot),
+    };
 }
 
 bool IsSwitch2Application(Core::System& system, u64 program_id) {

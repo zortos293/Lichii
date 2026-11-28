@@ -1298,11 +1298,11 @@ void System::RegisterLaunchInNewSessionCallback(LaunchInNewSessionCallback&& cal
     impl->launch_in_new_session_callback = std::move(callback);
 }
 
-bool System::LaunchInNewSession(u64 program_id) {
+bool System::LaunchInNewSession(NewSessionLaunch launch) {
     if (!impl->launch_in_new_session_callback) {
         return false;
     }
-    impl->launch_in_new_session_callback(program_id);
+    impl->launch_in_new_session_callback(std::move(launch));
     return true;
 }
 

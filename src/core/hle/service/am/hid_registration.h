@@ -26,7 +26,7 @@ public:
     explicit HidRegistration(Core::System& system, Process& process);
     ~HidRegistration();
 
-    void RegisterCurrentProcess();
+    void RegisterCurrentProcess(Core::System& system);
     void EnableAppletToGetInput(bool enable_pad, bool enable_touch);
 
 private:

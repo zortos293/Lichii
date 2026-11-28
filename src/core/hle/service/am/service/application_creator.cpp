@@ -33,13 +33,9 @@ Result CreateGuestApplication(SharedPointer<IApplicationAccessor>* out_applicati
         IsSwitch2Application(system, program_id) ||
         (nca_raw == nullptr && NS::GetGameListApplicationPath(system, program_id).has_value());
     if (own_session) {
-        if (system.LaunchInNewSession(program_id)) {
-            LOG_INFO(Service_AM, "{:016X}: booting it in a new session", program_id);
-        } else {
-            LOG_ERROR(Service_AM, "{:016X} needs a session of its own, which this frontend can't start",
-                      program_id);
-        }
-        R_THROW(ResultUnknown);
+        *out_application_accessor =
+            std::make_shared<IApplicationAccessor>(system, program_id, window_system);
+        R_SUCCEED();
     }
 
     R_UNLESS(nca_raw != nullptr, ResultUnknown);

@@ -23,15 +23,24 @@
 #include "core/file_sys/patch_manager.h"
 #include "core/file_sys/registered_cache.h"
 #include "core/file_sys/vfs/vfs_vector.h"
+#include "core/hle/ipc.h"
 #include "core/hle/kernel/k_process.h"
+#include "core/hle/kernel/k_scoped_resource_reservation.h"
+#include "core/hle/kernel/k_server_session.h"
 #include "core/hle/kernel/k_thread.h"
 #include "core/hle/kernel/kernel.h"
 #include "core/hle/service/am/am_types.h"
+#include "core/hle/service/am/applet_manager.h"
 #include "core/hle/service/am/process_creation.h"
+#include "core/hle/service/am/service/application_creator.h"
+#include "core/hle/service/am/service/storage.h"
+#include "core/hle/service/am/window_system.h"
 #include "core/hle/service/ns/application_manager_interface.h"
 #include "core/hle/service/ns/game_list_applications.h"
 #include "core/hle/service/os/process.h"
+#include "core/hle/service/server_manager.h"
 #include "core/loader/deconstructed_rom_directory.h"
+#include "core/memory.h"
 #include "tests/core/system_test_context.h"
 
 using Service::AM::AppletProgramId;
@@ -179,11 +188,12 @@ TEST_CASE("A HOME Menu launch in a new session reaches the frontend that can boo
     Core::System system;
     constexpr u64 Switch2Title = 0x0400C3F00006E000ULL;
 
-    CHECK_FALSE(system.LaunchInNewSession(Switch2Title));
+    CHECK_FALSE(system.LaunchInNewSession({.program_id = Switch2Title}));
 
     std::optional<u64> launched;
-    system.RegisterLaunchInNewSessionCallback([&](u64 program_id) { launched = program_id; });
-    CHECK(system.LaunchInNewSession(Switch2Title));
+    system.RegisterLaunchInNewSessionCallback(
+        [&](Core::System::NewSessionLaunch launch) { launched = launch.program_id; });
+    CHECK(system.LaunchInNewSession({.program_id = Switch2Title}));
     CHECK(launched == Switch2Title);
 }
 
@@ -203,6 +213,157 @@ TEST_CASE("An installed Switch 2 update is detected without its base RomFS",
     system.RegisterContentProvider(FileSys::ContentProviderUnionSlot::FrontendManual, &installed);
 
     CHECK(Service::AM::IsSwitch2Application(system, Title) == switch2_update);
+}
+
+TEST_CASE("HOME forwards an application only after Start through its CMIF accessor",
+          "[core][am][home_menu]") {
+    using namespace FileSys;
+    constexpr u64 NativeHome = 0x0400000000001000ULL;
+    constexpr u64 Forwarder = 0x0400486024DEC000ULL;
+    ScopedSystemTestContext environment;
+    ManualContentProvider provider;
+    Core::System system;
+    REQUIRE(system.Initialize());
+    provider.ReplaceApplicationPaths({{Forwarder, "forwarder.nup"}});
+    system.RegisterContentProvider(ContentProviderUnionSlot::FrontendManual, &provider);
+
+    auto& kernel = system.Kernel();
+    Kernel::KThread bootstrap{kernel};
+    REQUIRE(Kernel::KThread::InitializeDummyThread(system, &bootstrap, nullptr).IsSuccess());
+    kernel.SetCurrentEmuThread(&bootstrap);
+    kernel.Initialize();
+    SCOPE_EXIT {
+        system.CoreTiming().ClearPendingEvents();
+        kernel.Shutdown();
+        kernel.SetCurrentEmuThread(nullptr);
+        kernel.UnregisterKernelObject(&bootstrap);
+    };
+
+    auto [selection, loader] = Loader::AppLoader_DeconstructedRomDirectory::CreateNativeHomeExecutable(
+        MakeHomeExeFS(true, NativeHome, PoolPartition::System));
+    REQUIRE(selection == Loader::ResultStatus::Success);
+    Service::Process process{system};
+    Loader::ResultStatus load{};
+    REQUIRE(process.Initialize(*loader, load));
+    auto* const owner = process.GetHandle();
+    Kernel::KScopedResourceReservation reservation{
+        kernel, owner, Kernel::LimitableResource::ThreadCountMax};
+    REQUIRE(reservation.Succeeded());
+    auto* const client = Kernel::KThread::Create(kernel);
+    REQUIRE(client != nullptr);
+    REQUIRE(Kernel::KThread::InitializeUserThread(system, client, {}, 0, {}, 44, 0, owner)
+                .IsSuccess());
+    reservation.Commit();
+    Kernel::KThread::Register(kernel, client);
+    SCOPE_EXIT {
+        kernel.GlobalSchedulerContext().RemoveThread(client);
+        client->Close(kernel);
+    };
+
+    Service::AM::WindowSystem window{system};
+    Service::ServerManager server{system};
+    server.SkipLoop();
+    auto manager = std::make_shared<Service::SessionRequestManager>(kernel, server);
+    manager->SetSessionHandler(std::make_shared<Service::AM::IApplicationCreator>(system, window));
+    manager->ConvertToDomain();
+    Kernel::KServerSession session{kernel};
+    auto& memory = owner->GetMemory();
+    const auto tls = client->GetTlsAddress();
+    const auto request = [&](u32 object, u32 command, std::span<const u32> raw = {},
+                             u32 input_object = 0) {
+        std::array<u32_le, IPC::COMMAND_BUFFER_LENGTH> words{};
+        IPC::CommandHeader header{};
+        header.type.Assign(IPC::CommandType::Request);
+        header.data_size.Assign(static_cast<u32>(12 + raw.size() + (input_object != 0)));
+        std::memcpy(words.data(), &header, sizeof(header));
+        IPC::DomainMessageHeader domain{};
+        domain.command.Assign(IPC::DomainMessageHeader::CommandType::SendMessage);
+        domain.input_object_count.Assign(input_object != 0);
+        domain.size.Assign(static_cast<u32>((4 + raw.size()) * sizeof(u32)));
+        domain.object_id = object;
+        std::memcpy(words.data() + 4, &domain, sizeof(domain));
+        words[8] = 0x49434653;
+        words[10] = command;
+        std::copy(raw.begin(), raw.end(), words.begin() + 12);
+        if (input_object != 0) {
+            words[12 + raw.size()] = input_object;
+        }
+        memory.WriteBlock(tls, words.data(), sizeof(words));
+        Service::HLERequestContext ctx{kernel, memory, &session, client};
+        ctx.SetSessionRequestManager(manager);
+        REQUIRE(ctx.PopulateFromIncomingCommandBuffer(words.data()).IsSuccess());
+        REQUIRE(manager->CompleteSyncRequest(&session, ctx).IsSuccess());
+        REQUIRE(ctx.WriteToOutgoingCommandBuffer().IsSuccess());
+        memory.ReadBlock(tls, words.data(), sizeof(words));
+        REQUIRE(words[8] == 0x4f434653);
+        return words;
+    };
+
+    std::vector<u64> launches;
+    std::vector<std::vector<u8>> launch_parameters;
+    std::function<void()> reject_launch;
+    const std::array id{static_cast<u32>(Forwarder), static_cast<u32>(Forwarder >> 32)};
+    const auto create = [&](std::span<const u32> title) {
+        const auto reply = request(1, 0, title);
+        REQUIRE(reply[10] == ResultSuccess.raw);
+        const u32 accessor = reply[12];
+        REQUIRE(accessor > 1);
+        REQUIRE_FALSE(manager->DomainHandler(accessor - 1).expired());
+        return accessor;
+    };
+    const u32 accessor = create(id);
+    CHECK(launches.empty());
+    const auto app_id = request(accessor, 120);
+    CHECK(app_id[10] == ResultSuccess.raw);
+    CHECK(app_id[12] == id[0]);
+    CHECK(app_id[13] == id[1]);
+    CHECK(request(accessor, 20)[10] == ResultSuccess.raw);
+    CHECK(launches.empty());
+    CHECK(request(accessor, 10)[10] != ResultSuccess.raw);
+    const std::vector<u8> account_parameter{0x1b, 0x27};
+    const auto storage = manager->AppendDomainHandler(
+        std::make_shared<Service::AM::IStorage>(system, std::vector<u8>{account_parameter}));
+    const std::array account_kind{static_cast<u32>(Service::AM::LaunchParameterKind::AccountPreselectedUser)};
+    CHECK(request(accessor, 121, account_kind, static_cast<u32>(storage))[10] ==
+          ResultSuccess.raw);
+    system.RegisterLaunchInNewSessionCallback([&](Core::System::NewSessionLaunch launch) {
+        launches.push_back(launch.program_id);
+        launch_parameters = std::move(launch.preselected_user_parameters);
+        reject_launch = std::move(launch.on_rejected);
+    });
+    CHECK(request(accessor, 10)[10] == ResultSuccess.raw);
+    CHECK(request(accessor, 10)[10] == ResultSuccess.raw);
+    CHECK(request(accessor, 20)[10] == ResultSuccess.raw);
+    CHECK(launches == std::vector<u64>{Forwarder});
+    REQUIRE(launch_parameters.size() == 1);
+    CHECK(launch_parameters.front() == account_parameter);
+    REQUIRE(reject_launch);
+    reject_launch();
+    CHECK(request(accessor, 1)[12] == 1);
+    CHECK(request(accessor, 30)[10] == ResultUnknown.raw);
+    CHECK(request(accessor, 10)[10] != ResultSuccess.raw);
+
+    const u32 cancelled = create(id);
+    CHECK(request(cancelled, 25)[10] == ResultSuccess.raw);
+    CHECK(request(cancelled, 1)[12] == 1);
+    CHECK(request(cancelled, 10)[10] != ResultSuccess.raw);
+    CHECK(launches == std::vector<u64>{Forwarder});
+}
+
+TEST_CASE("A HOME account parameter identifies a selected user only with a valid payload",
+          "[core][am][home_menu]") {
+    const Common::UUID uid{std::array<u8, 16>{1, 2, 3}};
+    std::vector<u8> parameter(0x88);
+    Put(parameter, 0, u32_le{0xC79497CA});
+    Put(parameter, 4, u32_le{1});
+    Put(parameter, 8, uid);
+    CHECK(Service::AM::ReadPreselectedUser(parameter) == uid);
+    CHECK_FALSE(Service::AM::ReadPreselectedUser(std::span{parameter}.first(0x18)));
+    Put(parameter, 4, u32_le{0});
+    CHECK_FALSE(Service::AM::ReadPreselectedUser(parameter));
+    Put(parameter, 4, u32_le{1});
+    Put(parameter, 8, Common::UUID{});
+    CHECK_FALSE(Service::AM::ReadPreselectedUser(parameter));
 }
 
 TEST_CASE("The HOME Menu lists game list applications next to installed ones",

@@ -13,12 +13,14 @@
 namespace Service::AM {
 
 HidRegistration::HidRegistration(Core::System& system, Process& process) : m_process(process) {
-    m_hid_server = system.ServiceManager().GetService<HID::IHidServer>("hid", true);
-    this->RegisterCurrentProcess();
+    this->RegisterCurrentProcess(system);
 }
 
-void HidRegistration::RegisterCurrentProcess() {
+void HidRegistration::RegisterCurrentProcess(Core::System& system) {
     if (m_process.IsInitialized()) {
+        if (!m_hid_server) {
+            m_hid_server = system.ServiceManager().GetService<HID::IHidServer>("hid", true);
+        }
         m_hid_server->GetResourceManager()->RegisterAppletResourceUserId(m_process.GetProcessId(),
                                                                          true);
         m_hid_server->GetResourceManager()->SetAruidValidForVibration(m_process.GetProcessId(),

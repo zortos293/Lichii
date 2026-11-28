@@ -398,7 +398,7 @@ bool WindowSystem::RestartAppletProcessLocked(Applet* applet) {
     applet->is_process_running = false;
     applet->is_completed = false;
 
-    applet->hid_registration.RegisterCurrentProcess();
+    applet->hid_registration.RegisterCurrentProcess(m_system);
 
     applet->lifecycle_manager.ResetForRelaunch();
     applet->is_activity_runnable = false;

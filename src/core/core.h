@@ -450,14 +450,16 @@ public:
      */
     void ExecuteProgram(std::size_t program_index);
 
-    /// Type used for the frontend to designate a callback for System to boot an installed
-    /// application in a new session, in place of the running one.
-    using LaunchInNewSessionCallback = std::function<void(u64 program_id)>;
+    struct NewSessionLaunch {
+        u64 program_id{};
+        std::vector<std::vector<u8>> preselected_user_parameters{};
+        std::function<void()> on_rejected{};
+    };
+    using LaunchInNewSessionCallback = std::function<void(NewSessionLaunch)>;
     void RegisterLaunchInNewSessionCallback(LaunchInNewSessionCallback&& callback);
 
-    /// Asks the frontend to boot the installed application in a new session. False when the
-    /// frontend cannot.
-    bool LaunchInNewSession(u64 program_id);
+    /// Queues a launch in the frontend. False when it has no handoff callback.
+    bool LaunchInNewSession(NewSessionLaunch launch);
 
     [[nodiscard]] std::vector<std::vector<u8>>& GetUserChannel();
     [[nodiscard]] std::vector<std::vector<u8>>& GetGeneralChannel();

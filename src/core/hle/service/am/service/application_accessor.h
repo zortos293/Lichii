@@ -22,6 +22,7 @@ class IApplicationAccessor final : public ServiceFramework<IApplicationAccessor>
 public:
     explicit IApplicationAccessor(Core::System& system_, std::shared_ptr<Applet> applet,
                                   WindowSystem& window_system);
+    IApplicationAccessor(Core::System& system_, u64 program_id, WindowSystem& window_system);
     ~IApplicationAccessor() override;
 
 private:
@@ -50,6 +51,8 @@ private:
 
     WindowSystem& m_window_system;
     const std::shared_ptr<Applet> m_applet;
+    bool m_forwarder{};
+    bool m_forwarder_started{};
 };
 
 } // namespace Service::AM

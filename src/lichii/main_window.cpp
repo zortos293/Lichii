@@ -106,6 +106,7 @@
 #include <QInputDialog>
 #include <QMimeData>
 #include <QPalette>
+#include <QPointer>
 #include <QProgressDialog>
 #include <QScreen>
 #include <QSet>
@@ -2514,7 +2515,18 @@ void MainWindow::BootGame(const QString& filename, Service::AM::FrontendAppletPa
     speed_limit_before_hotkeys.reset();
     Settings::LogSettings();
 
-    if (UISettings::values.select_user_on_boot && !user_flag_cmd_line) {
+    if (!params.preselected_user_parameters.empty()) {
+        const auto uid = Service::AM::ReadPreselectedUser(params.preselected_user_parameters.back());
+        const auto index = uid ? Service::Account::ProfileManager{}.GetUserIndex(*uid)
+                               : std::nullopt;
+        if (index) {
+            Settings::values.current_user = static_cast<s32>(*index);
+        } else {
+            params.preselected_user_parameters.clear();
+        }
+    }
+    if (UISettings::values.select_user_on_boot && !user_flag_cmd_line &&
+        params.preselected_user_parameters.empty()) {
         const Core::Frontend::ProfileSelectParameters parameters{
             .mode = Service::AM::Frontend::UiMode::UserSelector,
             .invalid_uid_list = {},
@@ -2676,11 +2688,21 @@ void MainWindow::BootGame(const QString& filename, Service::AM::FrontendAppletPa
     QtCommon::system->RegisterExecuteProgramCallback(
         [this](std::size_t program_index_) { render_window->ExecuteProgram(program_index_); });
 
-    QtCommon::system->RegisterLaunchInNewSessionCallback([this](u64 program_id) {
-        QMetaObject::invokeMethod(
-            this, [this, program_id] { OnLaunchInNewSession(program_id); },
-            Qt::QueuedConnection);
-    });
+    QtCommon::system->RegisterLaunchInNewSessionCallback(
+        [this, source = QPointer{QtCommon::emu_thread.get()}](Core::System::NewSessionLaunch launch) {
+            QMetaObject::invokeMethod(
+                this,
+                [this, source, launch = std::move(launch)]() mutable {
+                    if (source && source.data() == QtCommon::emu_thread.get()) {
+                        if (!OnLaunchInNewSession(launch.program_id,
+                                                  std::move(launch.preselected_user_parameters)) &&
+                            launch.on_rejected) {
+                            launch.on_rejected();
+                        }
+                    }
+                },
+                Qt::QueuedConnection);
+        });
 
     QtCommon::system->RegisterExitCallback([this] {
         QtCommon::emu_thread->ForceStop();
@@ -4077,20 +4099,20 @@ void MainWindow::OnExecuteProgram(std::size_t program_index) {
     BootGame(filename, params);
 }
 
-void MainWindow::OnLaunchInNewSession(u64 program_id) {
+bool MainWindow::OnLaunchInNewSession(u64 program_id, std::vector<std::vector<u8>> parameters) {
     // A request queued while its session stops would run inside ShutdownGame's event loop and boot
     // under the outer shutdown, which then takes the new session's thread for a stuck one.
     if (!emulation_running || QtCommon::system->IsShuttingDown()) {
         LOG_WARNING(Frontend, "Dropping HOME Menu launch of {:016X}: its session is stopping",
                     program_id);
-        return;
+        return false;
     }
     QString filename;
     if (const auto path = Service::NS::GetGameListApplicationPath(*QtCommon::system, program_id)) {
         if (!Service::NS::OpenGameListApplication(*QtCommon::system, *path, program_id)) {
             LOG_WARNING(Frontend, "No matching program for HOME Menu application {:016X} in {}",
                         program_id, *path);
-            return;
+            return false;
         }
         filename = QString::fromStdString(*path);
     } else {
@@ -4113,7 +4135,7 @@ void MainWindow::OnLaunchInNewSession(u64 program_id) {
 
     if (filename.isEmpty()) {
         LOG_WARNING(Frontend, "No launch path for HOME Menu application {:016X}", program_id);
-        return;
+        return false;
     }
     LOG_INFO(Frontend, "HOME Menu launch of {:016X} in a new session from {}", program_id,
              filename.toStdString());
@@ -4121,7 +4143,9 @@ void MainWindow::OnLaunchInNewSession(u64 program_id) {
 
     auto params = ApplicationAppletParameters();
     params.program_id = program_id;
-    BootGame(filename, params);
+    params.preselected_user_parameters = std::move(parameters);
+    BootGame(filename, std::move(params));
+    return true;
 }
 
 void MainWindow::OnExit() {

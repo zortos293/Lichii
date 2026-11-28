@@ -27,8 +27,8 @@ namespace {
 constexpr u32 LaunchParameterAccountPreselectedUserMagic = 0xC79497CA;
 
 struct LaunchParameterAccountPreselectedUser {
-    u32 magic;
-    u32 is_account_selected;
+    u32_le magic;
+    u32_le is_account_selected;
     Common::UUID current_user;
     INSERT_PADDING_BYTES(0x70);
 };
@@ -231,6 +231,19 @@ void PushInShowSoftwareKeyboard(Core::System& system, AppletStorageChannel& chan
 AppletManager::AppletManager(Core::System& system) : m_system(system) {}
 AppletManager::~AppletManager() = default;
 
+std::optional<Common::UUID> ReadPreselectedUser(std::span<const u8> parameter) {
+    if (parameter.size() != sizeof(LaunchParameterAccountPreselectedUser)) {
+        return std::nullopt;
+    }
+    LaunchParameterAccountPreselectedUser user{};
+    std::memcpy(&user, parameter.data(), sizeof(user));
+    if (user.magic != LaunchParameterAccountPreselectedUserMagic ||
+        user.is_account_selected != 1 || !user.current_user.IsValid()) {
+        return std::nullopt;
+    }
+    return user.current_user;
+}
+
 void AppletManager::CreateAndInsertByFrontendAppletParameters(
     std::unique_ptr<Process> process, const FrontendAppletParameters& params) {
     {
@@ -328,7 +341,9 @@ void AppletManager::SetWindowSystem(WindowSystem* window_system) {
 
     // TODO: Read whether we need a preselected user from NACP?
     // TODO: This can be done quite easily from loader
-    if (!native_home) {
+    if (!params.preselected_user_parameters.empty()) {
+        applet->preselected_user_launch_parameter = params.preselected_user_parameters;
+    } else if (!native_home) {
         LaunchParameterAccountPreselectedUser lp{};
 
         lp.magic = LaunchParameterAccountPreselectedUserMagic;

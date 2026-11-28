@@ -247,7 +247,7 @@ signals:
 public slots:
     void OnLoadComplete();
     void OnExecuteProgram(std::size_t program_index);
-    void OnLaunchInNewSession(u64 program_id);
+    bool OnLaunchInNewSession(u64 program_id, std::vector<std::vector<u8>> parameters);
     void OnExit();
     void OnSaveConfig();
     void AmiiboSettingsShowDialog(const Core::Frontend::CabinetParameters& parameters,

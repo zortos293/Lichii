@@ -24,8 +24,13 @@ namespace Service {
 class Process;
 }
 
+namespace Service::Glue {
+struct ApplicationLaunchProperty;
+}
+
 namespace Service::AM {
 
+Glue::ApplicationLaunchProperty BuildApplicationLaunchProperty(Core::System& system, u64 program_id);
 std::unique_ptr<Process> CreateProcess(Core::System& system, u64 program_id, u8 minimum_key_generation, u8 maximum_key_generation);
 std::unique_ptr<Process> CreateApplicationProcess(std::vector<u8>& out_control, std::unique_ptr<Loader::AppLoader>& out_loader, Loader::ResultStatus& out_load_result, Core::System& system, FileSys::VirtualFile file, u64 program_id, u64 program_index);
 
