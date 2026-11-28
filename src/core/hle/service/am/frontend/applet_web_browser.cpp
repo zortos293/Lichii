@@ -37,12 +37,13 @@ template <typename T>
 void ParseRawValue(T& value, std::span<const u8> data) {
     static_assert(std::is_trivially_copyable_v<T>,
                   "It's undefined behavior to use memcpy with non-trivially copyable objects");
-    std::memcpy(&value, data.data(), data.size());
+    // The storage size comes from the guest: copy no more than the value holds.
+    std::memcpy(&value, data.data(), (std::min)(data.size(), sizeof(T)));
 }
 
 template <typename T>
 T ParseRawValue(std::span<const u8> data) {
-    T value;
+    T value{};
     ParseRawValue(value, data);
     return value;
 }
