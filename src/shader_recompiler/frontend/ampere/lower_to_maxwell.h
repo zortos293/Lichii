@@ -2906,8 +2906,8 @@ inline LoweredProgram LowerToMaxwellWith(std::span<const Instruction> code, u32 
             }
             // General form: gather the native operand list (array index first, coordinates,
             // then LOD/bias and the depth reference) into Maxwell TEX's coordinate and meta
-            // registers, sample into scratch and copy the packed components out. Native packs
-            // up to four values as halves of Ra and Rb (1+1, 2+1, 2+2), five or more as 4+n.
+            // registers, sample into scratch and copy the packed components out. Scalar TEX
+            // can pack coordinates together with meta operands across Ra and Rb.
             const auto general_tex = [&]() -> bool {
                 constexpr std::array<u32, 8> coordinate_count{1, 2, 3, 3, 2, 3, 0, 4};
                 constexpr std::array<u32, 8> maxwell_type{0, 2, 4, 6, 1, 3, 0, 7};
@@ -2929,8 +2929,8 @@ inline LoweredProgram LowerToMaxwellWith(std::span<const Instruction> code, u32 
                 const u32 handle_slot = opcode == 0x361 ? 1 : 0;
                 const u32 count = coordinates + handle_slot + (has_lod ? 1 : 0) + (offsets ? 1 : 0) +
                                   (depth_compare ? 1 : 0);
-                // Unpacked 0x361 (bit 60 clear): Ra holds the coordinates, Rb the handle and the rest.
-                const u32 in_a = opcode == 0x361 && !insn.Bits(60, 1) ? coordinates
+                // Unpacked TEX (bit 60 clear): Ra holds the coordinates, Rb the meta operands.
+                const u32 in_a = !insn.Bits(60, 1) ? coordinates
                                : count <= 4 ? (count + 1) / 2 : opcode == 0x361 ? coordinates : 4;
                 const auto value = [&](u32 i) -> u32 {
                     if (i < in_a) return source_a == 255 ? 255U : source_a + i;

@@ -340,6 +340,36 @@ TEST_CASE("Ampere half texel fetches reject forms without a TLDS half encoding",
     REQUIRE_FALSE(LowerToMaxwell(std::array{array_level, Exit}));
 }
 
+TEST_CASE("Ampere unpacked array depth samples keep LOD and reference in the second source",
+          "[video_core][ampere]") {
+    for (const u32 lod : {2U, 3U}) {
+        const Instruction sample{{
+            0xb60U | (7U << 12) | (5U << 16) | (12U << 24),
+            40U | (0x10U << 8) | (2U << 22) | (5U << 29),
+            0xffU | (1U << 8) | (1U << 14) | (7U << 17) | (lod << 23),
+            0,
+        }};
+        const auto lowered = LowerToMaxwell(std::array{sample, Exit});
+        INFO(lowered.error);
+        REQUIRE(lowered);
+        REQUIRE(lowered.required_texture_buffer == 2);
+        const u64 pred = 7ULL << 16;
+        const std::array<u64, 7> expected{
+            Copy(pred, 250, 12),
+            Copy(pred, 251, 13),
+            Copy(pred, 252, 14),
+            Copy(pred, 246, 40),
+            Copy(pred, 247, 41),
+            0xc000000000000000ULL | pred | 250 | (250ULL << 8) | (246ULL << 20) |
+                (3ULL << 28) | (1ULL << 31) | (0x10ULL << 36) | (1ULL << 50) |
+                (7ULL << 51) | (u64{lod} << 55),
+            Copy(pred, 5, 250),
+        };
+        REQUIRE(lowered.instructions.size() == expected.size() + 1);
+        CHECK(std::equal(expected.begin(), expected.end(), lowered.instructions.begin()));
+    }
+}
+
 TEST_CASE("Ampere array depth comparisons support nonlegacy descriptor bindings",
           "[video_core][ampere]") {
     // TEX.DC R5, R8 (layer, x), R0 (y, reference in R1), ARRAY_2D, descriptor buffer 4.
