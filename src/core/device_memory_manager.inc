@@ -729,6 +729,7 @@ void DeviceMemoryManager<Traits>::WriteBlock(DAddr address, const void* src_poin
 template <typename Traits>
 void DeviceMemoryManager<Traits>::ReadBlockUnsafe(DAddr address, void* dest_pointer, size_t size,
                                                   std::source_location caller) {
+    std::scoped_lock lk(mapping_guard);
     const std::size_t page_offset = address & Memory::LICHII_PAGEMASK;
     if (size <= Memory::LICHII_PAGESIZE - page_offset) {
         const DAddr guest_page = address & ~static_cast<DAddr>(Memory::LICHII_PAGEMASK);
