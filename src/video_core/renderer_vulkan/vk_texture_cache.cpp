@@ -40,6 +40,7 @@
 #include "video_core/renderer_vulkan/framebuffer_limits.h"
 #include "video_core/renderer_vulkan/maxwell_to_vk.h"
 #include "video_core/renderer_vulkan/vk_compute_pass.h"
+#include "video_core/renderer_vulkan/vk_depth_stencil_download.h"
 #include "video_core/renderer_vulkan/vk_ocarina_camera_motion.h"
 #include "video_core/renderer_vulkan/vk_render_pass_cache.h"
 #include "video_core/renderer_vulkan/vk_scheduler.h"
@@ -3533,8 +3534,18 @@ void Image::DownloadMemory(VkBuffer buffer, size_t offset,
     DownloadMemory(buffer_handles, buffer_offsets, copies);
 }
 
+bool Image::CanPackDepthStencil() const noexcept {
+    return info.num_samples == 1 &&
+           (info.format == PixelFormat::D24_UNORM_S8_UINT ||
+            info.format == PixelFormat::S8_UINT_D24_UNORM) &&
+           aspect_mask == (VK_IMAGE_ASPECT_DEPTH_BIT | VK_IMAGE_ASPECT_STENCIL_BIT);
+}
+
 void Image::DownloadMemory(std::span<VkBuffer> buffers_span, std::span<size_t> offsets_span,
                             std::span<const VideoCommon::BufferImageCopy> copies) {
+    if (copies.empty() || buffers_span.empty()) {
+        return;
+    }
     boost::container::small_vector<VideoCommon::BufferImageCopy, 16> host_copies;
     if (HostMipLevels() < static_cast<u32>(info.resources.levels)) {
         VideoCommon::AppendHostMipEntries(
@@ -3705,17 +3716,48 @@ void Image::DownloadMemory(std::span<VkBuffer> buffers_span, std::span<size_t> o
         }
         return;
     } else {
+        const bool pack_depth_stencil = CanPackDepthStencil();
+        vk::Buffer depth_stencil_staging;
+        boost::container::small_vector<DepthStencilDownload, 16> split_copies;
         boost::container::small_vector<VkBuffer, 8> buffers_vector{};
         boost::container::small_vector<boost::container::small_vector<VkBufferImageCopy, 16>, 8>
             vk_copies;
-        for (size_t index = 0; index < buffers_span.size(); index++) {
-            buffers_vector.emplace_back(buffers_span[index]);
-            vk_copies.emplace_back(
-                TransformBufferImageCopies(copies, offsets_span[index], aspect_mask));
+        if (pack_depth_stencil) {
+            const auto depth_copies = TransformBufferImageCopies(copies, 0, VK_IMAGE_ASPECT_DEPTH_BIT);
+            auto& regions = vk_copies.emplace_back();
+            size_t staging_size = 0;
+            for (const auto& copy : depth_copies) {
+                const auto& split =
+                    split_copies.emplace_back(SplitDepthStencilDownload(copy, staging_size));
+                staging_size = split.EndOffset();
+                regions.insert(regions.end(), split.regions.begin(), split.regions.end());
+            }
+            if (staging_size == 0) {
+                if (is_rescaled) {
+                    ScaleUp(true);
+                }
+                return;
+            }
+            depth_stencil_staging = runtime->memory_allocator.CreateBuffer(
+                {
+                    .sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO,
+                    .size = staging_size,
+                    .usage = VK_BUFFER_USAGE_TRANSFER_DST_BIT,
+                    .sharingMode = VK_SHARING_MODE_EXCLUSIVE,
+                },
+                MemoryUsage::Download);
+            buffers_vector.push_back(*depth_stencil_staging);
+        } else {
+            for (size_t index = 0; index < buffers_span.size(); index++) {
+                buffers_vector.emplace_back(buffers_span[index]);
+                vk_copies.emplace_back(
+                    TransformBufferImageCopies(copies, offsets_span[index], aspect_mask));
+            }
         }
         scheduler->RequestOutsideRenderPassOperationContext();
         scheduler->Record([buffers = std::move(buffers_vector), image = *original_image,
-                           aspect_mask_ = aspect_mask, vk_copies](vk::CommandBuffer cmdbuf) {
+                           aspect_mask_ = aspect_mask, vk_copies = std::move(vk_copies),
+                           pack_depth_stencil](vk::CommandBuffer cmdbuf) {
             const VkImageMemoryBarrier read_barrier{
                 .sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER,
                 .pNext = nullptr,
@@ -3746,7 +3788,10 @@ void Image::DownloadMemory(std::span<VkBuffer> buffers_span, std::span<size_t> o
                 .sType = VK_STRUCTURE_TYPE_MEMORY_BARRIER,
                 .pNext = nullptr,
                 .srcAccessMask = VK_ACCESS_MEMORY_WRITE_BIT,
-                .dstAccessMask = VK_ACCESS_MEMORY_READ_BIT | VK_ACCESS_MEMORY_WRITE_BIT,
+                .dstAccessMask = pack_depth_stencil
+                                     ? VkAccessFlags{VK_ACCESS_HOST_READ_BIT}
+                                     : VkAccessFlags{VK_ACCESS_MEMORY_READ_BIT |
+                                                     VK_ACCESS_MEMORY_WRITE_BIT},
             };
             const VkImageMemoryBarrier image_write_barrier{
                 .sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER,
@@ -3766,9 +3811,55 @@ void Image::DownloadMemory(std::span<VkBuffer> buffers_span, std::span<size_t> o
                     .layerCount = VK_REMAINING_ARRAY_LAYERS,
                 },
             };
-            cmdbuf.PipelineBarrier(VK_PIPELINE_STAGE_TRANSFER_BIT, vk::PIPELINE_STAGE_GRAPHICS_COMPUTE,
+            cmdbuf.PipelineBarrier(VK_PIPELINE_STAGE_TRANSFER_BIT,
+                                   vk::PIPELINE_STAGE_GRAPHICS_COMPUTE |
+                                       (pack_depth_stencil ? VK_PIPELINE_STAGE_HOST_BIT : 0),
                                    0, memory_write_barrier, nullptr, image_write_barrier);
         });
+
+        if (pack_depth_stencil) {
+            scheduler->Finish();
+            depth_stencil_staging.Invalidate();
+            const bool float_depth =
+                MaxwellToVK::SurfaceFormat(runtime->device, FormatType::Optimal, false, info.format)
+                    .format == VK_FORMAT_D32_SFLOAT_S8_UINT;
+            const bool low_stencil = info.format == PixelFormat::S8_UINT_D24_UNORM;
+            size_t packed_size = 0;
+            for (const auto& split : split_copies) {
+                packed_size += split.texels * sizeof(u32);
+            }
+            const auto upload = runtime->UploadStagingBuffer(packed_size);
+            boost::container::small_vector<VkBufferCopy, 16> scatter;
+            size_t packed_offset = 0;
+            for (size_t i = 0; i < copies.size(); ++i) {
+                const auto& split = split_copies[i];
+                split.Pack(upload.mapped_span.subspan(packed_offset), depth_stencil_staging.Mapped(),
+                           float_depth, low_stencil);
+                split.AppendPackedCopies(copies[i], upload.offset + packed_offset, scatter);
+                packed_offset += split.texels * sizeof(u32);
+            }
+            runtime->staging_buffer_pool.FlushUpload(upload, packed_size);
+            for (size_t index = 0; index < buffers_span.size(); ++index) {
+                auto regions = scatter;
+                for (auto& region : regions) {
+                    region.dstOffset += offsets_span[index];
+                }
+                scheduler->Record([src = upload.buffer, dst = buffers_span[index],
+                                   regions = std::move(regions)](vk::CommandBuffer cmdbuf) {
+                    cmdbuf.CopyBuffer(src, dst, regions);
+                    const VkMemoryBarrier barrier{
+                        .sType = VK_STRUCTURE_TYPE_MEMORY_BARRIER,
+                        .srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT,
+                        .dstAccessMask = VK_ACCESS_MEMORY_READ_BIT | VK_ACCESS_MEMORY_WRITE_BIT |
+                                         VK_ACCESS_HOST_READ_BIT,
+                    };
+                    cmdbuf.PipelineBarrier(VK_PIPELINE_STAGE_TRANSFER_BIT,
+                                           VK_PIPELINE_STAGE_ALL_COMMANDS_BIT |
+                                               VK_PIPELINE_STAGE_HOST_BIT,
+                                           0, barrier);
+                });
+            }
+        }
     }
 
     if (is_rescaled) {

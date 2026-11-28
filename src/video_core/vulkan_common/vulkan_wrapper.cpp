@@ -555,9 +555,9 @@ Image::MemoryBlock Image::GetMemoryBlock() const noexcept {
             info.allocationInfo.size};
 }
 
-void Buffer::Flush() const {
+void Buffer::Flush(VkDeviceSize offset, VkDeviceSize size) const {
     if (!is_coherent) {
-        vmaFlushAllocation(allocator, allocation, 0, VK_WHOLE_SIZE);
+        vmaFlushAllocation(allocator, allocation, offset, size);
     }
 }
 

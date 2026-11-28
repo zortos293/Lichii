@@ -3402,9 +3402,20 @@ void TextureCache<P>::PopAsyncFlushes() {
                 const BufferDownload& buffer_info = slot_buffer_downloads[download_info.object_id];
                 std::span<u8> download_span =
                     download_buffer.mapped_span.subspan(download_buffer.offset);
-                gpu_memory->WriteBlockUnsafe(buffer_info.address, download_span.data(),
-                                             buffer_info.size);
-                ClearStaleGpu(*gpu_memory, buffer_info.address, buffer_info.size);
+                if (buffer_info.row_pitch != 0) {
+                    for (u32 row = 0; row < buffer_info.rows; ++row) {
+                        const size_t offset = row * buffer_info.row_pitch;
+                        gpu_memory->WriteBlockUnsafe(buffer_info.address + offset,
+                                                     download_span.data() + offset,
+                                                     buffer_info.row_bytes);
+                        ClearStaleGpu(*gpu_memory, buffer_info.address + offset,
+                                      buffer_info.row_bytes);
+                    }
+                } else {
+                    gpu_memory->WriteBlockUnsafe(buffer_info.address, download_span.data(),
+                                                 buffer_info.size);
+                    ClearStaleGpu(*gpu_memory, buffer_info.address, buffer_info.size);
+                }
                 slot_buffer_downloads.erase(download_info.object_id);
             }
         }
@@ -3562,7 +3573,17 @@ void TextureCache<P>::DownloadImageIntoBuffer(typename TextureCache<P>::Image* i
                                               std::span<const VideoCommon::BufferImageCopy> copies,
                                               GPUVAddr address, size_t size) {
     if constexpr (IMPLEMENTS_ASYNC_DOWNLOADS) {
-        const BufferDownload new_buffer_download{address, size};
+        BufferDownload new_buffer_download{address, size};
+        if constexpr (requires { image->CanPackDepthStencil(); }) {
+            if (image->CanPackDepthStencil()) {
+                const auto& copy = copies.front();
+                new_buffer_download.row_bytes = size_t{copy.image_extent.width} * sizeof(u32);
+                new_buffer_download.row_pitch = copy.buffer_row_length != 0
+                                                    ? size_t{copy.buffer_row_length} * sizeof(u32)
+                                                    : new_buffer_download.row_bytes;
+                new_buffer_download.rows = copy.image_extent.height;
+            }
+        }
         auto slot = slot_buffer_downloads.insert(new_buffer_download);
         const PendingDownload new_download{false, uncommitted_async_buffers.size(), slot};
         uncommitted_downloads.emplace_back(new_download);

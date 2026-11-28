@@ -154,6 +154,19 @@ void StagingBufferPool::FreeDeferred(StagingBufferRef& ref) {
     cache_level.entries.push_back(std::move(node.mapped()));
 }
 
+void StagingBufferPool::FlushUpload(const StagingBufferRef& ref, size_t size) {
+    if (ref.buffer == *stream_buffer) {
+        stream_buffer.Flush(ref.offset, size);
+        return;
+    }
+    auto& entries = GetCache(MemoryUsage::Upload)[ref.log2_level].entries;
+    const auto it = std::ranges::find(entries, ref.index, &StagingBuffer::index);
+    ASSERT(it != entries.end());
+    if (it != entries.end()) {
+        it->buffer.Flush(ref.offset, size);
+    }
+}
+
 void StagingBufferPool::TickFrame() {
     current_delete_level = (current_delete_level + 1) % NUM_LEVELS;
 

@@ -844,7 +844,7 @@ public:
         return is_coherent;
     }
 
-    void Flush() const;
+    void Flush(VkDeviceSize offset = 0, VkDeviceSize size = VK_WHOLE_SIZE) const;
 
     void Invalidate() const;
 

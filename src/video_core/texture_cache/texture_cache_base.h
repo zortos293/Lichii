@@ -920,6 +920,9 @@ private:
     struct BufferDownload {
         GPUVAddr address;
         size_t size;
+        size_t row_bytes{};
+        size_t row_pitch{};
+        u32 rows{};
     };
 
     using PendingDownload = PendingImageDownload<Image>;

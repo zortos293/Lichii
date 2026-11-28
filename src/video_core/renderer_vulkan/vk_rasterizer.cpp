@@ -6149,6 +6149,22 @@ bool AccelerateDMA::DmaBufferImageCopy(const Tegra::DMA::ImageCopy& copy_info,
         return false;
     }
     const u32 buffer_size = static_cast<u32>(buffer_operand.pitch * buffer_operand.height);
+    const auto prepare_image = [&] {
+        return texture_cache.DmaBufferImageCopy(copy_info, buffer_operand, image_operand, image_id,
+                                                IS_IMAGE_UPLOAD);
+    };
+    std::pair<Image*, VideoCommon::BufferImageCopy> download;
+    if constexpr (!IS_IMAGE_UPLOAD) {
+        download = prepare_image();
+        const auto& [image, copy] = download;
+        if (image->CanPackDepthStencil() &&
+            (copy.image_extent.width == 0 || copy.image_extent.height == 0 ||
+             copy.buffer_row_length < copy.image_extent.width ||
+             u64{copy.buffer_row_length} * copy.image_extent.height * sizeof(u32) > buffer_size ||
+             static_cast<u32>(copy.image_subresource.base_level) >= image->HostMipLevels())) {
+            return false;
+        }
+    }
     static constexpr auto sync_info = VideoCommon::ObtainBufferSynchronize::FullSynchronize;
     const auto post_op = IS_IMAGE_UPLOAD ? VideoCommon::ObtainBufferOperation::DoNothing
                                          : VideoCommon::ObtainBufferOperation::MarkAsWritten;
@@ -6159,8 +6175,7 @@ bool AccelerateDMA::DmaBufferImageCopy(const Tegra::DMA::ImageCopy& copy_info,
         return false;
     }
 
-    const auto [image, copy] = texture_cache.DmaBufferImageCopy(
-        copy_info, buffer_operand, image_operand, image_id, IS_IMAGE_UPLOAD);
+    const auto [image, copy] = IS_IMAGE_UPLOAD ? prepare_image() : download;
     const std::span copy_span{&copy, 1};
 
     if constexpr (IS_IMAGE_UPLOAD) {

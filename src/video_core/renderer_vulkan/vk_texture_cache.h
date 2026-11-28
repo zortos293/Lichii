@@ -562,6 +562,8 @@ public:
     void DownloadMemory(const StagingBufferRef& map,
                         std::span<const VideoCommon::BufferImageCopy> copies);
 
+    [[nodiscard]] bool CanPackDepthStencil() const noexcept;
+
     void AllocateComputeUnswizzleImage();
 
     [[nodiscard]] VkImage Handle() const noexcept {
