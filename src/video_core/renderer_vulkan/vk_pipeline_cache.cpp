@@ -1493,9 +1493,13 @@ std::unique_ptr<GraphicsPipeline> PipelineCache::TranslateCachedGraphics(
         incomplete = true;
         return nullptr;
     }
-    incomplete = !pipeline && std::ranges::any_of(envs, [this](const FileEnvironment& env) {
-        return env.LacksRecordedValue(host_info.EnvironmentReadProperties());
+    const u32 read_properties = host_info.EnvironmentReadProperties();
+    incomplete = std::ranges::any_of(envs, [read_properties](const FileEnvironment& env) {
+        return env.LacksRecordedValue(read_properties);
     });
+    if (incomplete) {
+        return nullptr;
+    }
     return pipeline;
 }
 
