@@ -5,6 +5,7 @@
 
 #pragma once
 
+#include <string>
 #include <utility>
 #include <variant>
 #include <vector>
@@ -319,6 +320,10 @@ private:
     std::size_t instruction_ptr = 0;
     std::size_t condition_depth = 0;
     bool decode_success = false;
+    /// Per loaded cheat, in cheat_ends' order: whether its stray else was logged.
+    std::vector<bool> warned_stray_skip;
+    /// Where each loaded cheat's words end in the program, with its name, in program order.
+    std::vector<std::pair<std::size_t, std::string>> cheat_ends;
     std::array<u32, MaximumProgramOpcodeCount> program{};
     std::array<u64, NumRegisters> registers{};
     std::array<u64, NumRegisters> saved_values{};
@@ -335,6 +340,10 @@ private:
     void LogOpcode(const CheatVmOpcode& opcode);
 
     static u64 GetVmInt(VmInt value, u32 bit_width);
+    static u64 ShiftCount(u64 count);
+    /// The loaded cheat holding a program word.
+    std::vector<std::pair<std::size_t, std::string>>::const_iterator CheatAt(
+        std::size_t word) const;
     static u64 GetCheatProcessAddress(const CheatProcessMetadata& metadata,
                                       MemoryAccessType mem_type, u64 rel_address);
 };

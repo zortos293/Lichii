@@ -1,9 +1,13 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 
+#include <algorithm>
 #include <array>
+#include <cstring>
 #include <optional>
+#include <string>
+#include <string_view>
 
-#include "common/assert.h"
+#include "common/logging.h"
 #include "common/scope_exit.h"
 #include "core/memory/dmnt_cheat_types.h"
 #include "core/memory/dmnt_cheat_vm.h"
@@ -661,13 +665,36 @@ void DmntCheatVm::SkipConditionalBlock(bool is_if) {
             }
         }
     } else {
-        // Skipping, but condition_depth = 0.
-        // This is an error condition.
-        // However, I don't actually believe it is possible for this to happen.
-        // I guess we'll throw a fatal error here, so as to encourage me to fix the VM
-        // in the event that someone triggers it? I don't know how you'd do that.
-        UNREACHABLE_MSG("Invalid condition depth in DMNT Cheat VM");
+        // Skipping, but condition_depth = 0: an else outside any conditional block, which the
+        // cheat text can contain. Atmosphere's VM aborts here; a cheat file must not end the
+        // emulator, so the cheat it is in ends there instead, as if the block it skips ran to the
+        // cheat's end, and the cheats after it run.
+        const std::size_t word = instruction_ptr - 1; // the else, a single word
+        const auto cheat = CheatAt(word);
+        // Once per cheat and load: a cheat that keeps running into it says so once.
+        const std::size_t index = static_cast<std::size_t>(cheat - cheat_ends.begin());
+        if (index < warned_stray_skip.size() && !warned_stray_skip[index]) {
+            warned_stray_skip[index] = true;
+            LOG_WARNING(CheatEngine,
+                        "Cheat \"{}\" has an else outside any conditional block at word {:X}; "
+                        "it ends there",
+                        cheat->second, word);
+        }
+        instruction_ptr = cheat == cheat_ends.end() ? num_opcodes : cheat->first;
     }
+}
+
+std::vector<std::pair<std::size_t, std::string>>::const_iterator DmntCheatVm::CheatAt(
+    std::size_t word) const {
+    return std::ranges::upper_bound(cheat_ends, word, {},
+                                    [](const auto& cheat_end) { return cheat_end.first; });
+}
+
+u64 DmntCheatVm::ShiftCount(u64 count) {
+    // The counts come from the cheat text. The console's VM shifts 64-bit registers with
+    // instructions that take the count modulo 64 (AArch64 LSLV/LSRV), whatever the operation's
+    // width, which is applied to the result afterwards; a C++ shift by 64 or more is undefined.
+    return count & 63;
 }
 
 u64 DmntCheatVm::GetVmInt(VmInt value, u32 bit_width) {
@@ -713,18 +740,30 @@ void DmntCheatVm::ResetState() {
 bool DmntCheatVm::LoadProgram(const std::vector<CheatEntry>& entries) {
     // Reset opcode count.
     num_opcodes = 0;
+    warned_stray_skip.clear();
+    cheat_ends.clear();
 
     for (std::size_t i = 0; i < entries.size(); i++) {
         if (entries[i].enabled) {
             // Bounds check.
             if (entries[i].definition.num_opcodes + num_opcodes > MaximumProgramOpcodeCount) {
                 num_opcodes = 0;
+                cheat_ends.clear();
+                warned_stray_skip.clear();
                 return false;
             }
 
             for (std::size_t n = 0; n < entries[i].definition.num_opcodes; n++) {
                 program[num_opcodes++] = entries[i].definition.opcodes[n];
             }
+            const auto& name = entries[i].definition.readable_name;
+            // The name is the cheat file's text, which may hold line breaks: logged as one line.
+            std::string clean{name.data(), strnlen(name.data(), name.size())};
+            std::ranges::replace_if(
+                clean, [](char c) { return static_cast<unsigned char>(c) < 0x20 || c == 0x7F; },
+                '?');
+            cheat_ends.emplace_back(num_opcodes, std::move(clean));
+            warned_stray_skip.push_back(false);
         }
     }
 
@@ -755,6 +794,7 @@ std::vector<DmntCheatVm::MainStore> DmntCheatVm::MainStaticStores(
     std::size_t loop_depth = 0;
     std::size_t conditional_depth = 0;
     std::size_t position = 0;
+    std::size_t cheat_min_depth = 0; ///< The lowest loop_depth within the current cheat
     const auto change = [&](u32 reg) { values[reg & 0xF].reset(); };
     const auto restores = [](SaveRestoreRegisterOpType type) {
         return type == SaveRestoreRegisterOpType::Restore ||
@@ -766,8 +806,11 @@ std::vector<DmntCheatVm::MainStore> DmntCheatVm::MainStaticStores(
         if (!vm.DecodeNextOpcode(opcode)) {
             break;
         }
-        while (position < ends.size() && start >= ends[position].first) {
-            ++position;
+        if (position < ends.size() && start >= ends[position].first) {
+            while (position < ends.size() && start >= ends[position].first) {
+                ++position;
+            }
+            cheat_min_depth = loop_depth;
         }
         if (const auto* store = std::get_if<StoreStaticOpcode>(&opcode.opcode)) {
             const auto offset = values[store->offset_register & 0xF];
@@ -781,12 +824,37 @@ std::vector<DmntCheatVm::MainStore> DmntCheatVm::MainStaticStores(
                    std::holds_alternative<BeginRegisterConditionalOpcode>(opcode.opcode)) {
             ++conditional_depth;
         } else if (const auto* end_cond = std::get_if<EndConditionalOpcode>(&opcode.opcode)) {
+            if (end_cond->is_else && conditional_depth == 0) {
+                // Execute ends the cheat there (SkipConditionalBlock): its later stores do not run
+                // in that pass. The walk follows the words in order: the loops this cheat opened
+                // and had not closed are dropped (the loops of earlier cheats it closed stay
+                // closed), and the registers it set stay set.
+                // What a walk in order does not follow, and how it errs:
+                // - an else that Execute meets outside any block only on a later trip round a
+                //   loop is not seen, and that cheat's later stores stay listed (a warning more);
+                // - an if left open inside a loop's body makes Execute's depth exceed the walk's:
+                //   Execute can meet this else inside a block, skip to its endif and run the
+                //   stores after it, which the walk, abandoning here, leaves out. No well-formed
+                //   cheat leaves an if open in a loop;
+                // - a loop opened by an earlier cheat whose end lies in the part of this cheat
+                //   skipped here stays open for the walk, which then lists no later store, as it
+                //   already lists none after a loop start that is never closed;
+                // - Execute keeps the abandoned loops' tops and counters, so a later cheat's loop
+                //   end on the same register can take it back into earlier words and run their
+                //   stores again, possibly at other addresses; the walk does not follow that.
+                if (position < ends.size()) {
+                    vm.instruction_ptr = ends[position].first;
+                }
+                loop_depth = cheat_min_depth;
+                continue;
+            }
             if (!end_cond->is_else && conditional_depth) {
                 --conditional_depth;
             }
         } else if (const auto* loop = std::get_if<ControlLoopOpcode>(&opcode.opcode)) {
             change(loop->reg_index);
             loop_depth = loop->start_loop ? loop_depth + 1 : (loop_depth ? loop_depth - 1 : 0);
+            cheat_min_depth = (std::min)(cheat_min_depth, loop_depth);
         } else if (const auto* load = std::get_if<LoadRegisterStaticOpcode>(&opcode.opcode)) {
             change(load->reg_index);
             if (loop_depth == 0 && conditional_depth == 0) {
@@ -1000,11 +1068,11 @@ void DmntCheatVm::Execute(const CheatProcessMetadata& metadata) {
                 break;
             case RegisterArithmeticType::LeftShift:
                 registers[perform_math_static->reg_index] <<=
-                    static_cast<u64>(perform_math_static->value);
+                    ShiftCount(perform_math_static->value);
                 break;
             case RegisterArithmeticType::RightShift:
                 registers[perform_math_static->reg_index] >>=
-                    static_cast<u64>(perform_math_static->value);
+                    ShiftCount(perform_math_static->value);
                 break;
             default:
                 // Do not handle extensions here.
@@ -1057,10 +1125,10 @@ void DmntCheatVm::Execute(const CheatProcessMetadata& metadata) {
                 res_val = operand_1_value * operand_2_value;
                 break;
             case RegisterArithmeticType::LeftShift:
-                res_val = operand_1_value << operand_2_value;
+                res_val = operand_1_value << ShiftCount(operand_2_value);
                 break;
             case RegisterArithmeticType::RightShift:
-                res_val = operand_1_value >> operand_2_value;
+                res_val = operand_1_value >> ShiftCount(operand_2_value);
                 break;
             case RegisterArithmeticType::LogicalAnd:
                 res_val = operand_1_value & operand_2_value;

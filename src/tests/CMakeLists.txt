@@ -86,6 +86,7 @@ add_executable(tests
     core/kip_blz.cpp
     core/builtin_patches.cpp
     core/cheat_parser.cpp
+    core/cheat_vm.cpp
     core/builtin_font_glyphs.cpp
     core/system_test_context.cpp
     core/system_test_context.h
