@@ -107,13 +107,15 @@ inline bool PlainImage(const Tegra::Texture::TICEntry& image) {
 
 inline bool StarFoxColor(const Tegra::Texture::TICEntry& image,
                          Tegra::Texture::TextureFormat format,
-                         Tegra::Texture::ComponentType component, bool srgb) {
+                         Tegra::Texture::ComponentType component, bool srgb,
+                         bool opaque_alpha = false) {
     using namespace Tegra::Texture;
     return PlainImage(image) && image.format == format && (image.srgb_conversion != 0) == srgb &&
            image.r_type == component && image.g_type == component &&
            image.b_type == component && image.a_type == component &&
            image.x_source == SwizzleSource::R && image.y_source == SwizzleSource::G &&
-           image.z_source == SwizzleSource::B && image.w_source == SwizzleSource::A &&
+           image.z_source == SwizzleSource::B && (image.w_source == SwizzleSource::A ||
+            (opaque_alpha && image.w_source == SwizzleSource::OneFloat)) &&
            image.res_min_mip_level == 0 && image.res_max_mip_level == 0 &&
            image.msaa_mode == MsaaMode::Msaa1x1 && image.block_width == 0 &&
            image.block_depth == 0 && image.is_sparse == 0;
@@ -122,7 +124,9 @@ inline bool StarFoxColor(const Tegra::Texture::TICEntry& image,
 inline bool ValidInput(const Tegra::Texture::TICEntry& input, bool spatial_only = false) {
     using namespace Tegra::Texture;
     if (spatial_only) {
-        return StarFoxColor(input, TextureFormat::A8B8G8R8, ComponentType::UNORM, true);
+        // The SDR colour, or the HDR mode's B10G11R11 colour, whose alpha is read as one.
+        return StarFoxColor(input, TextureFormat::A8B8G8R8, ComponentType::UNORM, true) ||
+               StarFoxColor(input, TextureFormat::B10G11R11, ComponentType::FLOAT, false, true);
     }
     return input.format == TextureFormat::B10G11R11 && input.IsBlockLinear();
 }

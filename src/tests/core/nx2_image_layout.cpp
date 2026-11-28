@@ -37,6 +37,18 @@ TEST_CASE("Native RGB10A2 storage preserves four-byte geometry", "[nx2_image_lay
     REQUIRE(layout.alignment == 0x2000);
 }
 
+TEST_CASE("Star Fox HDR window buffers accept page-aligned offsets", "[nx2_image_layout]") {
+    const std::array<u32, 16> preference{
+        0, 2, (1440U - 1) << 16 | (2560U - 1), 0, 7, 160, 4, 1,
+    };
+    const auto layout = Service::Nx2CalculateNativeImageRequirements(preference, 1);
+    REQUIRE(layout.pitch == 0x2800);
+    REQUIRE(layout.size == 0xF00000);
+    REQUIRE(layout.alignment == 0x1000);
+    REQUIRE((0x1000 & (layout.alignment - 1)) == 0);
+    REQUIRE(Service::Nx2CalculateImageLayout(preference.data()).alignment == 0x2000);
+}
+
 TEST_CASE("Xenoblade 2 window buffers accept page-aligned offsets", "[nx2_image_layout]") {
     auto preference = ColorPreference;
     preference[7] = 2;

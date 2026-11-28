@@ -268,3 +268,38 @@ TEST_CASE("Star Fox logged native-resolution cutscene colour pair is accepted", 
     alias.address_high.Assign(input.address_high);
     REQUIRE_FALSE(FE::ValidPair(input, alias, true));
 }
+
+TEST_CASE("Star Fox HDR B10G11R11 colour input is accepted", "[starfox_upscale]") {
+    const auto input = std::bit_cast<TICEntry>(std::array<u32, 8>{
+        0x78d7ffa1, 0x26f62000, 0x00600081, 0x00070020,
+        0xe880077f, 0x80000437, 0x03000000, 0x00000000});
+    const auto output = std::bit_cast<TICEntry>(std::array<u32, 8>{
+        0x58d7ff83, 0x352f1000, 0x00600081, 0x00070020,
+        0xe880077f, 0x80000437, 0x03000000, 0x00000000});
+    REQUIRE(input.format == TextureFormat::B10G11R11);
+    REQUIRE(input.w_source == SwizzleSource::OneFloat);
+    REQUIRE(FE::ValidInput(input, true));
+    REQUIRE(FE::ValidPair(input, output, true));
+    REQUIRE(FE::ValidInput(input));
+    REQUIRE_FALSE(FE::ValidPair(input, output));
+
+    auto alpha = input;
+    alpha.w_source.Assign(SwizzleSource::A);
+    REQUIRE(FE::ValidPair(alpha, output, true));
+
+    const auto rejected = [&](auto mutate) {
+        auto from = input;
+        mutate(from);
+        REQUIRE_FALSE(FE::ValidInput(from, true));
+        REQUIRE_FALSE(FE::ValidPair(from, output, true));
+    };
+    rejected([](auto& image) { image.srgb_conversion.Assign(1); });
+    rejected([](auto& image) { image.r_type.Assign(ComponentType::UNORM); });
+    rejected([](auto& image) { image.a_type.Assign(ComponentType::UINT); });
+    rejected([](auto& image) { image.y_source.Assign(SwizzleSource::B); image.z_source.Assign(SwizzleSource::G); });
+    rejected([](auto& image) { image.w_source.Assign(SwizzleSource::R); });
+    rejected([](auto& image) { image.max_mip_level.Assign(1); });
+    rejected([](auto& image) { image.msaa_mode.Assign(MsaaMode::Msaa2x2); });
+    rejected([](auto& image) { image.block_width.Assign(1); });
+    rejected([](auto& image) { image.is_sparse.Assign(1); });
+}

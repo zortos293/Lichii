@@ -1723,8 +1723,10 @@ bool KeplerCompute::TryFireEmblemUpscale(bool allow_history) {
         result.addr_lower = static_cast<u32>(tic.Address());
         return result;
     };
-    const auto input_format = dlss_chain.spatial_only ? Tegra::RenderTargetFormat::A8B8G8R8_SRGB
-                                                     : Tegra::RenderTargetFormat::B10G11R11_FLOAT;
+    const auto input_format =
+        !dlss_chain.spatial_only || input->format == Texture::TextureFormat::B10G11R11
+            ? Tegra::RenderTargetFormat::B10G11R11_FLOAT
+            : Tegra::RenderTargetFormat::A8B8G8R8_SRGB;
     const auto output_format = dlss_chain.spatial_only ? Tegra::RenderTargetFormat::R16G16B16A16_FLOAT
                                                       : Tegra::RenderTargetFormat::B10G11R11_FLOAT;
     const auto upscale = [&](bool history) {
