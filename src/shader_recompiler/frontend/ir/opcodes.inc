@@ -355,6 +355,7 @@ OPCODE(SharedAtomicAnd32,                                   U32,            U32,
 OPCODE(SharedAtomicOr32,                                    U32,            U32,            U32,                                                            )
 OPCODE(SharedAtomicXor32,                                   U32,            U32,            U32,                                                            )
 OPCODE(SharedAtomicExchange32,                              U32,            U32,            U32,                                                            )
+OPCODE(SharedAtomicCompareExchange32,                       U32,            U32,            U32,            U32,                                            )
 OPCODE(SharedAtomicExchange64,                              U64,            U32,            U64,                                                            )
 OPCODE(SharedAtomicExchange32x2,                            U32x2,          U32,            U32x2,                                                          )
 

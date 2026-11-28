@@ -108,6 +108,12 @@ inline RegisterPressure PrepareRegisterPressure(const Instruction& input, u32 re
         operand(16);
         operand(32);
         break;
+    case 0x38d: // ATOMS.CAS: result in Rd, address in Ra, compare in Rb, new value in Rc.
+        operand(16);
+        operand(24);
+        operand(32);
+        operand(64);
+        break;
     case 0xb6c:
     case 0xf6c: // TXD: results in Rd/Rd+1 and the second pair, coordinates in Ra (Ra+2 is the layer
                 // of ARRAY_2D), gradients in Rb..Rb+3.

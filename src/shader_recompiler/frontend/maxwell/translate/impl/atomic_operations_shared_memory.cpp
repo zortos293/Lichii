@@ -105,4 +105,21 @@ void TranslatorVisitor::ATOMS(u64 insn) {
     StoreResult(*this, atoms.dest_reg, result, atoms.size);
 }
 
+/// ATOMS.CAS Rd, [Ra + imm], Rb: if the shared word equals Rb, store Rb+1; Rd gets the old word.
+void TranslatorVisitor::ATOMS_cas(u64 insn) {
+    union {
+        u64 raw;
+        BitField<0, 8, IR::Reg> dest_reg;
+        BitField<20, 8, IR::Reg> compare_reg;
+        BitField<52, 1, u64> is_64;
+    } const atoms{insn};
+    if (atoms.is_64 != 0) {
+        throw NotImplementedException("64-bit ATOMS.CAS");
+    }
+    const IR::Reg value_reg{atoms.compare_reg == IR::Reg::R254 ? IR::Reg::RZ
+                                                                : atoms.compare_reg + 1};
+    X(atoms.dest_reg, ir.SharedAtomicCompareExchange(AtomsOffset(*this, insn),
+                                                     X(atoms.compare_reg), X(value_reg)));
+}
+
 } // namespace Shader::Maxwell

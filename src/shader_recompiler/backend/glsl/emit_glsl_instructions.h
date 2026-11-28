@@ -455,6 +455,9 @@ void EmitSharedAtomicXor32(EmitContext& ctx, IR::Inst& inst, std::string_view po
                            std::string_view value);
 void EmitSharedAtomicExchange32(EmitContext& ctx, IR::Inst& inst, std::string_view pointer_offset,
                                 std::string_view value);
+void EmitSharedAtomicCompareExchange32(EmitContext& ctx, IR::Inst& inst,
+                                       std::string_view pointer_offset,
+                                       std::string_view comparator, std::string_view value);
 void EmitSharedAtomicExchange64(EmitContext& ctx, IR::Inst& inst, std::string_view pointer_offset,
                                 std::string_view value);
 void EmitSharedAtomicExchange32x2(EmitContext& ctx, IR::Inst& inst, std::string_view pointer_offset,

@@ -1444,6 +1444,12 @@ U32U64 IREmitter::SharedAtomicExchange(const U32& pointer_offset, const U32U64& 
     }
 }
 
+/// Stores value in shared memory if the word there equals comparator; returns the old word.
+U32 IREmitter::SharedAtomicCompareExchange(const U32& pointer_offset, const U32& comparator,
+                                           const U32& value) {
+    return Inst<U32>(Opcode::SharedAtomicCompareExchange32, pointer_offset, comparator, value);
+}
+
 U32U64 IREmitter::GlobalAtomicIAdd(const U64& pointer_offset, const U32U64& value) {
     switch (value.Type()) {
     case Type::U32:

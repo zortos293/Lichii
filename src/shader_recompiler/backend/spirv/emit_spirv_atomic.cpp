@@ -156,6 +156,14 @@ Id EmitSharedAtomicExchange32(EmitContext& ctx, Id offset, Id value) {
     return SharedAtomicU32(ctx, offset, value, &Sirit::Module::OpAtomicExchange);
 }
 
+/// Stores value if the shared word equals comparator; returns the old word.
+Id EmitSharedAtomicCompareExchange32(EmitContext& ctx, Id offset, Id comparator, Id value) {
+    const Id pointer{SharedPointer(ctx, offset)};
+    const auto [scope, semantics]{AtomicArgs(ctx)};
+    return ctx.OpAtomicCompareExchange(ctx.U32[1], pointer, scope, semantics, semantics, value,
+                                       comparator);
+}
+
 Id EmitSharedAtomicExchange64(EmitContext& ctx, Id offset, Id value) {
     if (ctx.profile.support_shared_int64_atomics && ctx.uses_explicit_workgroup_layout) {
         const Id shift_id{ctx.Const(3U)};

@@ -274,6 +274,8 @@ public:
     [[nodiscard]] U32 SharedAtomicOr(const U32& pointer_offset, const U32& value);
     [[nodiscard]] U32 SharedAtomicXor(const U32& pointer_offset, const U32& value);
     [[nodiscard]] U32U64 SharedAtomicExchange(const U32& pointer_offset, const U32U64& value);
+    [[nodiscard]] U32 SharedAtomicCompareExchange(const U32& pointer_offset, const U32& comparator,
+                                                  const U32& value);
 
     [[nodiscard]] U32U64 GlobalAtomicIAdd(const U64& pointer_offset, const U32U64& value);
     [[nodiscard]] U32U64 GlobalAtomicSMin(const U64& pointer_offset, const U32U64& value);

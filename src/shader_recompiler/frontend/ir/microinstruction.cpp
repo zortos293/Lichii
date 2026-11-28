@@ -122,6 +122,7 @@ bool Inst::MayHaveSideEffects() const noexcept {
     case Opcode::SharedAtomicOr32:
     case Opcode::SharedAtomicXor32:
     case Opcode::SharedAtomicExchange32:
+    case Opcode::SharedAtomicCompareExchange32:
     case Opcode::SharedAtomicExchange64:
     case Opcode::SharedAtomicExchange32x2:
     case Opcode::GlobalAtomicIAdd32:

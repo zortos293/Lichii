@@ -313,7 +313,7 @@ inline LoweredProgram LowerToMaxwellWith(std::span<const Instruction> code, u32 
             // Bits 32-39 name a register in register forms and in these opcodes: TEX/TLD, TXD's
             // gradients, and the data operand of the stores, ISBEWR (0x927), the global atomic
             // (0x9a8), RED (0x98e) and SURED (0x59f), all listed with operand 32 in RegisterPressure.
-            if (bit == 32 && insn.Bits(9, 3) != 1 && opcode != 0xb60 && opcode != 0xb66 && opcode != 0xb6c && opcode != 0xf6c && opcode != 0x986 && opcode != 0x987 && opcode != 0xf66 && opcode != 0x988 && opcode != 0x927 && opcode != 0x9a8 && opcode != 0x98e && opcode != 0x59f) continue;
+            if (bit == 32 && insn.Bits(9, 3) != 1 && opcode != 0xb60 && opcode != 0xb66 && opcode != 0xb6c && opcode != 0xf6c && opcode != 0x986 && opcode != 0x987 && opcode != 0xf66 && opcode != 0x988 && opcode != 0x927 && opcode != 0x9a8 && opcode != 0x98e && opcode != 0x59f && opcode != 0x38d) continue;
             const u32 reg = insn.Bits(bit, 8);
             if (reg >= (uses_uniform_bank ? high_uniform_base : 246U) && reg < 255)
                 requires_shadow = true;
@@ -1508,6 +1508,34 @@ inline LoweredProgram LowerToMaxwellWith(std::span<const Instruction> code, u32 
             emit(0xec00000000000000ULL | predicate | dest |
                 (u64{insn.Bits(24, 8)} << 8) | (u64{insn.Bits(32, 8)} << 20) |
                 (u64{insn.Bits(73, 1)} << 28) | (u64{offset >> 2} << 30) | (u64{operation} << 52));
+            break;
+        }
+        case 0x38d: { // ATOMS.CAS (op 0) or ATOMS.CAST.SPIN (op 3), 32-bit: Rb compare, Rc new value.
+            // Maxwell ATOMS.CAS takes the new value from Rb+1, so both go to R250/R251. CAS returns
+            // the old word; CAST.SPIN returns 1 when it stored and 0 when it did not (a retry loop
+            // reloads the word itself), so the old word in R252 is compared with R250.
+            const u32 stride = insn.Bits(78, 2), offset = insn.Bits(40, 24), operation = insn.Bits(87, 4);
+            if ((insn.words[2] & ~0x0180c0ffU) || (operation != 0 && operation != 3) || (offset & 3))
+                return fail(index, "native shared compare-and-swap mode");
+            u32 address = insn.Bits(24, 8);
+            if (stride && address != 255) {
+                emit(0x3848000000000000ULL | predicate | 252 | (u64{address} << 8) |
+                    (u64{stride + 1} << 20));
+                address = 252;
+            }
+            emit(0x5c98000000000000ULL | predicate | 250 | (u64{insn.Bits(32, 8)} << 20) | (u64{15} << 39));
+            emit(0x5c98000000000000ULL | predicate | 251 | (u64{insn.Bits(64, 8)} << 20) | (u64{15} << 39));
+            const bool spin = operation == 3;
+            emit(0xee40000000000000ULL | predicate | (spin ? 252 : dest) | (u64{address} << 8) |
+                (u64{250} << 20) | (u64{offset >> 2} << 30));
+            if (spin && dest != 255) {
+                emit(0x5c40000000000000ULL | predicate | 252 | (u64{252} << 8) | (u64{250} << 20) |
+                    (u64{2} << 41) | (u64{7} << 48));
+                emit(0x3820000000000000ULL | predicate | 252 | (u64{252} << 8) | (u64{1} << 20) |
+                    (u64{7} << 39));
+                emit(0x0400000000000000ULL | predicate | dest | (u64{252} << 8) | (u64{1} << 20) |
+                    (u64{2} << 53));
+            }
             break;
         }
         case 0x3a8: { // ATOMG.E.STRONG.GPU U32 at a 64-bit register address plus an offset.

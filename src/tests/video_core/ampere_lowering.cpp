@@ -808,4 +808,77 @@ TEST_CASE("Ampere MOV with a one-lane quad mask writes only that lane", "[video_
     }};
     REQUIRE(!static_cast<bool>(LowerToMaxwell(two_lanes)));
 }
+
+TEST_CASE("Ampere ATOMS.CAST.SPIN stores through Maxwell ATOMS.CAS and returns whether it stored",
+          "[video_core][ampere]") {
+    // Fire Emblem Fortune's Weave (#2636): ATOMS.CAST.SPIN R1, [RZ+0x4], R0, R1. The compare
+    // (R0) and new value (R1) go to R250/R251, the old word to R252, and R1 = (R252 == R250).
+    const std::array<Instruction, 2> code{{
+        {{0xff01738d, 0x00000400, 0x01800001, 0x000e6400}},
+        EXIT,
+    }};
+    const auto lowered = LowerToMaxwell(code);
+    INFO(lowered.error);
+    REQUIRE(static_cast<bool>(lowered));
+    const u64 cas = FindMaxwell(lowered, 0xee4, 52);
+    REQUIRE(cas != 0);
+    CHECK((cas & 0xff) == 252);
+    CHECK(((cas >> 8) & 0xff) == 255);
+    CHECK(((cas >> 20) & 0xff) == 250);
+    CHECK(((cas >> 30) & 0x3fffff) == 1);
+    CHECK(CountMaxwell(lowered, 0x5c98, 48) == 2);
+    const u64 compare_xor = FindMaxwell(lowered, 0x5c47, 48);
+    REQUIRE(compare_xor != 0);
+    CHECK(((compare_xor >> 41) & 3) == 2);
+    CHECK(((compare_xor >> 20) & 0xff) == 250);
+    const u64 clamp = FindMaxwell(lowered, 0x382, 52);
+    REQUIRE(clamp != 0);
+    CHECK(((clamp >> 20) & 0x7ffff) == 1);
+    CHECK(((clamp >> 48) & 1) == 0);
+    const u64 flag = FindMaxwell(lowered, 0x044, 52);
+    REQUIRE(flag != 0);
+    CHECK((flag & 0xff) == 1);
+    CHECK(((flag >> 8) & 0xff) == 252);
+}
+
+TEST_CASE("Ampere ATOMS.CAS returns the old word and scales its address", "[video_core][ampere]") {
+    // ATOMS.CAS R7, [R55], R54, R55: the old word goes straight to R7.
+    const std::array<Instruction, 2> plain{{
+        {{0x3707738d, 0x00000036, 0x00000037, 0}},
+        EXIT,
+    }};
+    const auto cas = LowerToMaxwell(plain);
+    INFO(cas.error);
+    REQUIRE(static_cast<bool>(cas));
+    const u64 word = FindMaxwell(cas, 0xee4, 52);
+    REQUIRE(word != 0);
+    CHECK((word & 0xff) == 7);
+    CHECK(((word >> 8) & 0xff) == 55);
+    CHECK(CountMaxwell(cas, 0x5c47, 48) == 0);
+
+    // ATOMS.CAST.SPIN R7, [R4.X4+0x3000], R6, R7: R252 = R4 << 2 is the address.
+    const std::array<Instruction, 2> scaled{{
+        {{0x0407738d, 0x00300006, 0x01804007, 0}},
+        EXIT,
+    }};
+    const auto spin = LowerToMaxwell(scaled);
+    INFO(spin.error);
+    REQUIRE(static_cast<bool>(spin));
+    const u64 shift = FindMaxwell(spin, 0x3848, 48);
+    REQUIRE(shift != 0);
+    CHECK((shift & 0xff) == 252);
+    CHECK(((shift >> 8) & 0xff) == 4);
+    CHECK(((shift >> 20) & 0x7ffff) == 2);
+    const u64 store = FindMaxwell(spin, 0xee4, 52);
+    REQUIRE(store != 0);
+    CHECK(((store >> 8) & 0xff) == 252);
+    CHECK(((store >> 30) & 0x3fffff) == 0xc00);
+
+    // ATOMS.CAST.SPIN.64 R6, [R13], R8, R10 stays rejected.
+    const std::array<Instruction, 2> wide{{
+        {{0x0d06738d, 0x00000008, 0x0180040a, 0}},
+        EXIT,
+    }};
+    CHECK(!static_cast<bool>(LowerToMaxwell(wide)));
+}
 } // namespace
