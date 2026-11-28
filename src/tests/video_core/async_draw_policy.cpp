@@ -52,6 +52,14 @@ TEST_CASE("Legacy pending draws retain the async heuristic", "[video_core][async
     REQUIRE_FALSE(Vulkan::CanDiscardPendingDraw(false, false, 0, 0));
 }
 
+TEST_CASE("Pending mesh draws keep storage writes, occlusion counts and emulated draws",
+          "[video_core][async_draw][native_pending]") {
+    REQUIRE(Vulkan::NativeMeshAllowsSkip(false, false, false));
+    REQUIRE_FALSE(Vulkan::NativeMeshAllowsSkip(false, true, false));
+    REQUIRE_FALSE(Vulkan::NativeMeshAllowsSkip(false, false, true));
+    REQUIRE_FALSE(Vulkan::NativeMeshAllowsSkip(true, false, false));
+}
+
 TEST_CASE("A native draw needs history on every render target it writes, through the RT map",
           "[video_core][async_draw]") {
     const auto identity = [](u32 i) { return i; };

@@ -2744,14 +2744,36 @@ GraphicsPipeline* PipelineCache::BuiltPipeline(GraphicsPipeline* pipeline) noexc
     if (!use_asynchronous_shaders) {
         return pipeline;
     }
+    if (SkipPendingMeshDraw()) {
+        LogSkippedPipelineLookup(true);
+        return nullptr;
+    }
     const auto& draw_state = maxwell3d->draw_manager.draw_state;
     const bool native = maxwell3d->GetNativeMacroEngine().native_turing;
     const NativePendingMode mode = native ? NativeMode() : NativePendingMode::Wait;
     const auto& regs = maxwell3d->regs;
+    const bool mesh = regs.IsMeshEnabled();
+    if (native && mesh && mode != NativePendingMode::Wait) {
+        const bool emulated_mesh = pipeline->IsEmulatedMesh();
+        const bool writes_storage = pipeline->WritesStorage();
+        const bool counts_samples = regs.zpass_pixel_count_enable != 0;
+        if (!NativeMeshAllowsSkip(emulated_mesh, writes_storage, counts_samples)) {
+            if (!emulated_mesh) {
+                static std::atomic<u32> logged{};
+                if (logged.fetch_add(1, std::memory_order_relaxed) < 16) {
+                    LOG_INFO(Render_Vulkan,
+                             "Mesh pipeline {:016x} is still building and {}: its draw waits",
+                             pipeline->Key().Hash(),
+                             writes_storage ? "writes storage" : "the Z-pass counter is on");
+                }
+            }
+            return pipeline;
+        }
+    }
     // A native draw counts as depth-tested only when every render target it writes color into
     // was first written in an earlier frame, which the title redraws every frame: Mario Kart World
     // bakes terrain once with depth-tested draws (b7980efd7), and a bound depth buffer alone
-    // doesn't test (Eglantine #874). Mesh draws wait unless the mesh skip setting is on.
+    // doesn't test (Eglantine #874).
     const auto writes_color = [&regs](u32 rt_index) {
         return rt_index < Maxwell::NumRenderTargets &&
                regs.rt[rt_index].format != Tegra::RenderTargetFormat::NONE &&
@@ -2760,7 +2782,7 @@ GraphicsPipeline* PipelineCache::BuiltPipeline(GraphicsPipeline* pipeline) noexc
     const bool depth_tested =
         native
             ? mode != NativePendingMode::Wait && regs.zeta_enable != 0 &&
-                  regs.depth_test_enable != 0 && !regs.IsMeshEnabled() &&
+                  regs.depth_test_enable != 0 &&
                   ColorWritesHaveHistory(
                       std::min<u32>(regs.rt_control.count,
                                     static_cast<u32>(Maxwell::NumRenderTargets)),
@@ -2807,9 +2829,8 @@ GraphicsPipeline* PipelineCache::BuiltPipeline(GraphicsPipeline* pipeline) noexc
         }
         }
     }
-    const bool skip_mesh = SkipPendingMeshDraw();
-    if (discard || skip_mesh) {
-        LogSkippedPipelineLookup(skip_mesh);
+    if (discard) {
+        LogSkippedPipelineLookup(mesh);
         return nullptr;
     }
     return pipeline;

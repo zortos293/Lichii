@@ -56,6 +56,10 @@ constexpr bool ColorWritesHaveHistory(u32 count, Map&& map, Writes&& writes,
     return writes_any;
 }
 
+constexpr bool NativeMeshAllowsSkip(bool emulated_mesh, bool writes_storage, bool counts_samples) {
+    return !emulated_mesh && !writes_storage && !counts_samples;
+}
+
 /// How a native draw with an unbuilt pipeline is handled (the native_async_draws setting).
 enum class NativePendingMode { Wait, Bounded, Skip };
 
