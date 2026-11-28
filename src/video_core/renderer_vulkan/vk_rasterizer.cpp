@@ -3981,7 +3981,9 @@ bool RasterizerVulkan::Nx2ListSlotsSupported() const {
     // A direct dispatch skips a grid over the device's limits; an indirect one must not get one.
     // The slot's height and depth are 16 bits, and a width over 31 bits is no culling result.
     const std::array<u32, 3> max_dim{device.GetMaxComputeWorkGroupCount()};
-    const bool fits = max_dim[0] >= 0x7fffffffU && max_dim[1] >= 0xffffU && max_dim[2] >= 0xffffU;
+    // MoltenVK reports 2^30 groups here, its placeholder for a limit Metal does not define.
+    const u32 min_width = device.IsMoltenVK() ? 0x40000000U : 0x7fffffffU;
+    const bool fits = max_dim[0] >= min_width && max_dim[1] >= 0xffffU && max_dim[2] >= 0xffffU;
     if (static std::atomic<bool> logged{}; !fits && !logged.exchange(true)) {
         LOG_WARNING(Render_Vulkan,
                     "Nx2 list indirect off: the device dispatches at most {}x{}x{} groups",
