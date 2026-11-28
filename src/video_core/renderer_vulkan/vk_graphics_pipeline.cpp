@@ -440,6 +440,18 @@ GraphicsPipeline::GraphicsPipeline(
         add(info->image_descriptors);
     }
     fragment_has_color0_output = stage_infos[NUM_STAGES - 1].stores_frag_color[0];
+    // Without a shader that picks the viewport, only the first one and its scissor apply; with one,
+    // every viewport the host binds. A mesh pipeline may pick it from host-made code (the
+    // emulation's vertex shader). The texture cache uses this only where it cuts attachment-less
+    // passes (CutsAttachmentlessRenderArea).
+    const bool picks_viewport =
+        IsMeshPipeline() || IsEmulatedMesh() ||
+        std::ranges::any_of(stage_infos, [](const Shader::Info& info) {
+            return info.stores[Shader::IR::Attribute::ViewportIndex] ||
+                   info.stores[Shader::IR::Attribute::ViewportMask];
+        });
+    bounding_scissors =
+        picks_viewport ? (std::min)(device.GetMaxViewports(), u32{Maxwell::NumViewports}) : 1;
     on_far_plane = infos[0] && infos[0]->position_on_far_plane && !infos[1] && !infos[2] &&
                    !infos[3] && key.state.extended_dynamic_state_2 != 0;
     // The guest leaves render target components the fragment shader doesn't output untouched,
@@ -1476,7 +1488,7 @@ bool GraphicsPipeline::ConfigureImpl(bool is_indexed, std::optional<PreparedBind
     }
     {
         Profile::Scope scope{Profile::Zone::RenderTargets};
-        texture_cache.UpdateRenderTargets(false);
+        texture_cache.UpdateRenderTargets(false, bounding_scissors);
         const std::span<const VideoCommon::ImageViewInOut> view_span{views.data(), views.size()};
         texture_cache.CheckFeedbackLoop(view_span);
         CheckColorFeedbackLoop(view_span, Spec::enabled_stages, fragment_entry);
@@ -1662,7 +1674,7 @@ bool GraphicsPipeline::ConfigureDelta(bool is_indexed, std::optional<PreparedBin
     }
     {
         Profile::Scope scope{Profile::Zone::RenderTargets};
-        texture_cache.UpdateRenderTargets(false);
+        texture_cache.UpdateRenderTargets(false, bounding_scissors);
         const std::span<const VideoCommon::ImageViewInOut> view_span{delta_views};
         texture_cache.CheckFeedbackLoop(view_span);
         CheckColorFeedbackLoop(view_span, configured_stages, fragment_entry);

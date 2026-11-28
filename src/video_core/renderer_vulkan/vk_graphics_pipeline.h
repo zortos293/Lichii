@@ -518,6 +518,9 @@ private:
     std::vector<SampledImage> sampled_images;
     u32 num_textures{};
     bool fragment_has_color0_output{};
+    /// The guest scissors that can bound a draw: those a pass without attachments is cut to where
+    /// the texture cache cuts them (CutsAttachmentlessRenderArea).
+    u32 bounding_scissors{};
     bool on_far_plane{};
     u32 color_output_mask{};
     bool writes_storage{};

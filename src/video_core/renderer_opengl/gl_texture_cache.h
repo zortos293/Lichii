@@ -134,6 +134,11 @@ public:
         return false;
     }
 
+    /// Attachment-less passes keep the surface clip's size (AttachmentlessRenderArea)
+    bool CutsAttachmentlessRenderArea() const noexcept {
+        return false;
+    }
+
     bool HasBrokenTextureViewFormats() const noexcept {
         return has_broken_texture_view_formats;
     }

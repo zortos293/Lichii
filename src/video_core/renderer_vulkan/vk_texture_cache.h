@@ -208,6 +208,12 @@ public:
         return false;
     }
 
+    /// Attachment-less passes are cut to their scissors where the render area costs
+    /// (AttachmentlessRenderArea, Device::HasRenderAreaCost)
+    bool CutsAttachmentlessRenderArea() const noexcept {
+        return device.HasRenderAreaCost();
+    }
+
     bool CanUploadMSAA() const noexcept {
         return true;
     }

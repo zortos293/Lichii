@@ -2302,7 +2302,7 @@ bool TextureCache<P>::RescaleRenderTargets() {
 }
 
 template <class P>
-void TextureCache<P>::UpdateRenderTargets(bool is_clear) {
+void TextureCache<P>::UpdateRenderTargets(bool is_clear, u32 bounding_scissors) {
     VideoCommon::GpuSplit::RenderOwned("TextureCache::UpdateRenderTargets");
     using namespace VideoCommon::Dirty;
     struct ClearingScope {
@@ -2317,6 +2317,15 @@ void TextureCache<P>::UpdateRenderTargets(bool is_clear) {
     drawing_render_targets = !is_clear;
     auto& flags = maxwell3d->dirty.flags;
     if (!flags[Dirty::RenderTargets]) {
+        if (rt_active_mask == 0 && runtime.CutsAttachmentlessRenderArea()) {
+            // What a pass without attachments needs changes with the scissors, without the
+            // targets: its framebuffer grows to it (NextAttachmentlessSize).
+            const Extent2D size = RenderTargetsSize(false, bounding_scissors);
+            if (size != render_targets.size) {
+                render_targets.size = size;
+                ++render_targets_serial;
+            }
+        }
         for (size_t index = 0; index < NUM_RT; ++index) {
             ImageViewId& color_buffer_id = render_targets.color_buffer_ids[index];
             PrepareImageView(color_buffer_id, true, is_clear && IsFullClear(color_buffer_id));
@@ -2366,16 +2375,7 @@ void TextureCache<P>::UpdateRenderTargets(bool is_clear) {
     for (size_t index = 0; index < NUM_RT; ++index) {
         render_targets.draw_buffers[index] = static_cast<u8>(maxwell3d->regs.rt_control.Map(index));
     }
-    u32 up_scale = 1;
-    u32 down_shift = 0;
-    if (is_rescaling) {
-        up_scale = Settings::values.resolution_info.up_scale;
-        down_shift = Settings::values.resolution_info.down_shift;
-    }
-    render_targets.size = Extent2D{
-        (maxwell3d->regs.surface_clip.width * up_scale) >> down_shift,
-        (maxwell3d->regs.surface_clip.height * up_scale) >> down_shift,
-    };
+    render_targets.size = RenderTargetsSize(true, bounding_scissors);
     render_targets.is_rescaled = is_rescaling;
 
     if (render_targets != previous_render_targets) {
@@ -2383,6 +2383,44 @@ void TextureCache<P>::UpdateRenderTargets(bool is_clear) {
     }
 
     flags[Dirty::DepthBiasGlobal] = true;
+}
+
+template <class P>
+Extent2D TextureCache<P>::RenderTargetsSize(bool targets_changed, u32 bounding_scissors) const {
+    using Regs = Tegra::Engines::Maxwell3D::Regs;
+    const Regs& regs = maxwell3d->regs;
+    const auto& resolution = Settings::values.resolution_info;
+    const u32 up_scale = is_rescaling ? resolution.up_scale : 1;
+    const u32 down_shift = is_rescaling ? resolution.down_shift : 0;
+    const Extent2D full{
+        (regs.surface_clip.width * up_scale) >> down_shift,
+        (regs.surface_clip.height * up_scale) >> down_shift,
+    };
+    const bool cut = rt_active_mask == 0 && runtime.CutsAttachmentlessRenderArea();
+    Extent2D needed = full;
+    if (cut && bounding_scissors != 0) {
+        std::array<GuestScissor, Regs::NumViewports> scissors;
+        const size_t count = (std::min)(size_t{bounding_scissors}, scissors.size());
+        for (size_t index = 0; index < count; ++index) {
+            const auto& scissor = regs.scissor_test[index];
+            scissors[index] = {
+                .enable = scissor.enable != 0,
+                .min_x = scissor.min_x.Value(),
+                .max_x = scissor.max_x.Value(),
+                .min_y = scissor.min_y.Value(),
+                .max_y = scissor.max_y.Value(),
+            };
+        }
+        const AttachmentlessState state{
+            .size = full,
+            .lower_left = regs.window_origin.mode != Regs::WindowOrigin::Mode::UpperLeft,
+            .viewport_transform = regs.viewport_scale_offset_enabled != 0,
+            .up_scale = up_scale,
+            .down_shift = down_shift,
+        };
+        needed = AttachmentlessRenderArea(state, std::span{scissors}.first(count));
+    }
+    return NextAttachmentlessSize(cut, targets_changed, render_targets.size, full, needed);
 }
 
 template <class P>
