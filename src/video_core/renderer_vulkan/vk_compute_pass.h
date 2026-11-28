@@ -187,8 +187,11 @@ public:
 
     /// Encodes every layer of one level (`source` is its RGBA8 storage view) into `buffer`,
     /// `out_offset` bytes past `buffer_offset`; blocks are row-major, layer after layer.
+    /// A source of another size (source_width/height, 0 = width/height) is resampled bilinearly,
+    /// in linear light when it holds sRGB colour (srgb).
     void Encode(VkImageView source, u32 width, u32 height, u32 layers, bool bc3, VkBuffer buffer,
-                VkDeviceSize buffer_offset, VkDeviceSize buffer_size, VkDeviceSize out_offset);
+                VkDeviceSize buffer_offset, VkDeviceSize buffer_size, VkDeviceSize out_offset,
+                u32 source_width = 0, u32 source_height = 0, bool srgb = false);
 
 private:
     Scheduler& scheduler;
@@ -198,13 +201,17 @@ private:
 /// Decodes the ASTC array `info` in `map` into `decode` (RGBA8 with `batch` layers, one storage
 /// view per level) and encodes it into `output`, `batch` layers at a time. Each level's blocks
 /// start at `level_offsets` and take `layer_bytes` a layer. The last batch's decode submits.
+/// A nonzero `host_width`/`host_height` encodes each level resampled to that size from the
+/// decode at the guest size. `decode_in_use` marks a `decode` an encode in flight may still read.
 void TranscodeAstcBatches(ASTCDecoderPass& decoder, BcEncoderPass& encoder,
                           const VideoCommon::ImageInfo& info, size_t guest_size_bytes,
                           const StagingBufferRef& map,
                           std::span<const VideoCommon::SwizzleParameters> swizzles, VkImage decode,
                           std::span<const vk::ImageView> level_views, u32 batch, bool bc3,
                           VkBuffer output, VkDeviceSize output_offset, VkDeviceSize output_size,
-                          std::span<const u64> level_offsets, std::span<const u64> layer_bytes);
+                          std::span<const u64> level_offsets, std::span<const u64> layer_bytes,
+                          u32 host_width = 0, u32 host_height = 0, bool srgb = false,
+                          bool decode_in_use = false);
 
 class BlockLinearUnswizzle3DPass final : public ComputePass {
 public:

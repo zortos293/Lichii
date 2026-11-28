@@ -24,7 +24,41 @@ layout (push_constant) uniform PushConstants {
     uint height;
     uint bc3;
     uint out_offset; // in 8-byte units
+    uint source_width;  // != width: the source level is resampled to width x height
+    uint source_height;
+    uint srgb; // the source holds sRGB-encoded colour: resampled in linear light
 };
+
+vec3 SrgbToLinear(vec3 c) {
+    return mix(c / 12.92, pow((c + 0.055) / 1.055, vec3(2.4)), greaterThan(c, vec3(0.04045)));
+}
+
+vec3 LinearToSrgb(vec3 c) {
+    return mix(c * 12.92, 1.055 * pow(c, vec3(1.0 / 2.4)) - 0.055, greaterThan(c, vec3(0.0031308)));
+}
+
+vec4 ToLinear(vec4 texel) {
+    return srgb != 0 ? vec4(SrgbToLinear(texel.rgb), texel.a) : texel;
+}
+
+// Bilinear sample of the source at the centre of destination texel `coord` (layer z), for sources
+// of another size (uneven-mip ASTC re-compressed at a rounded-up size). sRGB colour is filtered
+// in linear light, as sampling would, and encoded back.
+vec4 Resample(ivec2 coord, int z) {
+    const vec2 scale = vec2(source_width, source_height) / vec2(width, height);
+    const vec2 position = (vec2(coord) + 0.5) * scale - 0.5;
+    const vec2 base = floor(position);
+    const vec2 f = position - base;
+    const ivec2 last = ivec2(source_width, source_height) - 1;
+    const ivec2 p0 = clamp(ivec2(base), ivec2(0), last);
+    const ivec2 p1 = clamp(ivec2(base) + 1, ivec2(0), last);
+    const vec4 a = ToLinear(imageLoad(source, ivec3(p0.x, p0.y, z)));
+    const vec4 b = ToLinear(imageLoad(source, ivec3(p1.x, p0.y, z)));
+    const vec4 c = ToLinear(imageLoad(source, ivec3(p0.x, p1.y, z)));
+    const vec4 d = ToLinear(imageLoad(source, ivec3(p1.x, p1.y, z)));
+    const vec4 filtered = mix(mix(a, b, f.x), mix(c, d, f.x), f.y);
+    return srgb != 0 ? vec4(LinearToSrgb(clamp(filtered.rgb, 0.0, 1.0)), filtered.a) : filtered;
+}
 
 uint Pack565(vec3 color) {
     const uvec3 q = uvec3(round(clamp(color, 0.0, 1.0) * vec3(31.0, 63.0, 31.0)));
@@ -169,7 +203,9 @@ void main() {
         for (int x = 0; x < 4; ++x) {
             // Edge blocks repeat the last row/column so padding doesn't widen the endpoints.
             const ivec2 coord = min(base + ivec2(x, y), last);
-            texels[y * 4 + x] = imageLoad(source, ivec3(coord, int(id.z)));
+            texels[y * 4 + x] = source_width == width && source_height == height
+                                    ? imageLoad(source, ivec3(coord, int(id.z)))
+                                    : Resample(coord, int(id.z));
             any_transparent = any_transparent || texels[y * 4 + x].a < 0.5;
         }
     }

@@ -1512,6 +1512,7 @@ public:
         texture_descriptors[index].is_multisample |= desc.is_multisample;
         texture_descriptors[index].is_integer |= desc.is_integer;
         texture_descriptors[index].is_descriptor_array |= desc.is_descriptor_array;
+        texture_descriptors[index].uses_texel_size |= desc.uses_texel_size;
         return index;
     }
 
@@ -1884,6 +1885,10 @@ void TexturePass(Environment& env, IR::Program& program, const HostTranslateInfo
                     .handle_program = cbuf.handle_program,
                     .is_descriptor_array = cbuf.count > 1,
                     .handle_is_pointer_word = texture_inst.pointer_word,
+                    .uses_texel_size = inst->GetOpcode() == IR::Opcode::ImageQueryDimensions ||
+                                       inst->GetOpcode() == IR::Opcode::ImageFetch ||
+                                       is_rect_sample ||
+                                       flags.type == TextureType::Color2DRect,
                 });
                 if (texture_inst.pointer_word &&
                     std::ranges::none_of(program.info.storage_buffers_descriptors,

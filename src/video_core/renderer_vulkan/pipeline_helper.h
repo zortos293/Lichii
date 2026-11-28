@@ -463,6 +463,9 @@ inline void PushImageDescriptors(TextureCache& texture_cache,
             Sampler& sampler{texture_cache.GetSampler(sampler_id)};
             guest_descriptor_queue.AddSampledImage(vk_image_view,
                                                    sampler.HandleFor(image_view, desc.is_depth));
+            if (desc.uses_texel_size) {
+                texture_cache.NoteTexelSizeUse(image_view);
+            }
             const bool element_rescaled{texture_cache.IsRescaling(image_view)};
             is_rescaled |= element_rescaled;
         }

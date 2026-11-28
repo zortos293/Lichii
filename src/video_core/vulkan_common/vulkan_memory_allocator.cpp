@@ -225,9 +225,10 @@ vk::Image MemoryAllocator::CreateImage(const VkImageCreateInfo &ci, bool dedicat
     return image;
 }
 
-vk::Image MemoryAllocator::TryCreateImage(const VkImageCreateInfo &ci, bool dedicated) const {
+vk::Image MemoryAllocator::TryCreateImage(const VkImageCreateInfo &ci, bool dedicated,
+                                          bool scratch) const {
     vk::Image image;
-    const VkResult result = AllocateImage(ci, dedicated, true, image);
+    const VkResult result = AllocateImage(ci, dedicated, true, image, scratch);
     if (result != VK_ERROR_OUT_OF_DEVICE_MEMORY && result != VK_ERROR_OUT_OF_HOST_MEMORY) {
         vk::Check(result);
     }
@@ -235,8 +236,8 @@ vk::Image MemoryAllocator::TryCreateImage(const VkImageCreateInfo &ci, bool dedi
 }
 
 VkResult MemoryAllocator::AllocateImage(const VkImageCreateInfo &ci, bool dedicated, bool may_fail,
-                                        vk::Image &image) const {
-    const VmaAllocationCreateInfo alloc_ci = {
+                                        vk::Image &image, bool scratch) const {
+    VmaAllocationCreateInfo alloc_ci = {
             // Best fit: images freed by the thousand leave holes in the blocks, which new ones
             // should fill before VMA takes another block.
             .flags = static_cast<VmaAllocationCreateFlags>(VMA_ALLOCATION_CREATE_WITHIN_BUDGET_BIT |
@@ -251,6 +252,12 @@ VkResult MemoryAllocator::AllocateImage(const VkImageCreateInfo &ci, bool dedica
             .pUserData = nullptr,
             .priority = 0.f,
     };
+    if (scratch && !device.IsIntegrated()) {
+        // Within the budget alone is not enough: with the device heap over it, VMA takes the next
+        // memory type whose heap has room, host memory on a discrete GPU. A scratch image is then
+        // tried in another shape that may fit in device memory.
+        alloc_ci.requiredFlags = VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT;
+    }
 
     VkImage handle{};
     VmaAllocation allocation{};
@@ -281,7 +288,7 @@ VkResult MemoryAllocator::AllocateImage(const VkImageCreateInfo &ci, bool dedica
     }
     VkResult result = huge ? VK_ERROR_OUT_OF_DEVICE_MEMORY
                            : vmaCreateImage(allocator, &ci, &alloc_ci, &handle, &allocation, &alloc_info);
-    if (result == VK_ERROR_OUT_OF_DEVICE_MEMORY && !huge) {
+    if (result == VK_ERROR_OUT_OF_DEVICE_MEMORY && !huge && !scratch) {
         // Over the device memory budget (Switch 2 titles fill 8 GB cards): let the driver page
         // it out rather than failing the draw and aborting.
         static u32 logged{};
@@ -297,7 +304,7 @@ VkResult MemoryAllocator::AllocateImage(const VkImageCreateInfo &ci, bool dedica
         relaxed.flags &= ~VMA_ALLOCATION_CREATE_WITHIN_BUDGET_BIT;
         result = vmaCreateImage(allocator, &ci, &relaxed, &handle, &allocation, &alloc_info);
     }
-    if (result == VK_ERROR_OUT_OF_DEVICE_MEMORY && !huge) {
+    if (result == VK_ERROR_OUT_OF_DEVICE_MEMORY && !huge && !scratch) {
         pressure_events.fetch_add(1, std::memory_order_relaxed);
     }
     if (result == VK_ERROR_OUT_OF_DEVICE_MEMORY && !may_fail) {
@@ -310,6 +317,9 @@ VkResult MemoryAllocator::AllocateImage(const VkImageCreateInfo &ci, bool dedica
             image = std::move(sparse);
             return VK_SUCCESS;
         }
+    }
+    if (result != VK_SUCCESS && scratch) {
+        return result; // the caller tries another shape (TryCreateImage)
     }
     if (result != VK_SUCCESS) {
         failed_images.fetch_add(1, std::memory_order_relaxed);

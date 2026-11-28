@@ -155,6 +155,10 @@ VideoCommon::ImageInfo MakeInfo() {
 namespace VideoCommon {
 
 struct TextureCacheTestAccess {
+    template <class C>
+    static u64 GuestSizeKey(GPUVAddr gpu_addr, const ImageInfo& info) {
+        return C::GuestSizeKey(gpu_addr, info);
+    }
     template <class C, class F>
     static void ForEachSparseSegment(C& cache, ImageBase& image, F&& func) {
         cache.ForEachSparseSegment(image, std::forward<F>(func));
@@ -540,6 +544,29 @@ TEST_CASE("Hinted BC7 lookup waits for GPU-written native overlap bytes",
         CHECK(f.runtime.downloads == 0);
         CHECK(f.bytes[0x40] == 0x73);
     }
+}
+
+TEST_CASE("Guest-size requests tell apart shapes that differ only in mip levels",
+          "[video_core][texture_cache][texel_size]") {
+    // A 1365x1365x90 ASTC array with 11 levels and one with 8 at the same address: a texel-unit
+    // read of the first must not make the second keep its guest size.
+    constexpr GPUVAddr gpu_addr = 0x1365000000;
+    VideoCommon::ImageInfo full = MakeInfo();
+    full.format = VideoCore::Surface::PixelFormat::ASTC_2D_4X4_UNORM;
+    full.size.width = 1365;
+    full.size.height = 1365;
+    full.resources.layers = 90;
+    full.resources.levels = 11;
+    VideoCommon::ImageInfo fewer = full;
+    fewer.resources.levels = 8;
+
+    CHECK(Access::GuestSizeKey<Cache>(gpu_addr, full) !=
+          Access::GuestSizeKey<Cache>(gpu_addr, fewer));
+    CHECK(Access::GuestSizeKey<Cache>(gpu_addr, full) ==
+          Access::GuestSizeKey<Cache>(gpu_addr, VideoCommon::ImageInfo{full}));
+    // Another address with the same shape is another key.
+    CHECK(Access::GuestSizeKey<Cache>(gpu_addr, full) !=
+          Access::GuestSizeKey<Cache>(gpu_addr + 0x10000, full));
 }
 
 TEST_CASE("Cached XC2 LUT layout is invalidated by a conflicting write",

@@ -76,9 +76,19 @@ using VideoCore::Surface::IsPixelFormatSRGB;
 using VideoCore::Surface::SurfaceType;
 
 namespace {
+// Set by TextureCacheRuntime where IsUnevenMipRgba8Astc keeps uneven-mip ASTC as RGBA8 (AMD
+// drivers without native ASTC, discrete cards of 6 GiB or more): RescalesUnevenBc applies there.
+std::atomic_bool g_rescale_uneven_bc{false};
+
+[[nodiscard]] bool RescalesUnevenBc(const VideoCommon::ImageInfo& info);
+[[nodiscard]] VideoCommon::ImageInfo RescaledBcInfo(const VideoCommon::ImageInfo& info);
+
 [[nodiscard]] u32 HostMipCount(const VideoCommon::ImageInfo& info) {
     if (info.num_samples > 1)
         return 1;
+    if (RescalesUnevenBc(info)) {
+        return static_cast<u32>(RescaledBcInfo(info).resources.levels);
+    }
     return VideoCommon::HostMipLevelCount(info.size.width, info.size.height, info.size.depth,
                                           static_cast<u32>(info.resources.levels));
 }
@@ -233,10 +243,70 @@ constexpr VkBorderColor ConvertBorderColor(const std::array<float, 4>& color) {
     return false;
 }
 
+// The leading levels whose block counts halve exactly (HasUnevenBlockMips stops there).
+[[nodiscard]] u32 EvenBlockMipCount(const ImageInfo& info) {
+    const u32 blocks_x = Common::DivCeil(info.size.width, 4U);
+    const u32 blocks_y = Common::DivCeil(info.size.height, 4U);
+    const u32 levels = static_cast<u32>((std::max)(info.resources.levels, 1));
+    for (u32 level = 1; level < levels; ++level) {
+        const u32 level_x = Common::DivCeil((std::max)(info.size.width >> level, 1U), 4U);
+        const u32 level_y = Common::DivCeil((std::max)(info.size.height >> level, 1U), 4U);
+        if (level_x != (std::max)(blocks_x >> level, 1U) ||
+            level_y != (std::max)(blocks_y >> level, 1U)) {
+            return level;
+        }
+    }
+    return levels;
+}
+
+// A large ASTC image IsUnevenMipRgba8Astc would keep as RGBA8 is re-compressed to BC at a size
+// rounded up to 256 texels instead, whose block mips stay even down to 12 texels; the levels
+// below are left out (sampling clamps to the last one). Title 1's terrain material arrays
+// (1365x1365x90, 11 levels) become 1536x1536x90 with 8 levels: ~280 MiB of BC3 instead of
+// ~860 MiB of RGBA8 each, so they fit in 8 GB cards next to everything else. The decode keeps
+// the guest size and the BC encoder resamples each level to the host size. Normalized
+// coordinates sample them the same; texel fetches and textureSize see the host size.
+// Not for an image JoinImages keeps at its guest size (keep_guest_size): it stays RGBA8.
+[[nodiscard]] bool RescalesUnevenBc(const ImageInfo& info) {
+    if (!g_rescale_uneven_bc.load(std::memory_order_relaxed) || info.keep_guest_size ||
+        !IsPixelFormatASTC(info.format) ||
+        info.type != ImageType::e2D || info.size.depth != 1 || info.num_samples != 1 ||
+        info.resources.levels <= 1 || info.size.width < 256 || info.size.height < 256 ||
+        Settings::values.accelerate_astc.GetValue() != Settings::AstcDecodeMode::Gpu ||
+        Settings::GetAstcRecompression() == Settings::AstcRecompression::Uncompressed ||
+        !HasUnevenBlockMips(info)) {
+        return false;
+    }
+    u64 rgba8_bytes = 0;
+    for (s32 level = 0; level < info.resources.levels; ++level) {
+        rgba8_bytes += u64{(std::max)(info.size.width >> level, 1U)} *
+                       (std::max)(info.size.height >> level, 1U) * 4;
+    }
+    rgba8_bytes *= static_cast<u64>(info.resources.layers);
+    // From 256 MiB of RGBA8; over 1 GiB it is a huge array (IsHugeAstcArray), with its own path.
+    return rgba8_bytes >= (u64{256} << 20) && rgba8_bytes <= (u64{1} << 30);
+}
+
+// The host shape of a RescalesUnevenBc image: rounded up to 256 texels, with the even block mips.
+// No more than the rounded size's full chain: a power-of-two size never makes a block mip uneven,
+// so a guest declaring more levels than its size has (769x769 with 12) kept them all, one past
+// what Vulkan allows for 1024x1024, and its decode image as well.
+[[nodiscard]] ImageInfo RescaledBcInfo(const ImageInfo& info) {
+    ImageInfo host = info;
+    host.size.width = Common::AlignUp(info.size.width, 256U);
+    host.size.height = Common::AlignUp(info.size.height, 256U);
+    host.resources.levels = static_cast<s32>(VideoCommon::HostMipLevelCount(
+        host.size.width, host.size.height, 1, EvenBlockMipCount(host)));
+    return host;
+}
+
 // ASTC that would be re-compressed to BC1/BC3 but has uneven block mips (HasUnevenBlockMips) on
 // an AMD driver, which samples those wrong: kept as the GPU decoder's RGBA8 instead, like huge
-// arrays.
+// arrays (large ones are re-compressed at a rounded-up size: RescalesUnevenBc).
 [[nodiscard]] bool IsUnevenMipRgba8Astc(const Device& device, const ImageInfo& info) {
+    if (RescalesUnevenBc(info)) {
+        return false;
+    }
     if (!IsPixelFormatASTC(info.format) || device.IsOptimalAstcSupported() ||
         info.type != ImageType::e2D || info.size.depth != 1 || info.resources.levels <= 1 ||
         Settings::values.accelerate_astc.GetValue() != Settings::AstcDecodeMode::Gpu ||
@@ -457,6 +527,9 @@ constexpr u64 MaxFreeTranscodeBytes = u64{256} << 20;
 // coordinates and derivative LOD still address it correctly; explicit LODs sample one level lower.
 [[nodiscard]] ImageInfo TrimmedHostInfo(const Device& device, const ImageInfo& info, u32& level_offset) {
     level_offset = 0;
+    if (RescalesUnevenBc(info)) {
+        return RescaledBcInfo(info);
+    }
     if (!WillUseAcceleratedAstcDecode(device, info) || info.type != ImageType::e2D) {
         return info;
     }
@@ -1342,6 +1415,17 @@ TextureCacheRuntime::TextureCacheRuntime(const Device& device_, Scheduler& sched
       resolution{Settings::values.resolution_info} {
     // Before anything below reads astc_recompression (passes, view formats).
     UseBc3ForSwitch2OnSmallCards(device);
+    {
+        // Where IsUnevenMipRgba8Astc keeps uneven-mip ASTC as RGBA8 (see RescalesUnevenBc).
+        using namespace Common::Literals;
+        const VkDriverIdKHR id = device.GetDriverID();
+        const bool amd = id == VK_DRIVER_ID_AMD_PROPRIETARY || id == VK_DRIVER_ID_AMD_OPEN_SOURCE ||
+                         id == VK_DRIVER_ID_MESA_RADV;
+        g_rescale_uneven_bc.store(amd && !device.IsOptimalAstcSupported() &&
+                                      !device.IsIntegrated() &&
+                                      device.GetDeviceLocalHeapSize() >= 6_GiB,
+                                  std::memory_order_relaxed);
+    }
     // Huge ASTC arrays always decode on the GPU (IsHugeAstcArray), whatever the decode setting.
     if (Settings::values.accelerate_astc.GetValue() == Settings::AstcDecodeMode::Gpu ||
         !device.IsOptimalAstcSupported()) {
@@ -3308,7 +3392,20 @@ Image::Image(TextureCacheRuntime& runtime_, const ImageInfo& info_, GPUVAddr gpu
                 WillUseGpuBcnTranscode(runtime->device, info)) {
                 flags |= VideoCommon::ImageFlagBits::AcceleratedUpload;
             }
-            if (IsUnevenMipRgba8Astc(runtime->device, info)) {
+            if (RescalesUnevenBc(info)) {
+                rescaled_bc = true;
+                const ImageInfo host = RescaledBcInfo(info);
+                static std::atomic<u32> rescaled_images{0};
+                const u32 count = ++rescaled_images;
+                if (count <= 4 || (count & (count - 1)) == 0) {
+                    LOG_INFO(Render_Vulkan,
+                             "ASTC {}x{}x{} with {} levels kept as BC at {}x{} with {} levels "
+                             "(uneven BC block mips), {} images so far",
+                             info.size.width, info.size.height, info.resources.layers,
+                             info.resources.levels, host.size.width, host.size.height,
+                             host.resources.levels, count);
+                }
+            } else if (IsUnevenMipRgba8Astc(runtime->device, info)) {
                 static std::atomic<u32> uneven_images{0};
                 const u32 count = ++uneven_images;
                 if (count <= 4 || (count & (count - 1)) == 0) {
@@ -5551,30 +5648,76 @@ void TextureCacheRuntime::TranscodeAstcToBcn(
     // The BC encoder declares layout(rgba8). Identical byte layout is not enough:
     // its storage image view must have the matching R8G8B8A8_UNORM format.
     constexpr VkFormat DecodeFormat = VK_FORMAT_R8G8B8A8_UNORM;
-    // A decode image of the same shape the GPU is done with: title 1's title screen decodes
-    // dozens of textures a frame, mostly of a few shapes. Making one took 263 us; from VMA's
-    // shared blocks 90 us, but freeing them there left ~1 GB of those blocks unused.
-    const auto take_free = [&](u32 batch_layers, PendingTranscode& out) {
-        const auto reusable = std::ranges::find_if(free_transcodes, [&](const PendingTranscode& t) {
-            return t.width == width && t.height == height && t.levels == levels &&
-                   t.layers == batch_layers;
-        });
-        if (reusable == free_transcodes.end()) {
-            return false;
-        }
-        out = std::move(*reusable);
-        free_transcodes.erase(reusable);
-        return true;
+    // Decode images are made a size class larger than the texture and reused by any later
+    // texture that fits, even while the GPU still works on their last decode: commands run in
+    // submission order and a reused image's decode starts with a barrier after the encoder's
+    // reads (initialized below). Exact shapes only matched a few textures: a zone change in
+    // title 1 made ~430 decode images (1.7 GB of dedicated allocations, ~220 ms) in a second.
+    const auto size_class = [](u32 size) {
+        return size <= 512 ? std::bit_ceil((std::max)(size, 4U)) : Common::AlignUp(size, 512U);
     };
-    const auto make_decode = [&](u32 batch_layers) {
+    // Not const: when the size class does not fit, the exact shape is tried last.
+    u32 decode_width = size_class(width);
+    u32 decode_height = size_class(height);
+    u32 decode_levels =
+        (std::max)(levels, static_cast<u32>(std::bit_width((std::max)(decode_width, decode_height))));
+    // A decode of more than 128 MiB goes a batch of layers at a time through a smaller image:
+    // title 1's terrain material arrays (1365x1365x90, 11 levels) took an ~890 MiB decode image
+    // each, which stalled 80-230 ms with VRAM full and once landed in host memory. On a full card
+    // the whole-array allocation failed on every use of the texture (#1035), and on an integrated
+    // GPU it came out of host RAM (#1756); 128 MiB stays under the free pool's 256 MiB there too.
+    constexpr u64 MaxDecodeBytes = u64{128} << 20;
+    u64 decode_layer_bytes = 0;
+    for (u32 level = 0; level < decode_levels; ++level) {
+        decode_layer_bytes += u64{(std::max)(decode_width >> level, 1U)} *
+                              (std::max)(decode_height >> level, 1U) * 4;
+    }
+    u32 batch = layers;
+    if (decode_layer_bytes * layers > MaxDecodeBytes && info.layer_stride != 0) {
+        batch = static_cast<u32>(std::clamp<u64>(MaxDecodeBytes / decode_layer_bytes, 1, layers));
+    }
+    const auto fits = [&](const PendingTranscode& t, u32 batch_layers) {
+        return t.width >= width && t.height >= height && t.levels >= levels &&
+               t.layers >= batch_layers;
+    };
+    const auto smaller = [](const PendingTranscode& a, const PendingTranscode& b) {
+        return u64{a.width} * a.height * a.layers < u64{b.width} * b.height * b.layers;
+    };
+    // The smallest image that fits: one the GPU is done with first, else one in flight.
+    const auto take = [&](u32 batch_layers, PendingTranscode& out) {
+        auto best_free = free_transcodes.end();
+        for (auto it = free_transcodes.begin(); it != free_transcodes.end(); ++it) {
+            if (fits(*it, batch_layers) && (best_free == free_transcodes.end() || smaller(*it, *best_free))) {
+                best_free = it;
+            }
+        }
+        if (best_free != free_transcodes.end()) {
+            out = std::move(*best_free);
+            free_transcodes.erase(best_free);
+            return true;
+        }
+        auto best_busy = pending_transcodes.end();
+        for (auto it = pending_transcodes.begin(); it != pending_transcodes.end(); ++it) {
+            if (fits(*it, batch_layers) && (best_busy == pending_transcodes.end() || smaller(*it, *best_busy))) {
+                best_busy = it;
+            }
+        }
+        if (best_busy != pending_transcodes.end()) {
+            out = std::move(*best_busy);
+            pending_transcodes.erase(best_busy);
+            return true;
+        }
+        return false;
+    };
+    const auto make_decode = [&](u32 batch_layers, bool scratch = true) {
         const VkImageCreateInfo decode_ci{
             .sType = VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO,
             .pNext = nullptr,
             .flags = 0,
             .imageType = VK_IMAGE_TYPE_2D,
             .format = DecodeFormat,
-            .extent = {width, height, 1},
-            .mipLevels = levels,
+            .extent = {decode_width, decode_height, 1},
+            .mipLevels = decode_levels,
             .arrayLayers = batch_layers,
             .samples = VK_SAMPLE_COUNT_1_BIT,
             .tiling = VK_IMAGE_TILING_OPTIMAL,
@@ -5584,38 +5727,22 @@ void TextureCacheRuntime::TranscodeAstcToBcn(
             .pQueueFamilyIndices = nullptr,
             .initialLayout = VK_IMAGE_LAYOUT_UNDEFINED,
         };
-        return memory_allocator.TryCreateImage(decode_ci, true);
+        // Scratch attempts stay within the memory budget and a miss counts for nothing: the
+        // allocator placed the size class over budget in host memory where a smaller attempt
+        // still fit, and a miss another attempt recovered made the texture cache collect as out
+        // of memory. Only the last attempt (scratch false) may go over the budget, and counts.
+        return memory_allocator.TryCreateImage(decode_ci, true, scratch);
     };
-    // The decode image holds RGBA8 for every layer at once: a 1365x1365 array of 90 layers with
-    // 11 levels is ~890 MiB in one allocation. On a full card that allocation failed on every use
-    // of the texture, forever (#1035). When the whole array does not fit, decode and encode it a
-    // few layers at a time through a smaller image; the encoded output is the same.
-    // An over-budget decode image is not refused: VMA places it in system RAM instead (#2365: a
-    // 915 MiB image on a 6 GiB GTX 1660 Super spilled 1258 MiB and forced a collect), and on an
-    // integrated GPU device memory is system RAM (#1756: two ~890 MiB images on a 15 GiB Meteor
-    // Lake laptop just before it froze). Start with as many layers as the free pool keeps, so the
-    // next upload of the texture reuses the image.
-    u32 batch = layers;
-    u64 decode_layer_bytes{};
-    for (u32 level = 0; level < levels; ++level) {
-        decode_layer_bytes +=
-            u64{(std::max)(width >> level, 1U)} * (std::max)(height >> level, 1U) * 4;
-    }
-    while (batch > 1 && decode_layer_bytes * batch > MaxFreeTranscodeBytes) {
-        batch = Common::DivCeil(batch, 2U);
-    }
-    const u32 pool_batch = batch;
+    const u32 planned_batch = batch;
     PendingTranscode pending;
-    bool reused = take_free(batch, pending);
+    bool reused = take(batch, pending);
     if (!reused) {
         vk::Image decode = make_decode(batch);
-        // The whole array does not fit. A free image with fewer layers comes first: a texture
-        // that was decoded in batches gets back the image its last upload used, and the rest of
-        // the pool is kept. Emptying the pool first destroyed that image on every upload, only
-        // to make the same one again.
+        // It does not fit (#1035). An image for fewer layers comes first, then the free images'
+        // memory goes back to the driver, then fewer layers a batch.
         for (u32 fewer = batch; !decode && !reused && fewer > 1;) {
             fewer = Common::DivCeil(fewer, 2U);
-            if (take_free(fewer, pending)) {
+            if (take(fewer, pending)) {
                 batch = fewer;
                 reused = true;
             }
@@ -5625,9 +5752,34 @@ void TextureCacheRuntime::TranscodeAstcToBcn(
             free_transcodes.clear();
             decode = make_decode(batch);
         }
+        // The exact shape, widened only as far as all `levels` need: a rescaled image has the
+        // levels of its rounded size (769x769 rounded to 1024 keeps 11, which 769 does not have).
+        const u32 chain_size = 1U << (levels - 1);
+        const u32 exact_width = (std::max)(width, width >= height ? chain_size : 1U);
+        const u32 exact_height = (std::max)(height, width >= height ? 1U : chain_size);
+        const auto use_exact_shape = [&] {
+            decode_width = exact_width;
+            decode_height = exact_height;
+            decode_levels = levels;
+        };
+        if (!decode && !reused &&
+            (decode_width != exact_width || decode_height != exact_height ||
+             decode_levels != levels)) {
+            // The size class (made for reuse) is larger than the texture: a 4097x4097 level
+            // decodes in a 4608x4608 full chain, ~108 MiB against ~64 MiB. The exact shape is
+            // never larger, so it comes before fewer layers a batch.
+            use_exact_shape();
+            decode = make_decode(batch);
+        }
         while (!decode && !reused && batch > 1) {
             batch = Common::DivCeil(batch, 2U);
             decode = make_decode(batch);
+        }
+        if (!decode && !reused) {
+            // Last, the exact shape over the budget if it must (host memory), counted as a
+            // pressure event or, when even that fails, a failed image.
+            use_exact_shape();
+            decode = make_decode(batch, false);
         }
         if (!decode && !reused) {
             static u32 logged{};
@@ -5641,13 +5793,13 @@ void TextureCacheRuntime::TranscodeAstcToBcn(
             TransitionImageLayout(image);
             return;
         }
-        if (batch != pool_batch) {
+        if (batch != planned_batch) {
             static u32 batch_logged{};
             if (batch_logged++ < 32) {
                 LOG_WARNING(Render_Vulkan,
                             "ASTC image {:#x} ({}x{}, {} levels, {} layers) decoded {} layers at a "
-                            "time: not enough device memory for all of them",
-                            image.gpu_addr, width, height, levels, layers, batch);
+                            "time: not enough device memory for {}",
+                            image.gpu_addr, width, height, levels, layers, batch, planned_batch);
             }
         }
         if (!reused) {
@@ -5655,13 +5807,13 @@ void TextureCacheRuntime::TranscodeAstcToBcn(
                 .tick = 0,
                 .image = std::move(decode),
                 .views = {},
-                .width = width,
-                .height = height,
-                .levels = levels,
+                .width = decode_width,
+                .height = decode_height,
+                .levels = decode_levels,
                 .layers = batch,
                 .unused_frames = 0,
             };
-            for (u32 level = 0; level < levels; ++level) {
+            for (u32 level = 0; level < decode_levels; ++level) {
                 pending.views.push_back(
                     MakeStorageView(device.GetLogical(), level, *pending.image, DecodeFormat));
             }
@@ -5672,13 +5824,18 @@ void TextureCacheRuntime::TranscodeAstcToBcn(
     const bool bc3 = !IsOpaqueBc1Astc(device, info) &&
                      Settings::GetAstcRecompression() != Settings::AstcRecompression::Bc1;
     const u64 block_bytes = bc3 ? 16 : 8;
+    // RescalesUnevenBc: the decode keeps the guest size and the encoder resamples each level to
+    // the host size.
+    const bool rescaled = RescalesUnevenBc(info);
+    const u32 host_width = rescaled ? RescaledBcInfo(info).size.width : width;
+    const u32 host_height = rescaled ? RescaledBcInfo(info).size.height : height;
     boost::container::small_vector<VideoCommon::BufferImageCopy, 16> copies;
     boost::container::small_vector<u64, 16> layer_bytes; // one encoded layer of each level
     boost::container::small_vector<u64, 16> level_offsets;
     u64 total = 0;
     for (u32 level = 0; level < levels; ++level) {
-        const u32 level_width = (std::max)(width >> level, 1U);
-        const u32 level_height = (std::max)(height >> level, 1U);
+        const u32 level_width = (std::max)(host_width >> level, 1U);
+        const u32 level_height = (std::max)(host_height >> level, 1U);
         const u32 blocks_x = Common::DivCeil(level_width, 4U);
         const u32 blocks_y = Common::DivCeil(level_height, 4U);
         layer_bytes.push_back(u64{blocks_x} * blocks_y * block_bytes);
@@ -5705,9 +5862,12 @@ void TextureCacheRuntime::TranscodeAstcToBcn(
     // was past the decode, and two textures' blocks met in one buffer.
     auto output = staging_buffer_pool.Request(total, MemoryUsage::DeviceLocal, true);
 
+    // A rescaled image encodes at its host size from the decode at the guest size, and a decode
+    // image taken while in flight is still read by its last encode (initialized).
     TranscodeAstcBatches(*astc_decoder_pass, *bc_encoder_pass, info, image.guest_size_bytes, map,
                          swizzles, *pending.image, pending.views, batch, bc3, output.buffer,
-                         output.offset, total, level_offsets, layer_bytes);
+                         output.offset, total, level_offsets, layer_bytes, host_width, host_height,
+                         IsPixelFormatSRGB(info.format), reused);
     scheduler.Record([](vk::CommandBuffer cmdbuf) {
         const VkMemoryBarrier barrier{
             .sType = VK_STRUCTURE_TYPE_MEMORY_BARRIER,

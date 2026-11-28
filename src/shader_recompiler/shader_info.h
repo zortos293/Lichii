@@ -244,6 +244,10 @@ struct TextureDescriptor {
     /// Whether the constant buffer word above reaches the handle only as the address of a load:
     /// a pointer, never a texture handle, which binds no texture (see HandleIsStoragePointer)
     bool handle_is_pointer_word{};
+    /// Whether the shader reads the texture in texels: its size (textureSize), texel fetches or
+    /// unnormalized (rect) sampling. An image the host keeps at another size than the guest's
+    /// gives those the wrong answer (TextureCache::NoteTexelSizeUse).
+    bool uses_texel_size{};
 
     auto operator<=>(const TextureDescriptor&) const = default;
 };
