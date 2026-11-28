@@ -3,6 +3,8 @@
 
 // SPDX-License-Identifier: GPL-2.0-or-later
 
+#include <exception>
+
 #include "common/logging.h"
 #include "core/core.h"
 #include "core/hle/service/caps/caps_manager.h"
@@ -87,7 +89,15 @@ void IScreenShotApplicationService::CaptureAndSaveScreenshot(AlbumReportOption r
 
             Capture::ApplicationAlbumEntry entry{};
             manager->FlipVerticallyOnWrite(invert_y);
-            manager->SaveScreenShot(entry, attribute, report_option, image_data, {});
+            // This callback runs on a detached thread: an exception that escapes it ends the
+            // process, so a failed save must only be logged (#2631).
+            try {
+                manager->SaveScreenShot(entry, attribute, report_option, image_data, {});
+            } catch (const std::exception& e) {
+                LOG_ERROR(Service_Capture, "Saving the screenshot failed: {}", e.what());
+            } catch (...) {
+                LOG_ERROR(Service_Capture, "Saving the screenshot failed with an unknown error");
+            }
         },
         layout,
         Nvnflinger::LayerStackId::Screenshot);
