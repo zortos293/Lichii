@@ -93,6 +93,10 @@ if (LICHII_FUZZERS)
     add_compile_options(
         $<$<COMPILE_LANGUAGE:C,CXX>:-fsanitize=address,undefined,fuzzer-no-link>
         $<$<COMPILE_LANGUAGE:C,CXX>:-fno-sanitize-recover=undefined>
+        # memcpy and memset with a null pointer and a size of 0 would stop every run under
+        # -fno-sanitize-recover, though they touch no memory; a null pointer with a real size
+        # still faults, and ASan reports that.
+        $<$<COMPILE_LANGUAGE:C,CXX>:-fno-sanitize=nonnull-attribute>
         $<$<COMPILE_LANGUAGE:C,CXX>:-fno-omit-frame-pointer>)
     add_link_options(-fsanitize=address,undefined)
 endif()

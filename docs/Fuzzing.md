@@ -32,3 +32,7 @@ Start `fuzz_nca`, `fuzz_package` and `fuzz_ncz` from their `FUZZ_*_SEED` seeds (
 Each harness file starts with the flags it was run with. `fuzz_meta` and `fuzz_ncz` reach header fields that size allocations, so give them `-rss_limit_mb` and `-malloc_limit_mb`, and use `-fork=1 -ignore_ooms=1` to keep going past out-of-memory reports. `fuzz_keys` needs `ASAN_OPTIONS=detect_leaks=0`: LeakSanitizer reports about 65 bytes allocated at start-up, once per process, not per input.
 
 With `-DLICHII_TESTS=ON`, the same build directory also builds `tests` under the sanitizers.
+
+## In CI
+
+The `sanitizers` workflow (`.github/workflows/sanitizers.yml`) builds `tests` and the harnesses with `LICHII_FUZZERS=ON`, runs the parser test tags under ASan and UBSan and gives each harness a 60-second run. It runs each night on nx2, by hand (`workflow_dispatch`), and on pull requests that touch `src/core/file_sys`, `src/core/crypto`, `src/core/loader`, the cheat parser, `src/fuzz` or `src/tests/core`. Only the nx2 runs save its compiler cache, one entry in all, and pull requests restore it. The check is not required. When a harness crashes, its inputs are uploaded as the `fuzzer-crashes` artifact: replay them as above.
