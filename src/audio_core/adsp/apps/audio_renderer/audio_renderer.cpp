@@ -45,13 +45,17 @@ void AudioRenderer::Stop() {
         return;
     }
 
-    mailbox.Send(Direction::DSP, Message::Shutdown);
-    if (mailbox.Receive(Direction::Host) != Message::Shutdown) {
-        LOG_ERROR(Service_Audio, "Host Audio Renderer -- Failed to receive shutdown "
-                                 "message response from ADSP!");
-    }
+    // The thread's one exit is its stop token, which ends both its wait for a message and a
+    // render's wait for its stream to free queue space; a stream whose backend stopped asking for
+    // audio without an error never frees any, so waiting for a reply to a shutdown message hung.
     main_thread.request_stop();
     main_thread.join();
+
+    // A render the stop ended may have left its list part done, and the host may have set command
+    // buffers it never took: none of it may reach the next Start, whose systems and process may
+    // differ. The mailbox too: neither side reads what the other left.
+    command_buffers = {};
+    mailbox.Reset();
 
     for (auto& stream : streams) {
         if (stream) {
@@ -68,8 +72,12 @@ void AudioRenderer::Signal() {
     Send(Direction::DSP, Message::Render);
 }
 
-void AudioRenderer::Wait() {
-    auto msg = Receive(Direction::Host);
+void AudioRenderer::Wait(std::stop_token stop_token) {
+    auto msg = mailbox.Receive(Direction::Host, stop_token);
+    if (stop_token.stop_requested()) {
+        // Stopping while the render may still be running: leave its command buffers to it.
+        return;
+    }
     if (msg != Message::RenderResponse) {
         LOG_ERROR(Service_Audio,
                   "Did not receive the expected render response from the AudioRenderer! Expected "
@@ -146,12 +154,11 @@ void AudioRenderer::Main(std::stop_token stop_token) {
     constexpr u64 max_process_time{2'304'000ULL};
 
     while (!stop_token.stop_requested()) {
-        auto msg{mailbox.Receive(Direction::DSP)};
-        switch (msg) {
-        case Message::Shutdown:
-            mailbox.Send(Direction::Host, Message::Shutdown);
+        auto msg{mailbox.Receive(Direction::DSP, stop_token)};
+        if (stop_token.stop_requested()) {
             return;
-
+        }
+        switch (msg) {
         case Message::Render: {
             if (system.IsShuttingDown()) {
                 std::this_thread::sleep_for(std::chrono::milliseconds(200));

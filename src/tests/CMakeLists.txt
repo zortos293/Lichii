@@ -64,6 +64,7 @@ add_executable(tests
     audio_core/nx2_input_service.cpp
     audio_core/audio_in.cpp
     audio_core/sysmix_sink.cpp
+    audio_core/renderer_stalled_stream.cpp
     audio_core/sysmix_test_context.h
     video_core/ampere_starfox_test10.cpp
     video_core/ampere_yoshi_title.cpp

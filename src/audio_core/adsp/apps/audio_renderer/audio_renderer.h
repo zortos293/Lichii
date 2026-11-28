@@ -68,7 +68,9 @@ public:
     void Stop();
 
     void Signal();
-    void Wait();
+    /// Wait for the render Signal asked for. Returns early, leaving its command buffers alone,
+    /// once `stop_token` is stopped: a render can wait for its stream indefinitely.
+    void Wait(std::stop_token stop_token = {});
 
     void Send(Direction dir, u32 message);
     u32 Receive(Direction dir);

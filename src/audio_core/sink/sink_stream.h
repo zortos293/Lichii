@@ -259,6 +259,13 @@ protected:
      */
     void SignalPause();
 
+    /**
+     * Called on the renderer's thread, with the stream's release lock held, as it starts to wait
+     * for queue space with no limit: until whatever plays the stream frees some, the stream is
+     * paused, or the renderer is stopped. For tests that need a renderer parked there.
+     */
+    virtual void WaitingForSpace() {}
+
 protected:
     /// Core system
     Core::System& system;
