@@ -26,7 +26,8 @@ class StagingBufferPool;
 /// OoT uses finite standard depth and LDR colour with unit exposure. Both take render-size motion.
 class Fsr3Upscaler {
 public:
-    enum class Profile { HdrReversedDepth, OcarinaLdr };
+    /// HdrStandardDepth: HDR colour with standard depth (Fast Fusion's D24).
+    enum class Profile { HdrReversedDepth, HdrStandardDepth, OcarinaLdr };
     struct Inputs {
         VkImageView color;          ///< Profile's HDR or tonemapped LDR colour, at render size.
         VkImageView depth;          ///< Device depth in the profile's convention, at render size.
@@ -62,6 +63,9 @@ public:
 
     [[nodiscard]] VkImage OutputImage() const noexcept;
     [[nodiscard]] VkImageView OutputView() const noexcept;
+    [[nodiscard]] Profile GetProfile() const noexcept {
+        return profile;
+    }
 
     /// Nearest-neighbour clamp sampler (normalized coordinates), for reading Output().
     [[nodiscard]] VkSampler PointSampler() const noexcept {

@@ -26,6 +26,16 @@ constexpr u64 StarFoxOutputProgramKey = 0x7d3764ff101bec27ULL;
 constexpr u64 DuskbloodsProgramId = 0x0400D1D02399A000ULL;
 constexpr u64 DuskbloodsPrepassProgramKey = 0xe5efe04581720f15ULL;
 constexpr u64 DuskbloodsOutputProgramKey = 0x50e47e31c31fc1f8ULL;
+// Fast Fusion's race network: two dispatches of one shader. The prepass's constants give the
+// colour at OutputColorInputOffset, with depth and motion vectors in the next two texture
+// handles, and the jitter at FastFusionJitterOffset (the previous frame's is 8 bytes before it).
+constexpr u64 FastFusionProgramId = 0x040041E0212AE000ULL;
+constexpr u64 FastFusionPrepassProgramKey = 0x7a06618494a29bcdULL;
+constexpr u64 FastFusionOutputProgramKey = 0xd4ae33b8c2daa40dULL;
+constexpr u32 FastFusionJitterOffset = 0x388;
+// The output pass's input colour and output handles.
+constexpr u32 FastFusionOutputInputOffset = 0x220;
+constexpr u32 FastFusionOutputOffset = 0x26c;
 constexpr u32 PrepassColorOffset = 0x278;
 constexpr u32 JitterOffset = 0x1b0;
 constexpr u32 OutputColorInputOffset = 0x328;
@@ -41,6 +51,9 @@ struct Passes {
     // constants give that region.
     bool render_region = false;
     u64 alternate_prepass{};
+    /// The prepass's colour is at OutputColorInputOffset, with depth and motion vectors in the
+    /// texture handles after it (Fast Fusion).
+    bool adjacent_handles = false;
 
     /// Match either captured prepass; a zero alternate key means no alternate is configured.
     constexpr bool IsPrepass(u64 key) const {
@@ -59,6 +72,10 @@ constexpr std::optional<Passes> CapturedPasses(u64 program_id) {
     }
     if (program_id == DuskbloodsProgramId) {
         return Passes{DuskbloodsPrepassProgramKey, DuskbloodsOutputProgramKey, false, true};
+    }
+    if (program_id == FastFusionProgramId) {
+        return Passes{FastFusionPrepassProgramKey, FastFusionOutputProgramKey, false, false, 0,
+                      true};
     }
     return std::nullopt;
 }

@@ -274,7 +274,7 @@ set(FSR3_VARIANTS
     "rcas|rcas|none"
 )
 
-foreach(FSR3_PROFILE IN ITEMS hdr ldr)
+foreach(FSR3_PROFILE IN ITEMS hdr ldr std)
 foreach(VARIANT IN ITEMS ${FSR3_VARIANTS})
     string(REPLACE "|" ";" VARIANT_PARTS "${VARIANT}")
     list(GET VARIANT_PARTS 0 FSR3_NAME)
@@ -291,6 +291,11 @@ foreach(VARIANT IN ITEMS ${FSR3_VARIANTS})
         set(FSR3_PROFILE_FLAGS -DFFX_FSR3UPSCALER_OPTION_HDR_COLOR_INPUT=0
                                -DFFX_FSR3UPSCALER_OPTION_INVERTED_DEPTH=0)
         string(APPEND FSR3_NAME "_ldr")
+    elseif (FSR3_PROFILE STREQUAL "std")
+        # HDR colour with standard (not reversed) depth: Fast Fusion.
+        set(FSR3_PROFILE_FLAGS -DFFX_FSR3UPSCALER_OPTION_HDR_COLOR_INPUT=1
+                               -DFFX_FSR3UPSCALER_OPTION_INVERTED_DEPTH=0)
+        string(APPEND FSR3_NAME "_std")
     else()
         set(FSR3_PROFILE_FLAGS -DFFX_FSR3UPSCALER_OPTION_HDR_COLOR_INPUT=1
                                -DFFX_FSR3UPSCALER_OPTION_INVERTED_DEPTH=1)

@@ -35,6 +35,17 @@
 #include "video_core/host_shaders/fsr3_upscaler_shading_change_ldr_comp_spv.h"
 #include "video_core/host_shaders/fsr3_upscaler_shading_change_pyramid_ldr_comp_spv.h"
 #include "video_core/host_shaders/fsr3_upscaler_shading_change_pyramid_nowave_ldr_comp_spv.h"
+#include "video_core/host_shaders/fsr3_upscaler_accumulate_std_comp_spv.h"
+#include "video_core/host_shaders/fsr3_upscaler_accumulate_sharpen_std_comp_spv.h"
+#include "video_core/host_shaders/fsr3_upscaler_luma_instability_std_comp_spv.h"
+#include "video_core/host_shaders/fsr3_upscaler_luma_pyramid_std_comp_spv.h"
+#include "video_core/host_shaders/fsr3_upscaler_luma_pyramid_nowave_std_comp_spv.h"
+#include "video_core/host_shaders/fsr3_upscaler_prepare_inputs_std_comp_spv.h"
+#include "video_core/host_shaders/fsr3_upscaler_prepare_reactivity_std_comp_spv.h"
+#include "video_core/host_shaders/fsr3_upscaler_rcas_std_comp_spv.h"
+#include "video_core/host_shaders/fsr3_upscaler_shading_change_std_comp_spv.h"
+#include "video_core/host_shaders/fsr3_upscaler_shading_change_pyramid_std_comp_spv.h"
+#include "video_core/host_shaders/fsr3_upscaler_shading_change_pyramid_nowave_std_comp_spv.h"
 #include "video_core/renderer_vulkan/vk_compute_pass.h"
 #include "video_core/renderer_vulkan/vk_descriptor_pool.h"
 #include "video_core/renderer_vulkan/vk_fsr3_upscaler.h"
@@ -306,6 +317,26 @@ Fsr3Upscaler::Fsr3Upscaler(const Device& device_, Scheduler& scheduler_,
         passes[PassRcas] = pass(RCAS, FSR3_UPSCALER_RCAS_LDR_COMP_SPV);
         return;
     }
+    if (profile == Profile::HdrStandardDepth) {
+        passes[PassPrepareInputs] = pass(PREPARE_INPUTS, FSR3_UPSCALER_PREPARE_INPUTS_STD_COMP_SPV);
+        passes[PassLumaPyramid] = pass(
+            LUMA_PYRAMID, quads ? std::span<const u32>(FSR3_UPSCALER_LUMA_PYRAMID_STD_COMP_SPV)
+                               : std::span<const u32>(FSR3_UPSCALER_LUMA_PYRAMID_NOWAVE_STD_COMP_SPV));
+        passes[PassShadingChangePyramid] = pass(
+            SHADING_CHANGE_PYRAMID,
+            quads ? std::span<const u32>(FSR3_UPSCALER_SHADING_CHANGE_PYRAMID_STD_COMP_SPV)
+                  : std::span<const u32>(FSR3_UPSCALER_SHADING_CHANGE_PYRAMID_NOWAVE_STD_COMP_SPV));
+        passes[PassShadingChange] = pass(SHADING_CHANGE, FSR3_UPSCALER_SHADING_CHANGE_STD_COMP_SPV);
+        passes[PassPrepareReactivity] =
+            pass(PREPARE_REACTIVITY, FSR3_UPSCALER_PREPARE_REACTIVITY_STD_COMP_SPV);
+        passes[PassLumaInstability] =
+            pass(LUMA_INSTABILITY, FSR3_UPSCALER_LUMA_INSTABILITY_STD_COMP_SPV);
+        passes[PassAccumulate] = pass(ACCUMULATE, FSR3_UPSCALER_ACCUMULATE_STD_COMP_SPV);
+        passes[PassAccumulateSharpen] =
+            pass(ACCUMULATE, FSR3_UPSCALER_ACCUMULATE_SHARPEN_STD_COMP_SPV);
+        passes[PassRcas] = pass(RCAS, FSR3_UPSCALER_RCAS_STD_COMP_SPV);
+        return;
+    }
     passes[PassPrepareInputs] = pass(PREPARE_INPUTS, FSR3_UPSCALER_PREPARE_INPUTS_COMP_SPV);
     passes[PassLumaPyramid] =
         pass(LUMA_PYRAMID, quads ? std::span<const u32>(FSR3_UPSCALER_LUMA_PYRAMID_COMP_SPV)
@@ -484,8 +515,8 @@ void Fsr3Upscaler::Upscale(const Inputs& in) {
         const f32 cot_half_fov = std::cos(0.5f * fov) / std::sin(0.5f * fov);
         constants.device_to_view_depth = {-1.0f * (0.0f + FLT_EPSILON), near_plane,
                                            1.0f / (cot_half_fov / aspect), 1.0f / cot_half_fov};
-        if (profile == Profile::OcarinaLdr) {
-            // Vulkan device depth is [0,1], despite the camera's GL [-1,1] clip projection.
+        if (profile != Profile::HdrReversedDepth) {
+            // Standard [0,1] device depth (Ocarina's camera has a GL [-1,1] clip projection).
             // z_view = near*far / (far - device_depth*(far-near)).
             constexpr f32 far_plane = 25000.0f;
             constants.device_to_view_depth[0] = far_plane / (far_plane - near_plane);
@@ -604,7 +635,7 @@ void Fsr3Upscaler::Upscale(const Inputs& in) {
     scheduler.RequestOutsideRenderPassOperationContext();
     scheduler.Record([initialize, clear_zero, clear_frame_info,
                       nearest_depth = *previous_nearest_depth.image,
-                      unit = *unit_exposure.image, first, standard_depth = profile == Profile::OcarinaLdr,
+                      unit = *unit_exposure.image, first, standard_depth = profile != Profile::HdrReversedDepth,
                       lut = *lanczos_lut.image,
                       lut_buffer = lut_upload ? lut_upload->buffer : VkBuffer{},
                       lut_offset = lut_upload ? lut_upload->offset : 0](vk::CommandBuffer cmdbuf) {

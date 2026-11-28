@@ -338,6 +338,7 @@ private:
         bool active{};
         bool spatial_only{};
         bool render_region{};
+        bool adjacent_handles{};
         bool output_pass{};
         u32 rejected{};
         u32 clean_evaluations{};
@@ -381,6 +382,8 @@ private:
     std::optional<Texture::TICEntry> dlss_motion_vectors;
     std::optional<Texture::TICEntry> dlss_depth;
     u32 dlss_contract_trace_count{};
+    /// Native key and grid of each traced dispatch shape, with how many of it were logged.
+    std::vector<std::pair<std::array<u64, 2>, u32>> dlss_contract_shapes;
     GPUVAddr dlss_motion_color{};
     VideoCommon::FireEmblemUpscale::FrameJitter fe_upscale_jitter;
     bool ProcessNativeMethod(Core::System& system, u32 method, u32 argument, bool is_last_call);

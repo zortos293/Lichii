@@ -880,6 +880,7 @@ bool KeplerCompute::ProcessGameDlss(u64 program_id, u64 native_key) {
     if (passes->IsPrepass(native_key)) {
         dlss_chain.spatial_only = passes->spatial_only;
         dlss_chain.render_region = passes->render_region;
+        dlss_chain.adjacent_handles = passes->adjacent_handles;
         CaptureFireEmblemJitter();
         dlss_chain.active = true;
         dlss_chain.rejected = 0;
@@ -966,10 +967,15 @@ void KeplerCompute::CheckDlssNetwork() {
     if (!dlss_chain.checked) {
         return;
     }
+    using VideoCommon::FireEmblemUpscale::FastFusionOutputInputOffset;
+    using VideoCommon::FireEmblemUpscale::FastFusionOutputOffset;
+    const u32 input_offset = dlss_chain.adjacent_handles ? FastFusionOutputInputOffset : 0x328;
+    const u32 output_offset = dlss_chain.adjacent_handles ? FastFusionOutputOffset : 0x348;
+    const u32 needed = std::max(input_offset, output_offset) + 4;
     const auto& cbuf = launch_description.const_buffer_config[0];
     const GPUVAddr cbuf_address = (GPUVAddr{cbuf.address_high} << 32) | cbuf.address_low;
-    if (!(launch_description.const_buffer_enable_mask & 1) || cbuf.size.Value() < 0x34c ||
-        !memory_manager.IsFullyMappedRange(cbuf_address, 0x34c)) {
+    if (!(launch_description.const_buffer_enable_mask & 1) || cbuf.size.Value() < needed ||
+        !memory_manager.IsFullyMappedRange(cbuf_address, needed)) {
         return;
     }
     const auto surface = [&](u32 offset) -> std::optional<Fermi2D::Surface> {
@@ -1012,8 +1018,8 @@ void KeplerCompute::CheckDlssNetwork() {
         result.addr_lower = static_cast<u32>(tic.Address());
         return result;
     };
-    const auto input = surface(0x328);
-    const auto output = surface(0x348);
+    const auto input = surface(input_offset);
+    const auto output = surface(output_offset);
     if (!input || !output) {
         return;
     }
@@ -1465,8 +1471,7 @@ void KeplerCompute::RememberDlssMotionVectors() {
         !memory_manager.IsFullyMappedRange(cbuf_address, cbuf.size.Value())) {
         return;
     }
-    const auto image = [&](u32 offset) -> std::optional<Texture::TICEntry> {
-        const u32 tic_index = memory_manager.Read<u32>(cbuf_address + offset) & 0xfffff;
+    const auto entry = [&](u32 tic_index) -> std::optional<Texture::TICEntry> {
         if (tic_index > regs.tic.limit || !memory_manager.IsFullyMappedRange(
                 regs.tic.Address() + u64{tic_index} * sizeof(Texture::TICEntry),
                 sizeof(Texture::TICEntry))) {
@@ -1474,7 +1479,13 @@ void KeplerCompute::RememberDlssMotionVectors() {
         }
         return GetTICEntry(tic_index);
     };
-    const auto color = image(0x278), motion = image(0x290);
+    const auto image = [&](u32 offset) {
+        return entry(memory_manager.Read<u32>(cbuf_address + offset) & 0xfffff);
+    };
+    const u32 color_index =
+        memory_manager.Read<u32>(cbuf_address + (dlss_chain.adjacent_handles ? 0x328 : 0x278)) & 0xfffff;
+    const auto color = entry(color_index);
+    const auto motion = dlss_chain.adjacent_handles ? entry(color_index + 2) : image(0x290);
     // A game that renders a region of its targets (The Duskbloods) draws it on the same pixel grid
     // in targets of other sizes: in handheld mode its motion and depth are 1536x864 against a
     // 1920x1080 colour. The upscale checks the region fits them.
@@ -1489,7 +1500,9 @@ void KeplerCompute::RememberDlssMotionVectors() {
     dlss_motion_vectors = *motion;
     dlss_motion_color = color->Address();
     const u32 depth_offset = dlss_chain.render_region ? 0x288 : 0x298;
-    const auto depth = cbuf.size.Value() >= 0x29c ? image(depth_offset) : std::nullopt;
+    const auto depth = dlss_chain.adjacent_handles     ? entry(color_index + 1)
+                       : cbuf.size.Value() >= 0x29c ? image(depth_offset)
+                                                    : std::nullopt;
     if (!depth || depth->Address() == 0 || !same_grid(*depth) || !depth->IsBlockLinear()) {
         return;
     }
@@ -1510,11 +1523,14 @@ void KeplerCompute::CaptureFireEmblemJitter() {
     dlss_depth.reset();
     const auto& cbuf = launch_description.const_buffer_config[0];
     const GPUVAddr address = (GPUVAddr{cbuf.address_high} << 32) | cbuf.address_low;
-    if (!(launch_description.const_buffer_enable_mask & 1) || cbuf.size.Value() < 0x27c ||
-        !memory_manager.IsFullyMappedRange(address, 0x27c)) {
+    const u32 color_offset = dlss_chain.adjacent_handles ? OutputColorInputOffset : PrepassColorOffset;
+    const u32 jitter_offset = dlss_chain.adjacent_handles ? FastFusionJitterOffset : JitterOffset;
+    const u32 needed = std::max(color_offset + 4, jitter_offset + 8);
+    if (!(launch_description.const_buffer_enable_mask & 1) || cbuf.size.Value() < needed ||
+        !memory_manager.IsFullyMappedRange(address, needed)) {
         return;
     }
-    const u32 index = memory_manager.Read<u32>(address + PrepassColorOffset) & 0xfffff;
+    const u32 index = memory_manager.Read<u32>(address + color_offset) & 0xfffff;
     if (index > regs.tic.limit || !memory_manager.IsFullyMappedRange(
             regs.tic.Address() + u64{index} * sizeof(Texture::TICEntry), sizeof(Texture::TICEntry))) {
         return;
@@ -1524,8 +1540,8 @@ void KeplerCompute::CaptureFireEmblemJitter() {
         return;
     }
     fe_upscale_jitter.Capture(color.Address(), color.Width(), color.Height(),
-        {std::bit_cast<f32>(memory_manager.Read<u32>(address + JitterOffset)),
-         std::bit_cast<f32>(memory_manager.Read<u32>(address + JitterOffset + sizeof(f32)))});
+        {std::bit_cast<f32>(memory_manager.Read<u32>(address + jitter_offset)),
+         std::bit_cast<f32>(memory_manager.Read<u32>(address + jitter_offset + sizeof(f32)))});
     if (!dlss_chain.spatial_only) {
         RememberDlssMotionVectors();
     }
@@ -1542,25 +1558,49 @@ void KeplerCompute::TraceDlssContract(u64 native_key, bool warn_unvalidated) {
         const char* value = std::getenv("EDEN_NX2_DLSS_CONTRACT_SKIP");
         return value ? static_cast<u32>(std::min<unsigned long>(std::strtoul(value, nullptr, 10), 1000000UL)) : 0U;
     }();
-    if (!enabled || dlss_contract_trace_count >= skip + 24) {
+    if (!enabled) {
+        return;
+    }
+    // After the first 24 dispatches, the first four of each new pass and grid size are still
+    // logged, so a race's passes show up after a menu's.
+    const std::array<u64, 2> shape{native_key,
+                                   (u64{launch_description.grid_dim_x.Value()} << 32) |
+                                       launch_description.grid_dim_y.Value()};
+    auto it = std::ranges::find(dlss_contract_shapes, shape, &decltype(dlss_contract_shapes)::value_type::first);
+    if (it == dlss_contract_shapes.end() && dlss_contract_shapes.size() < 32) {
+        it = dlss_contract_shapes.insert(it, {shape, 0});
+    }
+    const bool new_shape = it != dlss_contract_shapes.end() && it->second < 4;
+    if (dlss_contract_trace_count >= skip + 24 && !new_shape) {
         return;
     }
     if (dlss_contract_trace_count++ < skip) {
         return;
     }
+    if (it != dlss_contract_shapes.end()) {
+        ++it->second;
+    }
     const auto& cbuf = launch_description.const_buffer_config[0];
     const GPUVAddr address = (GPUVAddr{cbuf.address_high} << 32) | cbuf.address_low;
-    const u32 bytes = std::min<u32>(cbuf.size.Value(), 0x360U);
+    const u32 bytes = std::min<u32>(cbuf.size.Value(), 0x600U);
     if (!(launch_description.const_buffer_enable_mask & 1) || bytes < 0x100 ||
         !memory_manager.IsFullyMappedRange(address, bytes)) {
         return;
     }
-    LOG_INFO(HW_GPU, "DLSS contract candidate {:016x}: cb0={:#x} bytes={:#x} grid={}x{}x{} block={}x{}x{} native dispatch retained",
-             native_key, address, bytes, launch_description.grid_dim_x.Value(),
+    LOG_INFO(HW_GPU, "DLSS contract candidate {:016x}: cb0={:#x} bytes={:#x} of {:#x} grid={}x{}x{} block={}x{}x{} native dispatch retained",
+             native_key, address, bytes, cbuf.size.Value(), launch_description.grid_dim_x.Value(),
              launch_description.grid_dim_y.Value(), launch_description.grid_dim_z.Value(),
              launch_description.block_dim_x.Value(), launch_description.block_dim_y.Value(),
              launch_description.block_dim_z.Value());
-    for (u32 offset = 0x100; offset + 16 <= bytes; offset += 16) {
+    for (u32 slot = 1; slot < launch_description.const_buffer_config.size(); ++slot) {
+        if (!(launch_description.const_buffer_enable_mask & (1U << slot))) {
+            continue;
+        }
+        const auto& other = launch_description.const_buffer_config[slot];
+        LOG_INFO(HW_GPU, "DLSS contract cb{}={:#x} size={:#x}", slot,
+                 (GPUVAddr{other.address_high} << 32) | other.address_low, other.size.Value());
+    }
+    for (u32 offset = 0; offset + 16 <= bytes; offset += 16) {
         std::array<u32, 4> words{};
         memory_manager.ReadBlock(address + offset, words.data(), sizeof(words));
         LOG_INFO(HW_GPU, "DLSS contract cb0+{:03x}: {:08x}", offset, fmt::join(words, " "));
@@ -1667,13 +1707,15 @@ bool KeplerCompute::TryFireEmblemUpscale(bool allow_history) {
         const char* const option = std::getenv("EDEN_NX2_DLSS_REPLACEMENT");
         return option && std::string_view{option} == "spatial";
     }();
-    const size_t game_index = dlss_chain.spatial_only ? 1 : 0;
-    const char* const game = dlss_chain.spatial_only ? "Star Fox" : "Fire Emblem";
+    const size_t game_index = dlss_chain.spatial_only ? 1 : dlss_chain.adjacent_handles ? 2 : 0;
+    const char* const game = dlss_chain.spatial_only ? "Star Fox"
+                             : dlss_chain.adjacent_handles ? "Fast Fusion"
+                                                      : "Fire Emblem";
     const auto jitter = fe_upscale_jitter.Take();
     const auto motion = std::exchange(dlss_motion_vectors, std::nullopt);
     const auto depth = std::exchange(dlss_depth, std::nullopt);
     if (!dlss_chain.render_region && !jitter) {
-        static std::array<bool, 2> reported{};
+        static std::array<bool, 3> reported{};
         if (!reported[game_index]) {
             reported[game_index] = true;
             LOG_WARNING(HW_GPU, "{} replacement lacks this frame's jitter; retaining native dispatch",
@@ -1683,8 +1725,12 @@ bool KeplerCompute::TryFireEmblemUpscale(bool allow_history) {
     }
     const auto& cbuf = launch_description.const_buffer_config[0];
     const GPUVAddr address = (GPUVAddr{cbuf.address_high} << 32) | cbuf.address_low;
-    if (!(launch_description.const_buffer_enable_mask & 1) || cbuf.size.Value() < 0x34c ||
-        !memory_manager.IsFullyMappedRange(address, 0x34c)) {
+    const u32 input_offset =
+        dlss_chain.adjacent_handles ? FastFusionOutputInputOffset : OutputColorInputOffset;
+    const u32 output_offset = dlss_chain.adjacent_handles ? FastFusionOutputOffset : OutputColorOffset;
+    const u32 needed = std::max(input_offset, output_offset) + 4;
+    if (!(launch_description.const_buffer_enable_mask & 1) || cbuf.size.Value() < needed ||
+        !memory_manager.IsFullyMappedRange(address, needed)) {
         return false;
     }
     const auto image = [&](u32 offset) -> std::optional<Texture::TICEntry> {
@@ -1695,8 +1741,8 @@ bool KeplerCompute::TryFireEmblemUpscale(bool allow_history) {
         }
         return GetTICEntry(index);
     };
-    const auto input = image(OutputColorInputOffset);
-    const auto output = image(OutputColorOffset);
+    const auto input = image(input_offset);
+    const auto output = image(output_offset);
     if (dlss_chain.render_region) {
         return ScaleDlssRenderRegion(address, input, output, jitter, motion, depth);
     }
@@ -1731,7 +1777,7 @@ bool KeplerCompute::TryFireEmblemUpscale(bool allow_history) {
         return rasterizer->AccelerateTemporalUpscale(
             surface(*input, input_format), surface(*output, output_format),
             history ? surface(*motion, Tegra::RenderTargetFormat::R16G16_FLOAT) : Fermi2D::Surface{},
-            history ? &*depth : nullptr, jitter->offset,
+            history && depth ? &*depth : nullptr, jitter->offset,
             history ? std::array{1.0f, 1.0f} : std::array{0.0f, 0.0f}, history);
     };
     bool done = upscale(use_history);
@@ -1739,7 +1785,7 @@ bool KeplerCompute::TryFireEmblemUpscale(bool allow_history) {
         use_history = false;
         done = upscale(false);
     }
-    static std::array<u32, 2> logged{};
+    static std::array<u32, 3> logged{};
     if (logged[game_index]++ < 8) {
         LOG_INFO(HW_GPU, "{} DLSS replacement: {} temporal={} input={:#x} {}x{} output={:#x} {}x{} jitter={},{}",
                  game, done ? "applied" : "unavailable; retaining native dispatch", use_history,

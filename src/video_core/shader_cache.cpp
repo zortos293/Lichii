@@ -367,7 +367,10 @@ const ShaderInfo* ShaderCache::ComputeShader() {
     if (kepler_compute->IsNativeMode() && shader->lowered_native &&
         DlssContract::IsFastFusionCandidate(program_id,
                                             shader->lowered_native->native_program_key)) {
-        kepler_compute->TraceDlssContract(shader->lowered_native->native_program_key);
+        // The race passes go through ProcessGameDlss; the menu pass is still unvalidated.
+        const u64 key = shader->lowered_native->native_program_key;
+        kepler_compute->TraceDlssContract(key, key != FireEmblemUpscale::FastFusionPrepassProgramKey &&
+                                                   key != FireEmblemUpscale::FastFusionOutputProgramKey);
     }
     if (kepler_compute->IsNativeMode() && shader->lowered_native &&
         kepler_compute->BypassOotNetwork(program_id, shader->lowered_native->native_program_key)) {
