@@ -14,6 +14,7 @@ add_executable(tests
     video_core/cdma_pusher_teardown.cpp
     video_core/cdma_pusher_wait_stop.cpp
     video_core/host1x_test_process.h
+    video_core/vic_geometry.cpp
     video_core/frame_dump_schedule.cpp
     video_core/frame_dump_decode.cpp
     video_core/frame_gen_generations.cpp

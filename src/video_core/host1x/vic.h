@@ -620,7 +620,22 @@ private:
 
     VicRegisters regs{};
 
+    /// Whether a scratch surface of that size is within MaxSurfaceDimension; logs once if not.
+    bool FitsSurface(u32 width, u32 height) noexcept;
+
+    /// Whether an output block height can be swizzled; logs once when it cannot.
+    bool ValidBlockHeight(u32 block_height) noexcept;
+
     Common::ScratchBuffer<u8> swizzle_scratch;
+    Common::ScratchBuffer<u8> chroma_swizzle_scratch; ///< The chroma plane's backup, apart from the luma's
+    /// How much of each scratch buffer has ever been written (zeros where it grew, then output):
+    /// no byte of them reaches the guest uninitialized.
+    size_t output_cleared{};
+    size_t slot_cleared{};
+    size_t luma_cleared{};
+    size_t chroma_cleared{};
+    size_t swizzle_cleared{};
+    size_t chroma_swizzle_cleared{};
     Common::ScratchBuffer<Tegra::Host1x::Pixel> output_surface;
     Common::ScratchBuffer<Tegra::Host1x::Pixel> slot_surface;
     Common::ScratchBuffer<u8> luma_scratch;
@@ -629,6 +644,9 @@ private:
     s32 id;
     s32 nvdec_id{-1};
     bool has_decoded_frame{};
+    bool logged_block_height{};
+    bool logged_block_kind{};
+    bool logged_large_surface{}; ///< One flag for the output, slot and plane sizes alike
     u32 syncpoint;
 };
 

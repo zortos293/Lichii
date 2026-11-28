@@ -99,6 +99,8 @@ add_library(video_core STATIC
     host1x/syncpoint_manager.h
     host1x/vic.cpp
     host1x/vic.h
+    host1x/vic_geometry.cpp
+    host1x/vic_geometry.h
     macro.cpp
     macro.h
     macro_memo.h
