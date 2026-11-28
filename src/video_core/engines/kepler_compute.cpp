@@ -1726,6 +1726,8 @@ bool KeplerCompute::TryFireEmblemUpscale(bool allow_history) {
     const auto input_format =
         !dlss_chain.spatial_only || input->format == Texture::TextureFormat::B10G11R11
             ? Tegra::RenderTargetFormat::B10G11R11_FLOAT
+        : input->format == Texture::TextureFormat::R16G16B16A16
+            ? Tegra::RenderTargetFormat::R16G16B16A16_FLOAT
             : Tegra::RenderTargetFormat::A8B8G8R8_SRGB;
     const auto output_format = dlss_chain.spatial_only ? Tegra::RenderTargetFormat::R16G16B16A16_FLOAT
                                                       : Tegra::RenderTargetFormat::B10G11R11_FLOAT;

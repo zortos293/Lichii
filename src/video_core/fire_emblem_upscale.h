@@ -124,9 +124,10 @@ inline bool StarFoxColor(const Tegra::Texture::TICEntry& image,
 inline bool ValidInput(const Tegra::Texture::TICEntry& input, bool spatial_only = false) {
     using namespace Tegra::Texture;
     if (spatial_only) {
-        // The SDR colour, or the HDR mode's B10G11R11 colour, whose alpha is read as one.
+        // The SDR colour, or the HDR mode's B10G11R11 or R16G16B16A16 float colour (alpha may be one).
         return StarFoxColor(input, TextureFormat::A8B8G8R8, ComponentType::UNORM, true) ||
-               StarFoxColor(input, TextureFormat::B10G11R11, ComponentType::FLOAT, false, true);
+               StarFoxColor(input, TextureFormat::B10G11R11, ComponentType::FLOAT, false, true) ||
+               StarFoxColor(input, TextureFormat::R16G16B16A16, ComponentType::FLOAT, false, true);
     }
     return input.format == TextureFormat::B10G11R11 && input.IsBlockLinear();
 }

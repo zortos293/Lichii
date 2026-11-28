@@ -740,6 +740,15 @@ constexpr std::array TEXTURE_COMPACTION_RECORDS{
 };
 constexpr std::array TEXTURE_COMPACTION_STATE{BuiltinPatchState{0x4E9D200, 16}};
 
+// ShortFuse's RenoDX Compositor IPS: Ocarina's float display allocation picks RGBA16F (format
+// 44) instead of R11G11B10F (26), so the RenoDX add-on gets a signed float compositor buffer.
+// The UNORM allocation branch is left as is.
+constexpr std::array<u8, 4> RENODX_COMPOSITOR_ORIGINAL{0x49, 0x03, 0x80, 0x52}; // mov w9, #26
+constexpr std::array<u8, 4> RENODX_COMPOSITOR_RGBA16F{0x89, 0x05, 0x80, 0x52};  // mov w9, #44
+constexpr std::array RENODX_COMPOSITOR_RECORDS{
+    BuiltinPatchRecord{0x65234C, RENODX_COMPOSITOR_RGBA16F, RENODX_COMPOSITOR_ORIGINAL},
+};
+
 constexpr std::array BUILTIN_PATCHES{
     // Ocarina of Time takes its "dynamic resolution disabled" path, so the 3D renders at full scale
     // instead of following the GPU-time controller down to its 480p floor.
@@ -870,6 +879,17 @@ constexpr std::array BUILTIN_PATCHES{
         .skip_on_cheat_overlap = true,
         .description = "Limits requests for new texture heap compaction rounds to once per guest "
                        "second. This may increase heap fragmentation. Restart the game to apply.",
+    },
+    BuiltinPatch{
+        .name = "RenoDX Compositor (built-in)",
+        .title_id = 0x0400486024DEC000,
+        .module = "main",
+        .build_id = "E0F3CCFAF50065AE4EA01EB5AEB13B1A45DA3348",
+        .records = RENODX_COMPOSITOR_RECORDS,
+        .off_by_default = true,
+        .description = "ShortFuse's RenoDX Compositor patch, for use with the RenoDX add-on. "
+                       "The game's float display buffer becomes RGBA16F instead of R11G11B10F, "
+                       "which uses more GPU memory bandwidth. Restart the game to apply.",
     },
     BuiltinPatch{
         .name = "Full Scene Resolution with FXAA (built-in)",

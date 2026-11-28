@@ -14,7 +14,8 @@ constexpr bool ValidColorFormats(VideoCore::Surface::PixelFormat input,
     using VideoCore::Surface::PixelFormat;
     return (input == PixelFormat::B10G11R11_FLOAT && output == input) ||
            (!use_history &&
-            (input == PixelFormat::A8B8G8R8_SRGB || input == PixelFormat::B10G11R11_FLOAT) &&
+            (input == PixelFormat::A8B8G8R8_SRGB || input == PixelFormat::B10G11R11_FLOAT ||
+             input == PixelFormat::R16G16B16A16_FLOAT) &&
             output == PixelFormat::R16G16B16A16_FLOAT);
 }
 

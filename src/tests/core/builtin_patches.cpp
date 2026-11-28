@@ -1441,6 +1441,67 @@ TEST_CASE("Built-in text speed is off until checked in Add-Ons", "[patch_manager
     }
 }
 
+TEST_CASE("RenoDX Compositor is an opt-in RGBA16F display allocation", "[patch_manager]") {
+    constexpr std::string_view Name = "RenoDX Compositor (built-in)";
+    constexpr size_t SiteOffset = sizeof(Loader::NSOHeader) + 0x65234C;
+    constexpr u32 MovR11G11B10F = 0x52800349; // mov w9, #26
+    constexpr u32 MovRGBA16F = 0x52800589;    // mov w9, #44
+    PatchManagerTestContext context;
+    const auto manager = context.Manager();
+    auto nso = MakeDynamicMain();
+    std::memcpy(nso.data() + SiteOffset, &MovR11G11B10F, sizeof(MovR11G11B10F));
+
+    SECTION("Listed unchecked with a description and not applied by default") {
+        const auto patches = manager.GetPatches();
+        const auto patch = std::ranges::find(patches, Name, &FileSys::Patch::name);
+        REQUIRE(patch != patches.end());
+        CHECK(patch->off_by_default);
+        CHECK_FALSE(patch->enabled);
+        CHECK_FALSE(patch->description.empty());
+        REQUIRE(WordAt(manager.PatchNSO(nso, "main"), SiteOffset) == MovR11G11B10F);
+    }
+
+    SECTION("Checked in Add-Ons") {
+        // The default-on built-ins change this module too; checking this one adds only its word.
+        auto expected = manager.PatchNSO(nso, "main");
+        std::memcpy(expected.data() + SiteOffset, &MovRGBA16F, sizeof(MovRGBA16F));
+        Settings::values.disabled_addons[OcarinaTitleId] = {FileSys::EnabledAddonKey(Name)};
+
+        SECTION("Only the format immediate changes") {
+            const auto patches = manager.GetPatches();
+            const auto patch = std::ranges::find(patches, Name, &FileSys::Patch::name);
+            REQUIRE(patch != patches.end());
+            CHECK(patch->enabled);
+            REQUIRE(manager.PatchNSO(nso, "main") == expected);
+        }
+        SECTION("Unexpected original instruction skips") {
+            std::memcpy(nso.data() + SiteOffset, &NopInstruction, sizeof(NopInstruction));
+            REQUIRE(WordAt(manager.PatchNSO(nso, "main"), SiteOffset) == NopInstruction);
+        }
+        SECTION("Other build id skips") {
+            nso[offsetof(Loader::NSOHeader, build_id)] ^= 1;
+            REQUIRE(WordAt(manager.PatchNSO(nso, "main"), SiteOffset) == MovR11G11B10F);
+        }
+        SECTION("Other module skips") {
+            REQUIRE(WordAt(manager.PatchNSO(nso, "sdk"), SiteOffset) == MovR11G11B10F);
+        }
+    }
+}
+
+TEST_CASE("RenoDX Compositor agrees with the standalone IPS at the same site",
+          "[patch_manager]") {
+    constexpr std::string_view Name = "RenoDX Compositor (built-in)";
+    constexpr size_t SiteOffset = sizeof(Loader::NSOHeader) + 0x65234C;
+    constexpr u32 MovR11G11B10F = 0x52800349;
+    constexpr u32 MovRGBA16F = 0x52800589;
+    PatchManagerTestContext context{MovRGBA16F, SiteOffset};
+    Settings::values.disabled_addons[OcarinaTitleId] = {FileSys::EnabledAddonKey(Name)};
+    const auto manager = context.Manager();
+    auto nso = MakeDynamicMain();
+    std::memcpy(nso.data() + SiteOffset, &MovR11G11B10F, sizeof(MovR11G11B10F));
+    REQUIRE(WordAt(manager.PatchNSO(nso, "main"), SiteOffset) == MovRGBA16F);
+}
+
 TEST_CASE("FPS Unlock guards the OoT day/night clock carry", "[patch_manager][oot_carry]") {
     constexpr size_t Site = sizeof(Loader::NSOHeader) + 0x3CDFC0;
     constexpr size_t Entry = sizeof(Loader::NSOHeader) + 0x177DAE4;
@@ -1593,11 +1654,12 @@ TEST_CASE("Unchecked add-on lists store off-by-default built-ins when checked", 
     const std::string Quadruple{"Text Speed 4x (built-in)"};
     const std::string Instant{"Text Speed Instant (built-in)"};
     const std::string Compaction{"Texture heap compaction interval (built-in)"};
+    const std::string Compositor{"RenoDX Compositor (built-in)"};
     const std::string MaxResolutionName{MaxResolution};
 
     SECTION("Unchecked off-by-default built-ins are not stored, checked ones get their key") {
-        auto stored = FileSys::StoredDisabledAddons(OcarinaTitleId,
-                                                    {MaxResolutionName, Double, Instant, Compaction});
+        auto stored = FileSys::StoredDisabledAddons(
+            OcarinaTitleId, {MaxResolutionName, Double, Instant, Compaction, Compositor});
         std::ranges::sort(stored);
         std::vector<std::string> expected{MaxResolutionName,
                                           FileSys::EnabledAddonKey(Quadruple)};

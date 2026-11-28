@@ -303,3 +303,41 @@ TEST_CASE("Star Fox HDR B10G11R11 colour input is accepted", "[starfox_upscale]"
     rejected([](auto& image) { image.block_width.Assign(1); });
     rejected([](auto& image) { image.is_sparse.Assign(1); });
 }
+
+TEST_CASE("Star Fox HDR R16G16B16A16 colour input is accepted", "[starfox_upscale]") {
+    const auto output = std::bit_cast<TICEntry>(std::array<u32, 8>{
+        0x58d7ff83, 0x352f1000, 0x00600081, 0x00070020,
+        0xe880077f, 0x80000437, 0x03000000, 0x00000000});
+    auto input = output;
+    input.address_low = 0x26f62000;
+    input.w_source.Assign(SwizzleSource::OneFloat);
+    REQUIRE(input.format == TextureFormat::R16G16B16A16);
+    REQUIRE(FE::ValidInput(input, true));
+    REQUIRE(FE::ValidPair(input, output, true));
+    REQUIRE_FALSE(FE::ValidInput(input));
+
+    auto alpha = input;
+    alpha.w_source.Assign(SwizzleSource::A);
+    REQUIRE(FE::ValidPair(alpha, output, true));
+
+    auto alias = input;
+    alias.address_low = output.address_low;
+    alias.address_high.Assign(output.address_high);
+    REQUIRE_FALSE(FE::ValidPair(alias, output, true));
+
+    const auto rejected = [&](auto mutate) {
+        auto from = input;
+        mutate(from);
+        REQUIRE_FALSE(FE::ValidInput(from, true));
+        REQUIRE_FALSE(FE::ValidPair(from, output, true));
+    };
+    rejected([](auto& image) { image.srgb_conversion.Assign(1); });
+    rejected([](auto& image) { image.r_type.Assign(ComponentType::UNORM); });
+    rejected([](auto& image) { image.a_type.Assign(ComponentType::UINT); });
+    rejected([](auto& image) { image.y_source.Assign(SwizzleSource::B); image.z_source.Assign(SwizzleSource::G); });
+    rejected([](auto& image) { image.w_source.Assign(SwizzleSource::R); });
+    rejected([](auto& image) { image.max_mip_level.Assign(1); });
+    rejected([](auto& image) { image.msaa_mode.Assign(MsaaMode::Msaa2x2); });
+    rejected([](auto& image) { image.block_width.Assign(1); });
+    rejected([](auto& image) { image.is_sparse.Assign(1); });
+}
