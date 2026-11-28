@@ -116,7 +116,8 @@ public:
 
     bool IsLoadingComplete() const;
 
-    void CaptureScreenshot(const QString& screenshot_path);
+    /// Requests a screenshot; false when one is already in progress.
+    bool CaptureScreenshot(const QString& screenshot_path);
 
     /**
      * Instructs the window to re-launch the application using the specified program_index.
@@ -138,6 +139,8 @@ signals:
     void ExitSignal();
     void MouseActivity();
     void TasPlaybackStateChanged();
+    /// A requested screenshot was written, or failed to be.
+    void ScreenshotSaved(bool success);
 
 private:
     void TouchBeginEvent(const QTouchEvent* event);

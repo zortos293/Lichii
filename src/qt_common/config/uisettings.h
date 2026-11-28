@@ -168,6 +168,8 @@ struct Values {
     Setting<bool> enable_screenshot_save_as{linkage, true, "enable_screenshot_save_as",
                                             Category::Screenshots};
     Setting<u32> screenshot_height{linkage, 0, "screenshot_height", Category::Screenshots};
+    // Flash the game, play a shutter sound and say whether the screenshot was saved
+    Setting<bool> screenshot_feedback{linkage, true, "screenshot_feedback", Category::Screenshots};
 
     std::string roms_path;
     std::string game_dir_deprecated;

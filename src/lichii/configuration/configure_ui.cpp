@@ -203,6 +203,7 @@ void ConfigureUi::ApplyConfiguration() {
         steamgriddb_key_edit->text().trimmed().toStdString();
 
     UISettings::values.enable_screenshot_save_as = ui->enable_screenshot_save_as->isChecked();
+    UISettings::values.screenshot_feedback = ui->screenshot_feedback->isChecked();
     Common::FS::SetEdenPath(Common::FS::EdenPath::ScreenshotsDir,
                             ui->screenshot_path_edit->text().toStdString());
 
@@ -244,6 +245,7 @@ void ConfigureUi::SetConfiguration() {
 
     ui->enable_screenshot_save_as->setChecked(
         UISettings::values.enable_screenshot_save_as.GetValue());
+    ui->screenshot_feedback->setChecked(UISettings::values.screenshot_feedback.GetValue());
     ui->screenshot_path_edit->setText(QString::fromStdString(
         Common::FS::GetEdenPathString(Common::FS::EdenPath::ScreenshotsDir)));
 

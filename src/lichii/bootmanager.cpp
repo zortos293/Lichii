@@ -805,13 +805,13 @@ void GRenderWindow::ReleaseRenderTarget() {
     main_context.reset();
 }
 
-void GRenderWindow::CaptureScreenshot(const QString& screenshot_path) {
+bool GRenderWindow::CaptureScreenshot(const QString& screenshot_path) {
     auto& renderer = QtCommon::system->Renderer();
 
     if (renderer.IsScreenshotPending()) {
         LOG_WARNING(Render,
                     "A screenshot is already requested or in progress, ignoring the request");
-        return;
+        return false;
     }
 
     const Layout::FramebufferLayout layout{[]() {
@@ -832,17 +832,23 @@ void GRenderWindow::CaptureScreenshot(const QString& screenshot_path) {
         [=, this](bool invert_y) {
             const std::string std_screenshot_path = screenshot_path.toStdString();
 #if QT_VERSION >= QT_VERSION_CHECK(6, 9, 0)
-            if (screenshot_image.flipped(invert_y ? Qt::Vertical : (Qt::Orientations)0)
-                    .save(screenshot_path)) {
+            const bool saved =
+                screenshot_image.flipped(invert_y ? Qt::Vertical : (Qt::Orientations)0)
+                    .save(screenshot_path);
 #else
-            if (screenshot_image.mirrored(false, invert_y).save(screenshot_path)) {
+            const bool saved = screenshot_image.mirrored(false, invert_y).save(screenshot_path);
 #endif
+            if (saved) {
                 LOG_INFO(Frontend, "Screenshot saved to \"{}\"", std_screenshot_path);
             } else {
                 LOG_ERROR(Frontend, "Failed to save screenshot to \"{}\"", std_screenshot_path);
             }
+            // This runs on the renderer's thread.
+            QMetaObject::invokeMethod(
+                this, [this, saved] { emit ScreenshotSaved(saved); }, Qt::QueuedConnection);
         },
         layout);
+    return true;
 }
 
 bool GRenderWindow::IsLoadingComplete() const {

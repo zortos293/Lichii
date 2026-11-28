@@ -89,6 +89,15 @@ private:
  */
 std::vector<std::string> ListSDLSinkDevices(bool capture);
 
+/**
+ * The SDL playback (or recording) device named device_name, the default one when none is.
+ *
+ * @param device_name Name of the device, as ListSDLSinkDevices gives it.
+ * @param capture     Whether to look among recording devices instead of playback ones.
+ * @return The device's id, an SDL_AudioDeviceID.
+ */
+u32 FindAudioDeviceByName(const std::string& device_name, bool capture);
+
 // REVERSION - function GetSDLLatency() reintroduced from EA-3833 - DIABLO 3 FIX
 /**
  * Get the reported latency for this sink.

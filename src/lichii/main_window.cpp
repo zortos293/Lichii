@@ -19,6 +19,7 @@
 #include "common/shutdown_progress.h"
 #include "frontend_common/settings_generator.h"
 #include "render/performance_overlay.h"
+#include "render/screenshot_feedback.h"
 #ifdef HAS_RESHADE
 #include "configuration/configure_post_processing.h"
 #include "video_core/post_processing/fx_preset.h"
@@ -1172,6 +1173,7 @@ void MainWindow::WebBrowserRequestExit() {
 
 void MainWindow::InitializeWidgets() {
     render_window = new GRenderWindow(this, input_subsystem);
+    connect(render_window, &GRenderWindow::ScreenshotSaved, this, &MainWindow::OnScreenshotSaved);
     render_window->hide();
 
     game_list = new GameList(QtCommon::vfs, QtCommon::provider.get(), *play_time_manager,
@@ -5874,7 +5876,36 @@ void MainWindow::OnCaptureScreenshot() {
         }
     }
 #endif
-    render_window->CaptureScreenshot(filename);
+    if (render_window->CaptureScreenshot(filename) &&
+        UISettings::values.screenshot_feedback.GetValue()) {
+        if (screenshot_feedback == nullptr) {
+            screenshot_feedback = new ScreenshotFeedback(this);
+        }
+        screenshot_feedback->Flash(ScreenshotFeedbackArea());
+        // At Lichii's volume, like the game's sound.
+        screenshot_feedback->PlayShutter(
+            Settings::values.audio_muted.GetValue()
+                ? 0.0f
+                : static_cast<float>(Settings::values.volume.GetValue()) / 100.0f);
+    }
+}
+
+void MainWindow::OnScreenshotSaved(bool success) {
+    // The game may have stopped while the screenshot was written.
+    if (!UISettings::values.screenshot_feedback.GetValue() || screenshot_feedback == nullptr ||
+        !emulation_running) {
+        return;
+    }
+    screenshot_feedback->ShowMessage(ScreenshotFeedbackArea(),
+                                     success ? tr("Screenshot saved")
+                                             : tr("Couldn't save the screenshot"));
+}
+
+QRect MainWindow::ScreenshotFeedbackArea() const {
+    // A hidden render window (the loading screen is up) keeps the size it was set up with.
+    const QWidget* const area =
+        render_window->isVisible() ? static_cast<const QWidget*>(render_window) : centralWidget();
+    return {area->mapToGlobal(QPoint{}), area->size()};
 }
 
 void MainWindow::OnReportBug() {

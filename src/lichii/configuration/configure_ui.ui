@@ -177,6 +177,16 @@
          </widget>
         </item>
         <item>
+         <widget class="QCheckBox" name="screenshot_feedback">
+          <property name="toolTip">
+           <string>Flashes the game and plays a shutter sound (at Lichii's volume) when you take a screenshot, then shows whether it was saved.</string>
+          </property>
+          <property name="text">
+           <string>Show Screenshot Feedback</string>
+          </property>
+         </widget>
+        </item>
+        <item>
          <layout class="QHBoxLayout" name="horizontalLayout_4">
           <item>
            <widget class="QLabel" name="label">

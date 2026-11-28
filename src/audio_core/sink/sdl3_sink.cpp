@@ -43,7 +43,9 @@ namespace {
     return true;
 }
 
-SDL_AudioDeviceID FindAudioDeviceByName(const std::string& device_name, bool capture) {
+} // Anonymous namespace
+
+u32 FindAudioDeviceByName(const std::string& device_name, bool capture) {
     int device_count = 0;
     SDL_AudioDeviceID* devices = capture ? SDL_GetAudioRecordingDevices(&device_count)
                                          : SDL_GetAudioPlaybackDevices(&device_count);
@@ -63,7 +65,6 @@ SDL_AudioDeviceID FindAudioDeviceByName(const std::string& device_name, bool cap
     SDL_free(devices);
     return selected;
 }
-} // Anonymous namespace
 
 /**
  * SDL sink stream, responsible for sinking samples to hardware.

@@ -71,6 +71,7 @@ class QSlider;
 class QHBoxLayout;
 class WaitTreeWidget;
 class PerformanceOverlay;
+class ScreenshotFeedback;
 #ifdef HAS_RESHADE
 class ConfigurePostProcessing;
 #endif
@@ -463,6 +464,9 @@ private slots:
     void OnCreateHomeMenuDesktopShortcut();
     void OnCreateHomeMenuApplicationMenuShortcut();
     void OnCaptureScreenshot();
+    void OnScreenshotSaved(bool success);
+    /// The game's picture in global coordinates, for the screenshot feedback.
+    QRect ScreenshotFeedbackArea() const;
     void OnReportBug();
     /// Checks for decryption keys; `prompt` asks to install them when they are missing.
     void OnCheckFirmwareDecryption(bool prompt = true);
@@ -600,6 +604,7 @@ private:
     OverlayDialog* shutdown_dialog{};
     BugReportDialog* bug_report_dialog{};
     PerformanceOverlay* perf_overlay = nullptr;
+    ScreenshotFeedback* screenshot_feedback = nullptr;
 #ifdef HAS_RESHADE
     ConfigurePostProcessing* post_processing_dialog = nullptr;
 #endif

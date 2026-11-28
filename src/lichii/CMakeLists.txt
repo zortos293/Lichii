@@ -275,6 +275,7 @@ add_executable(lichii
     configuration/addon/mod_select_dialog.h configuration/addon/mod_select_dialog.cpp configuration/addon/mod_select_dialog.ui
 
     render/performance_overlay.h render/performance_overlay.cpp
+    render/screenshot_feedback.h render/screenshot_feedback.cpp
     updater/update_dialog.h updater/update_dialog.cpp updater/update_dialog.ui
     game/common.h
     game/carousel.h game/carousel.cpp
