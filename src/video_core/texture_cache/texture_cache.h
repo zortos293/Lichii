@@ -3734,27 +3734,34 @@ void TextureCache<P>::RefreshContents(Image& image, ImageId image_id) {
     const u64 trace_faults = tc_trace ? Common::GetProcessPageFaults() : 0;
     auto trace_staged = trace_begin;
     upload_trace = {};
-    const bool chunked = UploadInChunks(image);
-    if (!chunked) {
-        auto staging = runtime.UploadStagingBuffer(MapSizeBytes(image));
-        if (tc_trace) {
-            trace_staged = TraceClock::now();
-        }
-        try {
-            UploadImageContents(image, staging);
-        } catch (const std::bad_alloc&) {
-            image.flags |= ImageFlagBits::CpuModified;
-            image.load_tick = previous_load_tick;
-            image.storage_written_levels = previous_storage_written_levels;
-            if (False(image.flags & ImageFlagBits::Sparse) ||
-                True(image.flags & ImageFlagBits::Registered)) {
-                UntrackImage(image, image_id);
+    bool chunked{};
+    bool whole_upload{};
+    try {
+        // The chunks read guest memory into a buffer of their own (ExecuteUnswizzlePlan), which
+        // can fail as the whole upload's scratch does. If one fails after others were uploaded,
+        // the host image holds new and old contents mixed until the whole image is uploaded
+        // again, which CpuModified below asks for.
+        chunked = UploadInChunks(image);
+        if (!chunked) {
+            whole_upload = true;
+            auto staging = runtime.UploadStagingBuffer(MapSizeBytes(image));
+            if (tc_trace) {
+                trace_staged = TraceClock::now();
             }
-            NoteHostOutOfMemory("upload", image);
-            runtime.TransitionImageLayout(image);
-            return;
+            UploadImageContents(image, staging);
+            runtime.InsertUploadMemoryBarrier();
         }
-        runtime.InsertUploadMemoryBarrier();
+    } catch (const std::bad_alloc&) {
+        image.flags |= ImageFlagBits::CpuModified;
+        image.load_tick = previous_load_tick;
+        image.storage_written_levels = previous_storage_written_levels;
+        if (False(image.flags & ImageFlagBits::Sparse) ||
+            True(image.flags & ImageFlagBits::Registered)) {
+            UntrackImage(image, image_id);
+        }
+        NoteHostOutOfMemory(whole_upload ? "upload" : "upload in chunks", image);
+        runtime.TransitionImageLayout(image);
+        return;
     }
     ++images_uploaded;
     uploaded_bytes += image.guest_size_bytes;
@@ -3803,6 +3810,9 @@ bool TextureCache<P>::UploadInChunks(Image& image) {
         MapSizeBytes(image) < min_size) {
         return false;
     }
+    // A new image gets its layout as a whole first: each chunk's upload only transitions the
+    // levels and layers it writes, and a chunk that fails would leave the rest without one.
+    runtime.TransitionImageLayout(image);
     for (u64 offset = 0; offset < image.guest_size_bytes; offset += chunk_size) {
         const std::array range{
             std::pair<u64, u64>{offset, std::min<u64>(offset + chunk_size, image.guest_size_bytes)}};
