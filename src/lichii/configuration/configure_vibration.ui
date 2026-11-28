@@ -511,6 +511,16 @@
        </widget>
       </item>
       <item>
+       <widget class="QCheckBox" name="checkBoxSteamControllerHdRumble">
+        <property name="toolTip">
+         <string>Play HD Rumble through the Steam Controller haptic actuators. Does not require Steam</string>
+        </property>
+        <property name="text">
+         <string>Steam Controller (2026) HD Haptics</string>
+        </property>
+       </widget>
+      </item>
+      <item>
        <widget class="QCheckBox" name="checkBoxDualSenseHaptics">
         <property name="toolTip">
          <string>Play HD Rumble through the DualSense haptic actuators, left and right apart. Requires a USB connection and a single wired DualSense; otherwise standard rumble is used.</string>

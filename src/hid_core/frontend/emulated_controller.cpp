@@ -334,6 +334,7 @@ void EmulatedController::LoadVirtualGamepadParams() {
 }
 
 void EmulatedController::ReloadInput() {
+    StopVibration();
     // If you load any device here add the equivalent to the UnloadInput() function
     LoadDevices();
     for (std::size_t index = 0; index < button_devices.size(); ++index) {
@@ -526,7 +527,19 @@ void EmulatedController::ReloadInput() {
     is_initialized = true;
 }
 
+void EmulatedController::StopVibration() {
+    for (std::size_t i = 0; i < 2; ++i) {
+        if (vibration_used[i] && output_devices[i]) {
+            output_devices[i]->SetVibration({.side = Common::Input::VibrationSide::Both});
+        }
+    }
+    vibration_used.fill(false);
+    last_vibration_value.fill(DEFAULT_VIBRATION_VALUE);
+    last_vibration_timepoint.fill({});
+}
+
 void EmulatedController::UnloadInput() {
+    StopVibration();
     is_initialized = false;
     for (auto& button : button_devices) {
         button.reset();
@@ -1246,11 +1259,11 @@ bool EmulatedController::SetVibration(DeviceIndex device_index, const VibrationV
     }
 
     // Skip duplicated vibrations
-    if (last_vibration_value[index] == vibration) {
+    const bool streamed = output_devices[index]->IsVibrationStreamed();
+    if (!streamed && last_vibration_timepoint[index] != std::chrono::steady_clock::time_point{} &&
+        last_vibration_value[index] == vibration) {
         return Settings::values.vibration_enabled.GetValue();
     }
-
-    last_vibration_value[index] = vibration;
 
     if (!Settings::values.vibration_enabled) {
         return false;
@@ -1264,8 +1277,7 @@ bool EmulatedController::SetVibration(DeviceIndex device_index, const VibrationV
         return false;
     }
 
-    if (!Settings::values.enable_accurate_vibrations.GetValue() &&
-        !output_devices[index]->IsVibrationStreamed()) {
+    if (!Settings::values.enable_accurate_vibrations.GetValue() && !streamed) {
         using std::chrono::duration_cast;
         using std::chrono::milliseconds;
         using std::chrono::steady_clock;
@@ -1277,8 +1289,6 @@ bool EmulatedController::SetVibration(DeviceIndex device_index, const VibrationV
             duration_cast<milliseconds>(now - last_vibration_timepoint[index]) < milliseconds(15)) {
             return false;
         }
-
-        last_vibration_timepoint[index] = now;
     }
 
     // Exponential amplification is too strong at low amplitudes. Switch to a linear
@@ -1299,7 +1309,17 @@ bool EmulatedController::SetVibration(DeviceIndex device_index, const VibrationV
     // Send vibrations to Android's input overlay
     output_devices[4]->SetVibration(status);
 
-    return output_devices[index]->SetVibration(status) == Common::Input::DriverResult::Success;
+    const bool delivered =
+        output_devices[index]->SetVibration(status) == Common::Input::DriverResult::Success;
+    if (delivered) {
+        last_vibration_value[index] = vibration;
+        last_vibration_timepoint[index] = std::chrono::steady_clock::now();
+        if (status.low_amplitude > 0 || status.high_amplitude > 0) {
+            // A Both request can leave the other grip playing after a one-sided stop.
+            vibration_used[index] = true;
+        }
+    }
+    return delivered;
 }
 
 VibrationValue EmulatedController::GetActualVibrationValue(DeviceIndex device_index) const {
@@ -1703,6 +1723,7 @@ void EmulatedController::Disconnect() {
         trigger_guard.Cancel();
         return;
     }
+    StopVibration();
     is_connected = false;
 }
 

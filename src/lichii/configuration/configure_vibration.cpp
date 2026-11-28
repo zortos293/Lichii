@@ -40,6 +40,11 @@ ConfigureVibration::ConfigureVibration(QWidget* parent, Core::HID::HIDCore& hid_
     ui->checkBoxAccurateVibration->setChecked(
         Settings::values.enable_accurate_vibrations.GetValue());
     ui->checkBoxDualSenseHaptics->setChecked(Settings::values.enable_dualsense_haptics.GetValue());
+    ui->checkBoxSteamControllerHdRumble->setChecked(
+        Settings::values.enable_steam_controller_hd_rumble.GetValue());
+#ifndef _WIN32
+    ui->checkBoxSteamControllerHdRumble->hide();
+#endif
     ui->checkBoxFrequencyRumble->setChecked(Settings::values.rumble_frequency_mapping.GetValue());
     // (0 in the setting is off: the box unticked, the field keeps its own default)
     const u8 trigger_rumble = Settings::values.trigger_rumble_strength.GetValue();
@@ -54,6 +59,7 @@ ConfigureVibration::ConfigureVibration(QWidget* parent, Core::HID::HIDCore& hid_
     if (!Settings::IsConfiguringGlobal()) {
         ui->checkBoxAccurateVibration->setDisabled(true);
         ui->checkBoxDualSenseHaptics->setDisabled(true);
+        ui->checkBoxSteamControllerHdRumble->setDisabled(true);
         ui->checkBoxFrequencyRumble->setDisabled(true);
         ui->checkBoxTriggerRumble->setDisabled(true);
         ui->spinTriggerRumble->setDisabled(true);
@@ -82,6 +88,8 @@ void ConfigureVibration::ApplyConfiguration() {
     Settings::values.enable_accurate_vibrations.SetValue(
         ui->checkBoxAccurateVibration->isChecked());
     Settings::values.enable_dualsense_haptics.SetValue(ui->checkBoxDualSenseHaptics->isChecked());
+    Settings::values.enable_steam_controller_hd_rumble.SetValue(
+        ui->checkBoxSteamControllerHdRumble->isChecked());
     Settings::values.rumble_frequency_mapping.SetValue(ui->checkBoxFrequencyRumble->isChecked());
     Settings::values.trigger_rumble_strength.SetValue(
         ui->checkBoxTriggerRumble->isChecked() ? static_cast<u8>(ui->spinTriggerRumble->value())

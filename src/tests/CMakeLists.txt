@@ -520,6 +520,28 @@ target_compile_definitions(shader_translation_tests PRIVATE
 add_test(NAME shader_translation_tests COMMAND shader_translation_tests)
 
 if (NOT ANDROID)
+    add_executable(steam_controller_haptics_tests
+        input_common/steam_controller_haptics.cpp
+        ../input_common/helpers/steam_controller_haptics.cpp)
+    target_link_libraries(steam_controller_haptics_tests PRIVATE
+        common SDL3::SDL3 Catch2::Catch2WithMain Threads::Threads)
+    target_compile_definitions(steam_controller_haptics_tests PRIVATE
+        SDL_hid_open_path=SteamHapticsTestOpen
+        SDL_hid_write=SteamHapticsTestWrite
+        SDL_hid_close=SteamHapticsTestClose)
+    if (WIN32)
+        target_sources(steam_controller_haptics_tests PRIVATE
+            ../input_common/drivers/sdl_driver.cpp
+            ../input_common/input_engine.cpp
+            ../input_common/helpers/dualsense_haptics.cpp
+            ../input_common/helpers/rumble_mapping.cpp)
+        target_compile_definitions(steam_controller_haptics_tests PRIVATE
+            SDL_GetJoysticks=SteamHapticsTestJoysticks
+            SDL_GetJoystickPath=SteamHapticsTestPath)
+    endif()
+    add_test(NAME steam_controller_haptics_tests COMMAND steam_controller_haptics_tests)
+    set_tests_properties(steam_controller_haptics_tests PROPERTIES TIMEOUT 20)
+
     target_sources(tests PRIVATE input_common/joycon_subcommand_response.cpp
                                  input_common/rumble_mapping.cpp
                                  input_common/switch2_protocol.cpp)
