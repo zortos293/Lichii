@@ -1493,9 +1493,11 @@ std::unique_ptr<GraphicsPipeline> PipelineCache::TranslateCachedGraphics(
         incomplete = true;
         return nullptr;
     }
-    incomplete = !pipeline && std::ranges::any_of(envs, [this](const FileEnvironment& env) {
-        return env.LacksRecordedValue(host_info.EnvironmentReadProperties());
-    });
+    // A translation the conservative answers let succeed can still rest on a guessed
+    // classification: cache the pipeline and the guess stays all session. Send the record to
+    // live recapture like one that never built; the first draw builds from the values the game
+    // binds, and drops the guessed pipeline here.
+    incomplete = GraphicsRecordLacksRecordedValue(envs, host_info.EnvironmentReadProperties());
     return pipeline;
 }
 
@@ -1859,7 +1861,7 @@ void PipelineCache::LoadPipelinesV2(u64 title_id,
                             unreadable(record, e.what());
                         }
                     }
-                    if (!pipeline) {
+                    if (!KeepTranslatedPipeline(pipeline != nullptr, incomplete)) {
                         std::scoped_lock lock{state.mutex};
                         if (incomplete) {
                             state.incomplete_graphics.emplace_back(key.Hash(),
@@ -1908,6 +1910,12 @@ void PipelineCache::LoadPipelinesV2(u64 title_id,
                     if (incomplete) {
                         std::scoped_lock lock{incomplete_prebuilds_mutex};
                         incomplete_prebuilds.insert(record.key.Hash());
+                    }
+                    // A translation on the conservative answers is a guess: leave the pipeline
+                    // to the first draw, which builds and records it from the values the game
+                    // binds (#603).
+                    if (!KeepTranslatedPipeline(pipeline != nullptr, incomplete)) {
+                        return std::unique_ptr<GraphicsPipeline>{};
                     }
                     return pipeline;
                 } catch (const std::ios_base::failure&) {
