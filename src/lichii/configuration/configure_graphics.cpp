@@ -16,6 +16,8 @@
 #include <QPixmap>
 #include <QPushButton>
 #include <QSlider>
+#include <QSpinBox>
+#include <QString>
 #include <QStringLiteral>
 #include <QtCore/qobjectdefs.h>
 #include <qabstractbutton.h>
@@ -29,6 +31,7 @@
 #include "common/common_types.h"
 #include "common/settings.h"
 #include "common/settings_enums.h"
+#include "core/frontend/framebuffer_layout.h"
 #include "core/core.h"
 #include "qt_common/config/uisettings.h"
 #include "qt_common/util/vk.h"
@@ -227,6 +230,15 @@ void ConfigureGraphics::Setup(const ConfigurationShared::Builder& builder) {
     QCheckBox* frame_gen_checkbox = nullptr;
     QComboBox* frame_gen_type_combobox = nullptr;
     QCheckBox* nvidia_dlss_checkbox = nullptr;
+    QComboBox* nvidia_dlss_quality_combobox = nullptr;
+    QCheckBox* ocarina_xess_checkbox = nullptr;
+    QComboBox* ocarina_render_scale_combobox = nullptr;
+    QWidget* xess_quality_widget = nullptr;
+    QSpinBox* custom_input_width = nullptr;
+    QSpinBox* custom_output_width = nullptr;
+    QSpinBox* custom_output_height = nullptr;
+    std::vector<QWidget*> ocarina_custom_input_widgets;
+    std::vector<QWidget*> ocarina_custom_output_widgets;
 #ifdef EGLANTINE_STREAMLINE
     NvidiaDlssPanel* nvidia_dlss_panel = nullptr;
 #endif
@@ -251,6 +263,15 @@ void ConfigureGraphics::Setup(const ConfigurationShared::Builder& builder) {
             continue;
         }
 #endif
+#ifndef _WIN32
+        if (setting->Id() == Settings::values.ocarina_xess.Id() ||
+            setting->Id() == Settings::values.xess_quality.Id()) {
+            continue;
+        }
+#endif
+        if (setting->Id() == Settings::values.ocarina_custom_input_height.Id()) {
+            continue;
+        }
 
         ConfigurationShared::Widget* widget = [&]() {
             if (setting->Id() == Settings::values.hdr_reference_white.Id() ||
@@ -279,13 +300,15 @@ void ConfigureGraphics::Setup(const ConfigurationShared::Builder& builder) {
             widget->deleteLater();
             continue;
         }
+        if (setting->Id() == Settings::values.nvidia_dlss_quality.Id()) {
+            nvidia_dlss_quality_combobox = widget->combobox;
+        }
 
         if (nvidia_dlss_checkbox && (setting->Id() == Settings::values.nvidia_dlss_quality.Id() ||
                                      setting->Id() == Settings::values.nvidia_dlss_preset.Id())) {
             widget->setVisible(nvidia_dlss_checkbox->isChecked());
             connect(nvidia_dlss_checkbox, &QCheckBox::toggled, widget, &QWidget::setVisible);
         }
-
         if (setting->Id() == Settings::values.hdr_mode.Id() ||
             setting->Id() == Settings::values.hdr_swapchain.Id() ||
             setting->Id() == Settings::values.hdr_reference_white.Id() ||
@@ -383,6 +406,42 @@ void ConfigureGraphics::Setup(const ConfigurationShared::Builder& builder) {
             group_layout->addWidget(nvidia_dlss_panel);
             hold_graphics.emplace(setting->Id(), group);
 #endif
+        } else if (setting->Id() == Settings::values.ocarina_render_scale.Id()) {
+            ocarina_render_scale_combobox = widget->combobox;
+            hold_graphics.emplace(setting->Id(), widget);
+        } else if (setting->Id() == Settings::values.ocarina_render_input.Id()) {
+            ocarina_render_input_combobox = widget->combobox;
+            hold_graphics.emplace(setting->Id(), widget);
+        } else if (setting->Id() == Settings::values.ocarina_upscale_output.Id()) {
+            ocarina_upscale_output_combobox = widget->combobox;
+            hold_graphics.emplace(setting->Id(), widget);
+        } else if (setting->Id() == Settings::values.ocarina_upscaler.Id()) {
+            ocarina_upscaler_combobox = widget->combobox;
+            hold_graphics.emplace(setting->Id(), widget);
+        } else if (setting->Id() == Settings::values.ocarina_custom_input_width.Id()) {
+            ocarina_custom_input_widgets.push_back(widget);
+            custom_input_width = widget->spinbox;
+            hold_graphics.emplace(setting->Id(), widget);
+        } else if (setting->Id() == Settings::values.ocarina_custom_output_width.Id() ||
+                   setting->Id() == Settings::values.ocarina_custom_output_height.Id()) {
+            ocarina_custom_output_widgets.push_back(widget);
+            if (setting->Id() == Settings::values.ocarina_custom_output_width.Id()) {
+                custom_output_width = widget->spinbox;
+            } else {
+                custom_output_height = widget->spinbox;
+            }
+            hold_graphics.emplace(setting->Id(), widget);
+        } else if (setting->Id() == Settings::values.ocarina_xess.Id()) {
+            ocarina_xess_checkbox = widget->checkbox;
+            ocarina_xess_group = new QWidget(this);
+            QVBoxLayout* group_layout = new QVBoxLayout(ocarina_xess_group);
+            group_layout->setContentsMargins(0, 0, 0, 0);
+            group_layout->setSpacing(2);
+            group_layout->addWidget(widget);
+            hold_graphics.emplace(setting->Id(), ocarina_xess_group);
+        } else if (setting->Id() == Settings::values.xess_quality.Id()) {
+            ocarina_xess_group->layout()->addWidget(widget);
+            xess_quality_widget = widget;
         } else if (setting->Id() == Settings::values.amd_fsr4.Id()) {
             // AMD's files and a download button under the checkbox, shown for GPUs FSR 4 runs on.
             amd_fsr4_group = new QWidget(this);
@@ -427,6 +486,172 @@ void ConfigureGraphics::Setup(const ConfigurationShared::Builder& builder) {
     for (const auto& [id, widget] : hold_graphics) {
         graphics_layout.addWidget(widget);
     }
+
+    ocarina_ratio_widget = new QLabel(this);
+    ocarina_preset_widget = new QLabel(this);
+    graphics_layout.addWidget(ocarina_ratio_widget);
+    graphics_layout.addWidget(ocarina_preset_widget);
+
+    const auto update_ocarina_details = [this, hold_graphics, ocarina_custom_input_widgets,
+                                         ocarina_custom_output_widgets,
+                                         ocarina_xess_checkbox, xess_quality_widget,
+                                         custom_input_width,
+                                         custom_output_width, custom_output_height,
+                                         ocarina_render_scale_combobox, nvidia_dlss_checkbox,
+                                         nvidia_dlss_quality_combobox]() {
+        const auto input_mode = static_cast<Settings::OcarinaRenderInput>(
+            ocarina_render_input_combobox->currentData().toUInt());
+        Settings::OcarinaResolution input{};
+        switch (input_mode) {
+        case Settings::OcarinaRenderInput::P540: input = {960, 540}; break;
+        case Settings::OcarinaRenderInput::P720: input = {1280, 720}; break;
+        case Settings::OcarinaRenderInput::P900: input = {1600, 900}; break;
+        case Settings::OcarinaRenderInput::P1080: input = {1920, 1080}; break;
+        case Settings::OcarinaRenderInput::P1440: input = {2560, 1440}; break;
+        case Settings::OcarinaRenderInput::Custom:
+            input = custom_input_width != nullptr
+                ? Settings::OcarinaCustomRenderInputResolution(
+                      static_cast<u32>(custom_input_width->value()))
+                : Settings::OcarinaRenderInputResolution();
+            break;
+        case Settings::OcarinaRenderInput::Legacy:
+        default:
+            switch (ocarina_render_scale_combobox != nullptr
+                        ? static_cast<Settings::OcarinaRenderScale>(
+                              ocarina_render_scale_combobox->currentData().toUInt())
+                        : Settings::OcarinaRenderScale::Automatic) {
+            case Settings::OcarinaRenderScale::Scale87: input = {2276, 1280}; break;
+            case Settings::OcarinaRenderScale::Scale75: input = {1920, 1080}; break;
+            case Settings::OcarinaRenderScale::Scale625: input = {1600, 900}; break;
+            case Settings::OcarinaRenderScale::Scale50: input = {1280, 720}; break;
+            case Settings::OcarinaRenderScale::Scale375: input = {960, 540}; break;
+            case Settings::OcarinaRenderScale::ScaleCustom:
+                input = Settings::OcarinaCustomRenderInputResolution(
+                    static_cast<u32>(custom_input_width->value()));
+                break;
+            case Settings::OcarinaRenderScale::Scale100:
+                input = {2560, 1440};
+                break;
+            case Settings::OcarinaRenderScale::Automatic:
+            default:
+                input = {2560, 1440};
+                if (nvidia_dlss_checkbox != nullptr && nvidia_dlss_checkbox->isChecked() &&
+                    nvidia_dlss_quality_combobox != nullptr) {
+                    switch (static_cast<Settings::NvidiaDlssQuality>(
+                        nvidia_dlss_quality_combobox->currentData().toUInt())) {
+                    case Settings::NvidiaDlssQuality::Balanced: input = {2276, 1280}; break;
+                    case Settings::NvidiaDlssQuality::Performance: input = {1920, 1080}; break;
+                    case Settings::NvidiaDlssQuality::UltraPerformance: input = {1280, 720}; break;
+                    default: break;
+                    }
+                }
+                break;
+            }
+            break;
+        }
+        const auto output_mode = static_cast<Settings::OcarinaUpscaleOutput>(
+            ocarina_upscale_output_combobox->currentData().toUInt());
+        if (output_mode == Settings::OcarinaUpscaleOutput::Legacy ||
+            output_mode == Settings::OcarinaUpscaleOutput::MatchWindow) {
+            qobject_cast<QLabel*>(ocarina_ratio_widget)->setText(
+                tr("Ocarina scale ratio: depends on game window"));
+            qobject_cast<QLabel*>(ocarina_preset_widget)->setText(
+                tr("Matching XeSS preset: depends on game window"));
+        } else {
+            Settings::OcarinaResolution output{};
+            switch (output_mode) {
+            case Settings::OcarinaUpscaleOutput::P1080: output = {1920, 1080}; break;
+            case Settings::OcarinaUpscaleOutput::P1440: output = {2560, 1440}; break;
+            case Settings::OcarinaUpscaleOutput::P2160: output = {3840, 2160}; break;
+            case Settings::OcarinaUpscaleOutput::Custom:
+                output = {static_cast<u32>(custom_output_width->value()),
+                          static_cast<u32>(custom_output_height->value())};
+                break;
+            default: break;
+            }
+            const double ratio = static_cast<double>(output.width) /
+                                 static_cast<double>(std::max(input.width, 1U));
+            const char* preset = "AA";
+            if (ratio > 1.0) {
+                if (ratio < 1.4) preset = "Ultra Quality+";
+                else if (ratio < 1.6) preset = "Ultra Quality";
+                else if (ratio < 1.85) preset = "Quality";
+                else if (ratio < 2.15) preset = "Balanced";
+                else if (ratio < 2.65) preset = "Performance";
+                else preset = "Ultra Performance";
+            }
+            qobject_cast<QLabel*>(ocarina_ratio_widget)->setText(
+                tr("Ocarina scale ratio: %1").arg(ratio, 0, 'f', 2));
+            qobject_cast<QLabel*>(ocarina_preset_widget)->setText(
+                tr("Matching XeSS preset: %1").arg(QString::fromLatin1(preset)));
+        }
+        const bool custom_legacy_scale = input_mode == Settings::OcarinaRenderInput::Legacy &&
+            ocarina_render_scale_combobox != nullptr &&
+            ocarina_render_scale_combobox->currentData().toUInt() ==
+                static_cast<u32>(Settings::OcarinaRenderScale::ScaleCustom);
+        const bool custom_input =
+            (ocarina_render_input_combobox != nullptr &&
+             ocarina_render_input_combobox->currentData().toUInt() ==
+                 static_cast<u32>(Settings::OcarinaRenderInput::Custom)) ||
+            custom_legacy_scale;
+        const bool custom_output = ocarina_upscale_output_combobox != nullptr &&
+            ocarina_upscale_output_combobox->currentData().toUInt() ==
+                static_cast<u32>(Settings::OcarinaUpscaleOutput::Custom);
+        for (QWidget* widget : ocarina_custom_input_widgets) widget->setVisible(custom_input);
+        for (QWidget* widget : ocarina_custom_output_widgets) widget->setVisible(custom_output);
+        if (ocarina_upscaler_combobox != nullptr) {
+            const bool explicit_xess = ocarina_upscaler_combobox->currentData().toUInt() ==
+                                       static_cast<u32>(Settings::OcarinaUpscaler::Xess);
+            const bool legacy_xess =
+                ocarina_upscaler_combobox->currentData().toUInt() ==
+                    static_cast<u32>(Settings::OcarinaUpscaler::Legacy) &&
+                ocarina_xess_checkbox != nullptr &&
+                                     ocarina_xess_checkbox->isChecked();
+            const bool xess = explicit_xess || legacy_xess;
+            ocarina_preset_widget->setVisible(xess);
+            if (xess_quality_widget != nullptr) {
+                xess_quality_widget->setVisible(xess);
+            }
+        }
+    };
+    if (ocarina_xess_checkbox != nullptr) {
+        connect(ocarina_xess_checkbox, &QCheckBox::toggled, this,
+                [update_ocarina_details](bool) { update_ocarina_details(); });
+    }
+    if (nvidia_dlss_checkbox != nullptr) {
+        connect(nvidia_dlss_checkbox, &QCheckBox::toggled, this,
+                [update_ocarina_details](bool) { update_ocarina_details(); });
+    }
+    if (ocarina_render_input_combobox != nullptr) {
+        ocarina_render_input_combobox->setEnabled(!system.IsPoweredOn());
+        apply_funcs.push_back([input_combobox = ocarina_render_input_combobox](bool powered_on) {
+            input_combobox->setEnabled(!powered_on);
+        });
+        connect(ocarina_render_input_combobox, &QComboBox::currentIndexChanged,
+                this, [update_ocarina_details](int) { update_ocarina_details(); });
+    }
+    if (ocarina_upscale_output_combobox != nullptr) {
+        connect(ocarina_upscale_output_combobox, &QComboBox::currentIndexChanged,
+                this, [update_ocarina_details](int) { update_ocarina_details(); });
+    }
+    if (ocarina_upscaler_combobox != nullptr) {
+        connect(ocarina_upscaler_combobox, &QComboBox::currentIndexChanged,
+                this, [update_ocarina_details](int) { update_ocarina_details(); });
+    }
+    for (QComboBox* combobox : {ocarina_render_scale_combobox,
+                                nvidia_dlss_quality_combobox}) {
+        if (combobox != nullptr) {
+            connect(combobox, qOverload<int>(&QComboBox::currentIndexChanged), this,
+                    [update_ocarina_details](int) { update_ocarina_details(); });
+        }
+    }
+    for (QSpinBox* spinbox : {custom_input_width, custom_output_width, custom_output_height}) {
+        if (spinbox != nullptr) {
+            connect(spinbox, qOverload<int>(&QSpinBox::valueChanged), this,
+                    [update_ocarina_details](int) { update_ocarina_details(); });
+        }
+    }
+    update_ocarina_details();
 
     // Hide rather than disable, a disabled widget would read as using the global value
     if (frame_gen_checkbox != nullptr) {
@@ -643,6 +868,9 @@ void ConfigureGraphics::UpdateAPILayout() {
     vulkan_device_widget->setVisible(is_vulkan);
     for (auto* widget : hdr_widgets) {
         widget->setVisible(is_vulkan);
+    }
+    if (ocarina_xess_group) {
+        ocarina_xess_group->setVisible(is_vulkan);
     }
     if (is_vulkan && int(vulkan_device) < vulkan_device_combobox->count()) {
         vulkan_device_combobox->setCurrentIndex(vulkan_device);

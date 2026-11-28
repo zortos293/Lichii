@@ -36,6 +36,7 @@
 #include "video_core/vulkan_common/vulkan_address_map.h"
 #include "video_core/vulkan_common/vulkan_device.h"
 #include "video_core/vulkan_common/vulkan_wrapper.h"
+#include "video_core/vulkan_common/xess_runtime.h"
 #include "video_core/gpu_logging/gpu_logging.h"
 #include "video_core/shader_cache_v2/cache.h"
 #ifdef EGLANTINE_STREAMLINE
@@ -55,10 +56,10 @@ namespace Vulkan {
 using namespace Common::Literals;
 namespace {
 // Matches Mesa's boolean parsing of its environment options.
-bool EnvFlagSet(const char* name) {
+bool EnvFlagSet(const char* name, bool default_value = false) {
     const char* value = std::getenv(name);
     if (value == nullptr) {
-        return false;
+        return default_value;
     }
     const std::string_view v{value};
     for (const std::string_view truthy : {"1", "true", "t", "yes", "y"}) {
@@ -68,7 +69,14 @@ bool EnvFlagSet(const char* name) {
             return true;
         }
     }
-    return false;
+    for (const std::string_view falsy : {"0", "false", "f", "no", "n", "off"}) {
+        if (std::ranges::equal(v, falsy, [](char a, char b) {
+                return std::tolower(static_cast<unsigned char>(a)) == b;
+            })) {
+            return false;
+        }
+    }
+    return default_value;
 }
 
 namespace Alternatives {
@@ -486,7 +494,8 @@ void Device::RemoveExtension(bool& extension, const std::string& extension_name)
 }
 
 void Device::RemoveExtensionIfUnsuitable(bool is_suitable, const std::string& extension_name) {
-    if (loaded_extensions.contains(extension_name) && !is_suitable) {
+    if (loaded_extensions.contains(extension_name) && !is_suitable &&
+        !(xess_supported && xess_required_extensions.contains(extension_name))) {
         LOG_WARNING(Render_Vulkan, "Removing unsuitable extension {}", extension_name);
         this->RemoveExtension(is_suitable, extension_name);
     }
@@ -511,7 +520,8 @@ void Device::RemoveExtensionFeature(bool& extension, Feature& feature,
 template <typename Feature>
 void Device::RemoveExtensionFeatureIfUnsuitable(bool is_suitable, Feature& feature,
                                                 const std::string& extension_name) {
-    if (loaded_extensions.contains(extension_name) && !is_suitable) {
+    if (loaded_extensions.contains(extension_name) && !is_suitable &&
+        !(xess_supported && xess_required_extensions.contains(extension_name))) {
         LOG_WARNING(Render_Vulkan, "Removing features for unsuitable extension {}", extension_name);
         this->RemoveExtensionFeature(is_suitable, feature, extension_name);
     }
@@ -589,7 +599,7 @@ Device::Device(VkInstance instance_, vk::PhysicalDevice physical_, VkSurfaceKHR 
 
     // GetSuitability has already configured the linked list of features for us.
     // Reuse it here.
-    const void* first_next = &features2;
+    const void* first_next = xess_features_chain_head ? xess_features_chain_head : &features2;
 
     VkDeviceDiagnosticsConfigCreateInfoNV diagnostics_nv{};
     const bool use_diagnostics_nv = Settings::values.enable_nsight_aftermath && extensions.device_diagnostics_config;
@@ -598,7 +608,7 @@ Device::Device(VkInstance instance_, vk::PhysicalDevice physical_, VkSurfaceKHR 
 
         diagnostics_nv = {
             .sType = VK_STRUCTURE_TYPE_DEVICE_DIAGNOSTICS_CONFIG_CREATE_INFO_NV,
-            .pNext = &features2,
+            .pNext = first_next,
             .flags = VK_DEVICE_DIAGNOSTICS_CONFIG_ENABLE_SHADER_DEBUG_INFO_BIT_NV |
                      VK_DEVICE_DIAGNOSTICS_CONFIG_ENABLE_RESOURCE_TRACKING_BIT_NV |
                      VK_DEVICE_DIAGNOSTICS_CONFIG_ENABLE_AUTOMATIC_CHECKPOINTS_BIT_NV,
@@ -781,9 +791,10 @@ Device::Device(VkInstance instance_, vk::PhysicalDevice physical_, VkSurfaceKHR 
         }
     }
 
+    // Intel's Astral Chain FP16 compiler failure applies to the Windows driver family.
     if (features.shader_float16_int8.shaderFloat16 && is_intel_windows) {
-        // Intel's compiler crashes when using fp16 on Astral Chain, disable it for the time being.
-        LOG_WARNING(Render_Vulkan, "Intel has broken float16 math");
+        LOG_WARNING(Render_Vulkan, "{}",
+                    "Intel GPU FP16 disabled for the Astral Chain workaround");
         features.shader_float16_int8.shaderFloat16 = false;
     }
 
@@ -1513,6 +1524,25 @@ bool Device::GetSuitability(bool requires_swapchain) {
         supported_extensions.insert(property.extensionName);
     }
 
+    std::vector<std::string> xess_device_extensions;
+    bool xess_requirements_available = XeSS::IsAvailable();
+    if (xess_requirements_available) {
+        auto required_extensions =
+            XeSS::DeviceExtensions(instance, static_cast<VkPhysicalDevice>(physical));
+        if (!required_extensions) {
+            xess_requirements_available = false;
+        } else {
+            xess_device_extensions = std::move(*required_extensions);
+        }
+        const auto supported = [&](const std::string& name) {
+            return supported_extensions.contains(name);
+        };
+        if (xess_requirements_available &&
+            !std::ranges::all_of(xess_device_extensions, supported)) {
+            xess_requirements_available = false;
+        }
+    }
+
     // Generate list of extensions to load.
     loaded_extensions.clear();
 
@@ -1746,6 +1776,22 @@ bool Device::GetSuitability(bool requires_swapchain) {
 
     // Perform the feature test.
     physical.GetFeatures2(features2);
+
+    if (xess_requirements_available) {
+        void* feature_chain = &features2;
+        if (XeSS::EnableRequiredDeviceFeatures(instance, static_cast<VkPhysicalDevice>(physical),
+                                               &feature_chain)) {
+            xess_features_chain_head = feature_chain;
+            loaded_extensions.insert(xess_device_extensions.begin(), xess_device_extensions.end());
+            xess_required_extensions.insert(xess_device_extensions.begin(),
+                                            xess_device_extensions.end());
+            xess_supported = true;
+            LOG_INFO(Render_Vulkan, "XeSS-SR Vulkan requirements enabled on {}",
+                     properties.properties.deviceName);
+        } else {
+            xess_requirements_available = false;
+        }
+    }
 
     if (has_device_fault_extension) {
         loaded_extensions.insert(VK_EXT_DEVICE_FAULT_EXTENSION_NAME);
@@ -2352,11 +2398,14 @@ void Device::RemoveUnsuitableExtensions() {
                                VK_EXT_SHADER_FLOAT8_EXTENSION_NAME);
     }
 
-    // Only for the fsr4-vk port: integer dot products and compute derivatives for its INT8
-    // network, and VK_NV_cooperative_matrix2's matrix conversions (all RADV implements of it,
-    // behind its radv_cooperative_matrix2_nv option) for its FP8 network.
+    // The FSR4 port needs integer dot products and compute derivatives for its INT8 network, and
+    // VK_NV_cooperative_matrix2's matrix conversions for its FP8 network. Preserve integer dot
+    // products when XeSS explicitly requests them too.
     const bool fsr4_port = WantsFsr4Port(properties.driver.driverID);
-    if (extensions.shader_integer_dot_product &&
+    const bool xess_requires_integer_dot_product =
+        xess_supported &&
+        xess_required_extensions.contains(VK_KHR_SHADER_INTEGER_DOT_PRODUCT_EXTENSION_NAME);
+    if (extensions.shader_integer_dot_product && !xess_requires_integer_dot_product &&
         (!fsr4_port || !features.shader_integer_dot_product.shaderIntegerDotProduct)) {
         RemoveExtensionFeature(extensions.shader_integer_dot_product,
                                features.shader_integer_dot_product,

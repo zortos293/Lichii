@@ -113,4 +113,10 @@ private:
     QComboBox* aspect_ratio_combobox;
     QComboBox* resolution_combobox;
     QWidget* amd_fsr4_group{}; ///< The FSR 4 setting and AmdFsr4Panel
+    QWidget* ocarina_xess_group{}; ///< XeSS setting and quality mode (Windows Vulkan only)
+    QComboBox* ocarina_render_input_combobox{};
+    QComboBox* ocarina_upscale_output_combobox{};
+    QComboBox* ocarina_upscaler_combobox{};
+    QWidget* ocarina_ratio_widget{};
+    QWidget* ocarina_preset_widget{};
 };

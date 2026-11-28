@@ -381,6 +381,10 @@ public:
         return properties.driver.driverID;
     }
 
+    bool IsXeSSSupported() const {
+        return xess_supported;
+    }
+
     bool IsSparseBindingSupported() const {
         return features.features.sparseBinding && graphics_family_sparse_binding;
     }
@@ -1493,6 +1497,7 @@ private:
     Properties properties{};
 
     VkPhysicalDeviceFeatures2 features2{};
+    void* xess_features_chain_head{};
     VkPhysicalDeviceFaultFeaturesEXT device_fault_features{};
     VkPhysicalDeviceAddressBindingReportFeaturesEXT address_binding_report_features{};
     bool address_binding_report{};
@@ -1514,6 +1519,7 @@ private:
     bool cooperative_hmma_16x16x16{};          ///< HMMA runs on 16x16x16 matrices.
     bool fp8_matrix_shapes{}; ///< 16x16x16 FP16 and FP8 matrices with FP32 results (fsr4-vk).
     bool is_integrated{};                      ///< Is GPU an iGPU.
+    bool xess_supported{};                      ///< XeSS-SR runtime requirements were enabled.
     bool is_virtual{};                         ///< Is GPU a virtual GPU.
     bool is_non_gpu{};                         ///< Is SoftwareRasterizer, FPGA, non-GPU device.
     bool has_broken_compute{};                 ///< Compute shaders can cause crashes
@@ -1546,6 +1552,7 @@ private:
     // Telemetry parameters
     std::set<std::string, std::less<>> supported_extensions; ///< Reported Vulkan extensions.
     std::set<std::string, std::less<>> loaded_extensions;    ///< Loaded Vulkan extensions.
+    std::set<std::string, std::less<>> xess_required_extensions;
     bool streamline_extensions{}; ///< NVIDIA DLSS's extensions are loaded.
     bool streamline_attached{};   ///< Streamline has this device.
     std::vector<size_t> valid_heap_memory;                   ///< Heaps used.

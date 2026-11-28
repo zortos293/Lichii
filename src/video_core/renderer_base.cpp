@@ -28,9 +28,7 @@ void RendererBase::RefreshBaseSettings() {
 }
 
 void RendererBase::UpdateCurrentFramebufferLayout() {
-    const Layout::FramebufferLayout& layout = render_window.GetFramebufferLayout();
-
-    render_window.UpdateCurrentFramebufferLayout(layout.width, layout.height);
+    render_window.UpdateCurrentFramebufferLayout();
 }
 
 bool RendererBase::IsScreenshotPending() const {
