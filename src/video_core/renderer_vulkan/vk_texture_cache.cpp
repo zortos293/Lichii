@@ -3129,8 +3129,13 @@ u64 TextureCacheRuntime::GetDeviceLocalMemory() const {
 }
 
 TextureCacheRuntime::~TextureCacheRuntime() {
-    // The pool's images belong to this device: destroyed before it is.
-    TrimImagePool(0);
+    // The pool's images belong to this device: destroyed before it is. Trim neither allocates nor
+    // throws; only making the pool on its first use can (when no image was ever made), and then
+    // there is nothing to destroy.
+    try {
+        TrimImagePool(0);
+    } catch (...) {
+    }
 }
 
 u64 TextureCacheRuntime::PooledImageBytes() const {
@@ -3456,6 +3461,8 @@ Image::~Image() {
     }
     if (pool_allowed && pool_key.valid && original_image && !original_image.IsUnbacked() &&
         ImagePoolEnabled()) {
+        // Put does not throw (an image it cannot keep is destroyed); the pool exists, since
+        // making this image took from it.
         const u64 size = original_image.GetMemoryBlock().size;
         GetImagePool().Put(pool_key, std::move(original_image), size);
     }
