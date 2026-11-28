@@ -4,6 +4,7 @@
 #pragma once
 
 #include <array>
+#include <stop_token>
 #include <vector>
 #include "common/bit_field.h"
 #include "common/common_types.h"
@@ -17,6 +18,29 @@ class SyncpointManager;
 } // namespace Service::Nvidia::NvCore
 
 namespace Service::Nvidia::Devices {
+
+/// IocCtrlEventWait's escalated wait: with the application stalled (`stall` returns the lock
+/// that keeps it stalled), until the host value of `id` reaches `value` or `stop` is requested.
+/// A stop already requested returns at once, without stalling. Otherwise `unstall` runs on every
+/// path, before the lock is released. A stop requested between that look and the stall is seen
+/// under the lock: System::StallApplication then neither suspends nor pauses, and
+/// System::UnstallApplication resumes nothing once the stop is requested. Returns whether the
+/// value was reached.
+template <class Stall, class Unstall>
+bool WaitHostStalled(Tegra::Host1x::SyncpointManager& manager, u32 id, u32 value,
+                     const std::stop_token& stop, Stall&& stall, Unstall&& unstall) {
+    if (stop.stop_requested()) {
+        return false;
+    }
+    auto lock = stall();
+    struct Unstaller {
+        Unstall& unstall;
+        ~Unstaller() {
+            unstall();
+        }
+    } unstaller{unstall};
+    return manager.WaitHost(id, value, stop);
+}
 
 class nvhost_ctrl final : public nvdevice {
 public:

@@ -364,13 +364,23 @@ struct System::Impl {
 
     std::unique_lock<std::mutex> StallApplication() {
         std::unique_lock<std::mutex> lk(suspend_guard);
+        // Under the lock, as the un-stall decides: once shutdown has requested its stop, a stall
+        // neither suspends nor pauses. Shutdown has suspended the guest and resumed core timing
+        // already, or will once it gets the lock, and a pause made after that would never be
+        // undone (core timing would stay paused through the teardown).
+        if (stop_event.stop_requested()) {
+            return lk;
+        }
         kernel.SuspendEmulation(true);
         core_timing.SyncPause(true);
         return lk;
     }
 
     void UnstallApplication() {
-        if (!IsPaused()) {
+        // Under suspend_guard (the stall's lock, still held). Once shutdown has requested its
+        // stop, the guest stays suspended: shutdown suspends it itself and must find it so.
+        // IsShuttingDown would be too early: Qt sets it seconds before the teardown starts.
+        if (Core::ResumesAfterStall(IsPaused(), stop_event.stop_requested())) {
             core_timing.SyncPause(false);
             kernel.SuspendEmulation(false);
         }
@@ -701,6 +711,15 @@ struct System::Impl {
             gpu_core->NotifyShutdown();
 
         stop_event.request_stop();
+        // An escalated nvdrv wait (IocCtrlEventWait) holds suspend_guard while it waits with the
+        // guest stalled, and the stop just requested ends it. Taking the lock waits until its
+        // UnstallApplication has run: that one saw the stop and left the guest suspended, or
+        // resumed it before the stop, and SuspendEmulation below suspends it again. A stall
+        // starting from now on sees the stop and does not wait. So no un-stall resumes the guest
+        // after this point.
+        {
+            std::scoped_lock lk{suspend_guard};
+        }
         core_timing.SyncPause(false);
         Network::CancelPendingSocketOperations();
         kernel.SuspendEmulation(true);
@@ -918,6 +937,10 @@ std::unique_lock<std::mutex> System::StallApplication() {
 
 void System::UnstallApplication() {
     impl->UnstallApplication();
+}
+
+std::stop_token System::StopToken() const {
+    return impl->stop_event.get_token();
 }
 
 void System::SetNVDECActive(bool is_nvdec_active) {

@@ -148,17 +148,27 @@ NvResult nvhost_ctrl::IocCtrlEventWait(IocCtrlEventWaitParams& params, bool is_a
 
     must_unmark_fail = false;
 
+    // After more than two cleared waits on a slot, the wait is made here, with the application
+    // stalled, until the value is reached. That can be never: a fence whose increments were
+    // dropped (a closed channel's bank left by CompleteSyncpoint), or a GPU hang. It gives up
+    // when emulation shuts down, so the services' close no longer waits for it; the guest stays
+    // suspended as shutdown left it, and the reply is not written.
+    enum class Escalated { No, Reached, Stopped };
     const auto check_failing = [&]() {
-        if (events[slot].fails > 2) {
-            {
-                auto lk = system.StallApplication();
-                host1x_syncpoint_manager.WaitHost(fence_id, target_value);
-                system.UnstallApplication();
-            }
-            params.value.raw = target_value;
-            return true;
+        if (events[slot].fails <= 2) {
+            return Escalated::No;
         }
-        return false;
+        const bool reached = WaitHostStalled(
+            host1x_syncpoint_manager, fence_id, target_value, system.StopToken(),
+            [this] { return system.StallApplication(); }, [this] { system.UnstallApplication(); });
+        if (!reached) {
+            LOG_WARNING(Service_NVDRV,
+                        "Escalated wait for syncpt_id={} threshold={} stopped before the value",
+                        fence_id, target_value);
+            return Escalated::Stopped;
+        }
+        params.value.raw = target_value;
+        return Escalated::Reached;
     };
 
     if (slot >= MaxNvEvents) {
@@ -166,7 +176,7 @@ NvResult nvhost_ctrl::IocCtrlEventWait(IocCtrlEventWaitParams& params, bool is_a
     }
 
     if (params.timeout == 0) {
-        if (check_failing()) {
+        if (check_failing() == Escalated::Reached) {
             events[slot].fails = 0;
             return NvResult::Success;
         }
@@ -183,9 +193,15 @@ NvResult nvhost_ctrl::IocCtrlEventWait(IocCtrlEventWaitParams& params, bool is_a
         return NvResult::BadParameter;
     }
 
-    if (check_failing()) {
+    switch (check_failing()) {
+    case Escalated::Reached:
         event.fails = 0;
         return NvResult::Success;
+    case Escalated::Stopped:
+        // Shutting down: no new wait is registered.
+        return NvResult::Timeout;
+    case Escalated::No:
+        break;
     }
 
     params.value.raw = 0;

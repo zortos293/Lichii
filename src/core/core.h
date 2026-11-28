@@ -15,6 +15,7 @@
 #include <mutex>
 #include <optional>
 #include <span>
+#include <stop_token>
 #include <string>
 #include <vector>
 
@@ -157,6 +158,12 @@ enum class SystemResultStatus : u32 {
     ErrorMemoryAllocation = 0x10007, ///< Outside ErrorLoader plus the u16 loader result range
 };
 
+/// Whether UnstallApplication resumes the guest after a stall: not while it is paused (the
+/// frontend's Pause), nor once shutdown has requested its stop (System::StopToken).
+[[nodiscard]] constexpr bool ResumesAfterStall(bool paused, bool stop_requested) {
+    return !paused && !stop_requested;
+}
+
 class System {
 public:
     using CurrentBuildProcessID = std::array<u8, 0x20>;
@@ -209,6 +216,11 @@ public:
 
     std::unique_lock<std::mutex> StallApplication();
     void UnstallApplication();
+
+    /// Requested when emulation shuts down (ShutdownMainProcess, once the guest is told to stop and
+    /// before the services are closed): a host wait inside a service call that would otherwise
+    /// block their close gives up on it.
+    [[nodiscard]] std::stop_token StopToken() const;
 
     void SetNVDECActive(bool is_nvdec_active);
     [[nodiscard]] bool GetNVDECActive();
