@@ -1291,7 +1291,12 @@ Result KProcess::LoadFromMetadata(KernelCore& kernel, const FileSys::ProgramMeta
 }
 
 void KProcess::LoadModule(KernelCore& kernel, CodeSet code_set, KProcessAddress base_addr) {
+    // An empty segment has no pages to protect: the kernel's loader skips it too (Atmosphere's
+    // KInitialProcessReader::SetMemoryPermissions), where this would ask for an empty range.
     const auto ReprotectSegment = [&](const CodeSet::Segment& segment, Svc::MemoryPermission permission) {
+        if (segment.size == 0) {
+            return;
+        }
         m_page_table.SetProcessMemoryPermission(segment.addr + base_addr, segment.size, permission);
     };
 
