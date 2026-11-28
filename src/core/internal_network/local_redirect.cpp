@@ -108,6 +108,8 @@ std::shared_ptr<const Config> Get() {
     return current_config;
 }
 
+} // Anonymous namespace
+
 bool IsLoopback(const SockAddrIn& address) {
     if (address.family == Domain::INET6) {
         static constexpr IPv6Address loopback{0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1};
@@ -118,8 +120,6 @@ bool IsLoopback(const SockAddrIn& address) {
     }
     return address.ip[0] == 127;
 }
-
-} // Anonymous namespace
 
 std::vector<std::string> ParseHosts(std::string_view text) {
     std::vector<std::string> hosts;

@@ -34,6 +34,7 @@
 #include "core/hle/service/sockets/bsd.h"
 #include "core/hle/service/sockets/nextendo_redirect.h"
 #include "core/hle/service/sockets/sockets_translate.h"
+#include "core/internal_network/local_redirect.h"
 #include "core/internal_network/network.h"
 #include "core/internal_network/socket_proxy.h"
 #include "core/internal_network/sockets.h"
@@ -96,6 +97,12 @@ std::optional<Network::Ipv6Option> TranslateIpv6Option(OptName optname) {
 /// takes the 28 bytes of a sockaddr_in6. Other families take the 16 every caller already checks.
 bool AddressFits(const SockAddrIn& addr, size_t size) {
     return static_cast<Domain>(addr.family) != Domain::INET6 || size >= sizeof(SockAddrIn6);
+}
+
+/// Whether flight mode keeps a socket on the loopback interface, the only one it leaves a
+/// console. Games build socket pairs from loopback TCP sockets with no network at all.
+bool LoopbackOnly(bool is_connection_based) {
+    return is_connection_based && Settings::values.airplane_mode.GetValue();
 }
 
 /// Whether a guest fd_set holds descriptor fd. Its fd_mask words are little-endian, so fd is bit
@@ -1408,15 +1415,11 @@ std::pair<s32, Errno> BSD_USA::SocketImpl(Domain domain, Type type, Protocol pro
     UNIMPLEMENTED_IF_MSG(unk_flag, "Unknown flag in type");
     type = static_cast<Type>(static_cast<u32>(type) & ~0x20000000);
 
-    // Checked before taking an fd. A joined room does not lift it: room TCP is only stubbed.
-    if (Settings::values.airplane_mode.GetValue() && IsConnectionBased(type)) {
-        LOG_ERROR(Service, "Airplane mode is enabled, cannot create socket");
-        return {-1, Errno::NOTCONN};
-    }
-
+    // A loopback-only socket is a host one even in a room: room TCP is only stubbed.
     std::shared_ptr<Network::SocketBase> socket;
     auto room_member = Network::GetRoomMember().lock();
-    if (room_member && room_member->IsConnected() && !Network::IsDirectLanActive()) {
+    if (!LoopbackOnly(IsConnectionBased(type)) && room_member && room_member->IsConnected() &&
+        !Network::IsDirectLanActive()) {
         // A room carries IPv4 alone.
         if (domain != Domain::INET) {
             LOG_INFO(Service, "Refusing non-IPv4 socket domain={} in a room",
@@ -1800,8 +1803,23 @@ Errno BSD_USA::BindImpl(s32 fd, std::span<const u8> addr) {
     if (!AddressFits(addr_in, addr.size())) {
         return Errno::INVAL;
     }
+    auto host_addr = Translate(addr_in);
+    if (LoopbackOnly(descriptor->is_connection_based) &&
+        !Network::LocalRedirect::IsLoopback(host_addr)) {
+        // The wildcard names every interface the console has, which is loopback alone.
+        const bool inet6 = host_addr.family == Network::Domain::INET6;
+        if (inet6 ? host_addr.ip6 != Network::IPv6Address{}
+                  : host_addr.ip != Network::IPv4Address{}) {
+            return Errno::ADDRNOTAVAIL;
+        }
+        if (inet6) {
+            host_addr.ip6[15] = 1;
+        } else {
+            host_addr.ip = {127, 0, 0, 1};
+        }
+    }
 
-    return Translate(descriptor->socket->Bind(Translate(addr_in)));
+    return Translate(descriptor->socket->Bind(host_addr));
 }
 
 Errno BSD_USA::ConnectImpl(s32 fd, std::span<const u8> addr) {
@@ -1823,6 +1841,11 @@ Errno BSD_USA::ConnectImpl(s32 fd, std::span<const u8> addr) {
             LOG_INFO(Service, "Nextendo: Gamesync fd={} routed to port {}", fd, routed->portno);
             target = *routed;
         }
+    }
+    // Checked on the address the socket would reach, which a host redirect moves off loopback.
+    if (LoopbackOnly(descriptor->is_connection_based) &&
+        !Network::LocalRedirect::IsLoopback(Network::LocalRedirect::ConnectTarget(target))) {
+        return Errno::NETUNREACH;
     }
 
     const Errno result = Translate(descriptor->socket->Connect(target));
@@ -1867,6 +1890,21 @@ Errno BSD_USA::ListenImpl(s32 fd, s32 backlog) {
     const auto descriptor = CopyDescriptor(fd);
     if (!descriptor) {
         return Errno::BADF;
+    }
+    if (LoopbackOnly(descriptor->is_connection_based)) {
+        // The host would bind an unbound listener to the wildcard address.
+        const auto [name, name_errno] = descriptor->socket->GetSockName();
+        if (name_errno != Network::Errno::SUCCESS || name.portno == 0) {
+            Network::SockAddrIn loopback{.family = Network::Domain::INET, .ip = {127, 0, 0, 1}};
+            if (descriptor->domain == Domain::INET6) {
+                loopback = {.family = Network::Domain::INET6};
+                loopback.ip6[15] = 1;
+            }
+            if (const auto bind_errno = descriptor->socket->Bind(loopback);
+                bind_errno != Network::Errno::SUCCESS) {
+                return Translate(bind_errno);
+            }
+        }
     }
     return Translate(descriptor->socket->Listen(backlog));
 }

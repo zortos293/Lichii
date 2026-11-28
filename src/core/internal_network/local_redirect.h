@@ -47,6 +47,9 @@ void Configure();
 /// Where a TCP connection to `address` goes: the configured server for 127.0.0.1:443.
 [[nodiscard]] SockAddrIn ConnectTarget(const SockAddrIn& address);
 
+/// Whether `address` is on the loopback interface (127.0.0.0/8, ::1 or a v4-mapped 127.x).
+[[nodiscard]] bool IsLoopback(const SockAddrIn& address);
+
 /// Whether the guest may reach `address` (always, unless loopback only is on). Checked before
 /// ConnectTarget, so the configured server stays reachable.
 [[nodiscard]] bool Allowed(const SockAddrIn& address);
